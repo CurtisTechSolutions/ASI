@@ -83,6 +83,14 @@ class FilterConfig:
     """Blame what this filter rejects (off: the tutor supplies the negatives, the filter only applies them)."""
     reason: str = "filtered"
     """Reason recorded when ``learn`` is on."""
+    provenance: bool = True
+    """Say why each candidate was vetoed: the rule, the risk, the reasons and the blamed fragments.
+
+    Off, the veto still applies exactly as before, but every verdict the pair
+    reports keeps only the text, the decision and the rule
+    (:meth:`NegativeFilter.terse`), so an answer is not followed by pages of
+    judgement when all that was wanted was the answer.
+    """
 
     def validate(self) -> None:
         """Raise ``ValueError`` for values the filter cannot run with."""
@@ -194,13 +202,31 @@ class NegativeFilter:
             return verdict["why"].replace("; below the threshold, kept", "; rejected (strict)")
         return verdict["why"]
 
+    @staticmethod
+    def terse(verdict: dict) -> dict:
+        """A verdict without its provenance: ``{"text", "decision", "rule"}`` - what was decided, not why."""
+        return {"text": verdict["text"], "decision": verdict["decision"], "rule": verdict["rule"]}
+
+    def report(self, verdicts: list[dict]) -> list[dict]:
+        """The verdicts as the pair reports them: whole, or :meth:`terse` when ``config.provenance`` is off."""
+        if self.config.provenance:
+            return verdicts
+        return [self.terse(v) for v in verdicts]
+
     def filter(self, texts: Iterable[str] | str) -> dict:
         """Judge every text; returns ``{"kept", "rejected", "verdicts", "accepted", "rate"}``.
 
         ``kept`` / ``rejected`` are the texts themselves (in input order),
-        ``verdicts`` the full judgements.  With ``config.learn`` the rejected
+        ``verdicts`` the full judgements (:meth:`terse` ones when
+        ``config.provenance`` is off).  With ``config.learn`` the rejected
         texts are blamed as new failures.
         """
+        outcome = self._filter(texts)
+        outcome["verdicts"] = self.report(outcome["verdicts"])
+        return outcome
+
+    def _filter(self, texts: Iterable[str] | str) -> dict:
+        """:meth:`filter` with the whole verdicts, for the output paths that rank by them."""
         items = [texts] if isinstance(texts, str) else [str(t) for t in texts]
         verdicts = [self.judge(t) for t in items]
         kept = [v["text"] for v in verdicts if v["decision"] != "reject"]
@@ -240,6 +266,7 @@ class NegativeFilter:
                 kept.append(candidate)
         best = kept[0] if kept else PathResult(full_text=prefix)
         carried = {f.name: getattr(best, f.name) for f in dataclasses.fields(PathResult) if f.name != "expanded"}
+        verdicts = self.report(verdicts)
         if isinstance(result, Prediction):
             return dataclasses.replace(result, top=kept, **carried), verdicts
         return dataclasses.replace(result, **carried), verdicts
@@ -274,8 +301,9 @@ class NegativeFilter:
         among equally clean ones the positive model's own order - the veto
         re-ranks as little as it can), ``results`` the walks behind them, and
         ``rejected`` carries every dropped candidate with the reason it was
-        dropped.  Fewer than ``count`` texts come back when the filter vetoed
-        too much - that is information, not an error.
+        dropped (the decision alone when ``config.provenance`` is off).  Fewer
+        than ``count`` texts come back when the filter vetoed too much - that
+        is information, not an error.
         """
         if count < 0:
             raise ValueError(f"count must be >= 0, got {count}")
@@ -298,16 +326,17 @@ class NegativeFilter:
             if text and text not in paths:
                 candidates.append(text)
                 paths[text] = result
-        outcome = self.filter(candidates)
+        outcome = self._filter(candidates)
         keepers = [v for v in outcome["verdicts"] if v["decision"] != "reject"]
         keepers.sort(key=lambda v: v["risk"])  # cleanest first; a stable sort keeps the model's own order among equals
         survivors = keepers[:count]
+        verdicts = self.report(outcome["verdicts"])
         return {
             "texts": [v["text"] for v in survivors],
             "results": [paths[v["text"]] for v in survivors],  # the walks behind them: cost, probability, path
             "kept": outcome["kept"],
-            "rejected": [v for v in outcome["verdicts"] if v["decision"] == "reject"],
-            "verdicts": outcome["verdicts"],
+            "rejected": [v for v in verdicts if v["decision"] == "reject"],
+            "verdicts": verdicts,
             "candidates": len(candidates),
             "asked": asked,
             "rate": outcome["rate"],
@@ -402,8 +431,8 @@ class NegativeFilter:
             )
         return {
             "turns": spoken,
-            "rejected": rejected,
-            "verdicts": verdicts,
+            "rejected": self.report(rejected),
+            "verdicts": self.report(verdicts),
             "vetoed": sum(turn.vetoed for turn in spoken),
         }
 
@@ -428,6 +457,7 @@ class NegativeFilter:
                 "over_sample": self.config.over_sample,
                 "strict": self.config.strict,
                 "learn": self.config.learn,
+                "provenance": self.config.provenance,
             },
         }
 

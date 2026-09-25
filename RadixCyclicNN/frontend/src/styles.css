@@ -913,6 +913,48 @@ pre.sample {
   color: var(--warn);
 }
 
+/* The copy editor's verdicts: it changed the text, handed it back as it was, or gave no usable answer. */
+.badge.corrected {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.badge.unchanged {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.badge.uncorrected {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+/* A correction shown as a diff: what the editor struck out of the model's text, what it wrote instead. */
+.diff {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff del {
+  background: var(--danger-bg);
+  color: var(--danger);
+  text-decoration: line-through;
+  border-radius: 2px;
+}
+
+.diff ins {
+  background: var(--ok-bg);
+  color: var(--ok);
+  text-decoration: none;
+  border-radius: 2px;
+}
+
+.diff .gap {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 table.data td.wrap {
   text-align: left;
   white-space: normal;

@@ -291,7 +291,7 @@ commands:
   think      the model thinks: one thought from the THINK sentinel, questioning itself where it learned to
   chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
-  ollama     a corpus written to order, the adversarial review and a thinking model's thoughts (models | corpus | review | think)
+  ollama     a corpus written to order, the adversarial review, the copy editor and a thinking model's thoughts (models | corpus | review | correct | think)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   mcp        speak MCP on stdin / stdout: the tools and the network itself, for any MCP client

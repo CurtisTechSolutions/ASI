@@ -258,6 +258,8 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /** Letter-level corrections of the model's samples or `texts`; `blame` teaches the negative network the diff. */
+  ollamaCorrect: (body) => post("/api/ollama/correct", body),
   /**
    * A thinking model thinks about a prompt: questions, the thinking behind each answer, and - with `train` -
    * a job teaching that thinking to the network as thoughts. Body: prompt, lines, think, temperature, url,

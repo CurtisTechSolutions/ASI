@@ -146,6 +146,43 @@ class TestFilter(unittest.TestCase):
         self.assertEqual(duo.negative.recent(1)[0]["source"], "filter")
 
 
+class TestProvenance(unittest.TestCase):
+    """The veto without its provenance: the same decisions, none of the reasons."""
+
+    def test_the_decisions_are_the_same_without_provenance(self):
+        texts = [FAILURE, CORPUS[0], "a wholly unrelated sentence"]
+        whole = pair().filter(texts)
+        terse = pair(FilterConfig(provenance=False)).filter(texts)
+        self.assertEqual((whole["kept"], whole["rejected"], whole["rate"]), (terse["kept"], terse["rejected"], terse["rate"]))
+        self.assertEqual([v["decision"] for v in whole["verdicts"]], [v["decision"] for v in terse["verdicts"]])
+        self.assertEqual([v["rule"] for v in whole["verdicts"]], [v["rule"] for v in terse["verdicts"]])
+        for verdict in terse["verdicts"]:
+            self.assertEqual(set(verdict), {"text", "decision", "rule"})  # no risk, no reasons, no spans, no why
+        self.assertIn("why", whole["verdicts"][0])
+        self.assertEqual(NegativeFilter.terse(whole["verdicts"][0]), terse["verdicts"][0])
+
+    def test_generate_predict_and_converse_stay_terse(self):
+        duo = pair(FilterConfig(provenance=False))
+        out = duo.generate(count=2, mode="sample", seed=1, max_length=30, over_sample=3)
+        self.assertEqual(len(out["verdicts"]), out["candidates"])
+        for verdict in out["verdicts"] + out["rejected"]:
+            self.assertEqual(set(verdict), {"text", "decision", "rule"})
+        out = duo.predict("the ", length=8, k=3)
+        for verdict in out["verdicts"] + out["rejected"]:
+            self.assertEqual(set(verdict), {"text", "decision", "rule"})
+        out = duo.converse(FAILURE, turns=2, max_length=30)
+        for verdict in out["verdicts"] + out["rejected"]:
+            self.assertEqual(set(verdict), {"text", "decision", "rule"})
+        self.assertFalse(duo.describe()["config"]["provenance"])
+        self.assertTrue(pair().describe()["config"]["provenance"])
+
+    def test_learn_still_blames_without_provenance(self):
+        duo = pair(FilterConfig(provenance=False, learn=True))
+        before = duo.negative.graph.total_blame
+        duo.filter([FAILURE])
+        self.assertGreater(duo.negative.graph.total_blame, before)
+
+
 class TestOutput(unittest.TestCase):
     def test_generate_returns_the_cleanest_survivors(self):
         duo = pair()

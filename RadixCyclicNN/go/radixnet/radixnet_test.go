@@ -510,11 +510,13 @@ func TestConverseWordRepeats(t *testing.T) {
 // rewrite - and streaming changes nothing about what is said.
 func TestConverseStream(t *testing.T) {
 	ways, _ := NewModel(3, DefaultGraphOptions())
+	ways.Exact = true // atomic counters: the racy default is deliberate, but the race detector runs here
 	if _, err := ways.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
 		TrainOptions{Epochs: 3}); err != nil {
 		t.Fatalf("Train: %v", err)
 	}
 	stuck, _ := NewModel(3, DefaultGraphOptions())
+	stuck.Exact = true
 	if _, err := stuck.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
 		t.Fatalf("Train: %v", err)
 	}
@@ -715,11 +717,13 @@ func TestBacktrack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewModel: %v", err)
 	}
+	ways.Exact = true // atomic counters: the racy default is deliberate, but the race detector runs here
 	if _, err := ways.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
 		TrainOptions{Epochs: 3}); err != nil {
 		t.Fatalf("Train: %v", err)
 	}
 	stuck, _ := NewModel(3, DefaultGraphOptions())
+	stuck.Exact = true
 	if _, err := stuck.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
 		t.Fatalf("Train: %v", err)
 	}
@@ -829,6 +833,7 @@ func TestBacktrack(t *testing.T) {
 func TestLearnsWhereItGoesRound(t *testing.T) {
 	build := func() *Model {
 		m, _ := NewModel(3, DefaultGraphOptions())
+		m.Exact = true // atomic counters: the racy default is deliberate, but the race detector runs here
 		if _, err := m.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
 			TrainOptions{Epochs: 3}); err != nil {
 			t.Fatalf("Train: %v", err)

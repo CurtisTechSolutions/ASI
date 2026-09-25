@@ -1666,6 +1666,8 @@ struct ConverseRequest {
     options: ConverseOptions,
     partner_kind: Option<&'static str>,
     guard_on: bool,
+    /// This answer's own choice about the provenance of the vetoes (`None`: the server's setting).
+    provenance: Option<bool>,
 }
 
 fn converse_request(svc: &Arc<Service>, r: &Request) -> Result<ConverseRequest, ApiError> {
@@ -1728,6 +1730,7 @@ fn converse_request(svc: &Arc<Service>, r: &Request) -> Result<ConverseRequest, 
         options: o,
         partner_kind,
         guard_on: r.flag("guard", true),
+        provenance: crate::duo::maybe_flag(r, "provenance")?,
     })
 }
 
@@ -1740,12 +1743,13 @@ fn hold(svc: &Arc<Service>, request: &ConverseRequest, stream: Option<&mut Strea
         options: o,
         partner_kind,
         guard_on,
+        provenance,
     } = request;
     let talk = |partner: Option<&mut Model>, stream: Option<&mut Stream>| -> Result<(Vec<Turn>, Json), ApiError> {
         let mut partner = partner;
         let mut stream = stream;
         let guarded = if *guard_on {
-            svc.guard(|pair| -> Result<(Vec<Turn>, Json), String> {
+            svc.guard(*provenance, |pair| -> Result<(Vec<Turn>, Json), String> {
                 let outcome = converse_guarded(pair, partner.as_deref_mut(), opening, o, stream.as_deref_mut())?;
                 // `vetoed` counts the distinct texts refused, `refusals` how often one was
                 let report = guard_report(

@@ -20,6 +20,7 @@ func wordModel(t *testing.T, n int, texts ...string) *Model {
 	if err != nil {
 		t.Fatalf("new model: %v", err)
 	}
+	m.Exact = true // atomic counters: the racy default is deliberate, but the race detector runs here
 	if len(texts) > 0 {
 		if _, err := m.Train(texts, TrainOptions{Epochs: 2, AutoCompress: true}); err != nil {
 			t.Fatalf("train: %v", err)

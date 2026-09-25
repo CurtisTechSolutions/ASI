@@ -88,6 +88,9 @@ D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 **Part XVIII — More ways to search and to train** · D-078 every method off by default, and none draws a random
 number · D-079 a setting's home is decided by who keeps it
 
+**Part XIX — The copy editor** · D-082 a correction is a diff, and the LLM is asked for the smallest one ·
+D-083 the veto can keep its provenance to itself
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -3249,6 +3252,114 @@ teaching the network where to question.
 **Lives in** `radixnet/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
 `radixnet/dialogue.py::think_back`, `radixnet/ollama.py::thoughts_from_prompt`, `go/radixnet/thinking.go`,
 `rust/src/thinking.rs`
+
+---
+
+# Part XIX — The copy editor
+
+### D-082 — A correction is a diff, and the LLM is asked for the smallest one
+
+**Status** Accepted · 2026-09-24 · **Layer** feedback, negative network · **Beside** D-029, D-026
+
+**Context** The adversarial reviewer (D-029) fails a *text*: its mark sets how
+badly and its critique says roughly why, and every transition of the text is
+blamed alike. The English tutor already knew better - it writes the sentence out
+correctly and only the characters it changed are blamed (`NegativeNet.correct`,
+`radixnet/diff.py`) - but that path was reachable only through a lesson. A
+model that writes `"Hi howe are you??"` has one letter and one mark wrong; a
+verdict on the sentence blames `"Hi "`, `" are "` and `"you"` too, and teaches
+the negative network that greetings are failures.
+
+**Decision** The LLM can be asked to be a **copy editor** instead of a critic
+(`ollama correct`, `negative auto --correct`, `POST /api/ollama/correct`): it
+returns each text written out correctly with the *smallest possible change*, and
+the diff between the two is what the negative network learns. Only the
+characters the editor struck out or replaced are blamed, at one failure per
+corrected text (`--severity`); the correction itself never joins the failure
+structure and clears blame where it is already known; a text handed back
+unchanged clears blame; a text the editor said nothing usable about is neither
+blamed nor cleared. The editor names the mistake in one word out of a fixed
+vocabulary, with aliases the models actually use (`typo`, `capitalization`);
+when it names none, the shape of the diff decides - punctuation, spacing, case,
+letters inside a word, or words moved - so a reason is never invented from
+nothing, and it is never `none` for a text that changed.
+
+**Rejected**
+* *Asking for the rating and the correction in one call.* Two jobs in one
+  prompt is two chances to drift: a model asked to rate tends to rewrite, and
+  one asked to rewrite stops rating. The reviewer and the editor are two modes,
+  and the same loop runs either.
+* *Scaling the severity by how much changed.* The diff already does that:
+  more changed characters blame more edges. A per-text severity keeps the two
+  numbers apart - how heavy a lesson, and how wide.
+
+**Rationale** The negative network's value is *where* text goes wrong (D-026's
+edge-level blame); a reviewer's verdict is the coarsest signal that can feed it
+and a correction the finest. Asking for the smallest change keeps the diff an
+honest map of the mistake rather than of the editor's taste.
+
+**Consequences**
+* The same prompt, the same parsing and the same reason rules in all three
+  ports (`radixnet/ollama.py`, `rust/src/review.rs`, `go/radixnet/review.go`),
+  held to Python byte for byte by the parity suites.
+* The Automatic card and the report card grow an editor's vocabulary -
+  `corrected`, `unchanged`, `uncorrected`, `edits`, `change_rate` - beside the
+  reviewer's marks, and a round record says which mode ran it.
+* An LLM that rewrites freely produces a wide diff and a wide lesson; the
+  prompt forbids it, and the `changes` on every entry show what it did.
+
+**Lives in** `radixnet/ollama.py` (`correct_texts`), `radixnet/blame.py`
+(`faults_from_corrections`, `correction_reason`, `reason_from_changes`),
+`radixnet/critic.py`, `radixnet/cli.py`, `radixnet/api.py`,
+`frontend/src/components/OllamaPanel.jsx`, `rust/src/review.rs`,
+`go/radixnet/review.go`
+
+---
+
+### D-083 — The veto can keep its provenance to itself
+
+**Status** Accepted · 2026-09-24 · **Layer** negative network, output paths · **Beside** D-026, D-029
+
+**Context** The guard (README, *The guard: both networks on every answer*)
+was built so that nothing is filtered silently: every answer carries every
+verdict - rule, risk, peak, ratio, reasons, blamed fragments, a sentence of
+why - for every candidate it judged. That is right when the question is *why
+was this dropped*, and wrong when the question was the answer: three texts
+asked for come back with nine judgements, and a conversation with one per
+candidate reply considered.
+
+**Decision** The provenance of a veto is a setting, on by default and off on
+request: `FilterConfig.provenance`, `--no-provenance` on the guard flags and
+on `negative filter`, `{"provenance": false}` on `generate`, `predict`,
+`converse` and `negative/filter` for one answer, and
+`POST /api/negative/settings {"provenance": false}` for every answer a server
+gives. Off, the veto applies exactly as before - the same candidates are
+stopped, `learn` still blames them - but the pair reports each verdict as its
+text, decision and rule alone, and the guard's report is the counts alone:
+how many were judged, how many vetoed. Nothing is filtered silently still -
+the count is always there - but nothing is explained unasked.
+
+**Rejected** *A verbosity knob on the verdict (fewer spans, no `why`).* The
+cost is the list itself, not the width of its rows; and a half-explained veto
+is worse than a counted one, because it looks complete.
+
+**Rationale** The judgement is computed either way (the decision needs it),
+so the setting is about what is *reported*, which is the caller's business
+and nobody else's - which is also why it is a per-answer field with a
+server-wide default rather than a flag the negative network carries.
+
+**Consequences**
+* The guard report has two shapes, told apart by `provenance: false` and the
+  presence of `judged`; the frontend's guard notice shows a count-only report
+  without a *why* to open, and its verdict card renders a terse verdict.
+* The same setting in all three ports, held to Python by the parity suites
+  (`tests/test_rust_parity_negative.py`, `tests/test_go_parity.py`).
+
+**Lives in** `radixnet/duo.py` (`FilterConfig.provenance`,
+`NegativeFilter.terse` / `report`), `radixnet/api.py` (`guard`,
+`_guard_report`, `negative_settings`), `radixnet/cli.py` (`add_guard_flags`,
+`_guard_doc`), `frontend/src/components/GuardNotice.jsx`, `rust/src/duo.rs`,
+`go/radixnet/duo.go`
 
 ---
 

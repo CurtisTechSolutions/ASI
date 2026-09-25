@@ -53,7 +53,7 @@ and an optional GPU backend (torch) are built in.
 | Learning-rate schedules | `lr` and `act_lr` as *graph functions* of the epoch (`linear(lr0, 4 * lr0)`, `lr0 * 1.25 ** i`, `warmup(...)`, `lr / 10`), previewed as a graph in the CLI (`schedule`), the API and the Train tab. |
 | Constantly self-upgrading system (GAN idea) | `Evolver`: the model is the generator, a second network is the discriminator. Each generation the model samples fakes, the discriminator learns real-vs-fake with 2NRL, the worst fakes become the model's own 2NRL garbage and real corpus lines its fine-tune pass. Runs forever (`--generations 0`, or the API's evolve job) and checkpoints as it goes. |
 | The negative network | `NegativeNet` (`--kind negative`, the Negative tab, and `radixnet-count negative` in Go): a copy of the network that keeps only its negative portions. Every node and edge in it exists because something went wrong there, every edge remembers the blame it collected and the tutor's reasons behind it, and `judge` walks a text through that structure to say how much of it is built out of known failure, which reasons those failures carried and which fragments carry them. It is trained on negative data alone; text the tutor *passed* only ever takes blame away (net evidence is `max(0, blame - clear)`). |
-| The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the **speech and image tutors** compare what the network remembers of a recording or a picture with the original (`speech tutor --blame`, `image tutor --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
+| The tutor supplies the negatives | `blame.py`: the **English tutor** names the mistake it marked a sentence down for (`agreement`, `tense`, `article`, ...), hands over its mark as the severity and its correction as the diff to blame (`tutor --blame`); the Ollama reviewer's critique becomes the reason and its rating the severity (`ollama review --blame`), the Ollama **copy editor** writes each text out correctly changing as few characters as it can and only the diff is blamed - `"Hi howe are you??"` against `"Hi, how are you?"` is the `e` and the second `?` (`ollama correct --blame`, `negative auto --correct`), the code sandbox / style checker / judge name why a program was rejected (`codegen --blame`), the **speech and image tutors** compare what the network remembers of a recording or a picture with the original (`speech tutor --blame`, `image tutor --blame`), the evolve discriminator blames every fake it scores below the real texts (`evolve --blame`), and a person can blame a text by hand. The negative network never invents a failure. |
 | A tutor that needs no teacher | `recall.py`: an utterance and a picture were *encoded* into text before being trained on, so the right answer is on file and marking needs no LLM. The network is given the opening of a text it was taught - the utterance's own token, or an image header and a few characters - and asked to write the rest; what comes back is run back through the codec and compared with the original. The agreement over the payload is the mark out of 10, the single worst thing wrong with it is named (`silence`, `clipping`, `mishearing`, `blank`, `noise`, `truncated`, ...), and the original is the correction the negative network blames from. |
 | An LLM on the other side of the line | `chat` (the **Chat** tab): a local **Ollama** model - or ChatGPT - holds an actual conversation with the network. It says a short line, the network replies by continuing it (the same search `converse` uses, so a reply is a real walk of the graph), they take turns, and then the LLM marks every reply out of 10 *against the line it answered* and the conversation as a whole. The failures blame the negative network, the passes clear it, and 2NRL trains the model on both - with the partner's own lines joining the positive phase, because they are what a good reply there would have looked like, and a reply the model could only repeat punished whatever the judge made of it. It is the one thing a language model is for, and the first teacher here that answers back. |
 | The negative network feeds itself | `negative auto` (the Negative tab's *Automatic* card): the model writes texts of its own, a local **Ollama** model (or ChatGPT) marks each one out of 10 and says what is wrong with it, and everything below the pass mark blames the negative network - round after round, with nobody typing a failure in by hand. The positive model is only read from, so the loop can run beside whatever else is teaching it. |
@@ -209,18 +209,18 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`, `--allow-word-repeats`, `--explore 3` (times a reply that caught itself repeating - its own words, or the conversation's - may back up and look for another way on), `--no-learn` (do not teach the graph where it goes round), `--no-think` (do not think before backing up out of a repeat), `--think-depth 2` (how deep such a thought may question itself), `--save` / `--out` (write what it learned back), `--stream` (print the conversation as it happens: each turn the moment it is spoken, and before it what the voice does - the context it continues, the draft it caught itself on, where it backed up to, what it found - dimmed on a terminal; with `--json` one JSON object per line, the usual document last as `{"event": "done", ...}`); prints the transcript with cost, probability and the words each reply picked up, each rethink's thought under it, then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; the guard flags below |
 | `think` | the model thinks: one thought from the THINK sentinel, questioning itself where it has learned to: `--about TEXT` (think at the node where that text ends, and teach the model to stop and think there), `--mode beam\|sample`, `--k 5`, `--beam N`, `--max-length 60`, `--temperature`, `--step-penalty`, `--depth 2` (how deep it may question itself), `--questions 1` (per thought), `--no-learn`, `--save` / `--out`; prints the thought and its questions, and what it triggered when it stopped |
 | `chat` | an LLM converses with the model and marks every reply (a reply it could only repeat is punished whatever the judge said): `--conversations 1` (0 = until Ctrl-C), `--turns 4` (replies per conversation), `--topic TEXT`, `--opening TEXT`, `--persona TEXT`, `--context 12`, `--max-length 60`, `--mode beam\|sample`, `--k 5`, `--temperature`, `--partner-temperature`, `--threshold 6` (pass mark), `--provider ollama\|chatgpt`, `--partner-model`, `--judge-model`, `--url`, `--judge-url`, `--timeout`, `--no-guard` (do not veto a reply before it is spoken), `--no-blame`, `--no-clear`, `--no-learn` (mark it but do not train), `--no-teach-partner`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--negative PATH`, `--epochs`, 2NRL options, `--out` |
-| the guard (on `predict`, `generate`, `converse`) | the negative network filters what the model writes, by default: `--no-guard` (print it unfiltered), `--negative PATH` (default `model.negative.json` beside `--model`), `--threshold RISK`, `--min-coverage SHARE`, `--over-sample N`. It stands aside when there is no negative model file, or when the one there has never been taught a failure |
+| the guard (on `predict`, `generate`, `converse`) | the negative network filters what the model writes, by default: `--no-guard` (print it unfiltered), `--negative PATH` (default `model.negative.json` beside `--model`), `--threshold RISK`, `--min-coverage SHARE`, `--over-sample N`, `--no-provenance` (veto without saying why: how many were stopped, not which or the reasons). It stands aside when there is no negative model file, or when the one there has never been taught a failure |
 | `weights` | show or change the score function of the kind that has one, then recompute every weight and save. Count model: `--global-scale`, `--window-scale`, `--reward-scale`, `--count-scale`, `--path-scale` (how loudly the judged paths speak), `--window N`. Resonant model: `--buckets`, `--period`, `--kick-scale`, `--resonance-scale`, `--amp-scale`, `--reward-scale`, `--concentration`. Another kind's options are rejected by name |
 | `2nrl --bad FILE --good FILE` | `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--batch-size`, `--strength` (count and resonant models), `--out` |
 | `feedback` | rated texts: `--good FILE` / `--good-text TEXT` (thumbs up), `--bad FILE` / `--bad-text TEXT` (thumbs down); both -> 2NRL, thumbs up alone -> reward, thumbs down alone -> punish then invert; `--good-ratings 10,5,8` / `--bad-ratings` give a mark out of 10 per text (in the order they were collected) and every text is learned in proportion to it; `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4`, `--out` |
-| `negative <action>` | the negative network (`--negative PATH`, default `model.negative.json` beside `--model`): `blame --text/--data --reason TAG --severity N --source NAME --note TEXT` (teach it a failure), `clear --text/--data` (the tutor passed these: take blame off what they share), `why --text/--data [--threshold --min-coverage --spans]` (risk, coverage, the reasons and the blamed fragments), `filter [--count --prefix --mode --max-length --over-sample --threshold --min-coverage --ratio --no-ratio --peak --strict --learn]` or `filter --text/--data` (the pair: the positive model writes, the negative one vetoes), `reasons [--limit --log]`, `forget [--reason TAG] [--factor F]`, `auto` (teach it automatically: the model writes, an LLM reviews, the failures are blamed - `--rounds 3` (0 = until Ctrl-C), `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--threshold 6`, `--context TEXT` (the reviewer's yardstick), `--provider ollama\|chatgpt`, `--reviewer-model`, `--url`, `--timeout`, `--epochs`, `--no-clear`, `--out`) |
+| `negative <action>` | the negative network (`--negative PATH`, default `model.negative.json` beside `--model`): `blame --text/--data --reason TAG --severity N --source NAME --note TEXT` (teach it a failure), `clear --text/--data` (the tutor passed these: take blame off what they share), `why --text/--data [--threshold --min-coverage --spans]` (risk, coverage, the reasons and the blamed fragments), `filter [--count --prefix --mode --max-length --over-sample --threshold --min-coverage --ratio --no-ratio --peak --strict --learn --no-provenance]` or `filter --text/--data` (the pair: the positive model writes, the negative one vetoes), `reasons [--limit --log]`, `forget [--reason TAG] [--factor F]`, `auto` (teach it automatically: the model writes, an LLM reviews, the failures are blamed - `--rounds 3` (0 = until Ctrl-C), `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--threshold 6`, `--context TEXT` (the reviewer's yardstick), `--provider ollama\|chatgpt`, `--reviewer-model`, `--url`, `--timeout`, `--epochs`, `--no-clear`, `--correct` (letter-level corrections instead of marks: only the characters the editor changed are blamed), `--severity 1` (blame per corrected text), `--out`) |
 | `invert` / `compress` | flip the network / merge unary chains, then save |
 | `evolve --data FILE` | `--blame` / `--negative PATH` (the discriminator teaches the negative network), `--generations` (0 = forever, Ctrl-C saves), `--samples`, `--real-per-generation`, `--max-length`, `--temperature`, `--discriminator PATH`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--disc-neg-epochs`, `--disc-pos-epochs`, `--batch-size`, `--blatant-mode none\|fail_invert\|activation\|state`, `--blatant-margin`, `--blatant-boost` (failure handling, see below), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--out` |
 | `info` | statistics and the training history tail |
 | `checkpoints` | `--dir`, `--restore NAME\|latest`, `--out` |
 | `bench` | `--chars`, `--epochs` |
 | `serve` | `--host`, `--port`, `--frontend-dir`, `--checkpoint-dir`, `--upload-dir` (training files uploaded through the API / frontend, default `uploads`), `--ollama-url`, `--ollama-model`, the tool options below |
-| `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--blame [--negative PATH]] [--2nrl --good FILE ...]`; `think --prompt TEXT [--lines 5] [--think true\|false\|low\|medium\|high] [--temperature 0.7] [--out FILE] [--train [--with-answers] [--no-questions] --epochs --lr --batch-size --model-out]` (a thinking model's reasoning about the prompt, taught as thoughts) |
+| `ollama [--url] [--ollama-model] [--timeout] <action>` | `models`; `corpus --prompt TEXT [--lines 20] [--style good\|garbage] [--out FILE] [--train --epochs --lr --batch-size --model-out]`; `review [--count 8] [--prefix] [--max-length 60] [--text ... \| --data FILE] [--threshold 6] [--context] [--blame [--negative PATH]] [--2nrl --good FILE ...]`; `correct [--count 8] [--prefix] [--max-length 60] [--temperature] [--text ... \| --data FILE] [--context] [--blame [--severity 1] [--negative PATH]]` (the copy editor: the diff against each correction is what the negative network learns); `think --prompt TEXT [--lines 5] [--think true\|false\|low\|medium\|high] [--temperature 0.7] [--out FILE] [--train [--with-answers] [--no-questions] --epochs --lr --batch-size --model-out]` (a thinking model's reasoning about the prompt, taught as thoughts) |
 | `speech info` / `transcribe FILE` / `teach FILE` / `listen` / `tutor FILE...` / `decode` | teaching by talking. `info`: backends, recorders, codecs. `transcribe FILE [--backend auto\|given\|faster-whisper\|whisper\|server] [--text TEXT] [--language en] [--asr-model] [--asr-url] [--out]`: the words. `teach FILE`: the transcript **and** the waveform behind one unique token - `--text` (what you said, skips the ASR), `--rate 8000`, `--codec auto\|mu\|pcm8`, `--normalise`, `--no-waveform`, `--pair` (also learn waveform → transcript), `--token` / `--shared-token`, `--out FILE`, `--train --epochs 3 --lr 0.5 --batch-size 8 --model-out`. `listen --seconds 5 [--recorder arecord\|rec\|sox\|ffmpeg] [--save clip.wav]`: record from the microphone first, then the same. `tutor FILE...`: the recall tutor - ask it to say back what it was taught and mark what comes back, `--length 400` (payload characters asked for, and what the marking compares against), `--lead`, `--attempts`, `--mode beam\|sample`, `--threshold 6`, `--listen-back` (transcribe what it said and compare the words), `--train` (teach it first), `--blame` / `--negative PATH`. `decode (--text\|--data) --out out.wav [--codec]`: an encoded or *predicted* waveform as audio |
 | `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--variants 3` / `--variant-weight 0.5` (with `--blame`: the teacher explains why each failure is wrong and writes that many more sentences with the same mistake, blamed at that share of its severity), `--topic TEXT`, `--rounds 3`, `--batches 1` (auto run: batches of `--rounds` rounds, each planned from the one before; 0 = until Ctrl-C), `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--brief TEXT` (what this batch is being taught to: the prompt the last report card led to), `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--plan N` (plan the next N lessons from the report card at the end), `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0` (what the unchanged words still earn; a whole path is only rewarded when the answer was right), `--no-count`, `--dry-run` (show the alignment only), `--out` |
@@ -263,6 +263,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/ollama/models?url=` | always 200: `{"available", "url", "model", "models": [{"name","size","modified_at","details"}], "error"}` |
 | `POST /api/ollama/corpus` | `{"prompt", "lines": 20, "style": "good"\|"garbage", "model", "url", "save_as": upload name, "train": false, "epochs", "lr", "batch_size"}` -> `{"texts", "upload", "job", ...}` (202 with a train job; 502 when Ollama fails) |
 | `POST /api/ollama/review` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (review these instead of sampling), "threshold": 6, "context", "apply": "none"\|"2nrl", "blame" (teach the negative network), "good", "good_files", 2NRL settings}` -> `{"reviews": [{"index","text","rating","verdict","critique"}], "mean_rating", "pass_rate", "good", "bad", "job", ...}` |
+| `POST /api/ollama/correct` | `{"count": 8, "prefix", "max_length": 60, "temperature", "texts": [...] (correct these instead of sampling), "context", "blame" (blame only the characters the editor changed; unchanged texts clear), "severity": 1}` -> `{"corrections": [{"index","text","correction","verdict": "corrected"\|"unchanged"\|"uncorrected","reason","note","changes": [{"op","wrong","right","at","to"}],"edits"}], "corrected", "unchanged", "uncorrected", "edits", "wrong_chars", "change_rate", "negative", ...}` |
 | `POST /api/ollama/think` | `{"prompt", "lines": 5 (questions to think about), "think": true\|false\|"low"\|"medium"\|"high", "temperature": 0.7, "model", "url", "save_as": upload name, "train": false (teach the thinking as thoughts that begin at the THINK sentinel, and the questions it asked itself as places to stop and think), "with_answers": false, "questions": true, "epochs", "lr", "batch_size"}` -> `{"prompt", "model", "url", "think", "count", "thinking", "thoughts": [{"question","thinking","answer"}], "upload", "job"}` (202 with a train job; 502 when Ollama fails or a model that does not think is asked to train) |
 | `GET /api/chatgpt/models?url=` | always 200: `{"available", "configured" (the server has a key), "url", "model", "models": [{"name","owned_by","created"}], "error"}`. The key is never a request field: it is the server's own `$OPENAI_API_KEY` |
 | `GET /api/images` | `{"pillow","torch","diffusers","sd_model","sd_loaded","sd_error","encoders","default_size","auto","text_format"}` |
@@ -298,7 +299,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/negative/clear` | the tutor passed these: `{"texts"\|"text","weight": 1,"epochs": 1}` -> `{"matched","unmatched","records","stats"}`; nothing is created |
 | `POST /api/negative/judge` | `{"texts"\|"text","threshold","min_coverage","spans": 5}` -> `{"verdicts": [{"verdict": "reject"\|"suspect"\|"pass","risk","coverage","blame","reasons","spans": [{"start","end","fragment","blame","fails","reason"}],"why"}]}` |
 | `POST /api/negative/filter` | the pair: `{"count": 3,"prefix","mode","max_length","temperature","over_sample": 3,"threshold","min_coverage","ratio": 0,"no_ratio","peak","strict","learn"}` (or `{"texts"}` to judge given texts) -> `{"texts" (the cleanest survivors),"kept","rejected": [verdicts],"verdicts","candidates","asked","rate","pair"}` |
-| `POST /api/negative/forget` / `POST /api/negative/settings` / `POST /api/negative/reset` / `POST /api/negative/save` | drop or fade a reason `{"reason","factor"}` / `{"threshold","min_coverage","share_scale","blame_scale","clear_scale"}` / a fresh negative network `{"seed"}` / write it `{"path"}` |
+| `POST /api/negative/forget` / `POST /api/negative/settings` / `POST /api/negative/reset` / `POST /api/negative/save` | drop or fade a reason `{"reason","factor"}` / `{"threshold","min_coverage","share_scale","blame_scale","clear_scale","provenance"}` (`provenance: false`: the guard's vetoes on every answer report their count, not their reasons) / a fresh negative network `{"seed"}` / write it `{"path"}` |
 | `POST /api/chat/start` | start a chat job - an LLM converses with the model and marks every reply: `{"conversations": 1 (0 = until stopped),"turns": 4,"topic","opening","persona","context": 12,"max_length": 60,"mode": "beam"\|"sample","k": 5,"temperature","partner_temperature","threshold": 6,"provider": "ollama"\|"chatgpt","partner_model","judge_model","url","judge_url","timeout","guard": true,"blame": true,"clear_passes": true,"learn": true,"teach_partner": true,"avoid_repeats": true,"neg_epochs","pos_epochs","neg_lr","pos_lr","batch_size","strength","epochs","seed"}` -> 202 `{"job","config","url","partner","judge","speakers"}` |
 | `GET /api/chat/history` | the `exchange` records as they are spoken, then one `conversation` record each (its transcript, every review with the line it answered, the marks, what was blamed and what was learned) and a `report` at the end of a run |
 | `POST /api/negative/auto` / `GET /api/negative/auto/history` | the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every failure blame the negative network - `{rounds (0 = until stopped), count, prefix, max_length, temperature, threshold, context, provider: ollama\|chatgpt, reviewer_model, url, timeout, clear_passes, epochs, seed}` -> 202 `{"job","config","url","reviewer"}`; the history is its round / report records. The positive model is only read from |
@@ -475,6 +476,16 @@ The network can be hooked into a local LLM served by [Ollama](https://ollama.com
   `--2nrl` the failed samples become the negative phase and the passed ones
   (plus a corpus) the positive phase, so an external LLM discriminator drives
   the self-upgrade.
+* **Letter-level correction** — Ollama plays the copy editor: every sample
+  (or any text you give it) comes back written out correctly with as few
+  characters changed as possible, and the *diff* between the two is what the
+  negative network learns. `"Hi howe are you??"` corrected to
+  `"Hi, how are you?"` blames the `e` and the second `?` (and the step that
+  walked past the missing comma), not the sentence; a text handed back
+  unchanged clears blame. `--blame` teaches it, `--severity` is the blame per
+  corrected text, and the editor's own word for the mistake (`spelling`,
+  `punctuation`, `capitalisation`, `spacing`, `agreement`, `tense`, ...) is the
+  reason - when it gives none, the shape of the diff decides.
 
 ```bash
 ollama pull llama3.2                                    # once, on the machine running Ollama
@@ -484,6 +495,14 @@ python -m radixnet ollama corpus --prompt "short true sentences about the sea" -
 python -m radixnet ollama review --count 8 --threshold 6
 python -m radixnet ollama review --count 8 --2nrl --good data/sample_corpus.txt
 python -m radixnet ollama review --text "the cat sat on the mat" --text "mat the on sat cat the"
+python -m radixnet ollama correct --text "Hi howe are you??" --blame       # blames the e and the second ?
+python -m radixnet ollama correct --count 8 --blame --severity 1.5          # the model's own samples, copy-edited
+```
+
+```
+verdict    text                  correction          reason    changes
+---------  --------------------  ------------------  --------  ------------------------------
+corrected  "Hi howe are you??"   "Hi, how are you?"  spelling  "" -> ",", "e" -> "", "?" -> ""
 python -m radixnet ollama think --prompt "the sea" --lines 5 --train      # a thinking model's reasoning, taught as thoughts
 python -m radixnet think --about "the sea"                                # the network thinks, in the words it was taught
 ```
@@ -491,13 +510,16 @@ python -m radixnet think --about "the sea"                                # the 
 `--url` / `--ollama-model` (or `OLLAMA_HOST` / `RADIXNET_OLLAMA_MODEL` in the
 environment) select the server (default `http://127.0.0.1:11434`) and model
 (default `llama3.2`). `make ollama-models`, `ollama-corpus`, `ollama-garbage`,
-`ollama-review` and `ollama-2nrl` wrap the same commands (`PROMPT`, `LINES`,
-`STYLE`, `COUNT`, `THRESHOLD`, `OLLAMA_URL`, `OLLAMA_MODEL`).
+`ollama-review`, `ollama-blame`, `ollama-correct` and `ollama-2nrl` wrap the
+same commands (`PROMPT`, `LINES`, `STYLE`, `COUNT`, `THRESHOLD`, `SEVERITY`,
+`OLLAMA_URL`, `OLLAMA_MODEL`).
 
 The API exposes the same through `GET /api/ollama/models`, `POST /api/ollama/corpus`,
-`POST /api/ollama/review` and `POST /api/ollama/think` (see the table above), and the frontend's Ollama
-tab wraps them: generate a corpus and train on it / save it as an upload, or
-review the model's samples and apply the verdicts as a 2NRL job. In Docker the
+`POST /api/ollama/review`, `POST /api/ollama/correct` and `POST /api/ollama/think` (see the table
+above), and the frontend's Ollama tab wraps them: generate a corpus and train on it / save it as an
+upload, review the model's samples and apply the verdicts as a 2NRL job, copy-edit them and see every
+correction as a diff, with the struck-out and inserted characters marked, or have a thinking model
+think about a prompt and teach the network its thinking. In Docker the
 API reaches an Ollama on the host through `host.docker.internal`; `make up-ollama`
 starts an Ollama container next to the API instead (`OLLAMA_HOST=http://ollama:11434`).
 
@@ -1769,6 +1791,7 @@ against):
 |---|---|---|
 | the **English tutor** (`tutor --blame`, the Tutor tab's checkbox, `POST /api/tutor/start {"blame": true}`) | the mistake it named marks the sentence, its mark out of 10 is the severity, its sentence of teaching is the note, and its correction is diffed so **only the characters it changed** are blamed | `agreement`, `tense`, `article`, `preposition`, `plural`, `pronoun`, `word-order`, `spelling`, `punctuation`, `vocabulary`, `fragment`, `nonsense` |
 | the Ollama reviewer (`ollama review --blame`, the Ollama tab's checkbox, `"blame": true`) | its critique picks the reason, its rating the severity (0 -> 2.0, the pass threshold -> 0.25); the texts it passed clear blame | `gibberish`, `repetition`, `truncated`, `grammar`, `spelling`, `contradiction`, `false`, `incoherent`, `off-topic`, `empty`, `unrated`, `other` |
+| the Ollama **copy editor** (`ollama correct --blame`, the Ollama tab's correction card, `POST /api/ollama/correct {"blame": true}`) | it writes each text out correctly changing as few characters as it can; the diff is the lesson, so **only the characters it changed** are blamed (`"Hi howe are you??"` -> `"Hi, how are you?"`: the `e` and the second `?`), at `--severity` (1.0) per corrected text; its own word for the mistake is the reason, the shape of the diff when it gives none; the texts it handed back unchanged clear blame, and a text it gave no usable answer for is neither | `spelling`, `punctuation`, `capitalisation`, `spacing`, `agreement`, `tense`, `article`, `preposition`, `plural`, `pronoun`, `word-order`, `vocabulary`, `repetition`, `fragment`, `nonsense`, `grammar` |
 | the code sandbox, the style checker and the judge (`codegen --blame`) | every rejected program is blamed for what they found, with the teacher's feedback as the note | `timeout`, `crash`, `wrong-output`, `task-not-done`, `style`, `naming` |
 | the **speech tutor** (`speech tutor --blame`, the Speech tab, `POST /api/speech/tutor {"blame": true}`) | it is asked to say back an utterance it was taught; what comes back is run through the codec and compared with the recording, the agreement over the waveform is the mark, and the original is the correction | `unreadable`, `truncated`, `overrun`, `garbled`, `silence`, `clipping`, `mishearing`, `distortion` |
 | the **image tutor** (`image tutor --blame`, the Images tab, `POST /api/images/tutor {"blame": true}`) | the same, for a picture it was shown: the payload it writes back is compared with the encoded image | `unreadable`, `truncated`, `overrun`, `garbled`, `blank`, `noise`, `drift` |
@@ -1825,6 +1848,18 @@ python -m radixnet negative auto --rounds 0 --context "plain English about every
 python -m radixnet negative auto --provider chatgpt --reviewer-model gpt-4o-mini
 ```
 
+`--correct` makes the reviewer a copy editor instead: each round it writes the
+texts out correctly, changing as little as it can, and only the characters it
+changed are blamed (`--severity` per corrected text; no pass mark applies), so
+the loop teaches *where* the writing goes wrong letter by letter rather than
+*that* a text went wrong. The round table then counts what was corrected,
+what came back unchanged and how many changes it took, and the report card's
+`change_rate` falls as the model has less to put right:
+
+```bash
+python -m radixnet negative auto --rounds 5 --count 8 --correct --severity 1.5
+```
+
 `--context` is the reviewer's yardstick - what the texts are *meant* to be -
 and is worth setting, because "is this good?" means little without it.
 `--rounds 0` runs until Ctrl-C, which finishes the round it is in and saves.
@@ -1834,8 +1869,9 @@ it.
 
 In the browser it is the Negative tab's **Automatic** card: press Start and the
 round table, the reason table and the journal below it fill in by themselves as
-the rounds land (`POST /api/negative/auto` starts the job,
-`GET /api/negative/auto/history` is its record).
+the rounds land (`POST /api/negative/auto` starts the job, `{"correct": true,
+"severity": 1}` runs the editor, `GET /api/negative/auto/history` is its
+record).
 
 ### Why a text is a failure
 
@@ -1902,9 +1938,10 @@ suspect   -      0.0625  1.0000   -9.5765  repetition  "the rain in autumn"
   vetoed: "the the the the cat" - 9 of 9 transitions are known failures ...
 ```
 
-`--strict` also drops the suspects, `--no-ratio` judges by blame alone, and
+`--strict` also drops the suspects, `--no-ratio` judges by blame alone,
 `--learn` blames what the filter itself rejected (off by default: the tutor
-supplies the negatives, the filter only applies them).  `negative predict`
+supplies the negatives, the filter only applies them), and `--no-provenance`
+reports each decision without the judgement behind it.  `negative predict`
 also comes back from `POST /api/negative/filter` as a `warning` - what the
 negative network expects to go wrong from that prefix - whether or not
 anything was actually vetoed.
@@ -1949,6 +1986,14 @@ Nothing is filtered silently and nothing is filtered for free:
   created just to guard an answer;
 * `--no-guard` (CLI), `{"guard": false}` (API) or the *Filter with the negative
   network* checkbox (frontend) hands out what the positive model wrote;
+* `--no-provenance` (CLI), `{"provenance": false}` (API, per answer, or
+  `POST /api/negative/settings {"provenance": false}` for every answer) or the
+  *Say why it vetoed* checkbox (frontend) keeps the veto and drops its
+  provenance: the guard still stops what it recognises, but reports how many
+  candidates it judged and vetoed (`judged`, `vetoed`) instead of every
+  verdict with its rule, risk, reasons and blamed fragments.  `negative
+  filter --no-provenance` likewise returns the decision and the rule of each
+  candidate and nothing else;
 * `--threshold`, `--min-coverage` and `--over-sample` tune it per command, and
   the Negative tab's settings move it for the server.
 
@@ -2294,7 +2339,7 @@ with the audio - which is what the page dictates anyway.
 | `GET /api/uploads`, `POST /api/uploads` (JSON, multipart, raw), `POST /api/uploads/delete` | text files and ZIP archives of any size: multipart and raw bodies stream to disk, archives are inspected and read entry by entry with the same rules as the Python module |
 | `GET /api/graph`, `GET /api/history`, `GET /api/paths`, `GET /api/nodes` | as the Python server (edges carry `reward`, `share`, `recent_share`, `recent_count`; the judged paths and the node ratios come back with the same counters, the same shares and the same order) |
 | `POST /api/evolve/start`, `POST /api/evolve/stop`, `GET /api/evolve/history` | the self-upgrade loop, same bodies and records as the Python server: the model generates, a discriminator judges, 2NRL follows; `blatant_mode` picks how failures drive the update and `blame` lets the critic teach the negative network. The discriminator lives beside the model as `discriminator.json` |
-| `GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review` | a corpus written to order (`train` starts a job on the lines) and the adversarial review, which with `blame` teaches the negative network what failed and why |
+| `GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`, `POST /api/ollama/correct` | a corpus written to order (`train` starts a job on the lines), the adversarial review, which with `blame` teaches the negative network what failed and why, and the copy editor, whose `blame` teaches it only the characters that changed |
 | `POST /api/negative/auto`, `GET /api/negative/auto/history` | the Negative tab, automatic: a `critic` job of write → review → blame, same bodies and records as the Python server |
 | `GET /api/images`, `POST /api/images/encode`, `/decode`, `/tutor` | images as text, same bodies and results as the Python server. The **thumbnail encoder only**: the Stable Diffusion one needs torch and diffusers, so `encoder: "sd"` is refused here with a message naming the Python side |
 | `GET /api/speech`, `POST /api/speech/teach`, `/decode`, `/tutor` | the waveform as text and the recall tutor over it, same bodies and results as the Python server. **Transcription is Python-only** (faster-whisper / openai-whisper are Python packages), so send the words with the audio - which is what the browser's dictation does |

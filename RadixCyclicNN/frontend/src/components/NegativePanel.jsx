@@ -36,14 +36,16 @@ export function Verdict({ verdict }) {
   if (!verdict) return null;
   const decision = verdict.decision || verdict.verdict;
   const reasons = asArray(verdict.reasons);
+  // a verdict without its provenance carries the text, the decision and the rule alone
+  const terse = typeof verdict.risk !== "number";
   return (
     <div className="verdict">
       <p>
         <span className={`badge ${DECISION_CLASS[decision] || "unrated"}`}>{decision}</span>{" "}
         <span className="muted">
-          risk {fmtNum(verdict.risk, 2)} · peak {fmtNum(verdict.peak, 2)} · coverage {fmtNum(verdict.coverage, 2)}
+          {terse ? "" : `risk ${fmtNum(verdict.risk, 2)} · peak ${fmtNum(verdict.peak, 2)} · coverage ${fmtNum(verdict.coverage, 2)}`}
           {typeof verdict.ratio === "number" ? ` · ratio ${fmtNum(verdict.ratio, 2)}` : ""}
-          {verdict.rule ? ` · rule: ${verdict.rule}` : ""}
+          {verdict.rule ? `${terse ? "" : " · "}rule: ${verdict.rule}` : ""}
         </span>
       </p>
       <Highlighted text={String(verdict.text ?? "")} spans={verdict.spans} />
@@ -86,6 +88,7 @@ export default function NegativePanel({ status }) {
   const [peak, setPeak] = useStoredState("negative.peak", "");
   const [noRatio, setNoRatio] = useStoredState("negative.noRatio", false);
   const [strict, setStrict] = useStoredState("negative.strict", false);
+  const [provenance, setProvenance] = useStoredState("negative.provenance", true);
   const [learn, setLearn] = useStoredState("negative.learn", false);
   const [candidates, setCandidates] = useStoredState("negative.candidates", "");
   const [filtered, setFiltered] = useState(null);
@@ -100,6 +103,8 @@ export default function NegativePanel({ status }) {
   const [autoModel, setAutoModel] = useStoredState("negative.autoModel", "");
   const [autoUrl, setAutoUrl] = useStoredState("negative.autoUrl", "");
   const [autoClear, setAutoClear] = useStoredState("negative.autoClear", true);
+  const [autoCorrect, setAutoCorrect] = useStoredState("negative.autoCorrect", false);
+  const [autoSeverity, setAutoSeverity] = useStoredState("negative.autoSeverity", "1");
   const [autoHistory, setAutoHistory] = useState([]);
 
   // judge / teach
@@ -178,6 +183,8 @@ export default function NegativePanel({ status }) {
       threshold: parseNumber(autoThreshold, 6),
       provider: autoProvider,
       clear_passes: autoClear,
+      correct: autoCorrect,
+      severity: Math.max(0, parseNumber(autoSeverity, 1)),
     };
     if (autoContext.trim()) body.context = autoContext.trim();
     if (autoModel.trim()) body.reviewer_model = autoModel.trim();
@@ -196,6 +203,7 @@ export default function NegativePanel({ status }) {
       over_sample: parseInteger(overSample, 3),
       strict,
       learn,
+      provenance,
       no_ratio: noRatio,
       ratio: parseNumber(ratio, 0),
     };
@@ -252,6 +260,8 @@ export default function NegativePanel({ status }) {
   const autoRoundRecords = autoShown.filter((r) => r && r.kind === "round");
   const autoReports = autoShown.filter((r) => r && r.kind === "report");
   const autoCard = autoReports.length ? autoReports[autoReports.length - 1] : null;
+  // the editor's rounds carry corrections, the critic's marks; the table follows what was run
+  const autoCorrecting = autoRoundRecords.length ? autoRoundRecords[0].mode === "correct" : autoCorrect;
   const rejected = asArray(filtered && filtered.rejected);
   const kept = asArray(filtered && filtered.texts);
 
@@ -263,16 +273,23 @@ export default function NegativePanel({ status }) {
           Nobody should have to type failures in by hand. Each round the model writes texts of its own, an LLM
           reviewer marks them out of 10 and says what is wrong with each one, and everything below the pass mark
           blames the network below — the critique picks the reason, the mark sets the severity — while the texts it
-          passed take blame off what they share with known failures. Then it goes round again. The positive model is
-          only read from: nothing here trains, rewards or inverts it.
+          passed take blame off what they share with known failures. Then it goes round again. With "Letter-level
+          corrections" the LLM is a copy editor instead: it writes each text out correctly changing as little as it
+          can, and only the characters it changed are blamed. The positive model is only read from: nothing here
+          trains, rewards or inverts it.
         </p>
         <div className="row">
           <NumberField label="Rounds" value={autoRounds} onChange={setAutoRounds} min="0" step="1" disabled={autoRunning}
                        hint="0 = until you stop it" />
           <NumberField label="Texts per round" value={autoCount} onChange={setAutoCount} min="1" step="1" disabled={autoRunning} />
           <NumberField label="Max length" value={autoLength} onChange={setAutoLength} min="0" step="1" disabled={autoRunning} />
-          <NumberField label="Pass mark" value={autoThreshold} onChange={setAutoThreshold} min="0" max="10" disabled={autoRunning}
-                       hint="out of 10" />
+          {autoCorrect ? (
+            <NumberField label="Severity" value={autoSeverity} onChange={setAutoSeverity} min="0" disabled={autoRunning}
+                         hint="blame per corrected text" />
+          ) : (
+            <NumberField label="Pass mark" value={autoThreshold} onChange={setAutoThreshold} min="0" max="10" disabled={autoRunning}
+                         hint="out of 10" />
+          )}
         </div>
         <div className="row">
           <SelectField label="Reviewer" value={autoProvider} onChange={setAutoProvider} disabled={autoRunning}
@@ -287,6 +304,8 @@ export default function NegativePanel({ status }) {
                    placeholder="plain English sentences about everyday life" />
         <div className="checks">
           <CheckField label="Let what it passed clear blame" checked={autoClear} onChange={setAutoClear} disabled={autoRunning} />
+          <CheckField label="Letter-level corrections (blame only the characters the editor changed)" checked={autoCorrect}
+                      onChange={setAutoCorrect} disabled={autoRunning} />
         </div>
         <div className="actions">
           <button type="submit" className="primary" disabled={autoRunning || autoBusy || running}>
@@ -306,9 +325,9 @@ export default function NegativePanel({ status }) {
                 <tr>
                   <th>round</th>
                   <th>texts</th>
-                  <th>passed</th>
-                  <th>failed</th>
-                  <th>mean mark</th>
+                  <th>{autoCorrecting ? "corrected" : "passed"}</th>
+                  <th>{autoCorrecting ? "unchanged" : "failed"}</th>
+                  <th>{autoCorrecting ? "changes" : "mean mark"}</th>
                   <th>blamed</th>
                   <th>cleared</th>
                   <th>edges</th>
@@ -320,9 +339,9 @@ export default function NegativePanel({ status }) {
                   <tr key={r.round}>
                     <td>{fmtInt(r.round)}</td>
                     <td>{fmtInt(r.texts)}</td>
-                    <td>{fmtInt(r.passed)}</td>
-                    <td>{fmtInt(r.failed)}</td>
-                    <td>{fmtNum(r.mean_rating, 1)}</td>
+                    <td>{fmtInt(r.mode === "correct" ? r.corrected : r.passed)}</td>
+                    <td>{fmtInt(r.mode === "correct" ? r.unchanged : r.failed)}</td>
+                    <td>{r.mode === "correct" ? fmtInt(r.edits) : fmtNum(r.mean_rating, 1)}</td>
                     <td>{fmtInt(r.blamed)}</td>
                     <td>{fmtInt(r.cleared)}</td>
                     <td>{fmtInt(r.edges)}</td>
@@ -343,8 +362,13 @@ export default function NegativePanel({ status }) {
               {fmtInt(autoCard.rounds)} round(s): reviewed {fmtInt(autoCard.reviewed)}, blamed {fmtInt(autoCard.blamed)},
               cleared {fmtInt(autoCard.cleared)}
             </b>
-            {" · "}mean mark {fmtNum(autoCard.mean_rating, 1)}/10
+            {typeof autoCard.change_rate === "number"
+              ? ` · corrected ${fmtInt(autoCard.corrected)} (${fmtInt(autoCard.edits)} changes) · change rate ${Math.round(autoCard.change_rate * 100)}%`
+              : ` · mean mark ${fmtNum(autoCard.mean_rating, 1)}/10`}
             {typeof autoCard.trend === "number" ? ` · trend ${autoCard.trend >= 0 ? "+" : ""}${fmtNum(autoCard.trend, 2)}` : ""}
+            {typeof autoCard.change_trend === "number"
+              ? ` · trend ${autoCard.change_trend >= 0 ? "+" : ""}${fmtNum(autoCard.change_trend, 2)}`
+              : ""}
             {Object.keys(autoCard.reasons || {}).length
               ? ` · ${Object.entries(autoCard.reasons)
                   .map(([k, v]) => `${k} ×${v}`)
@@ -383,6 +407,7 @@ export default function NegativePanel({ status }) {
           <CheckField label="No ratio rule (blame only)" checked={noRatio} onChange={setNoRatio} disabled={disabled} />
           <CheckField label="Strict (drop suspect too)" checked={strict} onChange={setStrict} disabled={disabled} />
           <CheckField label="Blame what is rejected" checked={learn} onChange={setLearn} disabled={disabled} />
+          <CheckField label="Say why (the provenance of each veto)" checked={provenance} onChange={setProvenance} disabled={disabled} />
         </div>
         <TextArea label="Candidates" value={candidates} onChange={setCandidates} rows={3} disabled={disabled}
                   hint="optional: judge these instead of generating" placeholder="one candidate per line" />

@@ -12,16 +12,18 @@ import (
 func badGateway(err error) error { return &apiError{502, err.Error()} }
 
 // The Negative tab teaching itself, and the Ollama endpoints the loop is built
-// out of: a prompt-driven corpus and the adversarial review.
+// out of: a prompt-driven corpus, the adversarial review and the copy editor's
+// letter-level corrections.
 
 // StartCritic starts a `critic` job: rounds of write -> review -> blame, so the
 // negative network is taught without anyone typing a failure in by hand.
 //
 // The positive model writes the texts, the LLM marks them and the failures
 // blame the negative network with the critique as the reason and the mark as
-// the severity.  The positive model is only read from - nothing here trains,
-// rewards or inverts it - so the loop can be left running beside whatever else
-// is teaching it.
+// the severity - or, with config.Correct, the LLM writes each text out
+// correctly and only the characters it changed are blamed.  The positive model
+// is only read from - nothing here trains, rewards or inverts it - so the loop
+// can be left running beside whatever else is teaching it.
 func (s *Service) StartCritic(config radixnet.CriticConfig, client radixnet.LLMClient) (map[string]any, error) {
 	if err := config.Validate(); err != nil {
 		return nil, badRequest("%v", err)
@@ -67,7 +69,9 @@ func init() {
 	doc("POST", "/api/negative/auto", "the Negative tab, automatic: start a job that has the model write texts, an "+
 		"LLM reviewer mark them and every failure blame the negative network - {rounds (0 = until stopped), count, "+
 		"prefix, max_length, temperature, threshold, context (what the texts are meant to be), provider: "+
-		"ollama|chatgpt, reviewer_model, url, timeout, clear_passes, epochs, seed}; the positive model is only read from")
+		"ollama|chatgpt, reviewer_model, url, timeout, clear_passes, epochs, seed, correct (letter-level corrections "+
+		"instead of marks: only the characters the editor changed are blamed), severity (blame per corrected text)}; "+
+		"the positive model is only read from")
 	route("GET", "/api/negative/auto/history", rNegativeAutoHistory)
 	doc("GET", "/api/negative/auto/history", "round / report records of all automatic runs")
 	route("GET", "/api/ollama/models", rOllamaModels)
@@ -79,6 +83,12 @@ func init() {
 	doc("POST", "/api/ollama/review", "adversarial LLM review of the model's samples or {texts}: {count, prefix, "+
 		"max_length, temperature, threshold, context, url, model, timeout, seed, blame (teach the negative network "+
 		"what failed and why)}")
+	route("POST", "/api/ollama/correct", rOllamaCorrect)
+	doc("POST", "/api/ollama/correct", "letter-level LLM correction of the model's samples or {texts}: {count, prefix, "+
+		"max_length, temperature, seed, context, url, model, timeout, blame (teach the negative network: only the "+
+		"characters the editor changed are blamed, the unchanged texts clear blame), severity} -> {corrections: "+
+		"[{text, correction, verdict, reason, note, changes, ...}], corrected, unchanged, uncorrected, edits, "+
+		"change_rate, negative}")
 	route("POST", "/api/ollama/think", rOllamaThink)
 	doc("POST", "/api/ollama/think", "a thinking model thinks about a prompt and the network is taught its thinking "+
 		"as thoughts: {prompt, lines (questions to think about), think: true | false | low | medium | high, "+
@@ -140,6 +150,12 @@ func criticConfigFrom(rq *request) (radixnet.CriticConfig, error) {
 	} else if ok {
 		value := int64(seed)
 		cfg.Seed = &value
+	}
+	if cfg.Correct, err = rq.f.flag("correct", cfg.Correct); err != nil {
+		return cfg, err
+	}
+	if cfg.Severity, _, err = rq.f.number("severity", cfg.Severity, &zero); err != nil {
+		return cfg, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, badRequest("%v", err)
@@ -501,6 +517,119 @@ func (s *Service) Review(client radixnet.LLMClient, o radixnet.AdversarialReview
 		}
 		out["negative"] = map[string]any{
 			"taught": report, "reasons": negative.Reasons(), "stats": negative.Stats(),
+		}
+	}
+	return out, nil
+}
+
+func rOllamaCorrect(rq *request) (int, any, error) {
+	given, err := rq.f.textsOptional("texts", "text")
+	if err != nil {
+		return 0, nil, err
+	}
+	client, err := ollamaClientOf(rq)
+	if err != nil {
+		return 0, nil, err
+	}
+	zero := 0.0
+	severity, _, err := rq.f.number("severity", radixnet.CorrectionSeverity, &zero)
+	if err != nil {
+		return 0, nil, err
+	}
+	o := radixnet.AdversarialCorrectionOptions{Model: client.ModelName()}
+	one := 1
+	if o.Count, _, err = rq.f.integer("count", 8, &one); err != nil {
+		return 0, nil, err
+	}
+	if o.Prefix, err = rq.f.optText("prefix", ""); err != nil {
+		return 0, nil, err
+	}
+	zeroI := 0
+	if o.MaxLength, _, err = rq.f.integer("max_length", 60, &zeroI); err != nil {
+		return 0, nil, err
+	}
+	if o.Temperature, _, err = rq.f.number("temperature", 1, &zero); err != nil {
+		return 0, nil, err
+	}
+	if o.Context, err = rq.f.optText("context", ""); err != nil {
+		return 0, nil, err
+	}
+	if seed, ok, err := rq.f.integer("seed", 0, nil); err != nil {
+		return 0, nil, err
+	} else if ok {
+		value := int64(seed)
+		o.Seed = &value
+	}
+	if len(given) > 0 {
+		o.Texts = given
+	}
+	blame, err := rq.f.flag("blame", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	result, err := rq.svc.Correct(client, o, blame, severity)
+	if err != nil {
+		return 0, nil, err
+	}
+	return 200, result, nil
+}
+
+// Correct runs the copy editor over the model's samples (or the given texts),
+// optionally teaching the negative network the characters it changed.
+//
+// The answer is the CorrectionResult shape plus url, severity and negative: nil,
+// or what the blaming came to ({blamed, cleared, unmatched, edges, edits,
+// uncorrected, reasons, lessons, severity_mean, stats, reason_table}).
+func (s *Service) Correct(client radixnet.LLMClient, o radixnet.AdversarialCorrectionOptions, blame bool, severity float64) (map[string]any, error) {
+	var negative *radixnet.Model
+	if blame {
+		found, err := s.negativeModel()
+		if err != nil {
+			return nil, err
+		}
+		negative = found
+	}
+	// The model writes under the lock (sampling walks the graph), the editor
+	// thinks without it (a network call that touches nothing of ours), and the
+	// blaming takes the lock again.
+	samples, source := o.Texts, "given"
+	if samples == nil {
+		s.mu.Lock()
+		drawn, err := radixnet.SampleTexts(s.model, o.Count, o.Prefix, o.MaxLength, o.Temperature, o.Seed)
+		s.mu.Unlock()
+		if err != nil {
+			return nil, badRequest("%v", err)
+		}
+		samples, source = drawn, "model"
+	}
+	editor := o.Model
+	if editor == "" {
+		editor = client.ModelName()
+	}
+	corrections, err := radixnet.CorrectTexts(client, samples, o.Context, o.Model, radixnet.DefaultCorrectionBatch)
+	if err != nil {
+		return nil, badGateway(err)
+	}
+	result := radixnet.SummariseCorrections(source, editor, samples, corrections)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]any{
+		"source": result.Source, "model": result.Model, "texts": result.Texts, "corrections": result.Corrections,
+		"corrected": result.Corrected, "unchanged": result.Unchanged, "uncorrected": result.Uncorrected,
+		"edits": result.Edits, "wrong_chars": result.WrongChars, "right_chars": result.RightChars,
+		"change_rate": result.ChangeRate, "url": client.BaseURL(), "severity": severity, "negative": nil,
+	}
+	if negative != nil {
+		report, err := radixnet.TeachCorrections(negative, result.Corrections, severity, true, "correction",
+			radixnet.TeachOptions{})
+		if err != nil {
+			return nil, err
+		}
+		out["negative"] = map[string]any{
+			"blamed": report.Blamed, "cleared": report.Cleared, "unmatched": report.Unmatched, "edges": report.Edges,
+			"edits": report.Edits, "uncorrected": report.Uncorrected, "reasons": report.Reasons,
+			"lessons": report.Faults, "severity_mean": report.SeverityMean, "stats": negative.Stats(),
+			"reason_table": negative.Reasons(),
 		}
 	}
 	return out, nil

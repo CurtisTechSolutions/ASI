@@ -931,9 +931,9 @@ provider_of(client) -> str            # the client's own label, "ollama" for any
 loads_lenient(raw) -> Any             # JSON from an LLM answer: tolerates code fences and prose around the object
 ```
 
-### 16.1 Ollama (`ollama.py`) — prompt-driven corpora and an adversarial LLM review
+### 16.1 Ollama (`ollama.py`) — prompt-driven corpora, an adversarial LLM review, letter-level correction
 
-Two ways of hooking the network into a local LLM served by [Ollama](https://ollama.com) (HTTP API, stdlib `urllib` only):
+Three ways of hooking the network into a local LLM served by [Ollama](https://ollama.com) (HTTP API, stdlib `urllib` only):
 
 1. **Corpus from a prompt** — the LLM is asked for *N* lines about a prompt, either correct (`style="good"`) or
    deliberately wrong (`style="garbage"`): exactly the two inputs of 2NRL. The lines can be trained on, saved as an
@@ -941,6 +941,11 @@ Two ways of hooking the network into a local LLM served by [Ollama](https://olla
 2. **Adversarial review** — the LLM plays the harsh critic: every sample the network generates (or any given text)
    gets a rating 0–10, a pass/fail verdict against a threshold and a one-sentence critique. Failed texts become 2NRL
    garbage, passed texts (plus an optional corpus) the fine-tune pass: an external discriminator for the GAN loop.
+3. **Letter-level correction** — the LLM plays the copy editor: every sample (or given text) comes back written out
+   correctly with the *smallest possible change*, and the diff between the two (`diff.edits`, character encoding)
+   is what the negative network learns — `"Hi howe are you??"` against `"Hi, how are you?"` is the `e` and the
+   second `?`, not the sentence (section 24.2, `blame.faults_from_corrections`). A text handed back unchanged
+   clears blame; one the answer said nothing usable about is neither blamed nor cleared.
 
 ```python
 DEFAULT_URL   = $OLLAMA_HOST (Ollama's own variable; "host:port" without scheme accepted) or "http://127.0.0.1:11434"
@@ -966,6 +971,18 @@ def adversarial_review(model, client, *, count=8, prefix="", max_length=60, temp
                        threshold=6.0, context=None, ollama_model=None, seed=None) -> dict
     # {"source": "model"|"given", "model", "threshold", "texts", "reviews", "mean_rating", "pass_rate",
     #  "good": passed texts, "bad": failed + unrated texts}
+CORRECTION_VERDICTS = ("corrected", "unchanged", "uncorrected")
+def correct_texts(client, texts, *, context=None, model=None, batch=20) -> list[dict]
+    # JSON-mode prompt at temperature 0 asking for the SMALLEST change and one word for the mistake out of
+    # blame.CORRECTION_REASONS; each entry {"index","text","correction": str | None,"verdict","reason","note",
+    # "changes": [{"op","wrong","right","at": [a0, a1],"to": [b0, b1]}] (equal runs dropped),"edits","wrong_chars",
+    # "right_chars"}; a corrected text's reason is blame.correction_reason(word, note, changes), an unchanged one's
+    # "none"; blank texts are "uncorrected" ("empty output") without asking the LLM
+def adversarial_correction(model, client, *, count=8, prefix="", max_length=60, temperature=1.0, texts=None,
+                           context=None, ollama_model=None, seed=None) -> dict          # summarise_corrections(...)
+def summarise_corrections(source, model, texts, corrections) -> dict
+    # {"source", "model", "texts", "corrections", "corrected", "unchanged", "uncorrected" (texts), "edits",
+    #  "wrong_chars", "right_chars", "change_rate": corrected / answered | None}
 ```
 
 **Thinking.** A thinking model (qwen3, deepseek-r1, gpt-oss, ...) reasons before it answers, and Ollama hands
@@ -986,6 +1003,7 @@ CLI: `radixnet [globals] ollama [--url URL] [--ollama-model NAME] [--timeout S] 
 | `models` | | list installed models |
 | `corpus` | `--prompt TEXT`, `--lines 20`, `--style good\|garbage`, `--out FILE`, `--train`, `--epochs 10`, `--lr 0.5`, `--batch-size 4`, `--model-out PATH` | prints the lines; writes / trains on them |
 | `review` | `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--text ...` / `--data FILE`, `--threshold 6`, `--context`, `--2nrl`, `--good FILE`, 2NRL options, `--out` | table of ratings + summary; `--2nrl` runs failed→invert→passed and saves |
+| `correct` | `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--text ...` / `--data FILE`, `--context`, `--blame`, `--severity 1`, `--negative PATH` | table of corrections as diffs + summary; `--blame` blames only the changed characters (`blame.teach_corrections`) and saves the negative network |
 | `think` | `--prompt TEXT`, `--lines 5` (questions to think about), `--think true\|false\|low\|medium\|high`, `--temperature 0.7`, `--out FILE`, `--train`, `--with-answers`, `--no-questions`, `--epochs 10`, `--lr 0.5`, `--batch-size 4`, `--model-out PATH` | asks for `--lines` questions about the prompt and has the model *think* about each one; prints question, thinking and answer; `--train` teaches the thinking as thoughts and the questions it asked itself as places to stop and think (`thinking.think_on`, section 36), `--with-answers` the answers as texts |
 
 `serve --ollama-url --ollama-model` set the API defaults.
@@ -998,12 +1016,13 @@ API (`ollama_url` / `ollama_model` on `ModelService` / `create_server`; `/api/st
 | POST `/api/ollama/corpus` | `{prompt, lines=20, style="good", model?, url?, timeout?, save_as?: upload name, train=false, epochs, lr, act_lr, batch_size}` | `{"prompt","style","model","url","lines","texts","upload": record\|null,"job": job\|null}`; 202 when a train job started; 400 bad input; 409 job running; 502 Ollama failure |
 | POST `/api/ollama/review` | `{count=8, prefix="", max_length=60, temperature=1, texts?\|text?, threshold=6, context?, model?, url?, apply="none"\|"2nrl", good?, good_text?, good_files?, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size}` | `adversarial_review` result + `"url"` + `"job"`; `apply="2nrl"` starts a 2NRL job with bad = failed+unrated and good = passed + given (400 when either set is empty) |
 | POST `/api/ollama/think` | `{prompt, lines=5, think=true\|false\|"low"\|"medium"\|"high", temperature=0.7, model?, url?, timeout?, save_as?, train=false, with_answers=false, questions=true, epochs, lr, batch_size}` | `{"prompt","model","url","think","count","thinking","thoughts": [{"question","thinking","answer"}],"upload","job"}`; 202 when a train job started (`thinking.think_on`, section 36); 400 bad input or a negative network; 502 when Ollama fails, writes no questions, or - with `train` - returned no thinking |
+| POST `/api/ollama/correct` | `{count=8, prefix="", max_length=60, temperature=1, seed?, texts?\|text?, context?, model?, url?, timeout?, blame=false, severity=1}` | `adversarial_correction` result + `"url"`, `"severity"`, `"negative"` (`null`, or `ModelService.negative_teach_corrections`: `{blamed, cleared, unmatched, edges, edits, uncorrected, reasons, lessons, severity_mean, stats, reason_table}`); the model samples under its lock, the editor answers outside it; 502 on an Ollama failure |
 
-Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from a prompt" (generate → train / save as upload / hold as 2NRL bad or good), "Adversarial review" (ratings table, summary, apply as 2NRL with extra good files) and "Thinking from a prompt" (`POST /api/ollama/think`: questions, a thinking level - on, low, medium, high, off or the model's choice, sent as `"default"` - and a temperature; "Teach the thinking to the network" starts the train job on the same request, with its epochs, "Learn where it questions itself" and "Train the answers as texts too"; "What it thought" lists question, thinking and answer with the questions the model asked itself marked, the saved upload and the teaching job's epochs).
+Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from a prompt" (generate → train / save as upload / hold as 2NRL bad or good), "Adversarial review" (ratings table, summary, apply as 2NRL with extra good files), "Letter-level correction" (every correction as a diff — `<del>` what the editor struck out of the model's text, `<ins>` what it wrote instead, a caret where a change leaves nothing on that side — with the verdict, the reason and the note, and a *teach the negative network* checkbox with its severity) and "Thinking from a prompt" (`POST /api/ollama/think`: questions, a thinking level - on, low, medium, high, off or the model's choice, sent as `"default"` - and a temperature; "Teach the thinking to the network" starts the train job on the same request, with its epochs, "Learn where it questions itself" and "Train the answers as texts too"; "What it thought" lists question, thinking and answer with the questions the model asked itself marked, the saved upload and the teaching job's epochs).
 
 Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.internal:11434`, reachable through `extra_hosts`); the `ollama` profile runs the official `ollama/ollama` image with a model volume (`OLLAMA_HOST=http://ollama:11434`).
 
-Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, questions for a thinking prompt, configurable failures) and `/api/chat`; asked to think, it answers with its thinking as Ollama's field, inline between `<think>` tags, or not at all.
+Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, JSON corrections for copy-editing prompts — `fake_copy_edit`: `howe` → `how`, `??` → `?`, a comma after an opening `Hi` —, questions for a thinking prompt, configurable failures) and `/api/chat`; asked to think, it answers with its thinking as Ollama's field, inline between `<think>` tags, or not at all.
 
 ### 16.2 ChatGPT (`chatgpt.py`) — the hosted alternative, same interface
 
@@ -2179,15 +2198,31 @@ does the same for the speech and image tutors of section 26, reading the round t
 `SPEECH_REASONS` (`unreadable`, `truncated`, `overrun`, `garbled`, `silence`, `clipping`, `mishearing`,
 `distortion`) and `IMAGE_REASONS` (the same four, then `blank`, `noise`, `drift`), with `RECALL_TRUNCATED` /
 `RECALL_OVERRUN` / `RECALL_AGREEMENT` as its boundaries.
-`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` / `faults_from_recall` turn a tutor's output
+`faults_from_corrections(corrections, severity=1.0)` reads the copy editor of section 16.1: every text the editor
+changed is a fault carrying its `correction`, so `teach` routes it through `NegativeNet.correct` and only the
+characters the editor struck out or replaced are blamed, at `CORRECTION_SEVERITY` (1.0) per corrected text; the
+texts it handed back unchanged clear blame, and an `uncorrected` one is neither.  The reason comes from
+`correction_reason(word, note, changes)`: the editor's own word when it is in `CORRECTION_REASONS` (`spelling`,
+`punctuation`, `capitalisation`, `spacing`, `agreement`, `tense`, `article`, `preposition`, `plural`, `pronoun`,
+`word-order`, `vocabulary`, `repetition`, `fragment`, `nonsense`, `grammar`; aliases such as `typo` and
+`capitalization` are accepted, spaces become hyphens), else its note read through `classify` (`gibberish` and
+`incoherent` map to `nonsense`, `truncated` to `fragment`), else the shape of the diff (`reason_from_changes`: every
+edit is read for what it moved - punctuation only, spaces only, a change of case only, letters inside one word
+(`spelling`), or letters with a space (`grammar`, a word came, went or moved) - and the widest kind wins, `grammar`
+> `spelling` > `punctuation` > `spacing` > `capitalisation`), and `grammar` when even that says nothing; it is
+never `none` for a text that changed.
+`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` / `faults_from_recall` /
+`faults_from_corrections` turn a tutor's output
 into `(faults, passed)`, and `teach(negative, faults, passed)` (with the wrappers `teach_reviews`,
-`teach_attempts`, `teach_lessons` and `teach_recall`) blames each fault - through `correct` when it carries one -
-and clears the passes, returning `{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
+`teach_attempts`, `teach_lessons`, `teach_recall` and `teach_corrections`, whose report adds `severity`, `edits` -
+the changed units over every correction - and `uncorrected`) blames each fault - through `correct` when it carries
+one - and clears the passes, returning `{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
 
 The call sites: `tutor --blame` / `TutorTrainer(negative=...)` / `POST /api/tutor/start {"blame": true}`, which
 blames every failed sentence of a round with the mistake the teacher named and adds `negative_blamed` /
 `negative_edges` / `negative_reasons` to its round records; `ollama review --blame` /
-`POST /api/ollama/review {"blame": true}` (the reviewer), `codegen --blame`
+`POST /api/ollama/review {"blame": true}` (the reviewer), `ollama correct --blame` / `POST /api/ollama/correct
+{"blame": true}` (the copy editor, whose diff is the lesson), `codegen --blame`
 / `CodeGenTrainer(negative=...)`, which blames the rejected attempts of every problem and adds `negative_blamed` /
 `negative_reasons` to its problem records, `evolve --blame` / `Evolver(negative=...)`, which blames every fake the
 discriminator scored below the real texts (reason `blatant` past `blatant_margin`, else `discriminator`, severity
@@ -2201,7 +2236,15 @@ person.
 ### 24.3 `duo.py` — the pair as a GAN at output time
 
 `NegativeFilter(positive, negative, config)` puts the two networks on one output path (`FilterConfig`: `threshold`,
-`min_coverage`, `ratio` (`None` = off), `peak` (`None` = off), `over_sample`, `strict`, `spans`, `learn`, `reason`). `judge(text)` merges
+`min_coverage`, `ratio` (`None` = off), `peak` (`None` = off), `over_sample`, `strict`, `spans`, `learn`, `reason`,
+`provenance`).  With `provenance` off the veto applies exactly as before but every verdict the pair reports is
+`terse(verdict)` - `{text, decision, rule}` - and the guard's report (`ModelService._guard_report`, the CLI's
+`_guard_doc`) is the counts alone, `{on, provenance: false, judged, vetoed, negative, config, ...}`, with neither
+`rejected` nor `verdicts` listed: the answer is not followed by pages of judgement when only the answer was wanted.
+`--no-provenance` (the guard flags and `negative filter`), `{"provenance": false}` on `generate` / `predict` /
+`converse` / `negative/filter` (per answer) and `POST /api/negative/settings {"provenance": false}` (every answer,
+`ModelService.guard_config`) set it; the frontend's *Say why it vetoed* checkboxes send it and `GuardNotice` shows
+a count-only report without a *why* to open. `judge(text)` merges
 the negative network's verdict with the likelihood ratio `negative.score(text)["per_char"] -
 positive.score(text)["per_char"]` — the discriminator logit of two generative models — and rejects when the blame
 rule fires, when `peak >= config.peak` (the evidence on one transition - a correction blames a handful of
@@ -2302,8 +2345,18 @@ in by hand — which is exactly the kind of work a loop should be doing.
    reason through `classify`, the mark sets the severity through `severity_from_rating`.  Nothing new is invented —
    this is the section 24.2 path, driven on a timer instead of by hand.
 
+With `correct=True` (`--correct`, `{"correct": true}`) step 2 is the copy editor of section 16.1 instead of the
+critic: `ollama.correct_texts` writes each text out correctly with the smallest change it can, and step 3 is
+`blame.teach_corrections` — only the characters the editor changed are blamed, at `severity` (1.0) per corrected
+text, the unchanged texts clear, and no pass mark applies.  The round record then says `"mode": "correct"` (a
+reviewing round says `"review"`) and carries `corrections`, `corrected`, `unchanged`, `uncorrected`, `edits`,
+`wrong_chars` and `change_rate` (the share of answered texts the editor changed) in place of the reviews and marks;
+the report card sums them and adds `change_rate` and `change_trend` (last round minus first — negative when the
+editor has less to put right than it had at the start).
+
 `CriticConfig` carries those knobs plus `context` (what the reviewer is *told* the texts are meant to be — its
-yardstick, and worth setting, because "is this good?" means little without one), `clear_passes`, `epochs` and `seed`.
+yardstick, and worth setting, because "is this good?" means little without one), `clear_passes`, `epochs`, `seed`,
+`correct` and `severity`.
 The seed advances by the round number (`_seed`), so a seeded run is reproducible *and* its rounds differ; an unseeded
 one leaves the sampling alone.
 

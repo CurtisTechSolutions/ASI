@@ -13,6 +13,16 @@ Two ways of hooking the network into a local large language model served by
   network's own generations (or given texts) and partitions them into ``bad``
   (failed) and ``good`` (passed) sets, ready for a 2NRL pass — an external
   discriminator in the spirit of the GAN loop.
+* **Letter-level correction** — :func:`correct_texts` makes the LLM play the
+  copy editor instead: every text comes back written out correctly with as few
+  characters changed as possible, and the *diff* between the two
+  (:mod:`radixnet.diff`) says exactly which characters were the mistake.
+  ``"Hi howe are you??"`` corrected to ``"Hi, how are you?"`` blames the
+  ``e`` and the second ``?`` (and the missing comma), nothing else: that is
+  what :func:`radixnet.blame.teach_corrections` hands the negative network
+  (:meth:`radixnet.negative.NegativeNet.correct`), while a text the editor
+  handed back unchanged clears blame.  :func:`adversarial_correction` runs it
+  over the network's own generations (or given texts).
 * **Thoughts** — a thinking model (``qwen3``, ``deepseek-r1``, ``gpt-oss``,
   ...) answers with its reasoning beside the answer when asked to
   (``think: true``; Ollama returns it as ``thinking``, older models inline it
@@ -40,19 +50,23 @@ from typing import Any
 from .llm import LLMError, loads_lenient as _loads_lenient
 
 __all__ = [
+    "CORRECTION_VERDICTS",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "DEFAULT_URL",
     "OllamaClient",
     "OllamaError",
+    "adversarial_correction",
     "adversarial_review",
     "chat_line",
+    "correct_texts",
     "corpus_from_prompt",
     "normalise_url",
     "parse_lines",
     "review_conversation",
     "review_texts",
     "sample_texts",
+    "summarise_corrections",
     "summarise_reviews",
     "split_thinking",
     "thoughts_from_prompt",
@@ -583,6 +597,204 @@ def summarise_reviews(source: str, model: str, threshold: float, texts: list[str
         "good": passed,
         "bad": failed,
     }
+
+# ---------------------------------------------------------------------------
+# letter-level correction
+# ---------------------------------------------------------------------------
+
+_CORRECT_SYSTEM = (
+    "You are a meticulous copy editor correcting short texts written by a small experimental character-level "
+    "language model. For each text write the corrected text: the same text in correct, natural English with the "
+    "SMALLEST possible change. Keep every character that is already right, keep the wording, the meaning and the "
+    "length as they are, and change only what is actually wrong: a misspelt letter, a missing or doubled "
+    "punctuation mark, a wrong ending, a missing word. Never rewrite, never add commentary, never quote. If a text "
+    "is already correct, return it exactly as it is. Name the kind of mistake with one word from this list: "
+    "{reasons}; use \"none\" for a text you did not change. Reply with JSON only, no prose, exactly of the form "
+    "{{\"corrections\": [{{\"index\": <int>, \"correction\": \"<the corrected text>\", \"reason\": "
+    "\"<one word from the list>\", \"note\": \"<one short sentence saying what was wrong, or 'nothing'>\"}}, "
+    "...]}} with one entry per text, in the given order and with the given index."
+)
+
+CORRECTION_VERDICTS = ("corrected", "unchanged", "uncorrected")
+"""What the editor did with a text: changed it, handed it back as it was, or could not be understood about it."""
+
+
+def _parse_corrections(raw: str, count: int) -> dict[int, dict]:
+    """``{index: {"correction", "reason", "note"}}`` for the entries that could be understood."""
+    data = _loads_lenient(raw)
+    items: Any = None
+    if isinstance(data, dict):
+        items = data.get("corrections")
+        if items is None:
+            items = data.get("results", data.get("items"))
+        if items is None and ("correction" in data or "corrected" in data):
+            items = [data]
+    elif isinstance(data, list):
+        items = data
+    parsed: dict[int, dict] = {}
+    if not isinstance(items, list):
+        return parsed
+    for position, item in enumerate(items):
+        if isinstance(item, str):  # a bare list of corrected lines
+            item = {"correction": item}
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index", position)
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = position
+        correction = item.get("correction", item.get("corrected", item.get("text")))
+        if not isinstance(correction, str):
+            continue
+        correction = correction.strip().strip("\"'`\u201c\u201d").strip()
+        reason = str(item.get("reason") or item.get("error") or "").strip().lower()
+        note = " ".join(str(item.get("note") or item.get("critique") or item.get("comment") or "").split())
+        if 0 <= index < count and index not in parsed:
+            parsed[index] = {"correction": correction, "reason": reason, "note": note}
+    return parsed
+
+
+def _correction_entry(index: int, text: str, correction: str | None, reason: str, note: str) -> dict:
+    """One :func:`correct_texts` result: the diff against the correction, and what the editor said."""
+    from . import blame as blame_module
+    from . import diff
+
+    entry: dict[str, Any] = {"index": index, "text": text}
+    if correction is None:
+        entry.update(
+            correction=None, verdict="uncorrected", reason="", note=note or "no correction returned",
+            changes=[], edits=0, wrong_chars=0, right_chars=0,
+        )
+        return entry
+    changes = [
+        {"op": e.op, "wrong": e.wrong, "right": e.right, "at": [e.a0, e.a1], "to": [e.b0, e.b1]}
+        for e in diff.edits(text, correction) if e.op != "equal"
+    ]
+    changed = correction != text
+    entry.update(
+        correction=correction,
+        verdict="corrected" if changed else "unchanged",
+        reason=blame_module.correction_reason(reason, note, changes) if changed else "none",
+        note=note or ("nothing" if not changed else "corrected"),
+        changes=changes,
+        edits=len(changes),
+        wrong_chars=sum(e["at"][1] - e["at"][0] for e in changes),
+        right_chars=sum(e["to"][1] - e["to"][0] for e in changes),
+    )
+    return entry
+
+
+def correct_texts(
+    client: OllamaClient,
+    texts: list[str],
+    *,
+    context: str | None = None,
+    model: str | None = None,
+    batch: int = 20,
+) -> list[dict]:
+    """Letter-level corrections of ``texts`` (input order): ``{index, text, correction, verdict, reason, note,
+    changes, edits, wrong_chars, right_chars}`` each.
+
+    ``verdict`` is ``"corrected"`` when the editor changed something,
+    ``"unchanged"`` when it handed the text back as it was (it is correct, so
+    it clears blame), and ``"uncorrected"`` when its answer could not be
+    understood for that text (``correction`` is ``None``: nothing is known
+    about it, so it neither blames nor clears).  ``changes`` are the edits of
+    the alignment (:func:`radixnet.diff.edits`), ``{"op", "wrong", "right",
+    "at": [a0, a1], "to": [b0, b1]}``, with the equal runs left out; ``reason``
+    is the editor's word for the mistake, mapped onto
+    :data:`radixnet.blame.CORRECTION_REASONS` (the shape of the diff decides
+    when it gave none).  Blank texts are ``uncorrected`` without asking.
+    """
+    from .blame import CORRECTION_REASONS
+
+    if batch < 1:
+        raise ValueError("batch must be >= 1")
+    results: list[dict] = []
+    system = _CORRECT_SYSTEM.format(reasons=", ".join(r for r in CORRECTION_REASONS if r != "none"))
+    for start in range(0, len(texts), batch):
+        chunk = [str(t) for t in texts[start : start + batch]]
+        asked = [(i, t) for i, t in enumerate(chunk) if t.strip()]
+        parsed: dict[int, dict] = {}
+        if asked:
+            numbered = "\n".join(f"[{i}] {t}" for i, t in asked)
+            user = (
+                (f"Context: {context.strip()}\n\n" if context and context.strip() else "")
+                + f"Correct these {len(asked)} texts:\n{numbered}\n\nReturn the JSON now."
+            )
+            raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": 0.0})
+            parsed = _parse_corrections(raw, len(chunk))
+        for i, text in enumerate(chunk):
+            if not text.strip():
+                results.append(_correction_entry(start + i, text, None, "", "empty output"))
+            elif i in parsed:
+                item = parsed[i]
+                results.append(_correction_entry(start + i, text, item["correction"], item["reason"], item["note"]))
+            else:
+                results.append(_correction_entry(start + i, text, None, "", ""))
+    return results
+
+
+def adversarial_correction(
+    model: Any,
+    client: OllamaClient,
+    *,
+    count: int = 8,
+    prefix: str = "",
+    max_length: int = 60,
+    temperature: float = 1.0,
+    texts: list[str] | None = None,
+    context: str | None = None,
+    ollama_model: str | None = None,
+    seed: int | None = None,
+) -> dict:
+    """Let the LLM copy-edit the network's own output (or ``texts``), letter by letter.
+
+    Returns the :func:`summarise_corrections` shape: ``{"source", "model",
+    "texts", "corrections", "corrected", "unchanged", "uncorrected", "edits",
+    "wrong_chars", "right_chars", "change_rate"}``.
+    """
+    if texts is None:
+        if model is None:
+            raise ValueError("either a model to sample from or texts to correct is required")
+        samples = sample_texts(model, count, prefix=prefix, max_length=max_length, temperature=temperature, seed=seed)
+        source = "model"
+    else:
+        samples = [str(t) for t in texts]
+        source = "given"
+    corrections = correct_texts(client, samples, context=context, model=ollama_model)
+    return summarise_corrections(source, ollama_model or client.model, samples, corrections)
+
+
+def summarise_corrections(source: str, model: str, texts: list[str], corrections: list[dict]) -> dict:
+    """Split a copy-edited set into what was changed, what was right as it was, and what got no answer.
+
+    ``change_rate`` is the share of the answered texts the editor changed
+    (``None`` when it answered none): the copy editor's counterpart of the
+    reviewer's pass rate, falling as the model's writing improves.  Separate
+    from :func:`adversarial_correction` for the same reason
+    :func:`summarise_reviews` is: a server samples under its model lock and
+    corrects outside it.
+    """
+    corrected = [c["text"] for c in corrections if c["verdict"] == "corrected"]
+    unchanged = [c["text"] for c in corrections if c["verdict"] == "unchanged"]
+    uncorrected = [c["text"] for c in corrections if c["verdict"] == "uncorrected"]
+    answered = len(corrected) + len(unchanged)
+    return {
+        "source": source,
+        "model": model,
+        "texts": list(texts),
+        "corrections": corrections,
+        "corrected": corrected,
+        "unchanged": unchanged,
+        "uncorrected": uncorrected,
+        "edits": sum(int(c.get("edits") or 0) for c in corrections),
+        "wrong_chars": sum(int(c.get("wrong_chars") or 0) for c in corrections),
+        "right_chars": sum(int(c.get("right_chars") or 0) for c in corrections),
+        "change_rate": len(corrected) / answered if answered else None,
+    }
+
 
 # ---------------------------------------------------------------------------
 # conversing with the network, and marking the conversation
