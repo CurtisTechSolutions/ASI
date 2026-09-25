@@ -489,7 +489,11 @@ func cmdTrain(args []string) {
 		pool = fmt.Sprintf("%d goroutines", workers)
 	}
 	before := m.MetaInt("trained_texts")
-	say("training from %s (%s, chunks of %d texts): %s, %s counting, %s, %d epoch(s), %s", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), m.Encoding().Describe(), *epochs, memory)
+	split := *unit
+	if trainPlan.Reverse {
+		split += ", every text read backwards"
+	}
+	say("training from %s (%s, chunks of %d texts): %s, %s counting, %s, %d epoch(s), %s", strings.Join(data, ", "), split, *chunk, pool, m.Counting(), m.Encoding().Describe(), *epochs, memory)
 	say("%5s %9s %10s %7s %7s %8s %6s %6s %11s %6s %8s", "epoch", "loss", "ppl", "nodes", "edges", "trigrams", "ratio", "merges", "transitions", "chunks", "seconds")
 	opts := radixnet.DefaultTrainOptions()
 	opts.Epochs = *epochs
@@ -587,7 +591,8 @@ func checkedFilter(topK int, topP, minP float64) radixnet.SamplingFilter {
 }
 
 // planFlags adds how a training run walks its texts
-// (../../../SPEC-SearchAndTraining.md §3-6), each off by default.
+// (../../../SPEC-SearchAndTraining.md §3-6) and whether it reads them
+// backwards (§9), each off by default.
 func planFlags(fs *flag.FlagSet) func() radixnet.Plan {
 	order := fs.String("order", "corpus", "how every epoch walks the texts: corpus | shortest-first | longest-first | shuffle")
 	curriculum := fs.Float64("curriculum", 1, "the first epoch walks the first C of the ordered texts, the last all of them (1 = off)")
@@ -595,11 +600,12 @@ func planFlags(fs *flag.FlagSet) func() radixnet.Plan {
 	replaySize := fs.Int("replay-size", 0, "keep a replay buffer of N texts, a uniform sample of everything trained on, saved with the model (0 drops it; left out: the model's buffer as it is)")
 	patience := fs.Int("patience", 0, "stop after N full epochs without the loss improving by --min-delta (0 = off)")
 	minDelta := fs.Float64("min-delta", 0, "how much the loss must fall below its best to count as an improvement")
+	reverse := fs.Bool("reverse", false, "read every text backwards, in the model's units (its last character, or word, first), so the model learns what comes before; with --split file a file is read from its end to its start")
 	return func() radixnet.Plan {
 		if !(*curriculum > 0 && *curriculum <= 1) {
 			fail("--curriculum must lie in (0, 1], got %v", *curriculum)
 		}
-		p := radixnet.Plan{Order: *order, Curriculum: *curriculum, Replay: *replay, Patience: *patience, MinDelta: *minDelta}
+		p := radixnet.Plan{Order: *order, Curriculum: *curriculum, Replay: *replay, Patience: *patience, MinDelta: *minDelta, Reverse: *reverse}
 		// only a size that was given changes the buffer; a negative one is an error, as everywhere
 		fs.Visit(func(f *flag.Flag) {
 			if f.Name == "replay-size" {

@@ -76,7 +76,9 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      rehearses R times as\n\
      many texts from the model's replay buffer; 0 = off), --replay-size N (the buffer's capacity; 0 drops it), \
      --patience N and\n\
-     --min-delta X (stop after N full epochs without the loss improving by X; 0 = off).  \
+     --min-delta X (stop after N full epochs without the loss improving by X; 0 = off), --reverse (read every \
+     text\n\
+     backwards - its last character, or word, first - so the model learns what comes before).  \
      ../SPEC-SearchAndTraining.md has the rules.";
 
 /// The default `--model` per unit, so a word model never overwrites a
@@ -928,7 +930,8 @@ fn search_tuning(args: &radixnet::cli::Args) -> Result<SearchTuning, String> {
 
 /// How a training run walks its texts (`--order`, `--curriculum`,
 /// `--replay`, `--replay-size`, `--patience`, `--min-delta`; the spec's
-/// sections 3-6), each off by default.
+/// sections 3-6) and whether it reads them backwards (`--reverse`, section 9),
+/// each off by default.
 fn plan_flags(args: &radixnet::cli::Args) -> Result<Plan, String> {
     let plan = Plan {
         order: args.str("order", "corpus"),
@@ -940,6 +943,7 @@ fn plan_flags(args: &radixnet::cli::Args) -> Result<Plan, String> {
         },
         patience: count_flag(args, "patience", 0)?,
         min_delta: args.float("min-delta", 0.0)?,
+        reverse: args.on("reverse"),
     };
     plan.check()?;
     Ok(plan)

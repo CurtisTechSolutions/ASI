@@ -132,6 +132,7 @@ pub const SWITCHES: &[&str] = &[
     "quiet",
     "read-reward",
     "resume",
+    "reverse",
     "reverse-schedule",
     "sample-first",
     "save",
@@ -594,6 +595,10 @@ mod tests {
         assert_eq!(args.get("plan"), Some("3"));
         let (_, args) = parse_args(&argv(&["tutor", "--plan", "5"])).unwrap();
         assert_eq!(args.get("plan"), Some("5"));
+        // --reverse is a switch: the flag after it keeps its own value
+        let (_, args) = parse_args(&argv(&["train", "--reverse", "--data", "corpus.txt"])).unwrap();
+        assert!(args.on("reverse"));
+        assert_eq!(args.get("data"), Some("corpus.txt"));
     }
 
     #[test]

@@ -19,7 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.beam import diverse_pick, path_overlap  # noqa: E402
 from radixnet.countnet import CountRewardNet  # noqa: E402
+from radixnet.encoding import WORDS, Encoding  # noqa: E402
 from radixnet.model import RadixNet, TrainConfig, load_model  # noqa: E402
+from radixnet.negative import NegativeNet  # noqa: E402
 from radixnet.resonance import ResonantNet  # noqa: E402
 from radixnet.search import check_sampling, sample_walk, sampling_filter  # noqa: E402
 from radixnet.training import (  # noqa: E402
@@ -399,9 +401,6 @@ class TestPlannedTraining(unittest.TestCase):
         self.assertNotEqual(a["edges"]["count"], b["edges"]["count"])  # the first epochs counted fewer
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestApiAndCli(unittest.TestCase):
     """The settings over HTTP and on the command line: accepted in range, a 400 / usage error out of it."""
@@ -450,7 +449,7 @@ class TestApiAndCli(unittest.TestCase):
 
     def test_training_settings_out_of_range_are_a_400(self):
         for body in ({"order": "random"}, {"curriculum": 0}, {"curriculum": 2}, {"replay": -1},
-                     {"replay_size": -2}, {"patience": -1}, {"min_delta": -0.1}):
+                     {"replay_size": -2}, {"patience": -1}, {"min_delta": -0.1}, {"reverse": "yes"}):
             with self.subTest(body=body):
                 status, data, _ = self.client.post("/api/train", {"texts": CORPUS[:3], "epochs": 1, **body})
                 self.assertEqual(status, 400, data)
@@ -488,3 +487,123 @@ class TestApiAndCli(unittest.TestCase):
                     self.assertNotEqual(proc.returncode, 0)
                     self.assertIn(f"argument {flag}", proc.stderr)
                     self.assertFalse(os.path.exists(model))  # refused before anything ran
+
+
+def _timeless(model) -> str:
+    """A model's document without the clock: what two runs that read the same texts agree on byte for byte."""
+    doc = model.to_dict()
+    doc.pop("saved_at", None)
+    doc["meta"] = {k: v for k, v in doc["meta"].items() if k != "created"}
+    doc["history"] = [{k: v for k, v in r.items() if k != "seconds"} for r in doc["history"]]
+    return json.dumps(doc, sort_keys=True)
+
+
+class TestReadingBackwards(unittest.TestCase):
+    """``reverse``: every text of a run read backwards, in the encoding's units (``SPEC-SearchAndTraining.md`` §9)."""
+
+    ENCODINGS = (Encoding(), Encoding(unit=WORDS, n=2))
+
+    def test_the_encoding_reverses_its_units(self):
+        chars, words = self.ENCODINGS
+        self.assertEqual(chars.reverse("héllo wörld"), "dlröw olléh")
+        self.assertEqual(chars.reverse("the cat\n"), "\ntac eht")
+        self.assertEqual(chars.reverse(""), "")
+        self.assertEqual(words.reverse("  the  cat\tsat\n"), "sat cat the")
+        self.assertEqual(words.reverse(" \t "), "")
+        # a combining accent is a code point of its own, so twice is the text again
+        text = "cafe\u0301 au lait"
+        self.assertEqual(chars.reverse(chars.reverse(text)), text)
+        # a separator str.split() and Unicode disagree about stays inside its word, as the Go and Rust splits keep it
+        self.assertEqual(words.reverse("a\x1cb c"), "c a\x1cb")
+
+    def test_a_reversed_run_is_a_run_over_the_reversed_texts(self):
+        for kind, cls in {**KINDS, "negative": NegativeNet}.items():
+            for enc in self.ENCODINGS:
+                with self.subTest(kind=kind, encoding=str(enc)):
+                    backwards = cls(seed=2, encoding=enc)
+                    backwards.train(CORPUS[:20], epochs=2, reverse=True)
+                    reversed_texts = cls(seed=2, encoding=enc)
+                    reversed_texts.train([enc.reverse(t) for t in CORPUS[:20]], epochs=2)
+                    forward = cls(seed=2, encoding=enc)
+                    forward.train(CORPUS[:20], epochs=2)
+                    self.assertEqual(_timeless(backwards), _timeless(reversed_texts))
+                    self.assertNotEqual(_timeless(backwards), _timeless(forward))
+
+    def test_off_is_the_run_it_always_was(self):
+        # the last field of the config, where the Rust port writes it (Plan::json_pairs)
+        self.assertEqual(list(TrainConfig().to_dict())[-1], "reverse")
+        self.assertIs(TrainConfig().reverse, False)
+        plain, off = CountRewardNet(seed=2), CountRewardNet(seed=2)
+        plain.train(CORPUS[:10], epochs=1)
+        off.train(CORPUS[:10], epochs=1, reverse=False)
+        self.assertEqual(_timeless(plain), _timeless(off))
+
+    def test_the_buffer_keeps_the_texts_as_they_were_read(self):
+        model = CountRewardNet(seed=2)
+        model.train(CORPUS[:10], epochs=1, reverse=True, replay_size=20)
+        self.assertEqual(sorted(model.replay.texts()), sorted(t[::-1] for t in CORPUS[:10]))
+        self.assertEqual(model.meta["trained_chars"], sum(len(t) for t in CORPUS[:10]))
+
+    def test_the_model_learns_what_comes_before(self):
+        for kind, cls in KINDS.items():
+            with self.subTest(kind=kind):
+                model = cls(seed=2)
+                model.train(["quick brown fox", "lazy dog sleeps"], epochs=2, reverse=True)
+                for end, whole in (("fox", "quick brown fox"), ("sleeps", "lazy dog sleeps")):
+                    found = model.predict(end[::-1], length=1, to_end=True)
+                    self.assertEqual(found.full_text[::-1], whole)
+
+
+class TestReadingBackwardsOverHttpAndCli(unittest.TestCase):
+    """A file trained on backwards through ``POST /api/train`` (an upload) and ``train --reverse``."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.test_api import start_server
+
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
+        cls.client, cls.server, cls.service = start_server(
+            cls.addClassCleanup, kind="count", seed=1, upload_dir=os.path.join(cls.tmp.name, "uploads")
+        )
+
+    def test_an_upload_read_backwards(self):
+        from tests.test_api import wait_for_job
+
+        status, data, _ = self.client.post("/api/train", {"texts": ["lazy dog sleeps"], "reverse": "yes"})
+        self.assertEqual(status, 400, data)
+        status, data, _ = self.client.post("/api/uploads", {"name": "fox.txt", "content": "quick brown fox\n"})
+        self.assertEqual(status, 201, data)
+        status, data, _ = self.client.post(
+            "/api/train", {"texts": ["lazy dog sleeps"], "files": ["fox.txt"], "reverse": True, "epochs": 2}
+        )
+        self.assertEqual(status, 202, data)
+        self.assertEqual(wait_for_job(self.client)["state"], "done")
+        for end, whole in (("fox", "quick brown fox"), ("sleeps", "lazy dog sleeps")):
+            status, data, _ = self.client.post(
+                "/api/predict", {"prefix": end[::-1], "length": 1, "to_end": True, "guard": False}
+            )
+            self.assertEqual(status, 200, data)
+            self.assertEqual(data["full_text"][::-1], whole)
+
+    def test_the_cli_reads_a_file_backwards(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "fox.txt")
+            with open(data, "w", encoding="utf-8") as fh:
+                fh.write("quick brown fox\nlazy dog sleeps\n")
+            model = os.path.join(tmp, "m.json")
+            proc = subprocess.run(
+                [sys.executable, "-m", "radixnet", "--json", "--kind", "count", "--model", model, "train",
+                 "--data", data, "--reverse", "--epochs", "2"],
+                cwd=ROOT, capture_output=True, text=True, timeout=120,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIs(json.loads(proc.stdout)["config"]["reverse"], True)
+            found = load_model(model).predict("xof", length=1, to_end=True)
+            self.assertEqual(found.full_text[::-1], "quick brown fox")
+
+
+if __name__ == "__main__":
+    unittest.main()

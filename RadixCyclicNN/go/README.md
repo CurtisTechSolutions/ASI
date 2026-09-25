@@ -76,6 +76,14 @@ graph, history and buffer by `../tests/test_go_parity.py::TestGoSearchAndTrainin
 (`../SPEC-SearchAndTraining.md`; `radixnet/training.go`).  A streaming source
 is read into memory when a run asks for an order, a curriculum or replay.
 
+`train --reverse` (`reverse` on `/api/train`, `Plan.Reverse`) reads every text
+backwards, in the model's units - its last character, or word, first - so the
+model learns what comes before (the spec's §9).  It streams: `ReversedSource`
+turns each text around as it is read, and keeps an archive's entries as parts,
+so `--parallel-parts` still streams them side by side.  The count model and the
+negative network (whose training is blaming) both read backwards; the count
+model is held to Python's file byte for byte, in characters and in words.
+
 ## The second traversal
 
 `predict`, `generate` and `bench` take `--traversal least-punished`: the walk is

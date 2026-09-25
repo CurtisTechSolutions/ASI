@@ -2540,9 +2540,10 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 def _train_config(f: Fields) -> TrainConfig:
     """The optional training settings of a request body, defaults from :class:`TrainConfig`.
 
-    ``order``, ``curriculum``, ``replay``, ``replay_size``, ``patience`` and
-    ``min_delta`` are the training methods of ``../SPEC-SearchAndTraining.md``;
-    a value out of range is a 400, before any job starts.
+    ``order``, ``curriculum``, ``replay``, ``replay_size``, ``patience``,
+    ``min_delta`` and ``reverse`` are the training methods of
+    ``../SPEC-SearchAndTraining.md``; a value out of range is a 400, before any
+    job starts.
     """
     config = TrainConfig(
         epochs=f.integer("epochs", TrainConfig.epochs, minimum=0),
@@ -2562,6 +2563,7 @@ def _train_config(f: Fields) -> TrainConfig:
         replay_size=f.integer("replay_size", None, minimum=0),
         patience=f.integer("patience", TrainConfig.patience, minimum=0),
         min_delta=f.number("min_delta", TrainConfig.min_delta, minimum=0.0),
+        reverse=f.flag("reverse", TrainConfig.reverse),
     )
     try:
         check_plan(config.order, config.curriculum, config.replay, config.replay_size, config.patience,
@@ -4190,7 +4192,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay "
      "(the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the "
      "buffer's capacity from now on; 0 drops it), patience, min_delta (stop after `patience` full epochs without "
-     "the loss improving by `min_delta`; 0 = off)}"),
+     "the loss improving by `min_delta`; 0 = off), reverse (read every text backwards, in the model's units - its "
+     "last character or word first - so the model learns what comes before; off by default)}"),
     ("GET", "/api/schedule", _r_schedule, "what a learning-rate schedule expression may use: variables, functions, helpers, presets"),
     ("POST", "/api/schedule/preview", _r_schedule_preview,
      "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr, "

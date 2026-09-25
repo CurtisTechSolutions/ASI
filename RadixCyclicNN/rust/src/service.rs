@@ -1190,8 +1190,10 @@ pub(crate) fn train_config(r: &Request) -> Result<TrainConfig, ApiError> {
 
 /// How a training run walks its texts (`../../SPEC-SearchAndTraining.md`
 /// sections 3-6): `order`, `curriculum`, `replay`, `replay_size`, `patience`
-/// and `min_delta`, each off when the request leaves it out.  A value out of
-/// range is a 400, before any job starts.
+/// and `min_delta`, and whether it reads them backwards (`reverse`, section
+/// 9), each off when the request leaves it out.  A value out of range - or a
+/// `reverse` that is not a boolean, as the Python and Go servers refuse it -
+/// is a 400, before any job starts.
 fn plan_fields(r: &Request) -> Result<crate::training::Plan, ApiError> {
     let order = r.text("order", "").trim().to_ascii_lowercase();
     let plan = crate::training::Plan {
@@ -1205,6 +1207,7 @@ fn plan_fields(r: &Request) -> Result<crate::training::Plan, ApiError> {
         },
         patience: r.usize("patience", 0)?,
         min_delta: r.number("min_delta", 0.0)?,
+        reverse: crate::llm::fields::Fields::of(r).flag("reverse", false)?,
     };
     plan.check()?;
     Ok(plan)

@@ -81,7 +81,7 @@ class TestTrainConfig(unittest.TestCase):
                 "lr_schedule": None, "act_lr_schedule": None, "reverse_schedule": False,
                 # the training methods of ../SPEC-SearchAndTraining.md, every one of them off
                 "order": "corpus", "curriculum": 1.0, "replay": 0.0, "replay_size": None,
-                "patience": 0, "min_delta": 0.0,
+                "patience": 0, "min_delta": 0.0, "reverse": False,
             },
         )
         cfg.validate()
