@@ -21,11 +21,21 @@
 //! keep it as an upload ([`store_text`], [`store_bytes`]) and train on what it
 //! became ([`save_and_train`]).
 //!
-//! No dependencies, like everything else: the multipart parser and base64
-//! ([`base64`]) are written out.
+//! `POST /api/uploads` is the one route that never holds its body: it streams
+//! ([`store_stream`]), so an archive of any size is possible - a multipart
+//! file part or a raw body goes straight to a `.part` file in the upload
+//! directory as it arrives ([`stream_parts`] finds the parts on the way), and
+//! is validated from there, entry by entry (D-035, as the Go server does it).
+//! Only the JSON forms, which carry the file inline, are read whole.
+//!
+//! No dependencies, like everything else: the multipart parser (held and
+//! streamed) and base64 ([`base64`]) are written out.
 
 pub mod base64;
 
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::http::{accepted, Answer, ApiError, Request};
@@ -136,13 +146,26 @@ fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
         return None;
     }
-    (from..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+    let last = hay.len() - needle.len();
+    let mut at = from;
+    // the first byte is looked for on its own, which is most of the work on a
+    // body of megabytes; the rest is compared where it matches
+    while at <= last {
+        at += hay[at..=last].iter().position(|&b| b == needle[0])?;
+        if &hay[at..at + needle.len()] == needle {
+            return Some(at);
+        }
+        at += 1;
+    }
+    None
 }
 
 /// The parts of a `multipart/form-data` body.
 ///
-/// Lenient where Python's `email` parser is lenient: lines may end in CRLF or
-/// LF, and a body without the closing delimiter keeps the parts it has.
+/// Lenient where Python's `email` parser is lenient, and read by its rules:
+/// lines may end in CRLF or LF, a delimiter is a line that starts with
+/// `--boundary`, a part's headers end at its first empty line, and a body
+/// without the closing delimiter keeps the parts it has.
 pub fn parse(body: &[u8], content_type: &str) -> Result<Vec<Part>, String> {
     let boundary = header_param(content_type, "boundary")
         .filter(|b| !b.is_empty())
@@ -168,7 +191,8 @@ pub fn parse(body: &[u8], content_type: &str) -> Result<Vec<Part>, String> {
             break;
         };
         let start = line_end + 1;
-        let next = find(body, &[b"\n".as_slice(), &delimiter].concat(), start);
+        // from the delimiter line's own end: the next delimiter may follow at once
+        let next = find(body, &[b"\n".as_slice(), &delimiter].concat(), line_end);
         let end = match next {
             Some(i) if i > start && body[i - 1] == b'\r' => i - 1,
             Some(i) => i,
@@ -185,20 +209,43 @@ pub fn parse(body: &[u8], content_type: &str) -> Result<Vec<Part>, String> {
 
 /// One part: its headers, a blank line, its bytes.
 fn parse_part(raw: &[u8]) -> Result<Part, String> {
-    let (head, data) = match (find(raw, b"\r\n\r\n", 0), find(raw, b"\n\n", 0)) {
-        (Some(a), Some(b)) if b < a => (&raw[..b], &raw[b + 2..]),
-        (Some(a), _) => (&raw[..a], &raw[a + 4..]),
-        (None, Some(b)) => (&raw[..b], &raw[b + 2..]),
-        // a part that starts with its blank line has no headers at all
-        (None, None) if raw.starts_with(b"\r\n") => (&raw[..0], &raw[2..]),
-        (None, None) => (raw, &raw[raw.len()..]),
+    // the headers end at the first empty line, whatever its ending; a part
+    // without one is headers alone
+    let (head, data) = match blank_line(raw) {
+        Some((at, after)) => (&raw[..at], &raw[after..]),
+        None => (raw, &raw[raw.len()..]),
     };
-    let head = String::from_utf8_lossy(head);
+    let (mut part, encoding) = parse_head(&String::from_utf8_lossy(head));
+    part.data = data.to_vec();
+    if encoding == "base64" {
+        part.data = decode_base64_part(&part.data)?;
+    }
+    Ok(part)
+}
+
+/// The first empty line of `raw` (a bare CRLF or LF): where it starts, and
+/// where what follows it starts.
+fn blank_line(raw: &[u8]) -> Option<(usize, usize)> {
+    let mut start = 0;
+    while start < raw.len() {
+        let end = find(raw, b"\n", start)?;
+        let line = &raw[start..end];
+        if line.strip_suffix(b"\r").unwrap_or(line).is_empty() {
+            return Some((start, end + 1));
+        }
+        start = end + 1;
+    }
+    None
+}
+
+/// A part's headers: the [`Part`] they describe, its data still to come, and
+/// its `Content-Transfer-Encoding`, lower-cased.
+fn parse_head(head: &str) -> (Part, String) {
     let mut part = Part {
         name: String::new(),
         filename: None,
         content_type: String::new(),
-        data: data.to_vec(),
+        data: Vec::new(),
     };
     let mut encoding = String::new();
     for line in head.lines() {
@@ -215,14 +262,276 @@ fn parse_part(raw: &[u8]) -> Result<Part, String> {
             _ => {}
         }
     }
-    if encoding == "base64" {
-        let text: String = String::from_utf8_lossy(&part.data)
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect();
-        part.data = base64::decode(&text).map_err(|err| format!("malformed multipart/form-data body: {err}"))?;
+    (part, encoding)
+}
+
+/// The bytes of a part sent `Content-Transfer-Encoding: base64`.
+fn decode_base64_part(data: &[u8]) -> Result<Vec<u8>, String> {
+    let text: String = String::from_utf8_lossy(data)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    base64::decode(&text).map_err(|err| format!("malformed multipart/form-data body: {err}"))
+}
+
+// -- multipart/form-data, as it arrives -------------------------------------------------------
+
+/// How much of a streamed body arrives at a time.
+const CHUNK: usize = 256 << 10;
+
+/// The longest line a part's headers may run to before the body is malformed.
+const MAX_HEADER_LINE: usize = 1 << 20;
+
+/// A window over a body being read: what has arrived and not been used yet.
+struct Scanner<'a> {
+    src: &'a mut dyn Read,
+    buf: Vec<u8>,
+    /// Where the unused bytes start in `buf`.
+    at: usize,
+    /// Where a chunk lands before it joins the window.
+    scratch: Vec<u8>,
+    eof: bool,
+    /// Whether the last line read ended in `\n` (the last line of a body may not).
+    terminated: bool,
+}
+
+impl<'a> Scanner<'a> {
+    fn new(src: &'a mut dyn Read) -> Scanner<'a> {
+        Scanner {
+            src,
+            buf: Vec::with_capacity(CHUNK),
+            at: 0,
+            scratch: vec![0u8; CHUNK],
+            eof: false,
+            terminated: false,
+        }
     }
-    Ok(part)
+
+    /// The bytes that have arrived and not been used.
+    fn window(&self) -> &[u8] {
+        &self.buf[self.at..]
+    }
+
+    fn consume(&mut self, n: usize) {
+        self.at += n;
+    }
+
+    /// Reads one more chunk of the body behind the window; false at its end.
+    fn fill(&mut self) -> std::io::Result<bool> {
+        if self.eof {
+            return Ok(false);
+        }
+        // the used bytes go, then one chunk more arrives
+        self.buf.drain(..self.at);
+        self.at = 0;
+        let n = loop {
+            match self.src.read(&mut self.scratch) {
+                Ok(n) => break n,
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            }
+        };
+        self.buf.extend_from_slice(&self.scratch[..n]);
+        if n == 0 {
+            self.eof = true;
+        }
+        Ok(n > 0)
+    }
+
+    /// One line, its `\n` (and a `\r` before it) dropped; `None` at the end
+    /// of the body.
+    fn line(&mut self) -> Result<Option<Vec<u8>>, ApiError> {
+        loop {
+            if let Some(i) = self.window().iter().position(|&b| b == b'\n') {
+                let mut line = self.window()[..i].to_vec();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                self.consume(i + 1);
+                self.terminated = true;
+                return Ok(Some(line));
+            }
+            if self.window().len() > MAX_HEADER_LINE {
+                return Err(ApiError::bad_request(
+                    "malformed multipart/form-data body (a header line without an end)",
+                ));
+            }
+            if !self.fill().map_err(read_failed)? {
+                // the last line, without an end
+                let rest = self.window().to_vec();
+                self.consume(rest.len());
+                self.terminated = false;
+                return Ok(if rest.is_empty() { None } else { Some(rest) });
+            }
+        }
+    }
+}
+
+/// The bytes of one part, read out of the scanner up to the delimiter that
+/// ends it - which is then consumed too, so the scanner stands after
+/// `--boundary` when the part is done.
+struct PartBody<'s, 'a> {
+    scanner: &'s mut Scanner<'a>,
+    /// `\n--boundary`: what ends the part (a `\r` before it is the
+    /// delimiter's too).
+    needle: &'s [u8],
+    /// Bytes at the front of the window that are the part's own, still to hand out.
+    pending: usize,
+    /// What follows them, once found: the delimiter, this many bytes to drop.
+    delimiter: Option<usize>,
+    /// Whether a delimiter ended the part (false: the body ended first).
+    delimited: bool,
+    /// Nothing handed out yet: the delimiter may stand right at the start,
+    /// without a line end of its own, for a part with no data.
+    at_start: bool,
+    done: bool,
+}
+
+impl Read for PartBody<'_, '_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.pending > 0 {
+                let n = self.pending.min(out.len());
+                out[..n].copy_from_slice(&self.scanner.window()[..n]);
+                self.scanner.consume(n);
+                self.pending -= n;
+                return Ok(n);
+            }
+            if self.done {
+                return Ok(0);
+            }
+            if let Some(skip) = self.delimiter.take() {
+                // the part's bytes are out; the delimiter that ended it goes too
+                self.scanner.consume(skip);
+                self.delimited = true;
+                self.done = true;
+                return Ok(0);
+            }
+            if self.at_start {
+                let delimiter = &self.needle[1..];
+                if self.scanner.window().len() < delimiter.len() && !self.scanner.eof {
+                    self.scanner.fill()?; // not enough to tell yet
+                    continue;
+                }
+                self.at_start = false;
+                if self.scanner.window().starts_with(delimiter) {
+                    self.delimiter = Some(delimiter.len());
+                    continue;
+                }
+            }
+            let window = self.scanner.window();
+            if let Some(i) = find(window, self.needle, 0) {
+                let end = if i > 0 && window[i - 1] == b'\r' { i - 1 } else { i };
+                self.pending = end;
+                self.delimiter = Some(i - end + self.needle.len());
+            } else if window.len() > self.needle.len() {
+                // a delimiter cannot start earlier than the window's last
+                // needle's length of bytes: everything before is the part's own
+                self.pending = window.len() - self.needle.len();
+            } else if !self.scanner.fill()? {
+                // the body ended without a closing delimiter: the rest is the
+                // part's own, as `parse` reads it
+                self.pending = self.scanner.window().len();
+                self.done = true;
+            }
+        }
+    }
+}
+
+/// A read of the request body that failed, as the client is answered: a body
+/// shorter than its `Content-Length` says is a 400, as it is on the Python server.
+fn read_failed(err: std::io::Error) -> ApiError {
+    if err.kind() == std::io::ErrorKind::UnexpectedEof {
+        return ApiError::bad_request("incomplete request body");
+    }
+    ApiError::bad_request(format!("could not read the request body: {err}"))
+}
+
+/// Reads a `multipart/form-data` body as it arrives, one part at a time:
+/// `each` gets a part's headers (a [`Part`] without its data) and a reader of
+/// its bytes, which ends where the part does.  Nothing is held - what `each`
+/// leaves unread is dropped - so a part may be as large as the body.
+///
+/// Lenient where [`parse`] is lenient: lines may end in CRLF or LF, and a body
+/// without the closing delimiter keeps the parts it has.  A part sent
+/// `Content-Transfer-Encoding: base64` (which nothing sends any more) is
+/// decoded whole first.
+pub fn stream_parts(
+    body: &mut dyn Read,
+    content_type: &str,
+    each: &mut dyn FnMut(&Part, &mut dyn Read) -> Result<(), ApiError>,
+) -> Result<(), ApiError> {
+    let boundary = header_param(content_type, "boundary")
+        .filter(|b| !b.is_empty())
+        .ok_or_else(|| ApiError::bad_request("malformed multipart/form-data body (missing boundary?)"))?;
+    let delimiter = format!("--{boundary}").into_bytes();
+    let needle = [b"\n".as_slice(), &delimiter].concat();
+    let mut scanner = Scanner::new(body);
+    // the first delimiter opens the body; anything before it is a preamble
+    let mut after_delimiter = loop {
+        match scanner.line()? {
+            None => return Ok(()),
+            Some(line) if line.starts_with(&delimiter) => break line[delimiter.len()..].to_vec(),
+            Some(_) => continue,
+        }
+    };
+    loop {
+        // "--" after a delimiter closes the body, and so does a delimiter
+        // line without an end; the rest of the line is padding
+        if after_delimiter.starts_with(b"--") || !scanner.terminated {
+            return Ok(());
+        }
+        // the part's headers, up to a blank line - or to the next delimiter,
+        // for a part with no data and no blank line
+        let mut head = String::new();
+        let mut ended_early = None;
+        while let Some(line) = scanner.line()? {
+            if line.is_empty() {
+                break;
+            }
+            if line.starts_with(&delimiter) {
+                ended_early = Some(line[delimiter.len()..].to_vec());
+                break;
+            }
+            head.push_str(&String::from_utf8_lossy(&line));
+            head.push('\n');
+        }
+        let (part, encoding) = parse_head(&head);
+        if let Some(rest) = ended_early {
+            each(&part, &mut std::io::empty())?;
+            after_delimiter = rest;
+            continue;
+        }
+        let mut data = PartBody {
+            scanner: &mut scanner,
+            needle: &needle,
+            pending: 0,
+            delimiter: None,
+            delimited: false,
+            at_start: true,
+            done: false,
+        };
+        if encoding == "base64" {
+            let mut raw = Vec::new();
+            data.read_to_end(&mut raw).map_err(read_failed)?;
+            let decoded = decode_base64_part(&raw).map_err(ApiError::bad_request)?;
+            each(&part, &mut std::io::Cursor::new(decoded))?;
+        } else {
+            each(&part, &mut data)?;
+            // what `each` left is dropped, so the scanner stands at the delimiter
+            std::io::copy(&mut data, &mut std::io::sink()).map_err(read_failed)?;
+        }
+        if !data.delimited {
+            return Ok(());
+        }
+        after_delimiter = match scanner.line()? {
+            Some(rest) => rest,
+            None => return Ok(()),
+        };
+    }
 }
 
 // -- the upload forms -------------------------------------------------------------------------
@@ -667,6 +976,36 @@ fn upload_dir(svc: &Service) -> Result<String, ApiError> {
     Ok(dir)
 }
 
+/// `<path>.part`: where an upload is written before it is moved into place,
+/// so a reader never sees half a file.
+fn staged(path: &Path) -> PathBuf {
+    path.with_extension(match path.extension() {
+        Some(ext) => format!("{}.part", ext.to_string_lossy()),
+        None => "part".to_string(),
+    })
+}
+
+/// A `.part` file of its own in the upload directory, for bytes on their way
+/// in (the listing skips `.part` files, as the Python and Go listings do).
+fn new_part(dir: &str) -> Result<PathBuf, ApiError> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = Path::new(dir).join(format!(
+        ".upload-{}-{}-{stamp}.part",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|err| ApiError::with_status(500, format!("cannot create {}: {err}", path.display())))?;
+    Ok(path)
+}
+
 /// `2026-09-20T01:23:45.678+00:00`: a file's modification time as Python's
 /// `isoformat(timespec="milliseconds")` writes it.
 fn modified(meta: &std::fs::Metadata) -> String {
@@ -680,11 +1019,12 @@ fn modified(meta: &std::fs::Metadata) -> String {
     format!("{date}.{:03}{zone}", since.subsec_millis())
 }
 
-/// The listing record of one text upload (`api._upload_record`).
-fn record(path: &std::path::Path) -> Result<Json, ApiError> {
+/// The listing record of one text upload (`api._upload_record`): its
+/// characters and its non-blank lines, counted a line at a time, so a large
+/// one is described without being held.
+pub(crate) fn record(path: &Path) -> Result<Json, ApiError> {
     let meta = std::fs::metadata(path).map_err(|err| ApiError::with_status(500, err.to_string()))?;
-    let bytes = std::fs::read(path).map_err(|err| ApiError::with_status(500, err.to_string()))?;
-    let text = String::from_utf8_lossy(&bytes);
+    let (chars, lines) = text_counts(path).map_err(|err| ApiError::with_status(500, err.to_string()))?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -692,17 +1032,29 @@ fn record(path: &std::path::Path) -> Result<Json, ApiError> {
     Ok(Json::obj([
         ("name", Json::str(name)),
         ("bytes", Json::Int(meta.len() as i64)),
-        ("chars", Json::Int(text.chars().count() as i64)),
-        (
-            "lines",
-            Json::Int(
-                text.lines()
-                    .filter(|l| !l.trim_matches(base64::is_python_space).is_empty())
-                    .count() as i64,
-            ),
-        ),
+        ("chars", Json::Int(chars as i64)),
+        ("lines", Json::Int(lines as i64)),
         ("modified", Json::str(modified(&meta))),
     ]))
+}
+
+/// The characters of a text file and its non-blank lines (`str.strip()`
+/// blank), a line at a time.
+fn text_counts(path: &Path) -> std::io::Result<(usize, usize)> {
+    let mut reader = BufReader::with_capacity(CHUNK, std::fs::File::open(path)?);
+    let (mut chars, mut lines) = (0usize, 0usize);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok((chars, lines));
+        }
+        let text = String::from_utf8_lossy(&line);
+        chars += text.chars().count();
+        if !text.trim_matches(base64::is_python_space).is_empty() {
+            lines += 1;
+        }
+    }
 }
 
 /// Stores `content` as the upload `name`, replacing one of that name
@@ -712,10 +1064,7 @@ pub fn store_text(svc: &Service, name: &str, content: &str) -> Result<Json, ApiE
     let path = std::path::Path::new(&dir).join(sanitize_upload_name(name)?);
     let replaced = path.is_file();
     // written beside and moved into place, so a reader never sees half a file
-    let part = path.with_extension(match path.extension() {
-        Some(ext) => format!("{}.part", ext.to_string_lossy()),
-        None => "part".to_string(),
-    });
+    let part = staged(&path);
     std::fs::write(&part, content.as_bytes())
         .and_then(|_| std::fs::rename(&part, &path))
         .map_err(|err| ApiError::with_status(500, format!("cannot store {}: {err}", path.display())))?;
@@ -740,25 +1089,166 @@ pub fn store_bytes(svc: &Service, name: &str, data: &[u8]) -> Result<Json, ApiEr
     Ok(Json::obj([("uploads", Json::Arr(vec![store_text(svc, name, &text)?]))]))
 }
 
-/// Keeps a ZIP archive as a single upload; its text entries are unpacked in
-/// memory whenever it is used (`ModelService.store_archive`).  A corrupt
-/// archive, or one without a single text entry, is refused (400); the
-/// entries passed over are listed with their reasons in the summary.
+/// Keeps a ZIP archive held in memory (the JSON forms carry it inline) as a
+/// single upload (`ModelService.store_archive`): its bytes go to a `.part`
+/// file, and [`store_part`] validates it from there and keeps it whole.
 pub fn store_archive(svc: &Service, name: &str, data: &[u8]) -> Result<Json, ApiError> {
     let dir = upload_dir(svc)?;
-    let mut archive_name = sanitize_upload_name(name)?;
+    store_from(svc, &dir, name, &mut std::io::Cursor::new(data))
+}
+
+/// Stores every file of an upload request: `{"uploads": [records]}` - the
+/// body of `POST /api/uploads` (`api._r_upload`).
+pub fn store_all(svc: &Service, files: &[Upload]) -> Result<Json, ApiError> {
+    let mut stored = Vec::new();
+    for file in files {
+        stored.push(match &file.payload {
+            Payload::Text(text) => Json::obj([("uploads", Json::Arr(vec![store_text(svc, &file.name, text)?]))]),
+            Payload::Bytes(data) => store_bytes(svc, &file.name, data)?,
+        });
+    }
+    gather(&stored)
+}
+
+/// The answer of an upload request from what each of its files stored:
+/// `{"uploads": [records]}`, plus `"archives": [summaries]` when any was one.
+fn gather(stored: &[Json]) -> Result<Json, ApiError> {
+    let mut records = Vec::new();
+    let mut archives: Vec<Json> = Vec::new();
+    for doc in stored {
+        records.extend(doc.at("uploads").as_array().iter().cloned());
+        archives.extend(doc.at("archives").as_array().iter().cloned());
+    }
+    if records.is_empty() {
+        return Err(ApiError::bad_request("nothing was uploaded"));
+    }
+    let mut body = vec![("uploads".to_string(), Json::Arr(records))];
+    if !archives.is_empty() {
+        body.push(("archives".to_string(), Json::Arr(archives)));
+    }
+    Ok(Json::Obj(body))
+}
+
+// -- keeping what arrives, as it arrives -----------------------------------------------------
+
+/// `POST /api/uploads`, read as the body arrives (the route streams:
+/// [`crate::http::Server::stream_route`]), so an archive of any size goes
+/// straight to disk, as it does on the Go server (D-035).  Multipart file
+/// parts and raw bodies are written to a `.part` file in the upload directory
+/// and kept from there ([`store_part`]); the JSON forms carry their file
+/// inline and are read whole, as Python reads them.  Answers
+/// `{"uploads": [records]}`, plus `"archives": [summaries]` for the archives
+/// among them (`api._r_upload`).
+pub fn store_stream(svc: &Service, r: &Request, body: &mut dyn Read) -> Answer {
+    // refused before a byte of the body is read
+    let dir = upload_dir(svc)?;
+    let kind = r.content_type();
+    let names: Vec<&str> = r
+        .query
+        .iter()
+        .filter(|(k, v)| k == "name" && !v.trim().is_empty())
+        .map(|(_, v)| v.as_str())
+        .collect();
+    let mut stored: Vec<Json> = Vec::new();
+    if kind == "multipart/form-data" {
+        let content_type = r.header("content-type").unwrap_or("").to_string();
+        stream_parts(body, &content_type, &mut |part, data| {
+            // plain form fields are ignored
+            let Some(name) = part.filename.as_deref().filter(|f| !f.is_empty()) else {
+                return Ok(());
+            };
+            stored.push(store_from(svc, &dir, name, data)?);
+            Ok(())
+        })?;
+        if stored.is_empty() {
+            return Err(ApiError::bad_request(
+                "multipart body contains no file parts (use -F file=@corpus.txt)",
+            ));
+        }
+        return gather(&stored);
+    }
+    if kind == "application/json" || (kind.is_empty() && names.is_empty()) {
+        let mut raw = Vec::new();
+        body.read_to_end(&mut raw).map_err(read_failed)?;
+        let parsed = match std::str::from_utf8(&raw) {
+            Ok(text) if !text.trim().is_empty() => crate::json::parse(text).unwrap_or(Json::Null),
+            _ => Json::Null,
+        };
+        let request = Request {
+            method: r.method.clone(),
+            path: r.path.clone(),
+            query: r.query.clone(),
+            body: parsed,
+            raw,
+            headers: r.headers.clone(),
+        };
+        let files = Form::read(&request, None)?.files()?;
+        return store_all(svc, &files);
+    }
+    let Some(name) = names.first() else {
+        return Err(ApiError::bad_request(
+            "raw uploads need a ?name=<file name> query parameter (or send JSON {name, content})",
+        ));
+    };
+    stored.push(store_from(svc, &dir, name, body)?);
+    gather(&stored)
+}
+
+/// Stores one file from the stream of its bytes: they go to a `.part` file
+/// in the upload directory as they arrive, and [`store_part`] keeps it from
+/// there.  A bad name is refused before a byte is read.
+fn store_from(svc: &Service, dir: &str, name: &str, data: &mut dyn Read) -> Result<Json, ApiError> {
+    let safe = sanitize_upload_name(name)?;
+    let part = new_part(dir)?;
+    let copied = std::fs::OpenOptions::new().write(true).open(&part).and_then(|file| {
+        let mut file = BufWriter::with_capacity(CHUNK, file);
+        std::io::copy(data, &mut file)?;
+        file.flush()
+    });
+    if let Err(err) = copied {
+        let _ = std::fs::remove_file(&part);
+        if err.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Err(ApiError::bad_request("incomplete request body"));
+        }
+        return Err(ApiError::with_status(500, format!("cannot store {safe}: {err}")));
+    }
+    store_part(svc, dir, &safe, &part)
+}
+
+/// Keeps an upload whose bytes are in `part`, a file in the upload directory,
+/// under the name `safe` (already made safe).  The first four bytes decide:
+/// a ZIP archive is validated by reading its entries from the file - a batch
+/// at a time, never whole - and kept whole under a `.zip` name (D-034);
+/// anything else is a text file, stored as UTF-8 with the byte-order mark
+/// dropped and undecodable bytes replaced, converted a chunk at a time.
+/// `part` is gone afterwards, kept or refused.
+fn store_part(svc: &Service, dir: &str, safe: &str, part: &Path) -> Result<Json, ApiError> {
+    let outcome = if crate::zip::is_zip_file(part) {
+        keep_archive(svc, dir, safe, part)
+    } else {
+        keep_text(dir, safe, part)
+    };
+    // nothing to do when it was moved into place; a refused one goes
+    let _ = std::fs::remove_file(part);
+    outcome
+}
+
+/// The archive in `part`, validated from the file and moved into place.  A
+/// corrupt archive, or one without a single text entry, is refused (400); the
+/// entries passed over are listed with their reasons in the summary.
+fn keep_archive(svc: &Service, dir: &str, safe: &str, part: &Path) -> Result<Json, ApiError> {
+    let mut archive_name = safe.to_string();
     if !archive_name.to_lowercase().ends_with(".zip") {
         archive_name.push_str(".zip");
     }
-    let mut archive = crate::zip::Archive::from_bytes(data.to_vec())
-        .map_err(|err| ApiError::bad_request(format!("{archive_name}: {err}")))?;
-    let mut extracted = 0usize;
-    let skipped = crate::source::walk_texts(&mut archive, svc.workers, &mut |_, _, _| {
-        extracted += 1;
-        std::ops::ControlFlow::Continue(())
-    });
+    let summary = crate::source::inspect(part, svc.workers);
+    if let Some(err) = &summary.error {
+        return Err(ApiError::bad_request(format!("{archive_name}: {err}")));
+    }
+    let extracted = summary.files();
     if extracted == 0 {
-        let reasons: Vec<String> = skipped
+        let reasons: Vec<String> = summary
+            .skipped
             .iter()
             .take(8)
             .map(|s| format!("{}: {}", s.path, s.reason))
@@ -772,59 +1262,128 @@ pub fn store_archive(svc: &Service, name: &str, data: &[u8]) -> Result<Json, Api
             "{archive_name} holds no text files to train on{why}"
         )));
     }
-    let path = std::path::Path::new(&dir).join(&archive_name);
+    let path = Path::new(dir).join(&archive_name);
     let replaced = path.is_file();
-    let part = path.with_extension("zip.part");
-    std::fs::write(&part, data)
-        .and_then(|_| std::fs::rename(&part, &path))
+    std::fs::rename(part, &path)
         .map_err(|err| ApiError::with_status(500, format!("cannot store {}: {err}", path.display())))?;
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    // the listing's record comes from the pass just made, not a second one
+    crate::source::remember(&path, summary.clone());
     let mut record = crate::source::archive_record(&path, svc.workers)
         .ok_or_else(|| ApiError::with_status(500, format!("{} is not a ZIP archive", path.display())))?;
     if let Json::Obj(pairs) = &mut record {
         pairs.push(("replaced".to_string(), Json::Bool(replaced)));
     }
-    let summary = Json::obj([
+    let skipped = &summary.skipped;
+    let doc = Json::obj([
         ("name", Json::str(archive_name.clone())),
-        ("bytes", Json::Int(data.len() as i64)),
+        ("bytes", Json::Int(bytes as i64)),
         ("entries", Json::Int((extracted + skipped.len()) as i64)),
         ("extracted", Json::Int(extracted as i64)),
         ("skipped", Json::Arr(skipped.iter().map(|s| s.to_json()).collect())),
     ]);
     crate::log_info!(
         LOG,
-        "upload {archive_name} ({} bytes; {extracted} text file(s) inside, {} skipped)",
-        data.len(),
+        "upload {archive_name} ({bytes} bytes; {extracted} text file(s) inside, {} skipped)",
         skipped.len()
     );
     Ok(Json::obj([
         ("uploads", Json::Arr(vec![record])),
-        ("archives", Json::Arr(vec![summary])),
+        ("archives", Json::Arr(vec![doc])),
     ]))
 }
 
-/// Stores every file of an upload request: `{"uploads": [records]}` - the
-/// body of `POST /api/uploads` (`api._r_upload`).
-pub fn store_all(svc: &Service, files: &[Upload]) -> Result<Json, ApiError> {
-    let mut records = Vec::new();
-    let mut archives: Vec<Json> = Vec::new();
-    for file in files {
-        match &file.payload {
-            Payload::Text(text) => records.push(store_text(svc, &file.name, text)?),
-            Payload::Bytes(data) => {
-                let stored = store_bytes(svc, &file.name, data)?;
-                records.extend(stored.at("uploads").as_array().iter().cloned());
-                archives.extend(stored.at("archives").as_array().iter().cloned());
+/// The text file in `part`, converted into place a chunk at a time.
+fn keep_text(dir: &str, safe: &str, part: &Path) -> Result<Json, ApiError> {
+    let path = Path::new(dir).join(safe);
+    let replaced = path.is_file();
+    let stage = staged(&path);
+    let written = std::fs::File::open(part).and_then(|src| {
+        let src = BufReader::with_capacity(CHUNK, src);
+        let mut dst = BufWriter::with_capacity(CHUNK, std::fs::File::create(&stage)?);
+        let written = copy_as_text(src, &mut dst)?;
+        dst.flush()?;
+        std::fs::rename(&stage, &path)?;
+        Ok(written)
+    });
+    let bytes = match written {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            let _ = std::fs::remove_file(&stage);
+            return Err(ApiError::with_status(
+                500,
+                format!("cannot store {}: {err}", path.display()),
+            ));
+        }
+    };
+    let mut doc = record(&path)?;
+    if let Json::Obj(pairs) = &mut doc {
+        pairs.push(("replaced".to_string(), Json::Bool(replaced)));
+    }
+    crate::log_info!(LOG, "upload {} ({bytes} bytes)", path.display());
+    Ok(Json::obj([("uploads", Json::Arr(vec![doc]))]))
+}
+
+/// Copies bytes as text - UTF-8 with the byte-order mark dropped and anything
+/// that is not UTF-8 replaced, what [`store_bytes`] makes of a small upload -
+/// a chunk at a time, so a file of any size is converted without being held.
+/// Returns how many bytes were written.
+fn copy_as_text(mut src: impl Read, mut dst: impl Write) -> std::io::Result<u64> {
+    let mut chunk = vec![0u8; CHUNK];
+    // what the last chunk left: a multi-byte sequence cut short, waiting for its rest
+    let mut held: Vec<u8> = Vec::new();
+    let mut first = true;
+    let mut written = 0u64;
+    loop {
+        let n = match src.read(&mut chunk) {
+            Ok(n) => n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        held.extend_from_slice(&chunk[..n]);
+        let at_end = n == 0;
+        if first {
+            // the mark is three bytes: wait for them, or the end, before deciding
+            if held.len() < 3 && !at_end {
+                continue;
             }
+            if held.starts_with(&[0xef, 0xbb, 0xbf]) {
+                held.drain(..3);
+            }
+            first = false;
+        }
+        let keep = if at_end { 0 } else { cut_short(&held) };
+        let ready = held.len() - keep;
+        let text = String::from_utf8_lossy(&held[..ready]);
+        dst.write_all(text.as_bytes())?;
+        written += text.len() as u64;
+        held.drain(..ready);
+        if at_end {
+            return Ok(written);
         }
     }
-    if records.is_empty() {
-        return Err(ApiError::bad_request("nothing was uploaded"));
+}
+
+/// How many bytes at the end of `bytes` begin a multi-byte UTF-8 sequence
+/// whose rest has not arrived (0 when they end cleanly, or wrongly: a
+/// sequence that is wrong is replaced whatever comes next).
+fn cut_short(bytes: &[u8]) -> usize {
+    let from = bytes.len().saturating_sub(3);
+    for i in (from..bytes.len()).rev() {
+        let lead = bytes[i];
+        if lead & 0xc0 == 0x80 {
+            continue; // a continuation byte: the lead is before it
+        }
+        let need = match lead {
+            0xc2..=0xdf => 2,
+            0xe0..=0xef => 3,
+            0xf0..=0xf4 => 4,
+            _ => return 0,
+        };
+        let have = bytes.len() - i;
+        return if have < need { have } else { 0 };
     }
-    let mut body = vec![("uploads".to_string(), Json::Arr(records))];
-    if !archives.is_empty() {
-        body.push(("archives".to_string(), Json::Arr(archives)));
-    }
-    Ok(Json::Obj(body))
+    0
 }
 
 /// Starts a training job on `texts` and hands back the job, as the train route
@@ -1023,5 +1582,261 @@ mod tests {
             Form::read(&r, None).unwrap().files().is_err(),
             "an empty body names no file"
         );
+    }
+
+    /// Reads a body one to three bytes at a time, so a delimiter is cut at
+    /// every place it can be.
+    struct Dribble<'a> {
+        bytes: &'a [u8],
+        at: usize,
+        step: usize,
+    }
+
+    impl Read for Dribble<'_> {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = (self.bytes.len() - self.at).min(out.len()).min(self.step);
+            out[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+            self.at += n;
+            self.step = self.step % 3 + 1;
+            Ok(n)
+        }
+    }
+
+    /// The parts of a body read as a stream, `step` bytes at a time (0: in
+    /// one piece), gathered the way `parse` gathers them.
+    fn streamed(body: &[u8], content_type: &str, step: usize) -> Result<Vec<Part>, ApiError> {
+        let mut parts = Vec::new();
+        let mut each = |head: &Part, data: &mut dyn Read| {
+            let mut part = head.clone();
+            data.read_to_end(&mut part.data)
+                .map_err(|err| ApiError::bad_request(err.to_string()))?;
+            parts.push(part);
+            Ok(())
+        };
+        if step == 0 {
+            stream_parts(&mut std::io::Cursor::new(body), content_type, &mut each)?;
+        } else {
+            stream_parts(
+                &mut Dribble {
+                    bytes: body,
+                    at: 0,
+                    step,
+                },
+                content_type,
+                &mut each,
+            )?;
+        }
+        Ok(parts)
+    }
+
+    /// Bytes with every prefix of a delimiter in them, and CRs and LFs where
+    /// they hurt: what a compressed archive looks like to a boundary search.
+    fn awkward_bytes(len: usize) -> Vec<u8> {
+        let pieces: [&[u8]; 8] = [
+            b"-",
+            b"--",
+            b"\n--",
+            b"\r\n--",
+            b"\n--X",
+            b"\r\n--Xy",
+            b"\n--Xy\r",
+            b"\r\r\n",
+        ];
+        let mut out = Vec::with_capacity(len + 16);
+        let mut seed = 12345u32;
+        while out.len() < len {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let pick = (seed >> 16) as usize;
+            if pick % 3 == 0 {
+                out.extend_from_slice(pieces[pick % pieces.len()]);
+            } else {
+                // never a 'Z', so the delimiter itself cannot come up by chance
+                let byte = (pick % 251) as u8;
+                out.push(if byte == b'Z' { b'z' } else { byte });
+            }
+        }
+        out.truncate(len);
+        out
+    }
+
+    #[test]
+    fn a_streamed_body_comes_apart_as_a_held_one_does() {
+        let mut two_files =
+            b"--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"one.bin\"\r\n\r\n".to_vec();
+        two_files.extend(awkward_bytes(700 * 1024));
+        two_files.extend_from_slice(
+            b"\r\n--XyZ\r\nContent-Disposition: form-data; name=\"file\"; filename=\"two.txt\"\r\n\r\n",
+        );
+        two_files.extend(awkward_bytes(3000));
+        two_files.extend_from_slice(b"\r\n--XyZ--\r\nepilogue\r\n");
+        let bodies: [(&[u8], &str); 10] = [
+            (
+                b"--XyZ\r\n\
+                  Content-Disposition: form-data; name=\"note\"\r\n\r\n\
+                  just a field\r\n\
+                  --XyZ\r\n\
+                  Content-Disposition: form-data; name=\"file\"; filename=\"a \\\"b\\\".wav\"\r\n\
+                  Content-Type: audio/wav\r\n\r\n\
+                  RIFF\r\n--not the boundary\r\n\
+                  --XyZ--\r\n",
+                "multipart/form-data; boundary=XyZ",
+            ),
+            (
+                b"preamble\n--b 1\nContent-Disposition: form-data; name=file; \
+                  filename*=UTF-8''caf%C3%A9.txt\n\nhello\n--b 1--\n",
+                "multipart/form-data; boundary=\"b 1\"",
+            ),
+            // every prefix of the delimiter inside the data, and a CR before the real one
+            (
+                b"--XyZ\r\nContent-Disposition: form-data; name=\"f\"; filename=\"t.bin\"\r\n\r\n\
+                  -\n--\n--X\n--Xy\r\n--Xy\r\r\n--XyZ--\r\n",
+                "multipart/form-data; boundary=XyZ",
+            ),
+            // no closing delimiter: the part keeps what came
+            (
+                b"--q\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x.txt\"\r\n\r\nunfinished business",
+                "multipart/form-data; boundary=q",
+            ),
+            // a part with no headers at all
+            (b"--q\r\n\r\nbare\r\n--q--\r\n", "multipart/form-data; boundary=q"),
+            // headers and no blank line: a part without data
+            (
+                b"--q\r\nContent-Disposition: form-data; name=\"x\"\r\n--q--\r\n",
+                "multipart/form-data; boundary=q",
+            ),
+            // a base64 part, decoded whole
+            (
+                b"--q\r\nContent-Disposition: form-data; name=\"f\"; filename=\"b.bin\"\r\n\
+                  Content-Transfer-Encoding: base64\r\n\r\naGVs\r\nbG8=\r\n--q--\r\n",
+                "multipart/form-data; boundary=q",
+            ),
+            (b"", "multipart/form-data; boundary=q"),
+            (b"nothing here\r\n", "multipart/form-data; boundary=q"),
+            (&two_files, "multipart/form-data; boundary=XyZ"),
+        ];
+        for (i, (body, content_type)) in bodies.iter().enumerate() {
+            let held = parse(body, content_type).unwrap();
+            assert_eq!(streamed(body, content_type, 0).unwrap(), held, "body {i}, in one piece");
+            // a large body is cut fine only where it is cheap to
+            let steps: &[usize] = if body.len() > 100_000 { &[1000] } else { &[1, 2, 3] };
+            for &step in steps {
+                assert_eq!(
+                    streamed(body, content_type, step).unwrap(),
+                    held,
+                    "body {i}, {step} bytes at a time"
+                );
+            }
+        }
+        let (body, content_type) = bodies[6];
+        assert_eq!(streamed(body, content_type, 0).unwrap()[0].data, b"hello");
+        let (body, content_type) = bodies[9];
+        let parts = streamed(body, content_type, 0).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].data.len(), 700 * 1024);
+        assert_eq!(parts[1].filename.as_deref(), Some("two.txt"));
+        assert!(streamed(body, "multipart/form-data", 0).is_err(), "no boundary");
+    }
+
+    #[test]
+    fn a_part_left_unread_is_dropped_and_the_next_still_found() {
+        let body = b"--q\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\n\
+            skipped entirely\r\n--q\r\nContent-Disposition: form-data; name=\"f\"; filename=\"b.txt\"\r\n\r\n\
+            read in part\r\n--q--\r\n";
+        let mut names = Vec::new();
+        let mut firsts = Vec::new();
+        stream_parts(
+            &mut Dribble {
+                bytes: body,
+                at: 0,
+                step: 1,
+            },
+            "multipart/form-data; boundary=q",
+            &mut |part, data| {
+                names.push(part.filename.clone().unwrap_or_default());
+                if names.len() == 2 {
+                    let mut four = [0u8; 4];
+                    data.read_exact(&mut four)
+                        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+                    firsts.push(four.to_vec());
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(names, vec!["a.txt", "b.txt"]);
+        assert_eq!(firsts, vec![b"read".to_vec()]);
+    }
+
+    #[test]
+    fn a_text_upload_is_converted_a_chunk_at_a_time_as_it_would_be_whole() {
+        let mut bytes = "\u{feff}caf\u{e9} \u{2615} \u{1f600}\n".as_bytes().to_vec();
+        bytes.extend_from_slice(b"bad \xff byte\n");
+        bytes.extend_from_slice("more \u{4e16}\u{754c}".as_bytes());
+        bytes.extend_from_slice(b"\xe2\x82"); // a sequence cut short at the very end
+        let whole = String::from_utf8_lossy(&bytes[3..]).into_owned();
+        for step in [0usize, 1, 2, 3] {
+            let mut out = Vec::new();
+            let written = if step == 0 {
+                copy_as_text(std::io::Cursor::new(&bytes), &mut out).unwrap()
+            } else {
+                copy_as_text(
+                    Dribble {
+                        bytes: &bytes,
+                        at: 0,
+                        step,
+                    },
+                    &mut out,
+                )
+                .unwrap()
+            };
+            assert_eq!(String::from_utf8_lossy(&out), whole, "{step} bytes at a time");
+            assert_eq!(written as usize, out.len());
+        }
+        for (input, want) in [
+            (&b""[..], ""),
+            (&b"\xef\xbb\xbf"[..], ""),
+            (&b"ab"[..], "ab"),
+            (&b"\xef\xbb\xbfab"[..], "ab"),
+            (&b"\xef\xbb"[..], "\u{fffd}"),
+        ] {
+            let mut out = Vec::new();
+            copy_as_text(
+                Dribble {
+                    bytes: input,
+                    at: 0,
+                    step: 1,
+                },
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(String::from_utf8_lossy(&out), want, "{input:?}");
+        }
+        assert_eq!(cut_short(b"abc"), 0);
+        assert_eq!(cut_short(b"ab\xc3"), 1);
+        assert_eq!(cut_short(b"a\xe2\x82"), 2);
+        assert_eq!(cut_short(b"\xf0\x9f\x98"), 3);
+        assert_eq!(cut_short(b"\xf0\x9f\x98\x80"), 0, "complete");
+        assert_eq!(cut_short(b"a\xff"), 0, "not a lead byte");
+        assert_eq!(cut_short(b"\x80\x80\x80"), 0, "continuation bytes alone");
+    }
+
+    #[test]
+    fn a_text_record_counts_a_line_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("radixnet-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.txt");
+        std::fs::write(
+            &path,
+            "para one line a\npara one line b\n\n  \t\npara two\r\nlast \u{e9}",
+        )
+        .unwrap();
+        let doc = record(&path).unwrap();
+        assert_eq!(doc.at("name").as_str(), Some("notes.txt"));
+        assert_eq!(doc.at("lines").as_i64(), Some(4));
+        assert_eq!(doc.at("chars").as_i64(), Some(53));
+        assert_eq!(doc.at("bytes").as_i64(), Some(54));
+        std::fs::write(&path, b"not \xff utf-8\n").unwrap();
+        assert_eq!(record(&path).unwrap().at("chars").as_i64(), Some(12));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

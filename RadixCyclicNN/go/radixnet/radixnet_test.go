@@ -506,6 +506,210 @@ func TestConverseWordRepeats(t *testing.T) {
 	}
 }
 
+// A conversation streamed as it happens: the turns are the answer, the rest is the window a backtrack may still
+// rewrite - and streaming changes nothing about what is said.
+func TestConverseStream(t *testing.T) {
+	ways, _ := NewModel(3, DefaultGraphOptions())
+	ways.Exact = true // atomic counters: the racy default is deliberate, but the race detector runs here
+	if _, err := ways.Train([]string{"ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"},
+		TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	stuck, _ := NewModel(3, DefaultGraphOptions())
+	stuck.Exact = true
+	if _, err := stuck.Train([]string{"ha ha ha ha ha"}, TrainOptions{Epochs: 3}); err != nil {
+		t.Fatalf("Train: %v", err)
+	}
+	streamed := func(m *Model, opening string, opts ConverseOptions) ([]*Turn, []map[string]any) {
+		events := []map[string]any{}
+		opts.Stream = func(event map[string]any) { events = append(events, event) }
+		turns, err := m.Converse(opening, opts)
+		if err != nil {
+			t.Fatalf("converse: %v", err)
+		}
+		return turns, events
+	}
+	kinds := map[string]bool{}
+	for _, kind := range StreamEvents {
+		kinds[kind] = true
+	}
+
+	// the turns streamed are the turns returned, and the window between two turns belongs to the one that follows
+	m := trained(t, 2, 4)
+	opts := DefaultConverseOptions()
+	opts.Turns, opts.Learn = 6, false
+	turns, events := streamed(m, "the cat sat on the mat", opts)
+	if len(turns) != 7 {
+		t.Fatalf("%d turns", len(turns))
+	}
+	spoken := []*Turn{}
+	looks := map[int]string{}
+	owner := -1
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		if !kinds[event["event"].(string)] {
+			t.Fatalf("unknown event %v", event)
+		}
+		if event["event"] == "turn" {
+			owner = event["index"].(int)
+		} else if event["index"].(int) != owner {
+			t.Fatalf("event %v belongs to turn %d", event, owner)
+		}
+	}
+	for _, event := range events {
+		switch event["event"] {
+		case "turn":
+			spoken = append(spoken, event["turn"].(*Turn))
+		case "look":
+			looks[event["index"].(int)] = event["from"].(string)
+		}
+	}
+	if !reflect.DeepEqual(spoken, turns) {
+		t.Fatalf("the turns streamed are not the turns returned: %v vs %v", spoken, turns)
+	}
+	for _, tr := range turns[1:] {
+		// a turn's context is where its last look started from ("" when it changed the subject)
+		if from, ok := looks[tr.Index]; !ok || from != tr.Context {
+			t.Fatalf("turn %d picked up %q but last looked from %q", tr.Index, tr.Context, from)
+		}
+	}
+
+	// the window shows the backing up: what it was about to say, what it caught, each step back, the way on
+	opts = DefaultConverseOptions()
+	opts.Turns, opts.Learn = 6, false
+	turns, events = streamed(ways, "", opts)
+	rethought := 0
+	found := 0
+	for _, tr := range turns {
+		if tr.Rethink == nil {
+			continue
+		}
+		rethought++
+		window := []map[string]any{}
+		for _, event := range events {
+			if event["index"].(int) == tr.Index && event["event"] != "turn" {
+				window = append(window, event)
+			}
+		}
+		var draft, caught map[string]any
+		steps := []map[string]any{}
+		for i, event := range window {
+			switch event["event"] {
+			case "draft":
+				draft = event
+				if i+1 >= len(window) || window[i+1]["event"] != "caught" {
+					t.Fatalf("a draft is followed by what it caught: %v", window)
+				}
+			case "caught":
+				caught = event
+			case "backtrack":
+				steps = append(steps, event)
+			case "found":
+				found++
+				if event["text"] != tr.Text || event["explored"] != tr.Rethink.Explored {
+					t.Fatalf("found %v for turn %+v", event, tr)
+				}
+			case "stuck":
+				if event["explored"] != tr.Rethink.Explored || tr.Rethink.Found {
+					t.Fatalf("stuck %v for turn %+v", event, tr)
+				}
+			}
+		}
+		if draft == nil || caught == nil {
+			t.Fatalf("no draft / caught in the window of turn %d: %v", tr.Index, window)
+		}
+		if caught["kind"] != tr.Rethink.Kind || caught["noticed"] != tr.Rethink.Noticed {
+			t.Fatalf("caught %v vs %+v", caught, tr.Rethink)
+		}
+		if len(steps) != tr.Rethink.Steps {
+			t.Fatalf("%d backtrack events for %d steps", len(steps), tr.Rethink.Steps)
+		}
+		if len(steps) > 0 {
+			if caught["cut"] != steps[0]["cut"] || !strings.HasPrefix(draft["text"].(string), steps[0]["cut"].(string)) {
+				t.Fatalf("the cut is where the draft is kept to: %v %v %v", caught, steps[0], draft)
+			}
+			if steps[len(steps)-1]["cut"] != tr.Rethink.Cut {
+				t.Fatalf("the last cut is the record's: %v vs %q", steps[len(steps)-1], tr.Rethink.Cut)
+			}
+			for i, step := range steps {
+				if step["step"] != i+1 || step["wider"].(int) < 5 {
+					t.Fatalf("step %d: %v", i+1, step)
+				}
+			}
+		} else if caught["cut"] != "" {
+			t.Fatalf("no step back, but a cut: %v", caught)
+		}
+	}
+	if rethought == 0 || found == 0 {
+		t.Fatalf("nothing thought twice about (%d rethinks, %d found): %v", rethought, found, Transcript(turns))
+	}
+	_, events = streamed(stuck, "", opts)
+	seen := map[string]int{}
+	for _, event := range events {
+		seen[event["event"].(string)]++
+	}
+	if seen["stuck"] == 0 || seen["found"] != 0 {
+		t.Fatalf("a voice with nowhere to go gets stuck: %v", seen)
+	}
+	opts.Explore = 0
+	_, events = streamed(ways, "", opts)
+	for _, event := range events {
+		if event["event"] != "look" && event["event"] != "turn" {
+			t.Fatalf("nothing to catch, but %v", event)
+		}
+	}
+
+	// streaming changes nothing: the same turns, and the same graph afterwards
+	silent, watched := trained(t, 2, 4), trained(t, 2, 4)
+	opts = DefaultConverseOptions()
+	opts.Turns = 10
+	plain, err := silent.Converse("the cat sat on the mat", opts)
+	if err != nil {
+		t.Fatalf("converse: %v", err)
+	}
+	turns, events = streamed(watched, "the cat sat on the mat", opts)
+	if !reflect.DeepEqual(turns, plain) {
+		t.Fatalf("streaming changed the conversation:\n%s\nvs\n%s", Transcript(turns), Transcript(plain))
+	}
+	if silent.G.NumEdges() != watched.G.NumEdges() {
+		t.Fatalf("streaming changed what was learned: %d vs %d edges", silent.G.NumEdges(), watched.G.NumEdges())
+	}
+	count := 0
+	for _, event := range events {
+		if event["event"] == "turn" {
+			count++
+		}
+	}
+	if count != len(plain) {
+		t.Fatalf("%d turn events for %d turns", count, len(plain))
+	}
+
+	// and Backtrack streams on its own, without a turn to belong to
+	events = nil
+	bo := BacktrackOptions{Explore: Explore, Mode: "beam", K: 3, MaxLength: 60, AvoidRepeats: true, AvoidWordRepeats: true,
+		Stream: func(event map[string]any) { events = append(events, event) }}
+	way, record, err := ways.Backtrack("ha ha ha", bo)
+	if err != nil || way == nil {
+		t.Fatalf("backtrack: %v %+v", err, record)
+	}
+	if len(events) != 3 || events[0]["event"] != "caught" || events[1]["event"] != "backtrack" || events[2]["event"] != "found" {
+		t.Fatalf("events: %v", events)
+	}
+	if events[0]["cut"] != "ha " || events[0]["noticed"] != "ha" || events[1]["wider"] != 6 || events[2]["text"] != way.FullText {
+		t.Fatalf("events: %v", events)
+	}
+	events = nil
+	bo.Keep = "ha ha "
+	if _, _, err := ways.Backtrack("ha ha ha", bo); err != nil || len(events) != 1 || events[0]["cut"] != "" {
+		t.Fatalf("the words it picked up: %v %v", err, events)
+	}
+	events = nil
+	bo.Keep = ""
+	if _, _, err := ways.Backtrack("the cat sat on the mat", bo); err != nil || len(events) != 0 {
+		t.Fatalf("nothing caught: %v %v", err, events)
+	}
+}
+
 // Catching itself repeating, backing up to where the walk went round, and looking for another way on.
 func TestBacktrack(t *testing.T) {
 	// "ha ha ..." loops; the other two lines leave the loop after "ha "

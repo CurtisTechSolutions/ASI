@@ -131,6 +131,20 @@ class Thought:
             "labels": list(self.labels), "node_ids": list(self.node_ids), "step_costs": list(self.step_costs),
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Thought":
+        """A thought read back from :meth:`to_dict` (what a streamed turn carries), questions and all."""
+        return cls(
+            trigger=str(d.get("trigger", ASKED)), at=int(d.get("at", -1)), about=str(d.get("about", "")),
+            text=str(d.get("text", "")), depth=int(d.get("depth", 0)), stopped=str(d.get("stopped", STOPPED_NOTHING)),
+            then=str(d.get("then", THEN_END)), taught=int(d.get("taught", -1)), handed_over=int(d.get("handed_over", -1)),
+            cost=float(d.get("cost", 0.0)), probability=float(d.get("probability", 1.0)),
+            expanded=int(d.get("expanded", 0)),
+            questions=[cls.from_dict(q) for q in (d.get("questions") or []) if isinstance(q, dict)],
+            labels=[str(x) for x in (d.get("labels") or [])], node_ids=[int(x) for x in (d.get("node_ids") or [])],
+            step_costs=[float(x) for x in (d.get("step_costs") or [])],
+        )
+
 
 def questions_in(text: str) -> list[tuple[int, str]]:
     """The sentences of ``text`` that end in a question mark, each with the index it starts at.

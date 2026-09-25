@@ -75,6 +75,45 @@ def py(*args, model, expect=0, env=None):
     return json.loads(proc.stdout) if proc.stdout.strip() else {"error": proc.stderr.strip()}
 
 
+def _lines(cmd, expect=0):
+    proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=600)
+    if proc.returncode != expect:
+        raise AssertionError(f"{' '.join(cmd)}\nexit {proc.returncode}\n--- stdout ---\n{proc.stdout[-4000:]}\n--- stderr ---\n{proc.stderr[-4000:]}")
+    return [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+
+
+def go_lines(*args, model):
+    """``--json`` output as JSON Lines (a streamed command): one document per line."""
+    return _lines([BINARY, "--json", "--exact", "--model", model, *[str(a) for a in args]])
+
+
+def py_lines(*args, model):
+    return _lines([sys.executable, "-m", "radixnet", "--json", "--model", model, *[str(a) for a in args]])
+
+
+def same_stream(test, a, b):
+    """Two streamed conversations say the same things in the same order: event for event, the texts equal and
+    the costs within tolerance, and the same document at the end."""
+    test.assertEqual([e["event"] for e in a], [e["event"] for e in b])
+    for x, y in zip(a, b):
+        if x["event"] == "done":
+            test.assertEqual(x["transcript"], y["transcript"])
+            test.assertEqual([t["rethink"] for t in x["turns"]], [t["rethink"] for t in y["turns"]])
+            test.assertEqual(x["repeats"], y["repeats"])
+            continue
+        test.assertEqual((x["index"], x["speaker"]), (y["index"], y["speaker"]), (x, y))
+        if x["event"] == "turn":
+            for key in ("text", "context", "reply", "fresh", "given", "repeat", "stutter", "rethink",
+                        "candidates", "skipped", "vetoed", "labels", "node_ids", "reached_end"):
+                test.assertEqual(x["turn"][key], y["turn"][key], (key, x["turn"]["text"]))
+            test.assertLessEqual(abs(x["turn"]["cost"] - y["turn"]["cost"]), 1e-9)
+        elif x["event"] in ("draft", "found"):
+            test.assertEqual({k: v for k, v in x.items() if k != "cost"}, {k: v for k, v in y.items() if k != "cost"})
+            test.assertLessEqual(abs(x["cost"] - y["cost"]), 1e-9)
+        else:
+            test.assertEqual(x, y)
+
+
 def load_json(path):
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -177,6 +216,25 @@ class TestGoParity(unittest.TestCase):
         self.assertTrue([t for t in a["turns"] if t["rethink"]], a["transcript"])
         self.assertTrue(a["taught"], a["transcript"])
         self.assertEqual(a["taught"], b["taught"])
+
+    def test_the_same_conversation_streamed(self):
+        # the stream is a view of the same conversation: both sides look at the same contexts, catch themselves
+        # on the same drafts, back up to the same cuts, find (or fail to find) the same ways on, and speak the
+        # same turns - and the last line is the document the plain command answers with
+        for extra in ([], ["--explore", 0], ["--allow-word-repeats"], ["--opening", "the cat sat on the mat", "--k", 3]):
+            with self.subTest(extra=extra):
+                a = py_lines("converse", "--turns", 12, "--stream", *extra, model=self.py_model)
+                b = go_lines("converse", "--turns", 12, "--stream", *extra, model=self.go_model)
+                same_stream(self, a, b)
+                self.assertEqual(a[-1]["event"], "done")
+                kinds = {e["event"] for e in a}
+                self.assertIn("turn", kinds)
+                if not extra:
+                    self.assertTrue({"draft", "caught", "backtrack"} <= kinds, kinds)
+                plain = py("converse", "--turns", 12, *extra, model=self.py_model)
+                self.assertEqual({k: v for k, v in a[-1].items() if k != "event"}, plain)
+                spoken = [e["turn"] for e in a if e["event"] == "turn"]
+                self.assertEqual(spoken, plain["turns"])
 
     def test_each_side_loads_and_continues_the_other(self):
         # Python loads the Go file: same predictions as its own model

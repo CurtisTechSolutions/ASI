@@ -70,7 +70,7 @@ D-055 chat with an LLM
 D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
 
 **Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood ·
-D-068 the BACK sentinel: where it goes round, learned
+D-068 the BACK sentinel: where it goes round, learned · D-081 the stream: turns commit, the window streams apart
 
 **Part XIII — Counters** · D-064 the odometer
 
@@ -1351,12 +1351,17 @@ against a threat model that does not apply, at the cost of the use case.
 * Removing the cap forced the streaming work (D-043) — an unbounded archive
   cannot be held in memory, so the Go engine reads entries on demand and trains
   in chunks.
-* JSON upload forms, which must be parsed whole, are still capped (512 MB in
-  the Go server).
+* The JSON upload forms, which carry the file inline, are read whole - held in
+  memory while they are parsed, on every server - but not capped either. The
+  Go server's 512 MB cap on them went on 2026-09-24, the day the Rust port's
+  16 MiB request cap was lifted from `/api/uploads` (its multipart and raw
+  uploads stream to disk, as the Go server's do). No server refuses an upload
+  for its size; what holds a corpus is the memory its *training* takes.
 * If this were ever exposed beyond localhost, this decision would need
   revisiting first. See Q-6.
 
-**Lives in** `radixnet/archive.py`, `radixnet/api.py`
+**Lives in** `radixnet/archive.py`, `radixnet/api.py`, `go/server/http.go`, `go/server/uploads.go`,
+`rust/src/http.rs`, `rust/src/multipart.rs`
 
 ---
 
@@ -2276,6 +2281,61 @@ property of the graph.
 
 **Lives in** `radixnet/graph.py::observe_back`, `radixnet/search.py::onward`,
 `radixnet/dialogue.py::teach_back`, `go/radixnet/graph.go`, `go/radixnet/search.go`
+
+---
+
+### D-081 — A streamed conversation commits by the **turn**, and streams the window apart from it
+
+**Status** Accepted · 2026-09-24 · **Layer** inference / transport · **Extends** D-062, D-063, D-080
+
+**Context** The conversation was answered whole: `converse` returned its turns when the last one was spoken, and
+nothing could be watched before that - neither the turns as they came nor the one thing this model does that a
+plain generator does not, backing out of a repeat (D-062).  Streaming the text as it is produced, the way a
+language model streams tokens, runs into the backtrack: text already shown would have to be taken back.  The
+obvious fix - stream the text but hold back a window of the last few words for the backtracking to rewrite -
+rests on the tail being the only thing that changes.
+
+**Decision** Two layers, split by what is certain.  A `turn` is streamed the moment it is spoken and is
+never taken back: `converse` only ever adds turns, so the turn events *are* the answer and a client appends
+them as they arrive.  Everything between two turns is the **window** - what the voice does before it commits
+and what a backtrack may still rewrite - and it is streamed apart, as its own events: `look` (the context it
+continues, losing a word at a time), `draft` (what it was about to say), `caught` (the words it caught itself
+on and what it keeps), `backtrack` (each step back and the cut it explores from), `found` or `stuck`.  The
+window is the whole turn being spoken, not a fixed number of words, because a draft is not only rewritten at
+its tail: a stutter is cut wherever the walk went round, a heard line is cut a word further back per step, and
+a voice that finds nothing from any cut drops the draft altogether for a shorter context or a fresh text.
+Nothing in a draft is certain until the turn is spoken, so nothing in it is streamed as the answer.
+
+The stream is a view, not a second procedure: the events are emitted from inside the one search `converse`
+always ran, the turns returned are the turns streamed, and a streamed conversation teaches the graph what a
+silent one does.  The same events, with the same fields, come out of Python, Go and Rust (`StreamFn`,
+`Stream func(map[string]any)`, `dyn FnMut(Json)`), and the parity tests hold the three to one stream.
+
+**Transport** `converse --stream` on the three CLIs (the window dimmed and indented above the turn it belongs
+to; with `--json`, JSON Lines with the usual document last), `POST /api/converse/stream` on the three servers
+(`application/x-ndjson`, chunked, the headers waiting for the first event so a refused request is still an
+ordinary 400, a failure after the first line the stream's last event) and the Converse tab's "Stream" (the
+draft with what it backed out of struck through and the way on underlined, then the turn committed).
+
+**Alternatives rejected**
+* **A hold-back window of N words.** It commits text that a rethink can still discard: the draft's beginning
+  is not safe either, and a client would need a retraction event for the "committed" text, which is the
+  problem the window was meant to remove.
+* **Streaming the walk step by step** (a node at a time inside the search).  The sample walk could, the beam
+  cannot without inventing a second search, and either way the repeat check runs on the whole candidate, so the
+  steps would be retracted as often as shown.  What a reader wants to see is the backing up, and that is what
+  the window shows.
+* **A `stream: true` flag on `/api/converse`.** Three route tables that map a path to a document; a route that
+  writes to the socket is a different kind of route, and a path of its own says so.
+
+**Consequences** A client that wants only the answer ignores everything but `turn` and loses nothing; one that
+wants to see the model think reads the window.  The conversation holds the model lock while it streams, as it
+did while it did not.  One rethink per turn (D-062) keeps the window short.
+
+**Lives in** `radixnet/dialogue.py` (`StreamFn`, `STREAM_EVENTS`), `radixnet/api.py` (`StreamedResponse`,
+`_send_stream`, `/api/converse/stream`), `radixnet/cli.py` (`ConversePrinter`), `go/radixnet/dialogue.go`,
+`go/server/http.go` (`streamResponse`, `writeStream`), `rust/src/dialogue.rs`, `rust/src/http.rs` (`Sink`,
+`stream_route`), `frontend/src/stream.js`, `frontend/src/components/ConversePanel.jsx`
 
 ---
 

@@ -14,7 +14,8 @@ and Go servers can serve the page with zero npm steps. **Rebuild and recommit
 |---|---|
 | `main.jsx` | the React root |
 | `App.jsx` | the header, the status bar and the tabbed panels |
-| `api.js` | the fetch wrapper — JSON, and `{"error": ...}` turned into a thrown error |
+| `api.js` | the fetch wrapper — JSON, and `{"error": ...}` turned into a thrown error; `converseStream` reads a route that answers as JSON Lines, one event at a time |
+| `stream.js` | a streamed conversation, pure: `LineParser` cuts the chunks into whole lines, `applyEvent` folds the events of the turn being spoken into what the live bubble shows (`test/stream.test.mjs`) |
 | `util.js` | parsing and formatting helpers (`fmtInt`, `fmtNum`, `fmtBytes`, `fmtCounter`, `asArray`, `parseInteger`, `splitLines`, …) |
 | `thinking.js` | the THINK sentinel's records read for display: the one-line summary of a thought, the questions in a text, the request bodies of `/api/think` and `/api/ollama/think`, which node ids are sentinels. Pure, and tested by `../test/thinking.test.mjs` |
 | `audio.js` | microphone capture, Web Speech dictation, and WAV encoding for the Speech panel — decodes with the Web Audio API, mixes to mono, resamples to 16 kHz and writes 16-bit PCM, so the server never needs ffmpeg |
