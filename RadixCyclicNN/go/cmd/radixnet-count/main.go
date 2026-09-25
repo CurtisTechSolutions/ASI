@@ -292,7 +292,7 @@ commands:
   talk       talk to the model in today's format: messages in, a reply out, the thinking first, streamed
   chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
-  ollama     a corpus written to order, the adversarial review and a thinking model's thoughts (models | corpus | review | think)
+  ollama     a corpus written to order, the adversarial review, the copy editor and a thinking model's thoughts (models | corpus | review | correct | think)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   mcp        speak MCP on stdin / stdout: the tools and the network itself, for any MCP client
@@ -1189,6 +1189,150 @@ func toF(v any) float64 {
 	return 0
 }
 
+// sayTurn prints one spoken turn of a conversation, as the transcript prints it: the line, its numbers and
+// flags, and what the voice noticed about a repeat of its own.
+func sayTurn(t *radixnet.Turn) {
+	fmt.Printf("%s: %s\n", t.Speaker, t.Text)
+	detail := fmt.Sprintf("    cost %.4f  p %.4g", t.Cost, t.Probability)
+	if t.Context != "" {
+		detail += "  picked up " + quote(t.Context)
+	}
+	var flags []string
+	if t.Given {
+		flags = append(flags, "given")
+	}
+	if t.Fresh && !t.Given {
+		flags = append(flags, "new topic")
+	}
+	if t.Repeat {
+		flags = append(flags, "repeat")
+	}
+	if t.Stutter {
+		flags = append(flags, "repeats itself")
+	}
+	if t.Vetoed > 0 {
+		flags = append(flags, fmt.Sprintf("%d vetoed", t.Vetoed))
+	}
+	if len(flags) > 0 {
+		detail += "  [" + strings.Join(flags, ", ") + "]"
+	}
+	fmt.Println(detail)
+	if r := t.Rethink; r != nil {
+		caught := fmt.Sprintf("repeating %s", quote(r.Noticed))
+		if r.Kind == "stutter" {
+			caught = fmt.Sprintf("saying %s twice", quote(r.Noticed))
+		}
+		thought := "    caught itself " + caught
+		switch {
+		case r.Steps == 0:
+			thought += "; the words it picked up, not its own"
+		case r.Found:
+			thought += fmt.Sprintf("; kept %s and found another way on in %d path(s)", quote(r.Cut), r.Explored)
+		default:
+			ending := "took a lesser answer"
+			if t.Repeat {
+				ending = "said it anyway"
+			}
+			thought += fmt.Sprintf("; kept %s, weighed %d path(s), %s", quote(r.Cut), r.Explored, ending)
+		}
+		fmt.Println(thought)
+		if r.Thought != nil {
+			fmt.Printf("    %s\n", radixnet.Summarize(r.Thought))
+		}
+	}
+}
+
+// emitLine writes one compact JSON object on its own line of stdout: the JSON Lines a streamed command writes.
+func emitLine(doc any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(doc); err != nil {
+		fail("%v", err)
+	}
+}
+
+// isTerminal reports whether stdout is a terminal (where the window of a streamed conversation is dimmed).
+func isTerminal() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// A conversePrinter is the Stream of `converse -stream`: the conversation as it happens.
+//
+// A "turn" is printed the way the transcript always was (sayTurn) the moment it is spoken.  The window between
+// two turns - what the voice does before it commits: the context it continues, the draft it caught itself on,
+// where it backed up to, what it found - is printed as it happens too, indented and dimmed on a terminal, so the
+// answer stands apart from the thinking that may still be rewritten.  With --json every event is one JSON line
+// on stdout instead (radixnet.Stream).
+type conversePrinter struct {
+	dimmed  bool
+	looking *string // the context the current turn last continued
+}
+
+func newConversePrinter() *conversePrinter {
+	return &conversePrinter{dimmed: !jsonMode && isTerminal()}
+}
+
+// dim prints a line that belongs to the window rather than the answer.
+func (p *conversePrinter) dim(text string) {
+	if p.dimmed {
+		text = "\x1b[2m" + text + "\x1b[0m"
+	}
+	fmt.Println(text)
+}
+
+func (p *conversePrinter) event(event map[string]any) {
+	if jsonMode {
+		emitLine(event)
+		return
+	}
+	text := func(key string) string { s, _ := event[key].(string); return s }
+	number := func(key string) int {
+		switch v := event[key].(type) {
+		case int:
+			return v
+		case float64:
+			return int(v)
+		}
+		return 0
+	}
+	switch event["event"] {
+	case "turn":
+		p.looking = nil
+		if t, ok := event["turn"].(*radixnet.Turn); ok {
+			sayTurn(t)
+		}
+	case "look":
+		from := text("from")
+		if p.looking != nil { // the first look of a turn is the context the turn will say it picked up
+			tried := "changes the subject"
+			if from != "" {
+				tried = "tries " + quote(from)
+			}
+			p.dim(fmt.Sprintf("    nothing new follows %s; %s", quote(*p.looking), tried))
+		}
+		p.looking = &from
+	case "draft":
+		p.dim(fmt.Sprintf("    was about to say %s", quote(text("text"))))
+	case "caught":
+		caught := fmt.Sprintf("repeating %s", quote(text("noticed")))
+		if text("kind") == "stutter" {
+			caught = fmt.Sprintf("saying %s twice", quote(text("noticed")))
+		}
+		line := "    caught itself " + caught
+		if text("cut") == "" {
+			line += "; the words it picked up, not its own"
+		}
+		p.dim(line)
+	case "backtrack":
+		p.dim(fmt.Sprintf("    backs up to %s and weighs up to %d paths (step %d)", quote(text("cut")), number("wider"), number("step")))
+	case "found":
+		p.dim(fmt.Sprintf("    found another way on: %s (%d path(s) weighed)", quote(text("text")), number("explored")))
+	case "stuck":
+		p.dim(fmt.Sprintf("    nothing new in %d path(s)", number("explored")))
+	}
+}
+
 func cmdConverse(args []string) {
 	fs := subFlagSet("converse")
 	opening := fs.String("opening", "", "the first line, spoken as given")
@@ -1210,6 +1354,7 @@ func cmdConverse(args []string) {
 	thinkDepth := fs.Int("think-depth", radixnet.ThinkDepth, "how deep a thought may question itself (0: never)")
 	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
+	stream := fs.Bool("stream", false, "print the conversation as it happens: each turn the moment it is spoken, and before it what the voice does - the context it continues, the draft it caught itself on, where it backed up to, what it found (with --json: one JSON object per line, the usual document last, as {\"event\": \"done\", ...})")
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
@@ -1218,6 +1363,13 @@ func cmdConverse(args []string) {
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
 	opts.AvoidWordRepeats, opts.Explore, opts.Learn = !*allowWordRepeats, *explore, !*noLearn
 	opts.Think, opts.ThinkDepth = !*noThink, *thinkDepth
+	// --stream: the conversation is printed as it happens - each turn the moment it is spoken, and before it
+	// what the voice does: the context it continues, a draft it catches itself on, where it backs up to
+	var live *conversePrinter
+	if *stream {
+		live = newConversePrinter()
+		opts.Stream = live.event
+	}
 	names := []string{}
 	for _, s := range strings.Split(*speakers, ",") {
 		if t := strings.TrimSpace(s); t != "" {
@@ -1287,57 +1439,18 @@ func cmdConverse(args []string) {
 		doc["saved"] = saveModel(m)
 	}
 	if jsonMode {
+		if live != nil {
+			// JSON Lines: the events went out as they happened, and the usual document is the last line
+			doc["event"] = "done"
+			emitLine(doc)
+			return
+		}
 		emit(doc)
 		return
 	}
-	for _, t := range turnsOut {
-		fmt.Printf("%s: %s\n", t.Speaker, t.Text)
-		detail := fmt.Sprintf("    cost %.4f  p %.4g", t.Cost, t.Probability)
-		if t.Context != "" {
-			detail += "  picked up " + quote(t.Context)
-		}
-		var flags []string
-		if t.Given {
-			flags = append(flags, "given")
-		}
-		if t.Fresh && !t.Given {
-			flags = append(flags, "new topic")
-		}
-		if t.Repeat {
-			flags = append(flags, "repeat")
-		}
-		if t.Stutter {
-			flags = append(flags, "repeats itself")
-		}
-		if t.Vetoed > 0 {
-			flags = append(flags, fmt.Sprintf("%d vetoed", t.Vetoed))
-		}
-		if len(flags) > 0 {
-			detail += "  [" + strings.Join(flags, ", ") + "]"
-		}
-		fmt.Println(detail)
-		if r := t.Rethink; r != nil {
-			caught := fmt.Sprintf("repeating %s", quote(r.Noticed))
-			if r.Kind == "stutter" {
-				caught = fmt.Sprintf("saying %s twice", quote(r.Noticed))
-			}
-			thought := "    caught itself " + caught
-			switch {
-			case r.Steps == 0:
-				thought += "; the words it picked up, not its own"
-			case r.Found:
-				thought += fmt.Sprintf("; kept %s and found another way on in %d path(s)", quote(r.Cut), r.Explored)
-			default:
-				ending := "took a lesser answer"
-				if t.Repeat {
-					ending = "said it anyway"
-				}
-				thought += fmt.Sprintf("; kept %s, weighed %d path(s), %s", quote(r.Cut), r.Explored, ending)
-			}
-			fmt.Println(thought)
-			if r.Thought != nil {
-				fmt.Printf("    %s\n", radixnet.Summarize(r.Thought))
-			}
+	if live == nil {
+		for _, t := range turnsOut {
+			sayTurn(t)
 		}
 	}
 	if len(turnsOut) == 0 {

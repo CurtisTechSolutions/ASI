@@ -119,6 +119,7 @@ export default function PredictPanel({ status }) {
   // the traversal, the sampling filters and the diversity are site-wide (the Settings tab)
   const { network, search } = useSiteSettings();
   const [guard, setGuard] = useStoredState("predict.guard", true);
+  const [provenance, setProvenance] = useStoredState("predict.provenance", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -166,6 +167,7 @@ export default function PredictPanel({ status }) {
         step_penalty: parseNumber(stepPenalty, 0),
         temperature: parseNumber(temperature, 1),
         guard,
+        provenance,
         ...network.body,
         ...tuning,
       };
@@ -277,6 +279,13 @@ export default function PredictPanel({ status }) {
           hint="the best continuation it does not veto; none survives, none comes back"
           checked={guard}
           onChange={setGuard}
+        />
+        <CheckField
+          label="Say why it vetoed"
+          hint="the provenance of each veto: the rule, the reasons and the blamed fragments; off, the guard reports how many it stopped"
+          checked={provenance}
+          onChange={setProvenance}
+          disabled={!guard}
         />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading || Boolean(searchProblem)}>

@@ -125,3 +125,74 @@ func TestPredictAndConverseGoThroughTheGuard(t *testing.T) {
 		t.Fatalf("the report adds them up: %d vs %+v", refusals, guard["refusals"])
 	}
 }
+
+func TestTheGuardCanKeepItsProvenanceToItself(t *testing.T) {
+	e := guardEnv(t)
+	e.blameFailures(nil)
+	status, doc := e.post("/api/generate", map[string]any{"count": 3, "mode": "beam", "max_length": 40, "provenance": false})
+	if status != 200 {
+		t.Fatalf("generate: %d %+v", status, doc)
+	}
+	guard, ok := doc["guard"].(map[string]any)
+	if !ok || guard["on"] != true || guard["provenance"] != false {
+		t.Fatalf("the guard still reports itself, without provenance: %+v", doc["guard"])
+	}
+	hasKeys(t, guard, "judged", "vetoed", "negative", "config", "candidates", "kept", "asked", "rate")
+	for _, key := range []string{"verdicts", "rejected"} {
+		if _, ok := guard[key]; ok {
+			t.Fatalf("%q is not listed without provenance: %+v", key, guard)
+		}
+	}
+	if toFloat(guard["judged"]) != toFloat(guard["candidates"]) || toFloat(guard["vetoed"])+toFloat(guard["kept"]) != toFloat(guard["judged"]) {
+		t.Fatalf("the counts add up: %+v", guard)
+	}
+	if guard["config"].(map[string]any)["provenance"] != false {
+		t.Fatalf("the config says so: %+v", guard["config"])
+	}
+	// the vetoes still apply: the same texts as with provenance
+	status, full := e.post("/api/generate", map[string]any{"count": 3, "mode": "beam", "max_length": 40})
+	if status != 200 {
+		t.Fatalf("generate: %d %+v", status, full)
+	}
+	if len(full["samples"].([]any)) != len(doc["samples"].([]any)) || full["guard"].(map[string]any)["provenance"] != nil {
+		t.Fatalf("the same answer, whole by default: %+v vs %+v", full, doc)
+	}
+	if _, ok := full["guard"].(map[string]any)["verdicts"]; !ok {
+		t.Fatalf("the whole report lists the verdicts: %+v", full["guard"])
+	}
+	// predict and converse read the flag too
+	status, doc = e.post("/api/predict", map[string]any{"prefix": "the ", "mode": "beam", "k": 4, "provenance": false})
+	if status != 200 || doc["guard"].(map[string]any)["provenance"] != false {
+		t.Fatalf("predict: %d %+v", status, doc["guard"])
+	}
+	status, doc = e.post("/api/converse", map[string]any{"opening": corpus[0], "turns": 3, "provenance": false})
+	if status != 200 || doc["guard"].(map[string]any)["provenance"] != false {
+		t.Fatalf("converse: %d %+v", status, doc["guard"])
+	}
+	hasKeys(t, doc["guard"].(map[string]any), "judged", "refusals")
+	// the server-wide setting, and one answer overriding it
+	status, settings := e.post("/api/negative/settings", map[string]any{"provenance": false})
+	if status != 200 || settings["settings"].(map[string]any)["provenance"] != false {
+		t.Fatalf("settings: %d %+v", status, settings)
+	}
+	_, tab := e.get("/api/negative")
+	if tab["settings"].(map[string]any)["provenance"] != false {
+		t.Fatalf("GET /api/negative reports it: %+v", tab["settings"])
+	}
+	_, doc = e.post("/api/generate", map[string]any{"count": 2, "mode": "beam", "max_length": 40})
+	if doc["guard"].(map[string]any)["provenance"] != false {
+		t.Fatalf("the server's setting applies: %+v", doc["guard"])
+	}
+	_, doc = e.post("/api/generate", map[string]any{"count": 2, "mode": "beam", "max_length": 40, "provenance": true})
+	if _, ok := doc["guard"].(map[string]any)["verdicts"]; !ok {
+		t.Fatalf("one answer may ask for the provenance back: %+v", doc["guard"])
+	}
+	e.post("/api/negative/settings", map[string]any{"provenance": true})
+	_, tab = e.get("/api/negative")
+	if tab["settings"].(map[string]any)["provenance"] != true {
+		t.Fatalf("and back on: %+v", tab["settings"])
+	}
+	if status, _ := e.post("/api/generate", map[string]any{"count": 1, "provenance": "yes"}); status != 400 {
+		t.Fatalf("a non-boolean provenance is a 400: %d", status)
+	}
+}

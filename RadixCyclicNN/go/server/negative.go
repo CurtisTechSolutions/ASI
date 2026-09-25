@@ -113,13 +113,21 @@ func (s *Service) NegativeStatus() (map[string]any, error) {
 			"reasons":  m.Reasons(),
 			"journal":  m.Recent(20),
 			"weights":  m.G.NegativeWeightConfig(),
-			"settings": map[string]any{"threshold": m.Neg.Threshold, "min_coverage": m.Neg.MinCoverage},
+			"settings": s.negativeSettings(m),
 		}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out.(map[string]any), nil
+}
+
+// negativeSettings is how strictly the negative network judges, and whether
+// the guard's vetoes carry their provenance.  Call it with the model lock held.
+func (s *Service) negativeSettings(m *radixnet.Model) map[string]any {
+	return map[string]any{
+		"threshold": m.Neg.Threshold, "min_coverage": m.Neg.MinCoverage, "provenance": s.guardConfig.Provenance,
+	}
 }
 
 func negativeResult(m *radixnet.Model, records []map[string]any, extra map[string]any) map[string]any {
@@ -252,8 +260,10 @@ func (s *Service) NegativeForget(reason string, factor float64) (map[string]any,
 	return out.(map[string]any), nil
 }
 
-// NegativeSettings changes how strictly the negative network judges and the scales of its weight function.
-func (s *Service) NegativeSettings(threshold, minCoverage *float64, scales map[string]float64) (map[string]any, error) {
+// NegativeSettings changes how strictly the negative network judges, the scales
+// of its weight function, and whether the guard's vetoes carry their provenance
+// (the rule, the reasons and the fragments behind each) or only their count.
+func (s *Service) NegativeSettings(threshold, minCoverage *float64, scales map[string]float64, provenance *bool) (map[string]any, error) {
 	out, err := s.negativeMutate(func(m *radixnet.Model) (any, error) {
 		if threshold != nil {
 			m.Neg.Threshold = *threshold
@@ -261,13 +271,16 @@ func (s *Service) NegativeSettings(threshold, minCoverage *float64, scales map[s
 		if minCoverage != nil {
 			m.Neg.MinCoverage = *minCoverage
 		}
+		if provenance != nil {
+			s.guardConfig.Provenance = *provenance
+		}
 		if len(scales) > 0 {
 			if err := m.G.ConfigureNegative(scales); err != nil {
 				return nil, badRequest("%v", err)
 			}
 		}
 		return map[string]any{
-			"settings": map[string]any{"threshold": m.Neg.Threshold, "min_coverage": m.Neg.MinCoverage},
+			"settings": s.negativeSettings(m),
 			"weights":  m.G.NegativeWeightConfig(),
 			"stats":    m.Stats(),
 		}, nil
@@ -343,7 +356,7 @@ func toFloat(v any) float64 {
 
 func init() {
 	route("GET", "/api/negative", rNegative)
-	doc("GET", "/api/negative", "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the filter settings")
+	doc("GET", "/api/negative", "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the filter settings (threshold, min_coverage, provenance)")
 	route("POST", "/api/negative/blame", rNegativeBlame)
 	doc("POST", "/api/negative/blame", "teach it a failure: {texts | text, reason, severity, source, note, epochs} - the only call that adds structure to the negative network")
 	route("POST", "/api/negative/clear", rNegativeClear)
@@ -351,11 +364,11 @@ func init() {
 	route("POST", "/api/negative/judge", rNegativeJudge)
 	doc("POST", "/api/negative/judge", "why texts look like failures: {texts | text, threshold, min_coverage, spans} -> verdicts with risk, peak, coverage, the reasons and the fragments to blame")
 	route("POST", "/api/negative/filter", rNegativeFilter)
-	doc("POST", "/api/negative/filter", "the pair: the positive model writes, the negative one vetoes - {count, prefix, mode, max_length, temperature, over_sample, threshold, min_coverage, ratio, no_ratio, peak, strict, learn} or {texts} to judge given texts")
+	doc("POST", "/api/negative/filter", "the pair: the positive model writes, the negative one vetoes - {count, prefix, mode, max_length, temperature, over_sample, threshold, min_coverage, ratio, no_ratio, peak, strict, learn, provenance (false: verdicts carry the decision and the rule alone)} or {texts} to judge given texts")
 	route("POST", "/api/negative/forget", rNegativeForget)
 	doc("POST", "/api/negative/forget", "drop or fade the blame behind a reason: {reason, factor}")
 	route("POST", "/api/negative/settings", rNegativeSettings)
-	doc("POST", "/api/negative/settings", "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}")
+	doc("POST", "/api/negative/settings", "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale, provenance (whether the guard's vetoes on /api/generate, /api/predict and /api/converse say why, server-wide)}")
 	route("POST", "/api/negative/reset", rNegativeReset)
 	doc("POST", "/api/negative/reset", "forget every failure: {seed} -> a fresh negative network")
 	route("POST", "/api/negative/save", rNegativeSave)
@@ -527,6 +540,9 @@ func rNegativeFilter(rq *request) (int, any, error) {
 	if config.Reason, err = rq.f.optText("reason", "filtered"); err != nil {
 		return 0, nil, err
 	}
+	if config.Provenance, err = rq.f.flag("provenance", true); err != nil {
+		return 0, nil, err
+	}
 	o := radixnet.DefaultGenerateOptions()
 	if o.MaxLength, _, err = rq.f.integer("max_length", 60, &zero); err != nil {
 		return 0, nil, err
@@ -593,7 +609,11 @@ func rNegativeSettings(rq *request) (int, any, error) {
 		}
 		scales[name] = value
 	}
-	out, err := rq.svc.NegativeSettings(threshold, minCoverage, scales)
+	provenance, err := optionalFlag(rq.f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.NegativeSettings(threshold, minCoverage, scales, provenance)
 	if err != nil {
 		return 0, nil, err
 	}

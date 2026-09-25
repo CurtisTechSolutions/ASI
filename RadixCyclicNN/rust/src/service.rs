@@ -972,9 +972,11 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     let (kind, ..) = svc.active_kind();
     // the negative network guards the answer: the best continuation it does
     // not veto is the one that comes back, and when it vetoes every one the
-    // continuation is empty and `guard` says why (`guard: false` turns it off)
+    // continuation is empty and `guard` says why (`guard: false` turns it off;
+    // `provenance: false` keeps the vetoes' reasons out of the answer)
+    let provenance = crate::duo::maybe_flag(r, "provenance")?;
     let guarded = if r.flag("guard", true) {
-        svc.guard(|pair| -> Result<(crate::beam::Prediction, Json), String> {
+        svc.guard(provenance, |pair| -> Result<(crate::beam::Prediction, Json), String> {
             let found = pair.positive.predict(&prefix, &opts)?;
             let (ranked, verdicts) = pair.rank(&prefix, &found);
             let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
@@ -1043,22 +1045,27 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     };
     // the negative network guards the texts: the model is asked for
     // `over_sample` times as many and what the negative half recognises as
-    // failure never reaches the answer (fewer come back when it vetoed a lot)
+    // failure never reaches the answer (fewer come back when it vetoed a lot;
+    // `provenance: false` reports how many were vetoed, not which or why)
+    let provenance = crate::duo::maybe_flag(r, "provenance")?;
     let guarded = if r.flag("guard", true) {
-        svc.guard(|pair| -> Result<(Vec<crate::search::PathResult>, Json), String> {
-            let outcome = pair.generate(opts.count, &opts)?;
-            let report = crate::duo::guard_report(
-                pair,
-                &outcome.verdicts,
-                vec![
-                    ("candidates", Json::Int(outcome.candidates as i64)),
-                    ("kept", Json::Int(outcome.kept.len() as i64)),
-                    ("asked", Json::Int(outcome.asked as i64)),
-                    ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
-                ],
-            );
-            Ok((outcome.results, report))
-        })?
+        svc.guard(
+            provenance,
+            |pair| -> Result<(Vec<crate::search::PathResult>, Json), String> {
+                let outcome = pair.generate(opts.count, &opts)?;
+                let report = crate::duo::guard_report(
+                    pair,
+                    &outcome.verdicts,
+                    vec![
+                        ("candidates", Json::Int(outcome.candidates as i64)),
+                        ("kept", Json::Int(outcome.kept.len() as i64)),
+                        ("asked", Json::Int(outcome.asked as i64)),
+                        ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
+                    ],
+                );
+                Ok((outcome.results, report))
+            },
+        )?
     } else {
         None
     };
@@ -1761,7 +1768,9 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let path = entry.path();
-            if !path.is_file() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // a file still on its way in (a `.part`) is not an upload yet
+            if !path.is_file() || name.ends_with(".part") {
                 continue;
             }
             // an archive reports the lines of its text entries, not its bytes read as text
@@ -1769,16 +1778,10 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
                 rows.push(record);
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let lines = std::fs::read_to_string(&path)
-                .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
-                .unwrap_or(0);
-            rows.push(Json::obj([
-                ("name", Json::str(name)),
-                ("bytes", Json::Int(bytes as i64)),
-                ("lines", Json::Int(lines as i64)),
-            ]));
+            // a text file, counted a line at a time, whatever its size
+            if let Ok(record) = crate::multipart::record(&path) {
+                rows.push(record);
+            }
         }
     }
     Ok(Json::obj([("uploads", Json::Arr(rows))]))
@@ -1787,12 +1790,14 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
 /// `POST /api/uploads`: every form Python's `_r_upload` takes - JSON `{name,
 /// content | content_base64}` or `{files: [...]}`, `multipart/form-data`, or a
 /// raw body named by `?name=` - answered with the records of what was stored.
-fn upload(svc: &Arc<Service>, r: &Request) -> Answer {
+/// The route streams: the body is read as it arrives and a multipart part or
+/// a raw body goes straight to disk, so an archive may be of any size
+/// (`multipart::store_stream`, D-035).
+fn upload(svc: &Arc<Service>, r: &Request, body: &mut dyn std::io::Read) -> Answer {
     if svc.upload_dir.is_none() {
         return Err(ApiError::bad_request("no upload directory is configured"));
     }
-    let files = crate::multipart::Form::read(r, None)?.files()?;
-    crate::multipart::store_all(svc, &files)
+    crate::multipart::store_stream(svc, r, body)
 }
 
 fn upload_delete(svc: &Arc<Service>, r: &Request) -> Answer {
@@ -1953,7 +1958,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("POST", "/api/load", load);
     server.route("POST", "/api/reset", reset);
     server.route("GET", "/api/uploads", uploads);
-    server.route("POST", "/api/uploads", upload);
+    server.stream_route("POST", "/api/uploads", upload);
     server.route("POST", "/api/uploads/delete", upload_delete);
     server.route("GET", "/api/schedule", schedule);
     server.route("POST", "/api/schedule/preview", schedule_preview);

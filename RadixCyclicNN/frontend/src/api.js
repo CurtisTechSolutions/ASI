@@ -8,6 +8,7 @@
  */
 
 import { EventStreamParser } from "./sse.js";
+import { LineParser } from "./stream.js";
 
 /** Base URL prefix; empty by default so relative /api URLs work when the Python server serves dist. */
 export const API_BASE = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
@@ -59,6 +60,64 @@ async function request(method, path, body) {
 
 const get = (path) => request("GET", path);
 const post = (path, body = {}) => request("POST", path, body);
+
+/**
+ * POST to a route that streams its answer as JSON Lines (application/x-ndjson): every line is one event,
+ * handed to `onEvent` as it arrives, except the last - `{"event": "done", ...}` - which is the document the
+ * plain route answers with, and is what this resolves to. A request refused before anything was streamed is an
+ * ordinary 4xx (an ApiError, as everywhere else); a server without the route answers 404 the same way, so a
+ * caller can fall back to the plain route. An `{"event": "error"}` line - a failure after the stream began -
+ * rejects with its message.
+ */
+async function stream(path, body, onEvent) {
+  const init = {
+    method: "POST",
+    headers: { Accept: "application/x-ndjson, application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
+  let response;
+  try {
+    response = await fetch(API_BASE + path, init);
+  } catch (err) {
+    throw new ApiError(`Network error: ${err && err.message ? err.message : "request failed"}`);
+  }
+  const type = response.headers.get("Content-Type") || "";
+  if (!response.ok || !type.startsWith("application/x-ndjson")) {
+    const text = await response.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    const detail = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+    const serverError = data && typeof data === "object" && typeof data.error === "string" ? data.error : null;
+    throw new ApiError(serverError || (response.ok ? `the answer is not a stream (${detail})` : detail), response.status, data);
+  }
+  const parser = new LineParser();
+  let done = null;
+  const handle = (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.event === "error") throw new ApiError(String(event.error || "the stream failed"), response.status, event);
+    if (event.event === "done") done = event;
+    else onEvent(event);
+  };
+  if (response.body && typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { value, done: finished } = await reader.read();
+      if (finished) break;
+      for (const event of parser.feed(decoder.decode(value, { stream: true }))) handle(event);
+    }
+    for (const event of parser.feed(decoder.decode())) handle(event);
+  } else {
+    for (const event of parser.feed(await response.text())) handle(event);
+  }
+  for (const event of parser.end()) handle(event);
+  if (done === null) throw new ApiError("the stream ended before its last line");
+  return done;
+}
 
 /** Blob / File -> base64, in chunks so a long recording cannot blow the argument stack. */
 async function toBase64(blob) {
@@ -178,6 +237,12 @@ export const api = {
   /** The model converses with itself (or with the other kind in memory): turns of a dialogue. */
   converse: (body) => post("/api/converse", body),
   /**
+   * The same conversation as it happens: `onEvent` gets every event but the last (look, draft, caught,
+   * backtrack, found, stuck - the window a backtrack may still rewrite - and turn, the answer), and the
+   * promise resolves to the `done` document, which is what `converse` answers with.
+   */
+  converseStream: (body, onEvent) => stream("/api/converse/stream", body, onEvent),
+  /**
    * The model thinks (see ThinkPanel): one thought from the THINK sentinel, questioning itself where it has
    * learned to. Body: about, mode, k, beam, max_length, temperature, step_penalty, seed, depth, questions, learn.
    */
@@ -253,6 +318,8 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /** Letter-level corrections of the model's samples or `texts`; `blame` teaches the negative network the diff. */
+  ollamaCorrect: (body) => post("/api/ollama/correct", body),
   /**
    * A thinking model thinks about a prompt: questions, the thinking behind each answer, and - with `train` -
    * a job teaching that thinking to the network as thoughts. Body: prompt, lines, think, temperature, url,

@@ -61,7 +61,7 @@ does what.
 |---|---|
 | `tutor.py` | automated English lessons: the tutor sets the exercise, the network completes it, the tutor marks it |
 | `recall.py` | what the network remembers of what it was shown — the recall tutor for speech and images |
-| `dialogue.py` | the model conversing with itself, with stutter detection and backtracking |
+| `dialogue.py` | the model conversing with itself, with stutter detection and backtracking - and the stream of events a conversation is watched through as it happens (`stream=`: the turns as they are spoken, and the window a backtrack may still rewrite between them) |
 | `chat.py` | the model in conversation with an LLM, and the LLM marking the conversation |
 | `codegen.py` | code generation with a sandbox, an LLM teacher / judge and 2NRL rewards |
 | `agent.py` | tool use: the network browses and solves on its own, an LLM sets the bar and teaches |

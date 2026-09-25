@@ -734,6 +734,7 @@ fn run() -> Result<(), String> {
                         spans: args.usize("spans", 3)?,
                         learn: args.on("learn"),
                         reason: args.str("reason", "filtered"),
+                        provenance: !args.on("no-provenance"),
                     };
                     let given = read_texts(&args)?;
                     let mut pair = Filter::new(&mut positive, &mut negative, config)?;

@@ -64,7 +64,8 @@ RadixCyclicNN/
                             and the guard: the same pair on every output path (section 24.7)
     dialogue.py             Turn, Heard, stutter, backtrack, teach_back, Rethink, reply, converse, repeats -
                             the model conversing with itself, thinking twice about a repeat, and teaching the
-                            graph where it goes round (section 22)
+                            graph where it goes round (section 22); StreamFn, the events a conversation is
+                            watched through as it happens (section 22.1)
     thinking.py             Thought, think, think_on, questions_in, place, summarize - the THINK sentinel at
                             work: what makes the model think, what it thinks, how a thought questions itself
                             and what it triggers when it stops (section 36)
@@ -692,7 +693,7 @@ output only, one JSON document on stdout).
 | `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path; beam: top / bottom tables |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam` | prints samples (#, cost, probability, reached END, text) |
 | `score` | `--text` or `--data FILE` | log-prob per text |
-| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript` |
+| `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out`, `--stream` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript`. `--stream` prints the conversation as it happens (section 22.1): each turn the moment it is spoken and, dimmed on a terminal, the window before it - the context it continues, the draft it caught itself on, where it backed up to, what it found; with `--json` one JSON object per line and the document last, as `{"event": "done", ...}` |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
 | `compress` | `--out` | compresses and saves, prints merges |
@@ -727,6 +728,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode` |
 | POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search |
 | POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn","think","think_depth"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22); `think` (default on) has a voice that caught itself repeating think before it backs up, `think_depth` deep, and its `rethink` carries the `thought` (section 36) |
+| POST `/api/converse/stream` | the same body as `/api/converse` | the same conversation as it happens (section 22.1): `application/x-ndjson`, one JSON object per line - `look` / `draft` / `caught` / `backtrack` / `found` / `stuck` (the window) and `turn` (the answer), each with `index` and `speaker`, then `{"event": "done", ...}` with the `/api/converse` document; a request refused before the first line is an ordinary 400, a failure after it the last line `{"event": "error", "error"}`. `ApiHandler._send_stream` writes it chunked, the headers waiting for the first event (`StreamedResponse`) |
 | POST `/api/think` | `{"about","mode","k","beam","max_length","temperature","step_penalty","seed","depth","questions","learn"}` | `{"kind", **Thought.to_dict()}` — one thought from the `THINK` sentinel (`thinking.think`, section 36): `about` thinks at the node where that text ends and teaches the model to stop and think there (`learn`, default on - a thought changes the model); `depth` / `questions` bound how it questions itself; 400 for a mode, a depth or a node that is not one |
 | POST `/api/score` | `{"text"}` | score dict |
 | GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","think_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
@@ -777,7 +779,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TrainPanel.jsx` — textarea (one text per line), epochs, lr, start / stop; live epoch table (loss, perplexity, nodes, compression).
 * `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
 * `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`).
-* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Learn where it goes round" (`learn`), "Think before backing up" (`think`) with its "Think depth" (`think_depth`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked.
+* `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Learn where it goes round" (`learn`), "Think before backing up" (`think`) with its "Think depth" (`think_depth`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked. "Stream" (on by default) runs `POST /api/converse/stream` instead (`api.converseStream`, section 22.1): every `turn` event is appended the moment it is spoken, and while a voice speaks a `LiveTurn` sits at the top of the list - the draft it caught itself on with what it backed out of struck through and the way on it found underlined, its meta line saying what it is doing (`applyEvent` in `src/stream.js` folds the events into that state; `LineParser` there cuts the chunks into lines, both with tests in `test/stream.test.mjs`). A committed turn keeps the draft it caught itself on in its meta line. A server without the route answers 404 and the panel falls back to `POST /api/converse`.
 * `ThinkPanel.jsx` — **Think** (section 36): one thought per press - "About" (think at the node where a text ends, and with "Learn where it thinks" teach the model to stop and think there), mode (beam / sample), K, max length, depth, questions, and temperature / seed for sample - through `POST /api/think`; the thoughts are listed newest first, each a `ThoughtView`: its summary, the thought, the trigger, the node, how it stopped, what it triggered, what it taught, its cost and the path from `<think>` as chips, with the questions it asked itself nested one level deeper each. A model taught no thoughts says so and points at the Ollama tab's thinking cards.
 * `ThoughtView.jsx` + `src/thinking.js` — the thought records read for display: `ThoughtView` (a thought in full, recursive over its questions) and `ThoughtLine` (the 💭 line under a Converse or Chat turn whose rethink thought before backing up); `thinking.js` holds the pure helpers - `summarizeThought` (radixnet.thinking.summarize's wording), `questionsIn` / `questionRuns` (radixnet.thinking.questions_in, to mark the questions in an LLM's thinking), the request builders for `/api/think` and `/api/ollama/think`, `isSentinel` (node ids 0-3) - tested with `node --test` in `test/thinking.test.mjs`.
 * `ChatPanel.jsx` — the model in conversation with an LLM that marks it (section 28): the settings, the live transcript, the table of conversations and the report card. Its transcript is **newest first** too - a new exchange is appended to the top of the `<ol reversed>` and pushes the older ones down, so a running conversation never has to be scrolled to (the partner's line stays directly above the reply it drew) - and a line above it says how many replies were duplicates punished with the failures.
@@ -897,7 +899,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
   faults it produces and what reaches the negative network, and the two CLI commands and two endpoints. Needs
   neither Pillow nor a transcriber, so nothing in it is skipped.
 * `test_thinking.py` — `questions_in` (sentences ending in `?`, a terminator run with no sentence, a comma question), `place` (the node cut so the prefix ends there; an unknown text and an empty prefix place nowhere), `think` (a model taught no thoughts has nothing to think with; asking about a text teaches the node to think and ends; learning off writes nothing; `think_on` teaches thoughts from `THINK` and not from `START`, and the questions they asked themselves; a thought questions itself where the model learned to think, once, one level down, saying something new, bounded by depth and count; a thought out of a repeat hands over to `BACK`; validation; the model file keeps its thoughts), `POST /api/think` and the conversation's thoughts, the `think` and `converse --no-think` commands.
-* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation.
+* `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation; `stream` (section 22.1): the turns streamed are the turns returned, the window between two turns belongs to the one that follows and shows the backing up event for event against the rethink record, a `backtrack` streamed on its own, and streaming changing nothing (the same turns and the same graph afterwards). `test_api.py::test_converse_stream` reads the route's JSON Lines, `test_cli.py` the `--stream` output in both modes, and the Go / Rust sides are held to the same events by `test_go_parity.py::test_the_same_conversation_streamed` and `test_rust_parity_dialogue.py`.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 
 ---
@@ -929,9 +931,9 @@ provider_of(client) -> str            # the client's own label, "ollama" for any
 loads_lenient(raw) -> Any             # JSON from an LLM answer: tolerates code fences and prose around the object
 ```
 
-### 16.1 Ollama (`ollama.py`) — prompt-driven corpora and an adversarial LLM review
+### 16.1 Ollama (`ollama.py`) — prompt-driven corpora, an adversarial LLM review, letter-level correction
 
-Two ways of hooking the network into a local LLM served by [Ollama](https://ollama.com) (HTTP API, stdlib `urllib` only):
+Three ways of hooking the network into a local LLM served by [Ollama](https://ollama.com) (HTTP API, stdlib `urllib` only):
 
 1. **Corpus from a prompt** — the LLM is asked for *N* lines about a prompt, either correct (`style="good"`) or
    deliberately wrong (`style="garbage"`): exactly the two inputs of 2NRL. The lines can be trained on, saved as an
@@ -939,6 +941,11 @@ Two ways of hooking the network into a local LLM served by [Ollama](https://olla
 2. **Adversarial review** — the LLM plays the harsh critic: every sample the network generates (or any given text)
    gets a rating 0–10, a pass/fail verdict against a threshold and a one-sentence critique. Failed texts become 2NRL
    garbage, passed texts (plus an optional corpus) the fine-tune pass: an external discriminator for the GAN loop.
+3. **Letter-level correction** — the LLM plays the copy editor: every sample (or given text) comes back written out
+   correctly with the *smallest possible change*, and the diff between the two (`diff.edits`, character encoding)
+   is what the negative network learns — `"Hi howe are you??"` against `"Hi, how are you?"` is the `e` and the
+   second `?`, not the sentence (section 24.2, `blame.faults_from_corrections`). A text handed back unchanged
+   clears blame; one the answer said nothing usable about is neither blamed nor cleared.
 
 ```python
 DEFAULT_URL   = $OLLAMA_HOST (Ollama's own variable; "host:port" without scheme accepted) or "http://127.0.0.1:11434"
@@ -964,6 +971,18 @@ def adversarial_review(model, client, *, count=8, prefix="", max_length=60, temp
                        threshold=6.0, context=None, ollama_model=None, seed=None) -> dict
     # {"source": "model"|"given", "model", "threshold", "texts", "reviews", "mean_rating", "pass_rate",
     #  "good": passed texts, "bad": failed + unrated texts}
+CORRECTION_VERDICTS = ("corrected", "unchanged", "uncorrected")
+def correct_texts(client, texts, *, context=None, model=None, batch=20) -> list[dict]
+    # JSON-mode prompt at temperature 0 asking for the SMALLEST change and one word for the mistake out of
+    # blame.CORRECTION_REASONS; each entry {"index","text","correction": str | None,"verdict","reason","note",
+    # "changes": [{"op","wrong","right","at": [a0, a1],"to": [b0, b1]}] (equal runs dropped),"edits","wrong_chars",
+    # "right_chars"}; a corrected text's reason is blame.correction_reason(word, note, changes), an unchanged one's
+    # "none"; blank texts are "uncorrected" ("empty output") without asking the LLM
+def adversarial_correction(model, client, *, count=8, prefix="", max_length=60, temperature=1.0, texts=None,
+                           context=None, ollama_model=None, seed=None) -> dict          # summarise_corrections(...)
+def summarise_corrections(source, model, texts, corrections) -> dict
+    # {"source", "model", "texts", "corrections", "corrected", "unchanged", "uncorrected" (texts), "edits",
+    #  "wrong_chars", "right_chars", "change_rate": corrected / answered | None}
 ```
 
 **Thinking.** A thinking model (qwen3, deepseek-r1, gpt-oss, ...) reasons before it answers, and Ollama hands
@@ -984,6 +1003,7 @@ CLI: `radixnet [globals] ollama [--url URL] [--ollama-model NAME] [--timeout S] 
 | `models` | | list installed models |
 | `corpus` | `--prompt TEXT`, `--lines 20`, `--style good\|garbage`, `--out FILE`, `--train`, `--epochs 10`, `--lr 0.5`, `--batch-size 4`, `--model-out PATH` | prints the lines; writes / trains on them |
 | `review` | `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--text ...` / `--data FILE`, `--threshold 6`, `--context`, `--2nrl`, `--good FILE`, 2NRL options, `--out` | table of ratings + summary; `--2nrl` runs failed→invert→passed and saves |
+| `correct` | `--count 8`, `--prefix`, `--max-length 60`, `--temperature`, `--text ...` / `--data FILE`, `--context`, `--blame`, `--severity 1`, `--negative PATH` | table of corrections as diffs + summary; `--blame` blames only the changed characters (`blame.teach_corrections`) and saves the negative network |
 | `think` | `--prompt TEXT`, `--lines 5` (questions to think about), `--think true\|false\|low\|medium\|high`, `--temperature 0.7`, `--out FILE`, `--train`, `--with-answers`, `--no-questions`, `--epochs 10`, `--lr 0.5`, `--batch-size 4`, `--model-out PATH` | asks for `--lines` questions about the prompt and has the model *think* about each one; prints question, thinking and answer; `--train` teaches the thinking as thoughts and the questions it asked itself as places to stop and think (`thinking.think_on`, section 36), `--with-answers` the answers as texts |
 
 `serve --ollama-url --ollama-model` set the API defaults.
@@ -996,12 +1016,13 @@ API (`ollama_url` / `ollama_model` on `ModelService` / `create_server`; `/api/st
 | POST `/api/ollama/corpus` | `{prompt, lines=20, style="good", model?, url?, timeout?, save_as?: upload name, train=false, epochs, lr, act_lr, batch_size}` | `{"prompt","style","model","url","lines","texts","upload": record\|null,"job": job\|null}`; 202 when a train job started; 400 bad input; 409 job running; 502 Ollama failure |
 | POST `/api/ollama/review` | `{count=8, prefix="", max_length=60, temperature=1, texts?\|text?, threshold=6, context?, model?, url?, apply="none"\|"2nrl", good?, good_text?, good_files?, neg_epochs, pos_epochs, neg_lr, pos_lr, batch_size}` | `adversarial_review` result + `"url"` + `"job"`; `apply="2nrl"` starts a 2NRL job with bad = failed+unrated and good = passed + given (400 when either set is empty) |
 | POST `/api/ollama/think` | `{prompt, lines=5, think=true\|false\|"low"\|"medium"\|"high", temperature=0.7, model?, url?, timeout?, save_as?, train=false, with_answers=false, questions=true, epochs, lr, batch_size}` | `{"prompt","model","url","think","count","thinking","thoughts": [{"question","thinking","answer"}],"upload","job"}`; 202 when a train job started (`thinking.think_on`, section 36); 400 bad input or a negative network; 502 when Ollama fails, writes no questions, or - with `train` - returned no thinking |
+| POST `/api/ollama/correct` | `{count=8, prefix="", max_length=60, temperature=1, seed?, texts?\|text?, context?, model?, url?, timeout?, blame=false, severity=1}` | `adversarial_correction` result + `"url"`, `"severity"`, `"negative"` (`null`, or `ModelService.negative_teach_corrections`: `{blamed, cleared, unmatched, edges, edits, uncorrected, reasons, lessons, severity_mean, stats, reason_table}`); the model samples under its lock, the editor answers outside it; 502 on an Ollama failure |
 
-Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from a prompt" (generate → train / save as upload / hold as 2NRL bad or good), "Adversarial review" (ratings table, summary, apply as 2NRL with extra good files) and "Thinking from a prompt" (`POST /api/ollama/think`: questions, a thinking level - on, low, medium, high, off or the model's choice, sent as `"default"` - and a temperature; "Teach the thinking to the network" starts the train job on the same request, with its epochs, "Learn where it questions itself" and "Train the answers as texts too"; "What it thought" lists question, thinking and answer with the questions the model asked itself marked, the saved upload and the teaching job's epochs).
+Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from a prompt" (generate → train / save as upload / hold as 2NRL bad or good), "Adversarial review" (ratings table, summary, apply as 2NRL with extra good files), "Letter-level correction" (every correction as a diff — `<del>` what the editor struck out of the model's text, `<ins>` what it wrote instead, a caret where a change leaves nothing on that side — with the verdict, the reason and the note, and a *teach the negative network* checkbox with its severity) and "Thinking from a prompt" (`POST /api/ollama/think`: questions, a thinking level - on, low, medium, high, off or the model's choice, sent as `"default"` - and a temperature; "Teach the thinking to the network" starts the train job on the same request, with its epochs, "Learn where it questions itself" and "Train the answers as texts too"; "What it thought" lists question, thinking and answer with the questions the model asked itself marked, the saved upload and the teaching job's epochs).
 
 Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.internal:11434`, reachable through `extra_hosts`); the `ollama` profile runs the official `ollama/ollama` image with a model volume (`OLLAMA_HOST=http://ollama:11434`).
 
-Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, questions for a thinking prompt, configurable failures) and `/api/chat`; asked to think, it answers with its thinking as Ollama's field, inline between `<think>` tags, or not at all.
+Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, JSON corrections for copy-editing prompts — `fake_copy_edit`: `howe` → `how`, `??` → `?`, a comma after an opening `Hi` —, questions for a thinking prompt, configurable failures) and `/api/chat`; asked to think, it answers with its thinking as Ollama's field, inline between `<think>` tags, or not at all.
 
 ### 16.2 ChatGPT (`chatgpt.py`) — the hosted alternative, same interface
 
@@ -1724,6 +1745,62 @@ expose it, and turns are rated with the same thumbs as generated samples (`Ratin
 previous, ...)` is one turn of that loop on its own, and is what section 28 calls when the other voice is an LLM
 rather than a model.
 
+### 22.1 Streaming the conversation: the turns, and the window between them
+
+A conversation can be watched as it happens: `converse(..., stream=fn)` (and `reply`, `backtrack`) hand every
+event to `fn` the moment it occurs (`StreamFn`, a callable taking one dict).  `converse --stream` prints them,
+`POST /api/converse/stream` writes them as `application/x-ndjson` (one JSON object per line, chunked, each line
+flushed as it is written) and the Converse tab's "Stream" draws them.  Streaming is a *view* of the conversation
+and not a second procedure: the events are emitted from inside the one search `converse` always ran, the turns
+returned are exactly the ones streamed, and a conversation streamed teaches the graph exactly what a silent one
+does (`TestStream.test_streaming_changes_nothing`).
+
+The stream has two layers, and the split is the design.
+
+* **The committed layer is the answer.** `{"event": "turn", "index", "speaker", "turn": {...}}` is a turn the
+  moment it is spoken - the opening included - and a turn is never taken back: `converse` only ever *adds* turns,
+  so a client can append them to a transcript as they arrive.  The `turn` field is `Turn.to_dict()`, the document
+  `/api/converse` writes.
+* **Everything between two turns is the window - what a backtrack may still rewrite.** A voice about to
+  speak looks for continuations of a context (`look`, `from`: the context, `""` for a fresh text from START), and
+  the context loses a word at a time while nothing new follows it - so there is one `look` per context tried.
+  A candidate caught repeating is streamed as the `draft` it was about to say (`text`, `cost`), then `caught`
+  (`kind`, `noticed`, and `cut`: what it keeps, `""` when it cannot back up - the exploring is off, the repeat
+  lies in the words it picked up, or nothing of its own comes before it), one `backtrack` per step back (`step`,
+  `cut`, `wider`: the candidates it weighs from there), and `found` (`text`, `cost`, `explored`) or `stuck`
+  (`explored`).  Every window event carries the `index` and `speaker` of the turn it belongs to, which is the
+  turn event that follows it.
+
+Why the window is the whole turn rather than the last few words: the obvious reading of "stream the text but
+hold back a window the backtracking can rewrite" would commit a draft's beginning and keep only its tail open.
+That would lie.  A stutter is cut where the walk went round, which can be anywhere in the draft; a repeat of a
+line already heard is cut at its last word and then a word further back per step; and a voice that finds
+nothing from any cut does not keep the draft's beginning either - it drops the draft altogether, tries a
+shorter context, and finally changes the subject with a fresh text from START.  Nothing in a draft is certain
+until the turn is spoken, so nothing in it is streamed as the answer.  The response streams by the turn, the
+window streams apart from it, and a client that only wants the answer ignores everything but `turn`.
+
+What the window buys is the point of streaming this model at all: the backtracking can be seen in action.
+The CLI prints the window dimmed and indented above the turn it belongs to (*was about to say "ha ha"* / *caught
+itself saying "ha" twice* / *backs up to "ha " and weighs up to 10 paths (step 1)* / *found another way on: "ha
+and the cat sat" (3 path(s) weighed)*, then `A: ha and the cat sat`); the tab shows the draft with what it backed
+out of struck through and the way on underlined, then commits the turn with its draft kept in the meta line.
+
+The transport is the same on the three servers: chunked NDJSON, the headers sent with the first event so a
+request refused before anything was streamed (a bad `k`, a partner not in memory) is an ordinary 400, and a
+failure after the first line the stream's last event, `{"event": "error", "error"}` - the status line has
+already gone.  The last line of a good stream is `{"event": "done", ...}` carrying the document `/api/converse`
+answers with, so a client has the transcript, the repeats and the guard's report without a second request.
+The conversation runs under the model lock and writes to the socket between searches; a client that goes away
+does not stop it (Go and Rust remember the failed write and drop what follows; Python's `BrokenPipeError` ends
+the request), and the model comes out of it as any conversation leaves it.
+
+The Go port (`Stream func(map[string]any)` on `ConverseOptions` / `ReplyOptions` / `BacktrackOptions`,
+`rConverseStream`, `converse -stream`) and the Rust port (`Stream`, a `dyn FnMut(Json)`; `Server::stream_route`
+and a `Sink` that chunks the lines; `converse --stream`) emit the same events with the same fields, and
+`test_go_parity.py::test_the_same_conversation_streamed` and `test_rust_parity_dialogue.py` hold all three to
+one stream, event for event, the costs to `1e-9`.  D-081 records the decision.
+
 ## 23. The count / reward model in Go (`go/`) — goroutines over lines, paragraphs and pages
 
 (The negative network is ported too; section 24.5 covers what it adds to the types below.)
@@ -1794,8 +1871,8 @@ Python dict order decides the softmax summation order -, trigram index, `Split` 
 `ObserveSequence`, `Trace`, `CheckInvariants`), `weights.go` (counts, the sliding window, rewards, the dual frequency
 function, lazy weights and edge costs), `search.go` (`PathResult`, `SampleWalk`), `beam.go` (`BeamPredict`),
 `model.go` (training passes, feedback, prediction, generation, scoring, stats), `dialogue.go` (`Converse`, `Reply`,
-`Heard`, `Stutter`, `Backtrack`, `TeachBack`, `Rethink`, `Repeats` - the same duplicate rules, second thoughts
-and learning as Python, checked by `test_go_parity.py`),
+`Heard`, `Stutter`, `Backtrack`, `TeachBack`, `Rethink`, `Repeats`, `Stream` - the same duplicate rules, second thoughts,
+learning and stream of events as Python, checked by `test_go_parity.py`),
 `json.go` (the file format), `parallel.go` (`parallelFor`, `parallelRanges`, `SplitTexts`), `counter.go` (the
 cyclic counters of section 28, identical to `radixnet/counter.py`).
 
@@ -1861,9 +1938,10 @@ read buffers are pooled, all of which keep the allocation rate off the collector
 The server's `POST /api/uploads` streams multipart parts and raw bodies into the upload directory
 (`Uploads.StoreStream`: the first four bytes decide text or ZIP, an archive is validated by `InspectZip` streaming
 its entries), the listing inspects archives by streaming, and `POST /api/train` builds a `MultiSource` of inline
-texts and `Uploads.Source` (ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which must be
-parsed whole, are capped at 512 MB. `GET /api/status` reports `heap_bytes` and `memory_limit_bytes` so the status
-bar can show how close a run is to its ceiling.
+texts and `Uploads.Source` (ZIP / file sources) for `StartTrainSource`. The JSON upload forms, which carry the file
+inline, are parsed whole - held in memory while they are, as the Python server holds them - but not capped either
+(D-035). `GET /api/status` reports `heap_bytes` and `memory_limit_bytes` so the status bar can show how close a run
+is to its ceiling.
 
 Parity (`tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
 with the same seed and settings and must agree on labels, counts, edges, rewards, window events, RNG state (exact),
@@ -2120,15 +2198,31 @@ does the same for the speech and image tutors of section 26, reading the round t
 `SPEECH_REASONS` (`unreadable`, `truncated`, `overrun`, `garbled`, `silence`, `clipping`, `mishearing`,
 `distortion`) and `IMAGE_REASONS` (the same four, then `blank`, `noise`, `drift`), with `RECALL_TRUNCATED` /
 `RECALL_OVERRUN` / `RECALL_AGREEMENT` as its boundaries.
-`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` / `faults_from_recall` turn a tutor's output
+`faults_from_corrections(corrections, severity=1.0)` reads the copy editor of section 16.1: every text the editor
+changed is a fault carrying its `correction`, so `teach` routes it through `NegativeNet.correct` and only the
+characters the editor struck out or replaced are blamed, at `CORRECTION_SEVERITY` (1.0) per corrected text; the
+texts it handed back unchanged clear blame, and an `uncorrected` one is neither.  The reason comes from
+`correction_reason(word, note, changes)`: the editor's own word when it is in `CORRECTION_REASONS` (`spelling`,
+`punctuation`, `capitalisation`, `spacing`, `agreement`, `tense`, `article`, `preposition`, `plural`, `pronoun`,
+`word-order`, `vocabulary`, `repetition`, `fragment`, `nonsense`, `grammar`; aliases such as `typo` and
+`capitalization` are accepted, spaces become hyphens), else its note read through `classify` (`gibberish` and
+`incoherent` map to `nonsense`, `truncated` to `fragment`), else the shape of the diff (`reason_from_changes`: every
+edit is read for what it moved - punctuation only, spaces only, a change of case only, letters inside one word
+(`spelling`), or letters with a space (`grammar`, a word came, went or moved) - and the widest kind wins, `grammar`
+> `spelling` > `punctuation` > `spacing` > `capitalisation`), and `grammar` when even that says nothing; it is
+never `none` for a text that changed.
+`faults_from_reviews` / `faults_from_attempts` / `faults_from_lessons` / `faults_from_recall` /
+`faults_from_corrections` turn a tutor's output
 into `(faults, passed)`, and `teach(negative, faults, passed)` (with the wrappers `teach_reviews`,
-`teach_attempts`, `teach_lessons` and `teach_recall`) blames each fault - through `correct` when it carries one -
-and clears the passes, returning `{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
+`teach_attempts`, `teach_lessons`, `teach_recall` and `teach_corrections`, whose report adds `severity`, `edits` -
+the changed units over every correction - and `uncorrected`) blames each fault - through `correct` when it carries
+one - and clears the passes, returning `{blamed, cleared, unmatched, edges, reasons, severity_mean, records}`.
 
 The call sites: `tutor --blame` / `TutorTrainer(negative=...)` / `POST /api/tutor/start {"blame": true}`, which
 blames every failed sentence of a round with the mistake the teacher named and adds `negative_blamed` /
 `negative_edges` / `negative_reasons` to its round records; `ollama review --blame` /
-`POST /api/ollama/review {"blame": true}` (the reviewer), `codegen --blame`
+`POST /api/ollama/review {"blame": true}` (the reviewer), `ollama correct --blame` / `POST /api/ollama/correct
+{"blame": true}` (the copy editor, whose diff is the lesson), `codegen --blame`
 / `CodeGenTrainer(negative=...)`, which blames the rejected attempts of every problem and adds `negative_blamed` /
 `negative_reasons` to its problem records, `evolve --blame` / `Evolver(negative=...)`, which blames every fake the
 discriminator scored below the real texts (reason `blatant` past `blatant_margin`, else `discriminator`, severity
@@ -2142,7 +2236,15 @@ person.
 ### 24.3 `duo.py` — the pair as a GAN at output time
 
 `NegativeFilter(positive, negative, config)` puts the two networks on one output path (`FilterConfig`: `threshold`,
-`min_coverage`, `ratio` (`None` = off), `peak` (`None` = off), `over_sample`, `strict`, `spans`, `learn`, `reason`). `judge(text)` merges
+`min_coverage`, `ratio` (`None` = off), `peak` (`None` = off), `over_sample`, `strict`, `spans`, `learn`, `reason`,
+`provenance`).  With `provenance` off the veto applies exactly as before but every verdict the pair reports is
+`terse(verdict)` - `{text, decision, rule}` - and the guard's report (`ModelService._guard_report`, the CLI's
+`_guard_doc`) is the counts alone, `{on, provenance: false, judged, vetoed, negative, config, ...}`, with neither
+`rejected` nor `verdicts` listed: the answer is not followed by pages of judgement when only the answer was wanted.
+`--no-provenance` (the guard flags and `negative filter`), `{"provenance": false}` on `generate` / `predict` /
+`converse` / `negative/filter` (per answer) and `POST /api/negative/settings {"provenance": false}` (every answer,
+`ModelService.guard_config`) set it; the frontend's *Say why it vetoed* checkboxes send it and `GuardNotice` shows
+a count-only report without a *why* to open. `judge(text)` merges
 the negative network's verdict with the likelihood ratio `negative.score(text)["per_char"] -
 positive.score(text)["per_char"]` — the discriminator logit of two generative models — and rejects when the blame
 rule fires, when `peak >= config.peak` (the evidence on one transition - a correction blames a handful of
@@ -2243,8 +2345,18 @@ in by hand — which is exactly the kind of work a loop should be doing.
    reason through `classify`, the mark sets the severity through `severity_from_rating`.  Nothing new is invented —
    this is the section 24.2 path, driven on a timer instead of by hand.
 
+With `correct=True` (`--correct`, `{"correct": true}`) step 2 is the copy editor of section 16.1 instead of the
+critic: `ollama.correct_texts` writes each text out correctly with the smallest change it can, and step 3 is
+`blame.teach_corrections` — only the characters the editor changed are blamed, at `severity` (1.0) per corrected
+text, the unchanged texts clear, and no pass mark applies.  The round record then says `"mode": "correct"` (a
+reviewing round says `"review"`) and carries `corrections`, `corrected`, `unchanged`, `uncorrected`, `edits`,
+`wrong_chars` and `change_rate` (the share of answered texts the editor changed) in place of the reviews and marks;
+the report card sums them and adds `change_rate` and `change_trend` (last round minus first — negative when the
+editor has less to put right than it had at the start).
+
 `CriticConfig` carries those knobs plus `context` (what the reviewer is *told* the texts are meant to be — its
-yardstick, and worth setting, because "is this good?" means little without one), `clear_passes`, `epochs` and `seed`.
+yardstick, and worth setting, because "is this good?" means little without one), `clear_passes`, `epochs`, `seed`,
+`correct` and `severity`.
 The seed advances by the round number (`_seed`), so a seeded run is reproducible *and* its rounds differ; an unseeded
 one leaves the sampling alone.
 
@@ -3475,6 +3587,19 @@ connection - under the whole JSON contract §12 defines and the Python and Go se
 is replying.  `frontend/dist` runs against `radixnet serve` unmodified: `/api/status` lists every route the server
 has (`routes`) and a tab is shown against the Rust server when the route it needs is in that list, and what it
 will not serve says so with a 400 rather than a half answer (`/api/words` on a character model).
+
+**Uploads stream, as they do on the Go server** (D-035).  `POST /api/uploads` is the one route registered as
+*streaming* (`Server::stream_route`): the request's head is read, the handler is given the body as it arrives -
+ending where `Content-Length` says, and failing on a client that sent less - and `multipart::store_stream` writes a
+multipart file part or a raw body straight to a `.part` file in the upload directory (`stream_parts` finds the
+parts on the way, a window at a time, and the listing skips `.part` files), validates an archive from that file
+(`source::inspect`, a batch of entries at a time, the pass remembered for the listing's record) and moves it into
+place under a `.zip` name; a text file is converted into place a chunk at a time (byte-order mark dropped, bytes
+that are not UTF-8 replaced) and counted a line at a time.  The JSON forms, which carry the file inline, are read
+whole.  Every other route reads its body whole under a 16 MiB cap (`http::MAX_BODY`), which is what keeps a bad
+`Content-Length` from asking for the machine's memory; a client that sends `Expect: 100-continue` (curl, for a
+large file) is answered before the body goes; and an answer goes out in one write, so a connection closed on a
+body the server did not read - a refused upload - still carries it.  So no server refuses an upload for its size.
 
 Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
 of the port:

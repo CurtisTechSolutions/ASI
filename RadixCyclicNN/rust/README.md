@@ -48,7 +48,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/duo.rs` | the pair on the way out: the positive model writes, the negative one vetoes; the guard on every answer and the `/api/negative` routes |
 | `src/blame.rs`, `src/diff.rs` | where the negative network's data comes from - verdicts turned into faults - and the unit diff that blames only what a teacher changed |
 | `src/correct.rs` | `Model::correct` and `radixnet correct`: teach one correction, only what changed moves |
-| `src/dialogue.rs` | the model converses with itself: skipping what was heard, backing out of a repeat, and teaching the graph where it goes round; `reply` hears a `trace` |
+| `src/dialogue.rs` | the model converses with itself: skipping what was heard, backing out of a repeat, and teaching the graph where it goes round; `converse --stream` and `POST /api/converse/stream` watch it happen, the turns as they are spoken and the backing up between them (a `Stream`, the same events as Python and Go); `reply` hears a `trace` |
 | `src/assistant.rs` | today's format: messages in, an assistant message out - the search's trace as the thinking, the text one node of the walk at a time - in OpenAI's and Anthropic's dialects, `radixnet talk`, `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` |
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
 | `src/parallel.rs` | the worker pool, and the one `unsafe` in the crate (with its contract) |
@@ -77,7 +77,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/vision.rs`, `src/vision/{png,jpeg,gif}.rs` | images as text: the Go port's thumbnail encoder over PNG / JPEG / GIF decoders written out - `radixnet image`, `/api/images/*` |
 | `src/speech.rs`, `src/speech/asr.rs` | speech as text: WAV in every format Python reads, both codecs and the unique token; transcripts given or from an OpenAI-compatible server - `radixnet speech`, `/api/speech/*` |
 | `src/recall.rs` | the recall tutor over images and speech, and what it teaches the negative network |
-| `src/multipart.rs`, `src/multipart/base64.rs` | request bodies as Python reads them (multipart, raw, base64) and uploads stored as Python stores them, a ZIP kept whole |
+| `src/multipart.rs`, `src/multipart/base64.rs` | request bodies as Python reads them (multipart, raw, base64) and uploads stored as Python stores them, a ZIP kept whole; `POST /api/uploads` streams to disk, whatever the size |
 | `src/codegen.rs` | code generation: problems run in the sandbox, style-checked and judged, blame and 2NRL through the model's kind - `radixnet codegen`, `/api/codegen/*` |
 | `src/agent.rs` | tool use: criteria, mediated `<tool>` calls, judging, teaching, failure-first learning and exploring - `radixnet agent` / `explore`, `/api/agent/*` |
 | `src/mcp.rs`, `src/mcp/pyjson.rs` | the tools and the network over MCP (JSON-RPC 2.0 on stdio), Python's answers line for line, and JSON read the way `json.loads` reads it, down to its error messages - `radixnet mcp` |
@@ -89,7 +89,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 |---|---|
 | `src/cli.rs` | the command line's plumbing, and the table that sends a command to the module that answers it |
 | `src/bin/radixnet.rs` | the CLI: the model's own commands, and every other module's through `cli::COMMANDS` |
-| `src/http.rs` | HTTP/1.1 written out: the requests, the routes, the static files and the SPA fallback, and the routes that stream server-sent events |
+| `src/http.rs` | HTTP/1.1 written out: the requests, the routes (a body read whole and parsed, or streamed for an upload of any size), the static files and the SPA fallback, and the routes that stream server-sent events |
 | `src/service.rs` | the API the frontend talks to - the same JSON contract as the Python and Go servers; `/api/status` lists every route it serves |
 | `src/log.rs` | logging, written out: levels, targets, timestamps, and never a byte on stdout |
 | `src/clock.rs` | the one timestamp a model file carries |

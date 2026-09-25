@@ -44,7 +44,12 @@ hands over there next time - which means a conversation changes the model. With
 "Think before backing up" on (the default) the voice thinks first: a thought
 from the THINK sentinel, questioning itself up to "Think depth" deep where the
 model has learned to, that hands over to BACK when it stops - and the 💭 line
-under the turn says what it thought. The duplicates it could not avoid come back
+under the turn says what it thought. With "Stream" on (the default) the conversation arrives as it happens over
+`POST /api/converse/stream`: every turn the moment it is spoken, and above it
+the turn being spoken - the draft the voice caught itself on with what it backed
+out of struck through and the way on it found underlined - so the backtracking
+can be watched; a committed turn keeps that draft in its meta line.
+The duplicates it could not avoid come back
 flagged, and "Punish duplicates" marks them 👎 so "Train on ratings" runs the
 2NRL negative phase on them.
 
@@ -63,13 +68,25 @@ mark every reply; its transcript reads newest first as well, it has the same
 "Avoid repeated words" and "Explore" settings, and a reply the model could only
 repeat is punished with the failures whatever the judge made of it.
 
+Every answer the Generate, Predict and Converse panels ask for goes through the
+guard (the negative network's veto); "Filter with the negative network" turns
+it off, and "Say why it vetoed" decides whether the report under the answer
+carries each veto's provenance (the rule, the reasons, the blamed fragments,
+opened with *why*) or only how many candidates were judged and vetoed
+(`provenance: false`). The Negative tab's Filter card has the same switch.
+
 The Ollama panel talks to a local Ollama server through the API
 (`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`,
-`POST /api/ollama/think`).
+`POST /api/ollama/correct`, `POST /api/ollama/think`).
 It writes a training corpus from a prompt (good or garbage style) that can be
 trained on, saved as an upload or held as 2NRL data, and it acts as an
 adversarial reviewer that rates samples from the model so the failed ones can
-be fed back through 2NRL. A thinking model (qwen3, deepseek-r1, gpt-oss, ...)
+be fed back through 2NRL. The copy editor card: every sample
+(or pasted text) comes back written out correctly with as few characters
+changed as possible, shown as a diff, and with "Teach the negative network"
+only the struck-out and inserted characters are blamed there (the unchanged
+texts clear blame); the Negative tab's Automatic card runs the same editor on
+a loop with "Letter-level corrections" ticked. A thinking model (qwen3, deepseek-r1, gpt-oss, ...)
 thinks about a prompt in "Thinking from a prompt": the questions it wrote, the
 thinking behind each answer with the questions it asked itself marked, and the
 answers come back, and "Teach the thinking to the network" trains that thinking
@@ -221,7 +238,8 @@ The old `#network` link opens Model settings.
     vite.config.js              dev proxy + build output
     src/main.jsx                React root
     src/App.jsx                 header, status bar, tabbed panels
-    src/api.js                  fetch wrapper (JSON + {"error": ...} handling)
+    src/api.js                  fetch wrapper (JSON + {"error": ...} handling), and the JSON Lines reader of a streamed route
+    src/stream.js               a streamed conversation: the line parser, and the window one turn goes through (pure)
     src/util.js                 parsing / formatting helpers
     src/audio.js                microphone capture, Web Speech dictation, WAV encoding (Speech panel)
     src/styles.css              all styling (responsive; single column under 800 px)

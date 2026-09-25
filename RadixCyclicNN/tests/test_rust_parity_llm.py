@@ -201,6 +201,73 @@ class TestRustCriticParity(unittest.TestCase):
         self.assertEqual([f["text"] for f in taught["lessons"]], [f["text"] for f in report["faults"]])
         self.assertEqual(taught["path"], negative_beside(self.rs_path))
 
+    def test_both_editors_correct_the_same_given_texts(self):
+        texts = ["Hi howe are you??", "the cat sat on the mat", "howe??", "   "]
+        options = ("ollama", "correct", "--context", "short greetings", *sum((("--text", t) for t in texts), ()))
+        a, b, py_seen, rs_seen = self.both(*options)
+        self.assertEqual(py_seen, rs_seen)  # the editor's prompt, byte for byte
+        self.assertEqual(a, b)  # the whole document: the corrections, their diffs, reasons and the counts
+        self.assertEqual([c["verdict"] for c in b["corrections"]], ["corrected", "unchanged", "corrected", "uncorrected"])
+        self.assertEqual(b["corrections"][0]["correction"], "Hi, how are you?")
+        self.assertEqual([(c["op"], c["wrong"], c["right"]) for c in b["corrections"][0]["changes"]],
+                         [("insert", "", ","), ("delete", "e", ""), ("delete", "?", "")])
+
+    def test_both_editors_correct_the_same_samples_from_the_model(self):
+        options = ("--seed", 3, "ollama", "correct", "--count", 3, "--max-length", 30)
+        a, b, py_seen, rs_seen = self.both(*options)
+        self.assertEqual(py_seen, rs_seen)
+        self.assertEqual(a["source"], "model")
+        self.assertEqual(a, b)
+        missing = os.path.join(tmpdir(), "missing.count.json")
+        py("ollama", "correct", "--count", 2, model=missing, env=self.env, expect=1)
+        rust("ollama", "correct", "--count", 2, model=missing, env=self.env, expect=1)
+
+    def test_a_blamed_correction_teaches_what_python_teaches(self):
+        texts = ["Hi howe are you??", "the cat sat on the mat", "howe now"]
+        given = sum((("--text", t) for t in texts), ())
+        options = ("ollama", "correct", *given, "--blame", "--severity", 1.5)
+        a, b, py_seen, rs_seen = self.both(*options)
+        self.assertEqual(py_seen, rs_seen)
+        self.assertEqual(graph_of(negative_beside(self.py_path)), graph_of(negative_beside(self.rs_path)))
+        taught_a, taught_b = a["negative"], b["negative"]
+        self.assertEqual(set(taught_a), set(taught_b))
+        for key in ("blamed", "cleared", "edges", "edits", "reasons", "lessons"):
+            self.assertEqual(taught_a[key], taught_b[key], key)
+        self.assertEqual((taught_b["blamed"], taught_b["cleared"]), (2, 0))  # the unchanged text shares no trigram with the failures
+        self.assertEqual([r["reason"] for r in taught_b["reasons"]], ["spelling"])
+        self.assertEqual(taught_b["lessons"][0]["severity"], 1.5)
+        # only the changed characters are known failures on either side
+        for side, path in ((py, self.py_path), (rust, self.rs_path)):
+            verdicts = side("negative", "why", "--text", "Hi, how are you?", "--text", "Hi howe are you??",
+                            model=path, env=self.env)["verdicts"]
+            self.assertEqual(verdicts[0]["verdict"], "pass")
+            self.assertEqual(verdicts[1]["reasons"][0]["reason"], "spelling")
+
+    def test_both_correcting_loops_ask_the_same_and_blame_the_same(self):
+        options = ("negative", "auto", "--rounds", 2, "--count", 4, "--max-length", 40, "--correct", "--severity", 2)
+        a, b, py_seen, rs_seen = self.both(*options)
+        self.assertEqual(len(py_seen), 2)
+        self.assertEqual(py_seen, rs_seen)
+        py_rounds = [r for r in a["records"] if r["kind"] == "round"]
+        rs_rounds = [r for r in b["records"] if r["kind"] == "round"]
+        self.assertEqual(len(py_rounds), 2)
+        self.assertEqual(len(py_rounds), len(rs_rounds))
+        for first, second in zip(py_rounds, rs_rounds):
+            self.assertEqual(set(first), set(second))
+            self.assertEqual(first["mode"], "correct")
+            for key in ("round", "reviewer", "mode", "severity", "texts", "corrections", "corrected", "unchanged",
+                        "uncorrected", "edits", "wrong_chars", "blamed", "cleared", "unmatched", "edges", "reasons",
+                        "change_rate"):
+                self.assertEqual(first[key], second[key], f"round {first['round']}: {key}")
+            self.assertAlmostEqual(first["severity_mean"], second["severity_mean"], places=12)
+        self.assertEqual(set(a["report"]), set(b["report"]))
+        for key in ("kind", "rounds", "reviewed", "blamed", "cleared", "edges", "reasons", "corrected", "unchanged",
+                    "uncorrected", "edits", "change_rate", "change_trend", "mean_rating", "pass_rate", "trend"):
+            self.assertEqual(a["report"][key], b["report"][key], key)
+        self.assertEqual(a["config"], b["config"])
+        self.assertEqual((a["config"]["correct"], a["config"]["severity"]), (True, 2.0))
+        self.assertEqual(graph_of(negative_beside(self.py_path)), graph_of(negative_beside(self.rs_path)))
+
     def test_a_corpus_is_asked_for_and_trained_on_the_same_way(self):
         py_out = os.path.join(tmpdir(), "corpus_py.txt")
         rs_out = os.path.join(tmpdir(), "corpus_rs.txt")

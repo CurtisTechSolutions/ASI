@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.dialogue import (  # noqa: E402
     DEFAULT_SPEAKERS,
+    STREAM_EVENTS,
     Heard,
     Turn,
     backtrack,
@@ -194,6 +195,116 @@ class TestBacktrack(unittest.TestCase):
         plain = converse(model, opening, turns=25, explore=0, learn=False)
         self.assertFalse([t for t in plain if t.rethink is not None])
         self.assertNotEqual([t.text for t in plain], [t.text for t in turns])
+
+
+class TestStream(unittest.TestCase):
+    """A conversation streamed as it happens: the turns are the answer, the rest is the window a backtrack may
+    still rewrite - and streaming changes nothing about what is said."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.stuck = new_model("radix", seed=3)
+        cls.stuck.train(["ha ha ha ha ha"], epochs=3, **FAST)
+        cls.ways = new_model("radix", seed=3)
+        cls.ways.train(["ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"], epochs=3, **FAST)
+
+    @staticmethod
+    def streamed(model, *args, **options):
+        events = []
+        turns = converse(model, *args, stream=events.append, **options)
+        return turns, events
+
+    def test_the_turns_streamed_are_the_turns_returned(self):
+        model = trained()
+        turns, events = self.streamed(model, "the cat sat on the mat", turns=6, learn=False)
+        self.assertEqual(len(turns), 7)
+        for event in events:
+            self.assertIn(event["event"], STREAM_EVENTS)
+            self.assertIn("index", event)
+            self.assertIn("speaker", event)
+        spoken = [e for e in events if e["event"] == "turn"]
+        self.assertEqual([e["turn"] for e in spoken], [t.to_dict() for t in turns])
+        self.assertEqual([(e["index"], e["speaker"]) for e in spoken], [(t.index, t.speaker) for t in turns])
+        self.assertTrue(spoken[0]["turn"]["given"])
+        # the window between two turns belongs to the turn that follows it
+        owner = None
+        for event in reversed(events):
+            if event["event"] == "turn":
+                owner = (event["index"], event["speaker"])
+            else:
+                self.assertEqual((event["index"], event["speaker"]), owner, event)
+        # a turn's context is where its last look started from ("" when it changed the subject)
+        looks = {}
+        for event in events:
+            if event["event"] == "look":
+                looks[event["index"]] = event["from"]
+            elif event["event"] == "turn" and not event["turn"]["given"]:
+                self.assertEqual(event["turn"]["context"], looks[event["index"]], event["turn"]["text"])
+
+    def test_the_window_shows_the_backing_up(self):
+        turns, events = self.streamed(self.ways, "", turns=6, learn=False)
+        rethought = [t for t in turns if t.rethink is not None]
+        self.assertTrue(rethought, [t.text for t in turns])
+        for turn in rethought:
+            window = [e for e in events if e["index"] == turn.index and e["event"] != "turn"]
+            kinds = [e["event"] for e in window]
+            self.assertIn("draft", kinds)
+            self.assertIn("caught", kinds)
+            draft = window[kinds.index("draft")]
+            caught = window[kinds.index("caught")]
+            self.assertEqual(kinds.index("draft") + 1, kinds.index("caught"), kinds)
+            self.assertEqual((caught["kind"], caught["noticed"]), (turn.rethink.kind, turn.rethink.noticed))
+            steps = [e for e in window if e["event"] == "backtrack"]
+            self.assertEqual(len(steps), turn.rethink.steps)
+            if steps:
+                self.assertEqual(caught["cut"], steps[0]["cut"])
+                self.assertTrue(draft["text"].startswith(steps[0]["cut"]), (draft, steps[0]))
+                self.assertEqual([s["step"] for s in steps], list(range(1, len(steps) + 1)))
+                self.assertEqual(steps[-1]["cut"], turn.rethink.cut)
+                for step in steps:
+                    self.assertGreaterEqual(step["wider"], 5)
+            else:
+                self.assertEqual(caught["cut"], "")
+            if turn.rethink.found:
+                found = window[kinds.index("found")]
+                self.assertEqual((found["text"], found["explored"]), (turn.text, turn.rethink.explored))
+                self.assertNotIn("stuck", kinds)
+            elif steps:
+                self.assertEqual(window[kinds.index("stuck")]["explored"], turn.rethink.explored)
+                self.assertNotIn("found", kinds)
+        self.assertTrue([t for t in rethought if t.rethink.found], [t.text for t in rethought])
+        # a voice with nowhere else to go is seen looking, and getting stuck
+        turns, events = self.streamed(self.stuck, "", turns=4, learn=False)
+        self.assertTrue([e for e in events if e["event"] == "stuck"], events)
+        self.assertFalse([e for e in events if e["event"] == "found"], events)
+        # nothing to catch, nothing in the window but the looking
+        _turns, events = self.streamed(self.ways, "", turns=4, explore=0, learn=False)
+        self.assertEqual({e["event"] for e in events}, {"look", "turn"})
+
+    def test_streaming_changes_nothing(self):
+        for kind in ("radix", "count"):
+            with self.subTest(kind=kind):
+                silent, watched = trained(kind), trained(kind)
+                plain = converse(silent, "the cat sat on the mat", turns=10)
+                turns, events = self.streamed(watched, "the cat sat on the mat", turns=10)
+                self.assertEqual([t.to_dict() for t in turns], [t.to_dict() for t in plain])
+                self.assertEqual(silent.graph.to_dict()["edges"], watched.graph.to_dict()["edges"])
+                self.assertEqual(len([e for e in events if e["event"] == "turn"]), len(plain))
+
+    def test_backtrack_streams_on_its_own(self):
+        events = []
+        found, thought = backtrack(self.ways, "ha ha ha", k=3, learn=False, stream=events.append)
+        self.assertIsNotNone(found)
+        self.assertEqual([e["event"] for e in events], ["caught", "backtrack", "found"])
+        self.assertEqual(events[0], {"event": "caught", "kind": "stutter", "noticed": "ha", "cut": "ha "})
+        self.assertEqual(events[1], {"event": "backtrack", "step": 1, "cut": "ha ", "wider": 6})
+        self.assertEqual((events[2]["text"], events[2]["explored"]), (found.full_text, thought.explored))
+        events = []
+        backtrack(self.ways, "ha ha ha", keep="ha ha ", k=3, learn=False, stream=events.append)
+        self.assertEqual(events, [{"event": "caught", "kind": "stutter", "noticed": "ha", "cut": ""}])
+        events = []
+        backtrack(self.ways, "the cat sat on the mat", k=3, learn=False, stream=events.append)
+        self.assertEqual(events, [])
 
 
 class TestLearnsWhereItGoesRound(unittest.TestCase):

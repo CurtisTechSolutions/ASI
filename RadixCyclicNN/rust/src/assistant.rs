@@ -1222,6 +1222,7 @@ pub fn respond(
                 } else {
                     None
                 },
+                stream: None,
                 trace: Some(&mut trace as &mut crate::dialogue::Trace),
             };
             reply_or_err(model, &previous, options, &mut rng)?

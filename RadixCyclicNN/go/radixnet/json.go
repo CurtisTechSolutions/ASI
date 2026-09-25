@@ -47,12 +47,14 @@ type edgesDoc struct {
 	// (see counter.go), so an ordinary file carries no reset arrays at all
 	CountResets []int64 `json:"count_resets,omitempty"`
 
-	// the negative network's evidence (omitted on a count / reward graph)
-	Blame       []float64      `json:"blame,omitempty"`
-	Fails       []int64        `json:"fails,omitempty"`
+	// the negative network's evidence: left nil (and so omitted) on a count /
+	// reward graph, written even when empty on a negative one, as the Python
+	// file is - a negative network nobody has blamed yet still says what it is
+	Blame       []float64      `json:"blame,omitzero"`
+	Fails       []int64        `json:"fails,omitzero"`
 	FailsResets []int64        `json:"fails_resets,omitempty"`
-	Clear       []float64      `json:"clear,omitempty"`
-	Reasons     [][][2]float64 `json:"reasons,omitempty"`
+	Clear       []float64      `json:"clear,omitzero"`
+	Reasons     [][][2]float64 `json:"reasons,omitzero"`
 }
 
 // reasonRegistryDoc is the negative graph's reason registry.

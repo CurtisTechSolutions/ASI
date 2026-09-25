@@ -30,6 +30,18 @@ Both kinds of repetition are settings: ``avoid_repeats`` for what the
 conversation has already heard, ``avoid_word_repeats`` for what one utterance
 says twice in a row.  With a setting off that kind is neither skipped nor
 flagged, and so is never punished.
+
+A conversation can be **streamed** as it happens (``stream=``, a callable
+that takes one event dict; :data:`StreamFn`).  The stream has two layers.
+``turn`` events are the response: a turn is spoken once and never taken back,
+so they can be appended to a transcript as they arrive.  Everything between
+two of them is the *window* - what the voice is doing before it commits, and
+what a backtrack may still rewrite: ``look`` (the context it continues, losing
+a word at a time), ``draft`` (what it was about to say), ``caught`` (the words
+it caught itself on and what it keeps), ``backtrack`` (each step back, and the
+cut it explores from), ``found`` (another way on) or ``stuck`` (nothing new
+from any cut).  Streaming changes nothing about what is said: the turns are
+the ones :func:`converse` returns, event for event.
 """
 
 from __future__ import annotations
@@ -71,6 +83,34 @@ one a reply is exactly what it always was."""
 
 EXPLORE = 3
 """Times a voice may back up out of a repeat by default (0 turns the exploring off)."""
+
+StreamFn = Callable[[dict], Any]
+"""Where a conversation streams what it is doing, one event dict at a time, as it happens.
+
+Every event carries ``event`` (its kind), ``index`` and ``speaker`` (whose turn it is).  The committed layer is
+``turn`` (``turn``: the :class:`Turn` as :meth:`Turn.to_dict` writes it) - a turn is spoken once and never taken
+back.  The window between two turns is ``look`` (``from``: the context it continues; ``""`` for a fresh text from
+START), ``draft`` (``text``, ``cost``: what it was about to say before it caught itself), ``caught`` (``kind``,
+``noticed``, ``cut``: what it keeps, ``""`` when it cannot back up), ``backtrack`` (``step``, ``cut``, ``wider``:
+one step back and the candidates it weighs from there), ``found`` (``text``, ``cost``, ``explored``) or ``stuck``
+(``explored``: nothing new from any cut).  Only a ``turn`` is the model's answer; the rest is what a backtrack
+may still rewrite, which is exactly why it is streamed apart.
+"""
+
+STREAM_EVENTS: tuple[str, ...] = ("look", "draft", "caught", "backtrack", "found", "stuck", "turn")
+"""Every kind of event a streamed conversation emits, in the order a turn goes through them."""
+
+
+def _tagged(stream: StreamFn | None, index: int, speaker: str) -> StreamFn | None:
+    """``stream`` with the turn's ``index`` and ``speaker`` written into every event (``None`` stays ``None``)."""
+    if stream is None:
+        return None
+
+    def tag(event: dict) -> None:
+        stream({"event": event["event"], "index": index, "speaker": speaker,
+                **{key: value for key, value in event.items() if key != "event"}})
+
+    return tag
 
 
 @dataclass
@@ -433,6 +473,7 @@ def backtrack(
     avoid_word_repeats: bool = True,
     learn: bool = True,
     veto: "Veto | None" = None,
+    stream: StreamFn | None = None,
     think: bool = True,
     think_depth: int = THINK_DEPTH,
 ) -> tuple[PathResult | None, Rethink]:
@@ -468,6 +509,9 @@ def backtrack(
     walked from ``THINK`` - questioning itself up to ``think_depth`` deep where it has learned to - and when
     the thought stops it hands over to ``BACK`` with the same lesson :func:`teach_back` teaches.  The
     ``Rethink`` carries the thought.
+    ``stream`` watches it happen (:data:`StreamFn`): ``caught`` the moment it notices (with the ``cut`` it will
+    keep, or ``""`` when it cannot back up), ``backtrack`` for every step back, then ``found`` or ``stuck``.  The
+    events are the same whatever they are written to, and they change nothing about what is found.
     """
     heard = Heard() if heard is None else heard
     kind, noticed, at = "", "", -1
@@ -479,6 +523,12 @@ def backtrack(
         if noticed:
             kind, at = "repeat", _last_word_at(text)
     record = Rethink(kind=kind, noticed=noticed)
+    if noticed and stream is not None:
+        # what it will keep - "" when there is no backing up from here: nowhere to cut, the exploring off, the
+        # repeat inside the words it picked up, or nothing of its own before it
+        cut = text[:at] if at >= 0 else ""
+        kept = cut if at >= 0 and explore > 0 and len(cut) >= len(keep) and cut.strip() else ""
+        stream({"event": "caught", "kind": kind, "noticed": noticed, "cut": kept})
     if not noticed or at < 0 or explore <= 0:
         return None, record
     cut = text[:at]
@@ -489,6 +539,8 @@ def backtrack(
             break
         record.cut, record.steps = cut, step + 1
         wider = k * (step + 2)  # the further back it goes, the wider it looks
+        if stream is not None:
+            stream({"event": "backtrack", "step": step + 1, "cut": cut, "wider": wider})
         for cand in _offer(voice, cut, mode, wider, beam, max_length, step_penalty, temperature, rng):
             record.explored += 1
             if not cand.text.strip() or (veto is not None and veto(cand.full_text)):
@@ -499,6 +551,8 @@ def backtrack(
             record.found = True
             record.taught = _teach(voice, text, at, cand, record, learn, think, think_depth, mode, k, beam,
                                    max_length, step_penalty, temperature, rng)
+            if stream is not None:
+                stream({"event": "found", "text": cand.full_text, "cost": cand.cost, "explored": record.explored})
             return cand, record
         shorter = _shorter(cut)
         if len(shorter) < len(keep) or shorter == cut:
@@ -507,6 +561,8 @@ def backtrack(
     # it goes round here even if it found no way out
     record.taught = _teach(voice, text, at, None, record, learn, think, think_depth, mode, k, beam, max_length,
                            step_penalty, temperature, rng)
+    if stream is not None and record.steps:
+        stream({"event": "stuck", "explored": record.explored})
     return None, record
 
 
@@ -598,6 +654,7 @@ def converse(
     explore: int = EXPLORE,
     learn: bool = True,
     veto: Veto | None = None,
+    stream: StreamFn | None = None,
     think: bool = True,
     think_depth: int = THINK_DEPTH,
 ) -> list[Turn]:
@@ -630,6 +687,9 @@ def converse(
       (:func:`think_back`, :mod:`radixnet.thinking`), questioning itself up to ``think_depth`` deep; the
       thought rides on the turn's rethink.  With ``learn`` it also teaches the graph where it stopped to
       think.
+    * ``stream`` - where the conversation is streamed as it happens (:data:`StreamFn`): a ``turn`` event for
+      every turn spoken, the opening included, and between them what each voice does before it commits.  The
+      turns returned are exactly the ones streamed.
 
     Every generated turn records the context it picked up, its cost and probability, whether it started fresh
     from START (nothing followed the previous line), and whether it had to repeat something already said
@@ -662,6 +722,7 @@ def converse(
             cost=-score["log_prob"], probability=path_probability(PathResult(cost=-score["log_prob"])),
             reached_end=True, fresh=True, given=True, candidates=1,
         ))
+        _spoken(stream, result[-1])
         said_list.append(opening)
         index += 1
     heard = Heard(said_list)
@@ -673,19 +734,26 @@ def converse(
             speaker=speakers[index % len(speakers)], mode=mode, max_length=max_length, context=context,
             temperature=temperature, k=k, beam=beam, step_penalty=step_penalty, rng=rng,
             avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, explore=explore, learn=learn,
-            veto=veto, think=think, think_depth=think_depth,
+            veto=veto, think=think, think_depth=think_depth, stream=stream,
         )
         if turn is None:
             break
         if turn.repeat and normalize(turn.text) in repeated:
             break  # the voice can only say a duplicate it has already repeated: the conversation is over
         result.append(turn)
+        _spoken(stream, turn)
         said_list.append(turn.text)
         heard.remember(turn.text, turn.reply if turn.context else "")
         if turn.repeat:
             repeated.add(normalize(turn.text))
         index += 1
     return result
+
+
+def _spoken(stream: StreamFn | None, turn: Turn) -> None:
+    """The committed layer of the stream: a turn that has been spoken, and will not be taken back."""
+    if stream is not None:
+        stream({"event": "turn", "index": turn.index, "speaker": turn.speaker, "turn": turn.to_dict()})
 
 
 def reply(
@@ -708,6 +776,7 @@ def reply(
     explore: int = EXPLORE,
     learn: bool = True,
     veto: Veto | None = None,
+    stream: StreamFn | None = None,
     think: bool = True,
     think_depth: int = THINK_DEPTH,
     trace: Trace | None = None,
@@ -735,8 +804,16 @@ def reply(
 
     It is public because the other voice need not be a model at all: the chat
     loop (:mod:`radixnet.chat`) has an LLM speak every other line and calls
-    this for the model's own.  ``trace`` hears every step as it is taken
-    (:data:`Trace`); it is how the assistant format streams the thinking.
+    this for the model's own.
+
+    ``stream`` (:data:`StreamFn`) watches the turn being found: ``look`` for
+    every context it continues (and ``""`` for a fresh text), then - when a
+    candidate is caught repeating - ``draft``, and what :func:`backtrack` does
+    about it.  The turn itself is not an event of this function's: it is the
+    caller's to speak (:func:`converse` streams it as ``turn``), since a reply
+    may still be refused for repeating a duplicate already repeated.
+    ``trace`` hears every step as it is taken (:data:`Trace`); it is how the
+    assistant format streams the thinking.
     """
     mode = "beam" if mode in ("", "dijkstra") else mode
     if mode not in MODES:
@@ -749,6 +826,7 @@ def reply(
     repeat = False
     rethought: Rethink | None = None
     draws = k if mode == "sample" else 1
+    watch = _tagged(stream, index, speaker)
 
     def notice(kind: str, **fields: Any) -> None:
         if trace is not None:
@@ -760,11 +838,14 @@ def reply(
         nonlocal rethought, offered
         if pick.caught is None or explore <= 0 or rethought is not None:
             return pick.spoken, pick.repeat
+        if watch is not None:
+            watch({"event": "draft", "text": pick.caught.full_text, "cost": pick.caught.cost})
         found, rethought = backtrack(
             voice, pick.caught.full_text, keep, heard, added=pick.caught.text, explore=explore, mode=mode, k=k,
             beam=beam, max_length=max_length, step_penalty=step_penalty, temperature=temperature, rng=rng,
             avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, learn=learn, veto=veto,
             think=think, think_depth=think_depth,
+            stream=watch,
         )
         offered += rethought.explored
         notice("rethink", kind_of=rethought.kind, noticed=rethought.noticed, cut=rethought.cut, steps=rethought.steps,
@@ -789,6 +870,8 @@ def reply(
         usable = _usable(voice, ctx)
         notice("context", context=ctx, usable=usable)
         if usable:
+            if watch is not None:
+                watch({"event": "look", "from": ctx})
             for _draw in range(draws):
                 spoken, repeat = look(ctx)
                 if spoken is not None and not repeat:
@@ -801,6 +884,8 @@ def reply(
         notice("fresh")
         fresh_pick: PathResult | None = None
         fresh_repeat = False
+        if watch is not None:
+            watch({"event": "look", "from": ""})
         for _draw in range(draws):
             fresh_pick, fresh_repeat = look("")
             if fresh_pick is not None and not fresh_repeat:

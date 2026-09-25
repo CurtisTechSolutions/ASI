@@ -30,6 +30,7 @@ export default function GeneratePanel({ status }) {
   // the traversal, the sampling filters and the diversity are site-wide (the Settings tab)
   const { network, search } = useSiteSettings();
   const [guard, setGuard] = useStoredState("generate.guard", true);
+  const [provenance, setProvenance] = useStoredState("generate.provenance", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [samples, setSamples] = useState(null);
@@ -57,6 +58,7 @@ export default function GeneratePanel({ status }) {
         temperature: parseNumber(temperature, 1),
         mode,
         guard,
+        provenance,
         ...(prefix ? { prefix } : {}),
         ...network.body,
         ...tuning,
@@ -122,6 +124,13 @@ export default function GeneratePanel({ status }) {
           hint="the pair: the model over-samples and the negative network vetoes what it knows to be a failure"
           checked={guard}
           onChange={setGuard}
+        />
+        <CheckField
+          label="Say why it vetoed"
+          hint="the provenance of each veto: the rule, the reasons and the blamed fragments; off, the guard reports how many it stopped"
+          checked={provenance}
+          onChange={setProvenance}
+          disabled={!guard}
         />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading || Boolean(searchProblem)}>

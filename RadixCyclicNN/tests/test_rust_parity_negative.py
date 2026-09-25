@@ -110,6 +110,32 @@ class TestRustFilterParity(unittest.TestCase):
         for key in ("vetoed", "candidates", "asked", "kept", "rate"):
             self.assertEqual(a["guard"][key], b["guard"][key], key)
 
+    def test_the_guard_can_keep_its_provenance_to_itself_on_both_sides(self):
+        args = ["generate", "--count", 3, "--mode", "beam", "--max-length", 30, "--no-provenance"]
+        a = py(*args, model=self.model)
+        b = rust(*args, model=self.model)
+        self.assertEqual([s["text"] for s in a["samples"]], [s["text"] for s in b["samples"]])  # still vetoed
+        self.assertEqual(set(a["guard"]), set(b["guard"]))
+        self.assertNotIn("verdicts", b["guard"])
+        self.assertNotIn("rejected", b["guard"])
+        for key in ("on", "provenance", "judged", "vetoed", "candidates", "asked", "kept", "rate", "config"):
+            self.assertEqual(a["guard"][key], b["guard"][key], key)
+        self.assertFalse(b["guard"]["config"]["provenance"])
+        args = ["predict", "--prefix", "the ", "--length", 12, "--k", 5, "--no-provenance"]
+        a = py(*args, model=self.model)
+        b = rust(*args, model=self.model)
+        self.assertEqual(a["continuation"], b["continuation"])
+        self.assertEqual({k: v for k, v in a["guard"].items() if k != "negative"},
+                         {k: v for k, v in b["guard"].items() if k != "negative"})
+        args = ["negative", "filter", "--text", "the the the the cat", "--text", "a rainy day in autumn",
+                "--no-provenance"]
+        a = py(*args, model=self.model)
+        b = rust(*args, model=self.model)
+        self.assertEqual(a["verdicts"], b["verdicts"])  # the decision and the rule, nothing else
+        self.assertEqual([set(v) for v in b["verdicts"]], [{"text", "decision", "rule"}] * 2)
+        self.assertEqual(a["rejected"], b["rejected"])
+        self.assertEqual(a["pair"]["config"], b["pair"]["config"])
+
     def test_no_negative_network_no_guard(self):
         root = os.path.join(tmpdir(), "unguarded")
         os.makedirs(root, exist_ok=True)
@@ -177,6 +203,26 @@ class TestRustServerNegative(unittest.TestCase):
         self.assertEqual(status, 200, data)
         self.assertIsNotNone(data["guard"])
         self.assertEqual(data["guard"]["asked"], 6)
+        # the provenance of the vetoes: off per answer, off for the server, and back on for one answer
+        status, data, _ = s.post("/api/generate", {"count": 2, "mode": "beam", "provenance": False})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["guard"]["provenance"], False)
+        self.assertNotIn("verdicts", data["guard"])
+        self.assertIn("judged", data["guard"])
+        status, data, _ = s.post("/api/negative/settings", {"provenance": False})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["settings"]["provenance"], False)
+        status, data, _ = s.get("/api/negative")
+        self.assertEqual(data["settings"]["provenance"], False)
+        status, data, _ = s.post("/api/predict", {"prefix": "the ", "length": 10})
+        self.assertNotIn("verdicts", data["guard"])
+        status, data, _ = s.post("/api/predict", {"prefix": "the ", "length": 10, "provenance": True})
+        self.assertIn("verdicts", data["guard"])
+        status, data, _ = s.post("/api/negative/filter", {"texts": ["the the the the cat", "an unseen line"],
+                                                          "provenance": False})
+        self.assertEqual([set(v) for v in data["verdicts"]], [{"text", "decision", "rule"}] * 2)
+        self.assertEqual(data["pair"]["config"]["provenance"], False)
+        s.post("/api/negative/settings", {"provenance": True})
         # forgetting and resetting
         status, data, _ = s.post("/api/negative/forget", {"reason": "repetition"})
         self.assertEqual(status, 200, data)

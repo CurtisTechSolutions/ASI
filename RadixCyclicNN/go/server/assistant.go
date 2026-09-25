@@ -47,7 +47,7 @@ type eventStream struct {
 
 // writeStream sends a streamed answer: the headers, then every frame as it is
 // produced (flushed one by one), then the end of the body.
-func (h *Handler) writeStream(w http.ResponseWriter, es *eventStream) int {
+func (h *Handler) writeEvents(w http.ResponseWriter, es *eventStream) int {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -120,7 +120,7 @@ func (s *Service) Respond(ask *radixnet.Ask, emit func(map[string]any)) (*radixn
 		}
 		var pair *radixnet.Filter
 		if ask.Guard {
-			pair = s.guard()
+			pair = s.guard(nil)
 		}
 		reply, err := radixnet.Respond(voice, pair, ask, "", emit)
 		if err != nil {
