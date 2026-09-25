@@ -1350,12 +1350,17 @@ against a threat model that does not apply, at the cost of the use case.
 * Removing the cap forced the streaming work (D-043) — an unbounded archive
   cannot be held in memory, so the Go engine reads entries on demand and trains
   in chunks.
-* JSON upload forms, which must be parsed whole, are still capped (512 MB in
-  the Go server).
+* The JSON upload forms, which carry the file inline, are read whole - held in
+  memory while they are parsed, on every server - but not capped either. The
+  Go server's 512 MB cap on them went on 2026-09-24, the day the Rust port's
+  16 MiB request cap was lifted from `/api/uploads` (its multipart and raw
+  uploads stream to disk, as the Go server's do). No server refuses an upload
+  for its size; what holds a corpus is the memory its *training* takes.
 * If this were ever exposed beyond localhost, this decision would need
   revisiting first. See Q-6.
 
-**Lives in** `radixnet/archive.py`, `radixnet/api.py`
+**Lives in** `radixnet/archive.py`, `radixnet/api.py`, `go/server/http.go`, `go/server/uploads.go`,
+`rust/src/http.rs`, `rust/src/multipart.rs`
 
 ---
 
