@@ -119,7 +119,7 @@ same marks, and the same model afterwards.  The frontend runs against
 is `radix`); a CLI run cannot be interrupted with Ctrl-C (the standard library
 cannot catch it), so the long loops save as they go; the calculator's integers
 stop at 2**127; and where Python has a bug the port does what Python meant and
-says so in the code (the HTML reader and `<meta>`, a word model's corrections,
+says so in the code (a word model's corrections,
 the review's `lessons` key).
 
 ## Building and running

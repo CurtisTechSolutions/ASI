@@ -60,6 +60,7 @@ __all__ = [
     "ANSWER_OPEN",
     "CALL_CLOSE",
     "CALL_OPEN",
+    "DEFAULT_SEARCH_ENGINES",
     "DEFAULT_SEARCH_URL",
     "DEFAULT_USER_AGENT",
     "PARAM_TYPES",
@@ -488,78 +489,272 @@ class ToolBox:
 # ---------------------------------------------------------------------------
 
 _BLOCK_TAGS = frozenset(
-    "p div br li tr h1 h2 h3 h4 h5 h6 section article header footer nav aside blockquote pre table".split()
+    "p div br li tr h1 h2 h3 h4 h5 h6 section article header footer nav aside blockquote pre table "
+    "main ul ol dl dt dd figure figcaption form fieldset details summary caption hr address".split()
 )
-_DROP_TAGS = frozenset("script style noscript template svg canvas head meta link".split())
+"""Tags that start a new line of the text."""
+_CELL_TAGS = frozenset(("td", "th"))
+"""Table cells: set off from the cell before them by a space rather than glued to it."""
+_DROP_TAGS = frozenset(
+    "script style noscript template svg canvas head "
+    "nav footer aside dialog button select textarea iframe object audio video datalist".split()
+)
+"""Tags whose content goes with them: what is never shown, and the page's own chrome and controls."""
+_VOID_TAGS = frozenset("area base br col embed hr img input link meta param source track wbr".split())
+"""Elements that have no content and no end tag, so one of them can never open a drop: a
+``<meta charset="utf-8">`` once did, and every page that has one read as empty."""
+_OPTIONAL_END_TAGS = frozenset(
+    "html head body p li dt dd tr td th thead tbody tfoot caption colgroup option optgroup rb rt rtc rp".split()
+)
+"""Elements whose end tag may be left out: hiding one by its attributes could hide the rest of the page."""
+_DROP_ROLES = frozenset(
+    "navigation banner contentinfo complementary search menu menubar toolbar dialog alertdialog tooltip".split()
+)
+"""ARIA roles of page chrome, dropped like the elements they stand for."""
+
+
+def _letters(text: str) -> int:
+    """How many letters and digits ``text`` has: what the link density of a line is measured in."""
+    return sum(1 for ch in text if ch.isalnum())
+
+
+def _role(attrs: dict) -> str:
+    """An element's ARIA role: the first of the roles it lists, lower-cased (``""`` for none)."""
+    roles = (attrs.get("role") or "").lower().split()
+    return roles[0] if roles else ""
+
+
+class _Line:
+    """One line of a page as it is read: its pieces, how many of its letters are link text, and where it lies."""
+
+    __slots__ = ("parts", "linked", "main", "article")
+
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+        self.linked = 0
+        self.main = self.article = False
 
 
 class _TextExtractor(HTMLParser):
-    """HTML -> readable text, plus the title and the links, with the standard library only."""
+    """HTML -> readable text, plus the title and the links, with the standard library only.
+
+    The text is the page as a reader meets it rather than as its markup lists it:
+
+    * what is never shown (``<head>``, ``<script>``, an element that is
+      ``hidden`` or ``display: none``) and the page's own chrome (``<nav>``,
+      ``<footer>``, ``<aside>``, the page's ``<header>``, buttons, menus, the
+      ARIA navigation / banner / search roles) go with everything inside
+      them, their links included;
+    * the lines follow the page's blocks: a paragraph written over several
+      lines of markup is one line, and a ``<pre>`` keeps its own;
+    * a run of lines made of nothing but link text (a menu, a list of
+      languages or of categories) moves after the rest, and so does what lies
+      outside the page's ``<main>`` (its ``<article>`` when it has no main).
+      So the first few hundred characters are what the page is about, and
+      nothing is lost: the rest is still there, further down.
+
+    The links come in the same order, the ones in the running text first.
+    """
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
+        self.lines = [_Line()]
         self.title = ""
-        self.links: list[tuple[str, str]] = []
-        self._drop = 0
+        self.anchors: list[tuple[str, str, int]] = []  # (text, href, the line its text starts on)
+        self._drop: str | None = None  # the element being dropped with everything inside it
+        self._drop_depth = 0           # how many elements of its name are open, itself included
+        self._main: str | None = None  # the element that is the page's main region
+        self._main_depth = 0
+        self._article = self._section = self._pre = 0
         self._in_title = False
         self._href: str | None = None
         self._anchor: list[str] = []
+        self._anchor_line: int | None = None
+
+    # -- lines ----------------------------------------------------------------
+
+    def _break(self) -> None:
+        if self.lines[-1].parts:
+            self.lines.append(_Line())
+
+    def _space(self) -> None:
+        if self.lines[-1].parts:
+            self.lines[-1].parts.append(" ")
+
+    def _add(self, data: str) -> None:
+        if not data:
+            return
+        line = self.lines[-1]
+        if not line.parts:
+            line.main, line.article = self._main is not None, self._article > 0
+        line.parts.append(data)
+        if self._href is not None:
+            letters = _letters(data)
+            line.linked += letters
+            if letters and self._anchor_line is None:
+                self._anchor_line = len(self.lines) - 1
+
+    # -- tags -----------------------------------------------------------------
+
+    def _drops(self, tag: str, attrs: dict) -> bool:
+        """Whether an element (not a void one) goes, with everything inside it."""
+        if tag in _DROP_TAGS:
+            return True
+        if tag == "header" and self._main is None and not self._article and not self._section:
+            return True  # the page's banner, not the header of an article or a section
+        if tag in _OPTIONAL_END_TAGS:
+            return False
+        if "hidden" in attrs and (attrs["hidden"] or "").strip().lower() != "until-found":
+            return True
+        if (attrs.get("aria-hidden") or "").strip().lower() == "true":
+            return True
+        if _role(attrs) in _DROP_ROLES:
+            return True
+        style = "".join((attrs.get("style") or "").lower().split())
+        return "display:none" in style or "visibility:hidden" in style
 
     def handle_starttag(self, tag: str, attrs: list) -> None:
-        if tag in _DROP_TAGS:
-            self._drop += 1
+        values = dict(attrs)
+        void = tag in _VOID_TAGS
+        if self._main is not None:
+            if tag == self._main and not void:
+                self._main_depth += 1  # the region counts its own name everywhere, dropped or not
+        elif self._drop is None and not void and (tag == "main" or _role(values) == "main"):
+            self._break()
+            self._main, self._main_depth = tag, 1
+        if self._drop is not None:
+            if tag == self._drop and not void:
+                self._drop_depth += 1
+            elif tag == "body" and self._drop == "head":  # the head ends where the body begins, </head> or not
+                self._drop = None
+            elif tag == "title" and self._drop == "head":  # the title lives inside <head>, which is otherwise dropped
+                self._in_title = True
+            return
+        if not void and self._drops(tag, values):
+            if tag in _BLOCK_TAGS:
+                self._break()
+            self._drop, self._drop_depth = tag, 1
             return
         if tag == "title":
             self._in_title = True
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
         elif tag == "a":
-            self._href = dict(attrs).get("href")
-            self._anchor = []
+            self._href = values.get("href")
+            self._anchor, self._anchor_line = [], None
+        else:
+            if tag == "article":
+                self._article += 1
+            elif tag == "section":
+                self._section += 1
+            elif tag == "pre":
+                self._pre += 1
+            if tag in _BLOCK_TAGS:
+                self._break()
+            elif tag in _CELL_TAGS:
+                self._space()
 
     def handle_startendtag(self, tag: str, attrs: list) -> None:
-        if tag == "br":
-            self.parts.append("\n")
+        if tag == "br" and self._drop is None:
+            self._break()
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in _DROP_TAGS:
-            self._drop = max(0, self._drop - 1)
-            return
+        void = tag in _VOID_TAGS
         if tag == "title":
             self._in_title = False
-        elif tag in _BLOCK_TAGS:
-            self.parts.append("\n")
         elif tag == "a":
-            text = " ".join("".join(self._anchor).split())
-            if self._href and text:
-                self.links.append((text, self._href))
-            self._href, self._anchor = None, []
+            self._close_anchor()
+        if self._drop is not None:
+            if tag == self._drop and not void:
+                self._drop_depth -= 1
+                if not self._drop_depth:
+                    self._drop = None
+                    if tag in _BLOCK_TAGS:
+                        self._break()
+        else:
+            if tag == "article":
+                self._article = max(0, self._article - 1)
+            elif tag == "section":
+                self._section = max(0, self._section - 1)
+            elif tag == "pre":
+                self._pre = max(0, self._pre - 1)
+            if tag in _BLOCK_TAGS:
+                self._break()
+        if self._main is not None and tag == self._main and not void:
+            self._main_depth -= 1
+            if not self._main_depth:
+                self._main = None
+                self._break()
+
+    def _close_anchor(self) -> None:
+        text = " ".join("".join(self._anchor).split())
+        if self._href and text:
+            line = self._anchor_line if self._anchor_line is not None else len(self.lines) - 1
+            self.anchors.append((text, self._href, line))
+        self._href, self._anchor, self._anchor_line = None, [], None
 
     def handle_data(self, data: str) -> None:
-        if self._in_title:  # the title lives inside <head>, which is otherwise dropped
+        if self._in_title:
             self.title += data
             return
-        if self._drop:
+        if self._drop is not None:
             return
-        self.parts.append(data)
         if self._href is not None:
             self._anchor.append(data)
+        if not self._pre:
+            self._add(data)
+            return
+        for i, piece in enumerate(data.split("\n")):  # a <pre> keeps its lines
+            if i:
+                self._break()
+            self._add(piece)
 
-    def text(self) -> str:
-        lines = [" ".join(line.split()) for line in "".join(self.parts).split("\n")]
-        return "\n".join(line for line in lines if line)
+    # -- the page -------------------------------------------------------------
+
+    def result(self, reading_order: bool = True) -> dict:
+        """``{"title", "text", "links"}``: the main text first, then the rest, and the links in the same order.
+
+        With ``reading_order`` off, the lines and the links stay as the page has them.
+        """
+        texts = [" ".join("".join(line.parts).split()) for line in self.lines]
+        shown = [i for i, text in enumerate(texts) if text]
+        order, anchors = shown, self.anchors
+        if reading_order:
+            if any(self.lines[i].main for i in shown):
+                primary = [line.main for line in self.lines]
+            elif any(self.lines[i].article for i in shown):
+                primary = [line.article for line in self.lines]
+            else:
+                primary = [True] * len(self.lines)
+            # a line of nothing but link text is a menu item when the line beside it is one too
+            weak = [self.lines[i].linked >= _letters(texts[i]) for i in shown]
+            menu = set()
+            for k, i in enumerate(shown):
+                if weak[k] and ((k > 0 and weak[k - 1]) or (k + 1 < len(shown) and weak[k + 1])):
+                    menu.add(i)
+            tier = [(2 if i in menu else 0) + (0 if primary[i] else 1) for i in range(len(self.lines))]
+            order = sorted(shown, key=lambda i: (tier[i], i))
+            anchors = sorted(self.anchors, key=lambda anchor: tier[anchor[2]])
+        return {
+            "title": " ".join(self.title.split()),
+            "text": "\n".join(texts[i] for i in order),
+            "links": [(text, href) for text, href, _line in anchors],
+        }
 
 
-def html_to_text(markup: str) -> dict:
-    """``{"title", "text", "links": [(text, href)]}`` for a page (never raises on broken HTML)."""
+def html_to_text(markup: str, *, reading_order: bool = True) -> dict:
+    """``{"title", "text", "links": [(text, href)]}`` for a page (never raises on broken HTML).
+
+    The text starts with what the page is about, not with its menus: see
+    :class:`_TextExtractor` for what is dropped and what moves to the end.
+    ``reading_order=False`` keeps the lines and the links in the order the page
+    has them (a search engine's hits are ranked by it).
+    """
     parser = _TextExtractor()
     try:
         parser.feed(markup)
         parser.close()
     except Exception:  # noqa: BLE001 - malformed markup still yields whatever was parsed
         pass
-    return {"title": " ".join(parser.title.split()), "text": parser.text(), "links": parser.links}
+    return parser.result(reading_order)
 
 
 # ---------------------------------------------------------------------------
@@ -572,10 +767,18 @@ class WebError(ToolError):
 
 
 DEFAULT_USER_AGENT = os.environ.get("RADIXNET_USER_AGENT", "").strip() or "radixnet/0.1 (+https://curtistechsolutions.com)"
-DEFAULT_SEARCH_URL = (
-    os.environ.get("RADIXNET_SEARCH_URL", "").strip() or "https://html.duckduckgo.com/html/?q={query}"
+DEFAULT_SEARCH_ENGINES = (
+    "https://html.duckduckgo.com/html/?q={query}",
+    "https://lite.duckduckgo.com/lite/?q={query}",
+    "https://en.wikipedia.org/w/api.php?action=query&format=json&formatversion=2&generator=search&gsrlimit=10"
+    "&prop=info%7Cextracts&inprop=url&exintro=1&explaintext=1&exsentences=2&exlimit=10&gsrsearch={query}",
 )
-"""Search endpoint; ``{query}`` is replaced by the URL-encoded query. JSON answers are understood too."""
+"""The search endpoints tried in turn by default: DuckDuckGo's HTML page, its lite page, and then
+Wikipedia's own search API, which is made for programs and so still answers when a search engine
+takes this client for a bot (each of its hits carries the first sentences of the article)."""
+DEFAULT_SEARCH_URL = os.environ.get("RADIXNET_SEARCH_URL", "").strip() or " ".join(DEFAULT_SEARCH_ENGINES)
+"""Search endpoints, separated by spaces and tried in turn until one has results; ``{query}`` is replaced
+by the URL-encoded query. JSON answers are understood too."""
 
 
 _ADDRESS_KINDS = (
@@ -663,7 +866,7 @@ class WebClient:
         self.max_redirects = max(0, int(max_redirects))
         self.user_agent = user_agent or DEFAULT_USER_AGENT
         self.allow_private = bool(allow_private)
-        self.search_url = search_url or DEFAULT_SEARCH_URL
+        self.search_url = " ".join((search_url or "").split()) or DEFAULT_SEARCH_URL
         self.fetched = 0
         self.browser = browser
         """Optional :class:`~radixnet.browser.BrowserClient`: pages are then drawn by a real Chrome,
@@ -739,7 +942,10 @@ class WebClient:
                 charset = response.headers.get_content_charset() or "utf-8"
                 final = response.geturl() or target
             truncated = len(raw) > self.max_bytes
-            body = raw[: self.max_bytes].decode(charset, errors="replace")
+            try:
+                body = raw[: self.max_bytes].decode(charset, errors="replace")
+            except LookupError:  # a charset Python has never heard of: read it as UTF-8 rather than fail
+                body = raw[: self.max_bytes].decode("utf-8", errors="replace")
             self.fetched += 1
             return {
                 "url": final, "status": status, "content_type": content_type or "text/html",
@@ -771,13 +977,26 @@ class WebClient:
     # -- pages ---------------------------------------------------------------
 
     def page(self, url: str) -> dict:
-        """A fetched page reduced to text: ``{"url", "title", "text", "links", "status", "content_type", "truncated"}``."""
+        """A fetched page reduced to text: ``{"url", "title", "text", "links", "status", "content_type", "truncated"}``.
+
+        The links are absolute ``http(s)`` addresses, each once, and none of them
+        back into this same page (a table of contents, a "back to top").
+        """
         response = self.fetch(url)
         kind = response["content_type"]
         if kind in ("text/html", "application/xhtml+xml", ""):
             page = html_to_text(response["body"])
-            links = [(text, urllib.parse.urljoin(response["url"], href)) for text, href in page["links"]]
-            links = [(text, href) for text, href in links if urllib.parse.urlsplit(href).scheme in ("http", "https")]
+            here = response["url"].split("#", 1)[0]
+            links: list[tuple[str, str]] = []
+            seen: set[str] = set()
+            for text, href in page["links"]:
+                href = urllib.parse.urljoin(response["url"], href)
+                if urllib.parse.urlsplit(href).scheme not in ("http", "https") or href in seen:
+                    continue
+                if href.split("#", 1)[0] == here:
+                    continue
+                seen.add(href)
+                links.append((text, href))
         elif kind == "application/json":
             page = {"title": "", "text": response["body"]}
             links = []
@@ -792,20 +1011,54 @@ class WebClient:
     # -- search --------------------------------------------------------------
 
     def search(self, query: str, limit: int = 5) -> list["SearchResult"]:
-        """Search results for ``query`` from :attr:`search_url` (a JSON answer is parsed as such, else the HTML)."""
+        """Search results for ``query`` from the first endpoint of :attr:`search_url` that has any.
+
+        :attr:`search_url` may list several endpoints separated by spaces, and
+        the default does (:data:`DEFAULT_SEARCH_ENGINES`).  An endpoint that
+        refuses rather than answers — an HTTP error, a ``202 Accepted``, a
+        CAPTCHA where the results should be — is passed over for the
+        next one, and when every one of them refused, the error says what each
+        answered.  A JSON answer is read as such (SearxNG, MediaWiki,
+        OpenSearch, ...), anything else as the engine's HTML.
+        """
         text = (query or "").strip()
         if not text:
             raise WebError("the search query is empty")
         quoted = urllib.parse.quote_plus(text)
-        url = self.search_url.replace("{query}", quoted) if "{query}" in self.search_url else (
-            self.search_url + ("&" if "?" in self.search_url else "?") + "q=" + quoted
-        )
-        response = self.fetch(url)
-        if response["content_type"] == "application/json" or response["body"].lstrip()[:1] in ("{", "["):
-            results = _search_from_json(response["body"])
+        endpoints = self.search_url.split()
+        refusals: list[str] = []
+        answered = False
+        for endpoint in endpoints:
+            url = endpoint.replace("{query}", quoted) if "{query}" in endpoint else (
+                endpoint + ("&" if "?" in endpoint else "?") + "q=" + quoted
+            )
+            try:
+                results = self._search_at(url)
+            except WebError as exc:
+                if len(endpoints) == 1:
+                    raise
+                refusals.append(str(exc))
+                continue
             if results:
                 return results[:limit]
-        return _search_from_html(response["body"], response["url"])[:limit]
+            answered = True
+        if answered or not refusals:
+            return []
+        raise WebError("no search engine answered: " + "; ".join(refusals))
+
+    def _search_at(self, url: str) -> list["SearchResult"]:
+        """The hits one search endpoint answers with; :class:`WebError` when it refuses instead."""
+        response = self.fetch(url)
+        host = urllib.parse.urlsplit(response["url"]).hostname or response["url"]
+        if response["status"] == 202:  # "Accepted", and not answered: DuckDuckGo's way of saying no
+            raise WebError(
+                f"{host} answered HTTP {response['status']} instead of results"
+                " - it may be turning automated searches away"
+            )
+        results = _search_results(response["body"], response["content_type"], response["url"])
+        if not results and _is_challenge(response["body"]):
+            raise WebError(f"{host} answered with a CAPTCHA instead of results - it takes this client for a bot")
+        return results
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -825,63 +1078,115 @@ class SearchResult:
         return {"title": self.title, "url": self.url, "snippet": self.snippet}
 
 
+def _search_results(body: str, content_type: str, base: str) -> list[SearchResult]:
+    """The hits in one answer of a search endpoint: a JSON API's results, else the links out of the engine's page."""
+    if content_type == "application/json" or body.lstrip()[:1] in ("{", "["):
+        results = _search_from_json(body)
+        if results:
+            return results
+    page = html_to_text(body, reading_order=False)  # the hits in the engine's own ranking
+    results = _search_from_links(page["links"], base)
+    if not results and page["text"][:1] in ("{", "["):  # a JSON answer that a browser drew as a page
+        results = _search_from_json(page["text"])
+    return results
+
+
 def _search_from_json(body: str) -> list[SearchResult]:
-    """Results out of a JSON search API (SearxNG, Brave and the like)."""
+    """Results out of a JSON search API: SearxNG, Brave, MediaWiki (``query.pages``), OpenSearch and the like."""
     try:
         data = json.loads(body)
     except ValueError:
         return []
     items: Any = None
     if isinstance(data, dict):
-        for key in ("results", "items", "webPages", "web", "data"):
+        for key in ("results", "items", "webPages", "web", "data", "query"):
             value = data.get(key)
             if isinstance(value, dict):
-                value = value.get("value", value.get("results"))
+                value = next((value[k] for k in ("value", "results", "pages", "search") if k in value), None)
             if isinstance(value, list):
                 items = value
                 break
     elif isinstance(data, list):
-        items = data
+        if len(data) >= 4 and isinstance(data[0], str) and all(isinstance(part, list) for part in data[1:4]):
+            # OpenSearch suggestions: [query, [titles], [descriptions], [urls]]
+            items = [{"title": t, "description": d, "url": u} for t, d, u in zip(data[1], data[2], data[3])]
+        else:
+            items = data
     if not isinstance(items, list):
         return []
+    if items and all(isinstance(item, dict) and _is_number(item.get("index")) for item in items):
+        items = sorted(items, key=lambda item: item["index"])  # MediaWiki lists the pages of a search out of rank
     results: list[SearchResult] = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        url = next((item[k] for k in ("url", "link", "href") if isinstance(item.get(k), str)), None)
+        url = next(
+            (item[k] for k in ("url", "link", "href", "fullurl", "canonicalurl") if isinstance(item.get(k), str)), None
+        )
         if not url:
             continue
         title = next((item[k] for k in ("title", "name", "heading") if isinstance(item.get(k), str)), url)
         snippet = next(
-            (item[k] for k in ("content", "snippet", "description", "body", "summary") if isinstance(item.get(k), str)), ""
+            (item[k] for k in ("content", "snippet", "description", "body", "summary", "extract")
+             if isinstance(item.get(k), str)), ""
         )
         results.append(SearchResult(" ".join(title.split()), url, " ".join(snippet.split())[:300]))
     return results
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 _DDG_REDIRECT = re.compile(r"^(?:https?:)?//duckduckgo\.com/l/\?uddg=", re.I)
 
 
-def _search_from_html(body: str, base: str) -> list[SearchResult]:
-    """Results out of a search engine's HTML: the links that leave the engine, de-duplicated."""
-    page = html_to_text(body)
+def _search_from_links(links: list[tuple[str, str]], base: str) -> list[SearchResult]:
+    """Results out of a search engine's page: the links that leave the engine, each once.
+
+    An engine links a hit more than once — its title, its address, a snippet of
+    the page — so a later link to a hit already listed lends it its text as the
+    snippet: the longest such text that has a space in it (an address has
+    none), up to 300 characters.
+    """
     engine = urllib.parse.urlsplit(base).hostname or ""
     results: list[SearchResult] = []
-    seen: set[str] = set()
-    for title, href in page["links"]:
+    listed: dict[str, SearchResult] = {}
+    for title, href in links:
         if _DDG_REDIRECT.match(href):  # DuckDuckGo wraps every hit in a redirect
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(href).query)
             href = (query.get("uddg") or [""])[0]
         href = urllib.parse.urljoin(base, href)
         parts = urllib.parse.urlsplit(href)
         host = parts.hostname or ""
-        if parts.scheme not in ("http", "https") or not host or href in seen or len(title) < 3:
+        if parts.scheme not in ("http", "https") or not host:
             continue
         if host == engine or engine.endswith("." + host) or host.endswith("." + engine):
             continue
-        seen.add(href)
-        results.append(SearchResult(title[:200], href))
+        if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):  # its ads (y.js), its feedback page
+            continue
+        hit = listed.get(href)
+        if hit is not None:
+            snippet = title[:300]
+            if " " in snippet and title[:200] != hit.title and len(snippet) > len(hit.snippet):
+                hit.snippet = snippet
+            continue
+        if len(title) < 3:
+            continue
+        listed[href] = hit = SearchResult(title[:200], href)
+        results.append(hit)
     return results
+
+
+_CHALLENGE_MARKERS = (
+    "captcha", "anomaly-modal", "unusual traffic", "are you a robot", "not a robot", "bots use duckduckgo",
+)
+"""What a search engine's "are you a human?" page says where its results should be."""
+
+
+def _is_challenge(body: str) -> bool:
+    lower = body.lower()
+    return any(marker in lower for marker in _CHALLENGE_MARKERS)
 
 
 # ---------------------------------------------------------------------------

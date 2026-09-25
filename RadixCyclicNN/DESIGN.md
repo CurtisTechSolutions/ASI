@@ -2558,9 +2558,19 @@ Browsing is `WebClient(timeout=20, max_bytes=2_000_000, max_redirects=4, user_ag
 search_url=None)`: `http`/`https` only, no credentials in the URL, no address that resolves into a private,
 loopback, link-local, reserved or multicast range (`allow_private` is for a local test server), redirects followed
 by hand so every hop is checked again, a byte cap and a timeout. `.fetch(url)` is the raw response, `.page(url)`
-adds `html_to_text` (title, text, absolute `http(s)` links; `<script>` / `<style>` / `<head>` dropped) and
-`.search(query, limit)` reads a JSON search API (SearxNG, Brave, ...) or an engine's HTML, unwrapping DuckDuckGo's
-redirects and dropping links back into the engine. `$RADIXNET_SEARCH_URL` (`{query}` is substituted) and
+adds `html_to_text` (title, text, absolute `http(s)` links, each once and none back into the page itself) and
+`.search(query, limit)` reads a JSON search API (SearxNG, Brave, MediaWiki, OpenSearch, ...) or an engine's HTML,
+unwrapping DuckDuckGo's redirects, dropping links back into the engine and taking a hit's snippet from the engine's
+other links to it. `search_url` may name several endpoints separated by spaces, tried in turn: one that refuses (an
+HTTP error, DuckDuckGo's `202 Accepted` or a CAPTCHA page) is passed over for the next, and the default is
+DuckDuckGo's HTML page, its lite page and Wikipedia's search API (`DEFAULT_SEARCH_ENGINES`).
+`html_to_text` reads a page the way a reader meets it: what is never shown (`<head>`, `<script>`, `hidden`,
+`display: none`, `aria-hidden`) and the page's chrome (`<nav>`, `<footer>`, `<aside>`, the page-level `<header>`,
+buttons, menus, ARIA navigation / banner / search roles) are dropped with their links; the lines follow the blocks
+(`<pre>` keeps its own); and runs of link-only lines (menus, language lists) and whatever lies outside `<main>` (or
+`<article>`) move after the rest, links likewise, so the first few hundred characters - what the agent's transcript
+keeps of an observation - are what the page is about. `<meta>` and `<link>` are void: counting them as open drops
+once made every page that has one read as empty. `$RADIXNET_SEARCH_URL` (`{query}` is substituted) and
 `$RADIXNET_USER_AGENT` are the defaults.
 
 `default_toolbox(web=None, *, sandbox=None, upload_dir=None, offline=False, extra=()) -> ToolBox` installs

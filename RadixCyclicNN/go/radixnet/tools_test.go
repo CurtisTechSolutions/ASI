@@ -3,8 +3,10 @@ package radixnet
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +31,34 @@ const searchHTML = "<html><body><a href='/internal'>engine link</a>" +
 	"<a href='https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.net%2Fhit'>A wrapped hit</a>" +
 	"<a href='https://example.com/plain'>A plain hit</a></body></html>"
 
+// articlePage is a page as real sites write them: a <meta charset> before the
+// title (which once made every page read as empty), a banner, menus, a
+// language list, hidden parts and a footer around the article.
+const articlePage = "<html><head><meta charset=\"utf-8\"><title>Cat</title><link rel=stylesheet href=s.css>" +
+	"</head><body><a href=\"#content\">Jump to content</a>" +
+	"<header><form role=search><button>Search</button></form><nav><a href=\"/login\">Log in</a></nav></header>" +
+	"<main id=\"content\"><header><h1>Cat</h1><ul><li><a href=\"https://de.example.org/\">Deutsch</a></li>" +
+	"<li><a href=\"https://fr.example.org/\">Fran&ccedil;ais</a></li></ul></header>" +
+	"<p>The cat is a small\n <a href=\"/wiki/Mammal\">mammal</a>; see <a href=\"#Legs\">below</a>.</p>" +
+	"<table><tr><th>Legs:</th><td><a href=\"/wiki/Mammal\">4</a></td></tr></table>" +
+	"<div hidden>x</div><input type=hidden hidden><pre>meow()\npurr()</pre>" +
+	"<div role=\"navigation\"><a href=\"/wiki/Lion\">Lion</a></div></main>" +
+	"<footer><a href=\"/privacy\">Privacy</a></footer></body></html>"
+
+// ddgPage is DuckDuckGo's page: an ad, then a hit linked three times (its
+// title, its address, a snippet) through the duckduckgo.com/l/ redirect.
+const ddgPage = "<html><head><meta charset=\"utf-8\"><title>cats at DuckDuckGo</title></head><body>" +
+	"<form><select name=kl><option>All Regions</option></select></form>" +
+	"<h2><a href=\"https://duckduckgo.com/y.js?ad_domain=shop.example\">Cat food deals</a></h2>" +
+	"<h2><a href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.example.org%2Fwiki%2FCat&amp;rut=1\">Cat - Encyclopedia</a></h2>" +
+	"<a href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.example.org%2Fwiki%2FCat&amp;rut=1\">en.example.org/wiki/Cat</a>" +
+	"<a href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.example.org%2Fwiki%2FCat&amp;rut=1\">The <b>cat</b> is a small " +
+	"mammal.</a><a href=\"//duckduckgo.com/feedback.html\">Feedback</a></body></html>"
+
+const wikiAPI = `{"query": {"pages": [{"title": "Cat anatomy", "index": 2, "fullurl": "https://en.example.org/wiki/Cat_anatomy",
+ "extract": "Cat anatomy is the study of cats."}, {"title": "Cat", "index": 1, "fullurl": "https://en.example.org/wiki/Cat",
+ "extract": "The cat is a mammal."}]}}`
+
 func fakeSite(t *testing.T) *httptest.Server {
 	t.Helper()
 	searchJSON, _ := json.Marshal(map[string]any{"results": []map[string]any{
@@ -46,6 +76,35 @@ func fakeSite(t *testing.T) *httptest.Server {
 			w.Write(searchJSON)
 		case "/search-html":
 			w.Write([]byte(searchHTML))
+		case "/article":
+			fmt.Fprint(w, articlePage)
+		case "/ddg":
+			w.Write([]byte(ddgPage))
+		case "/ddg-blocked":
+			w.WriteHeader(http.StatusAccepted)
+			fmt.Fprint(w, "<html><body><div class=\"anomaly-modal__title\">Unfortunately, bots use DuckDuckGo too.</div></body></html>")
+		case "/search-203": // a proxy that rewrote the answer: still an answer
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNonAuthoritativeInfo)
+			w.Write(searchJSON)
+		case "/captcha":
+			fmt.Fprint(w, "<html><body><p>Our systems have detected unusual traffic.</p><a href='/help'>Why?</a></body></html>")
+		case "/no-results":
+			fmt.Fprint(w, "<html><head><meta charset=\"utf-8\"><title>No results</title></head><body>No results.</body></html>")
+		case "/wiki-api":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, wikiAPI)
+		case "/opensearch":
+			w.Header().Set("Content-Type", "application/x-suggestions+json")
+			fmt.Fprint(w, `["cat", ["Cat", "Catalonia"], ["", "A region"], ["https://en.example.org/wiki/Cat", "https://en.example.org/wiki/Catalonia"]]`)
+		case "/json-page":
+			fmt.Fprint(w, `<html><body><pre>{"results": [{"title": "Cats", "url": "http://example.org/cats"}]}</pre></body></html>`)
+		case "/latin1":
+			w.Header().Set("Content-Type", "text/html; charset=ISO-8859-1")
+			w.Write([]byte("<p>caf\xe9 \x80</p>"))
+		case "/cp1252":
+			w.Header().Set("Content-Type", "text/html; charset=windows-1252")
+			w.Write([]byte("<p>\x93quoted\x94 \x80</p>"))
 		case "/plain":
 			w.Header().Set("Content-Type", "text/plain")
 			fmt.Fprint(w, "just text")
@@ -397,6 +456,225 @@ func TestSearchReadsJSONAndHTML(t *testing.T) {
 	}
 	if len(urls) != 2 || urls[0] != "https://example.net/hit" || urls[1] != "https://example.com/plain" {
 		t.Fatalf("the engine's own links are skipped and the wrapper unwrapped: %+v", urls)
+	}
+}
+
+func TestHTMLToTextPutsTheMainTextFirst(t *testing.T) {
+	page := HTMLToText(articlePage)
+	if page.Title != "Cat" {
+		t.Fatalf("the title: %q", page.Title)
+	}
+	want := "Cat\nThe cat is a small mammal; see below.\nLegs: 4\nmeow()\npurr()\nJump to content\nDeutsch\nFrançais"
+	if page.Text != want {
+		t.Fatalf("the article first, the chrome gone, the menus last:\n%q\nwant\n%q", page.Text, want)
+	}
+	hrefs := []string{}
+	for _, link := range page.Links {
+		hrefs = append(hrefs, link.URL)
+	}
+	wantLinks := []string{"/wiki/Mammal", "#Legs", "/wiki/Mammal", "#content", "https://de.example.org/", "https://fr.example.org/"}
+	if strings.Join(hrefs, " ") != strings.Join(wantLinks, " ") {
+		t.Fatalf("the links in the running text first: %v", hrefs)
+	}
+	written := readHTML(articlePage, false) // as the page has them, for a search engine's ranking
+	if lines := strings.Split(written.Text, "\n"); lines[0] != "Jump to content" || lines[1] != "Cat" || lines[2] != "Deutsch" {
+		t.Fatalf("page order: %q", written.Text)
+	}
+	if written.Links[0].URL != "#content" {
+		t.Fatalf("page order: %+v", written.Links)
+	}
+	// the <meta> that once hid every page, and entities in a title
+	meta := HTMLToText(`<html><head><meta charset="utf-8"><link rel=x href=y><title>T &amp; U</title></head>` +
+		`<body><p>Hello &amp; bye&nbsp;now</p><a href="/q?a=1&amp;b=2">Link &lt;1&gt;</a></body></html>`)
+	if meta.Title != "T & U" || meta.Text != "Hello & bye now\nLink <1>" || meta.Links[0].URL != "/q?a=1&b=2" {
+		t.Fatalf("a meta tag swallowed the page: %+v", meta)
+	}
+}
+
+func TestHTMLToTextDropsWhatIsNeverShown(t *testing.T) {
+	cases := map[string]string{
+		"<p>a</p><div hidden><div>nested</div>still hidden</div><p>b</p>" +
+			"<span style='DISPLAY: none'>x</span><span style='visibility:hidden'>y</span><span aria-hidden=true>z</span>" +
+			"<div role='navigation'>menu</div><div role='Search box'>find</div><dialog>cookies?</dialog>" +
+			"<p>c<button>Click</button><select><option>One</option></select><textarea>typed</textarea></p>": "a\nb\nc",
+		// a void element cannot hide what follows it, nor can one whose end tag may be left out
+		`<p>before</p><input name="m" hidden><img hidden src=x><p>after</p>`: "before\nafter",
+		"<ul><li hidden>one<li>two</ul><p>three":                             "one\ntwo\nthree",
+		`<div hidden="until-found">findable</div>`:                           "findable",
+		// the banner goes, the header of an article or a section stays
+		"<header>Site name</header><article><header><h1>Story</h1></header><p>Body.</p></article>": "Story\nBody.",
+		"<section><header>Part one</header><p>x</p></section>":                                     "Part one\nx",
+		// one link on its own line is text; a run of them is a menu
+		"<p>First.</p><p><a href='/a'>A link</a></p><p>Last.</p>":                                       "First.\nA link\nLast.",
+		"<ul><li><a href='/a'>One</a><li><a href='/b'>Two</a></ul><p>Body.</p>":                         "Body.\nOne\nTwo",
+		"<div>Promo</div><div role='main'><div>Body<div hidden>x</div></div>more</div><div>After</div>": "Body\nmore\nPromo\nAfter",
+		"<table><tr><td>Kingdom:</td><td><a href=/a>Animalia</a></td></tr></table>":                     "Kingdom: Animalia",
+		// the tokenizer: a stray '<' is text, a '>' inside quotes does not end a tag, a title may hold '<'
+		"<p>1 < 2</p><a title=\"a>b\" href=/x>link</a>":                               "1 < 2\nlink",
+		"<script>if (a < b) { x = \"</p>\" }</script><p>after</p><SCRIPT>y</Script>z": "after\nz",
+	}
+	for markup, want := range cases {
+		if got := HTMLToText(markup).Text; got != want {
+			t.Errorf("%q:\n got %q\nwant %q", markup, got, want)
+		}
+	}
+	// an unclosed head ends where the body begins; an icon's title is not the page's
+	page := HTMLToText("<html><head><title>T</title><body><a href=/><svg><title>Icon</title></svg>Home</a>")
+	if page.Title != "T" || page.Text != "Home" {
+		t.Fatalf("head and titles: %+v", page)
+	}
+	if page := HTMLToText("<title>Tom &amp; Jerry <3</title><p>x</p>"); page.Title != "Tom & Jerry <3" || page.Text != "x" {
+		t.Fatalf("a '<' in a title: %+v", page)
+	}
+}
+
+func TestHTMLToTextTakesRawTextWholeAndDropsACutOffTag(t *testing.T) {
+	// a title is text, its references read; a script ends only at its own end tag
+	if page := HTMLToText("<title>Use <b> tags &amp; more</title><p>x</p>"); page.Title != "Use <b> tags & more" || page.Text != "x" {
+		t.Fatalf("a title: %+v", page)
+	}
+	for markup, want := range map[string]string{
+		`<script>if (a) "</scripts>"</script><p>after</p>`: "after",
+		"<xmp><b>raw</b> &amp;</xmp>":                      "<b>raw</b> &amp;",
+		"<textarea><p>typed</p></textarea><p>b</p>":        "b",
+		"cat</": "cat</",
+	} {
+		if got := HTMLToText(markup).Text; got != want {
+			t.Errorf("%q: got %q, want %q", markup, got, want)
+		}
+	}
+	// a page cut off at the byte cap in the middle of a tag
+	if page := HTMLToText(`<p>cat</p><a href="/x`); page.Text != "cat" || len(page.Links) != 0 {
+		t.Fatalf("a cut-off tag: %+v", page)
+	}
+}
+
+func TestGetPageLinksEachAddressOnceAndNeverBackToItself(t *testing.T) {
+	site := fakeSite(t)
+	page, err := localWeb(t, site).GetPage(site.URL + "/article")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hrefs := []string{}
+	for _, link := range page.Links {
+		hrefs = append(hrefs, link.URL)
+	}
+	want := []string{site.URL + "/wiki/Mammal", "https://de.example.org/", "https://fr.example.org/"}
+	if strings.Join(hrefs, " ") != strings.Join(want, " ") {
+		t.Fatalf("absolute, each once, none back into the page: %v", hrefs)
+	}
+	for path, want := range map[string]string{"/latin1": "café \u0080", "/cp1252": "“quoted” €"} {
+		page, err := localWeb(t, site).GetPage(site.URL + path)
+		if err != nil || page.Text != want {
+			t.Fatalf("%s is read in its charset: %+v %v", path, page, err)
+		}
+	}
+}
+
+// engines is a client that searches the fake site's endpoints, in the order given.
+func engines(t *testing.T, site *httptest.Server, paths ...string) *WebClient {
+	t.Helper()
+	chain := []string{}
+	for _, path := range paths {
+		chain = append(chain, site.URL+path+"?q={query}")
+	}
+	web, err := NewWebClient(10*time.Second, 0, true, strings.Join(chain, " "), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return web
+}
+
+func TestSearchFallsBackFromAnEngineThatRefuses(t *testing.T) {
+	site := fakeSite(t)
+	hits, err := engines(t, site, "/ddg").Search("cats", 5)
+	if err != nil || len(hits) != 1 || hits[0] != (SearchResult{"Cat - Encyclopedia", "https://en.example.org/wiki/Cat", "The cat is a small mammal."}) {
+		t.Fatalf("DuckDuckGo's page, the ad and the feedback link skipped, the snippet kept: %+v %v", hits, err)
+	}
+	hits, err = engines(t, site, "/ddg-blocked", "/wiki-api").Search("cat legs", 5)
+	if err != nil || len(hits) != 2 || hits[0].Title != "Cat" || hits[0].Snippet != "The cat is a mammal." || hits[1].Title != "Cat anatomy" {
+		t.Fatalf("DuckDuckGo refused, so Wikipedia's API answered, ranked by index: %+v %v", hits, err)
+	}
+	if _, err := engines(t, site, "/ddg-blocked").Search("cats", 5); err == nil ||
+		err.Error() != "127.0.0.1 answered HTTP 202 instead of results - it may be turning automated searches away" {
+		t.Fatalf("one engine that refuses: %v", err)
+	}
+	if _, err := engines(t, site, "/captcha").Search("cats", 5); err == nil || !strings.Contains(err.Error(), "answered with a CAPTCHA instead of results") {
+		t.Fatalf("a CAPTCHA: %v", err)
+	}
+	_, err = engines(t, site, "/ddg-blocked", "/captcha", "/nope").Search("cats", 5)
+	if err == nil || !strings.HasPrefix(err.Error(), "no search engine answered: ") {
+		t.Fatalf("every engine refusing: %v", err)
+	}
+	for _, part := range []string{"HTTP 202", "CAPTCHA", "HTTP 404"} {
+		if !strings.Contains(err.Error(), part) {
+			t.Fatalf("each engine's answer is named: %v", err)
+		}
+	}
+	if hits, err := engines(t, site, "/ddg-blocked", "/no-results").Search("cats", 5); err != nil || len(hits) != 0 {
+		t.Fatalf("an engine that finds nothing is no results: %+v %v", hits, err)
+	}
+	hits, err = engines(t, site, "/opensearch").Search("cat", 5)
+	if err != nil || len(hits) != 2 || hits[0].Title != "Cat" || hits[1].Snippet != "A region" {
+		t.Fatalf("OpenSearch: %+v %v", hits, err)
+	}
+	if hits, err := engines(t, site, "/search-203").Search("cats", 5); err != nil || len(hits) != 2 {
+		t.Fatalf("only a 202 is a refusal: %+v %v", hits, err)
+	}
+	hits, err = engines(t, site, "/json-page").Search("cats", 5)
+	if err != nil || len(hits) != 1 || hits[0].URL != "http://example.org/cats" {
+		t.Fatalf("a JSON answer drawn as a page, as a browser has it: %+v %v", hits, err)
+	}
+}
+
+func TestDefaultSearchEngines(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("RADIXNET_SEARCH_URL")) != "" {
+		t.Skip("$RADIXNET_SEARCH_URL names its own")
+	}
+	web, err := NewWebClient(0, 0, false, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(strings.Fields(web.SearchURL), "|") != strings.Join(DefaultSearchEngines, "|") {
+		t.Fatalf("the default engines: %q", web.SearchURL)
+	}
+	web, _ = NewWebClient(0, 0, false, "  http://a/?q={query}\n http://b/  ", "")
+	if web.SearchURL != "http://a/?q={query} http://b/" {
+		t.Fatalf("the endpoints are split on spaces: %q", web.SearchURL)
+	}
+}
+
+func TestCheckSaysWhyAnAddressIsRefused(t *testing.T) {
+	web, _ := NewWebClient(5*time.Second, 0, false, "", "")
+	for raw, want := range map[string]string{
+		"http://127.0.0.1/":       "refusing 127.0.0.1: it resolves to 127.0.0.1, a loopback address - pass allow_private (--allow-private) to fetch it anyway",
+		"http://169.254.169.254/": "a link-local address",
+		"http://0.0.0.0/":         "an unspecified address",
+		"http://10.1.2.3/":        "a private address",
+		"http://[::1]/":           "a loopback address",
+		"http://[fd00::1]/":       "a private address",
+	} {
+		if _, err := web.Check(raw); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v (want %q)", raw, err, want)
+		}
+	}
+	// a name this process cannot resolve is refused - unless a proxy carries the request and resolves it
+	savedLookup, savedProxy := lookupIP, environmentProxy
+	t.Cleanup(func() { lookupIP, environmentProxy = savedLookup, savedProxy })
+	lookupIP = func(host string) ([]net.IP, error) {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	environmentProxy = func(*http.Request) (*url.URL, error) { return nil, nil }
+	if _, err := web.Check("https://example.com/"); err == nil || err.Error() != "refusing example.com: it cannot be resolved here (no such host)" {
+		t.Fatalf("no DNS, no proxy: %v", err)
+	}
+	environmentProxy = func(*http.Request) (*url.URL, error) { return url.Parse("http://127.0.0.1:3128") }
+	if got, err := web.Check("https://example.com/"); err != nil || got != "https://example.com/" {
+		t.Fatalf("no DNS, but a proxy that resolves it: %q %v", got, err)
+	}
+	lookupIP = func(string) ([]net.IP, error) { return []net.IP{net.ParseIP("10.0.0.7")}, nil }
+	if _, err := web.Check("https://example.com/"); err == nil || !strings.Contains(err.Error(), "resolves to 10.0.0.7, a private address") {
+		t.Fatalf("a name that resolves somewhere internal is refused, proxy or not: %v", err)
 	}
 }
 

@@ -152,6 +152,33 @@ class TestRustBrowsingParity(unittest.TestCase):
         a, b = self.call("web_search", "query=cats and dogs", search="/search-html?q={query}")
         self.assertEqual(without_timing(a), without_timing(b))  # the DuckDuckGo wrapper unwrapped, the engine skipped
 
+    def test_a_real_page_reads_the_same(self):
+        """A page as real sites write them: the article first, the chrome gone, the same links in the same order."""
+        for extra in (("max_chars=20000",), ()):
+            a, b = self.call("web_fetch", f"url={self.site.url}/article", *extra)
+            self.assertEqual(without_timing(a), without_timing(b), extra)
+        self.assertTrue(b["output"].startswith(f"Cat - Encyclopedia — {self.site.url}/article\nCat\nThe cat (Felis"))
+        self.assertEqual(b["meta"]["link_count"], 7)
+        a, b = self.call("web_links", f"url={self.site.url}/article", "limit=100")
+        self.assertEqual(without_timing(a), without_timing(b))
+
+    def test_the_search_engines_are_tried_the_same_way(self):
+        chain = lambda *paths: " ".join(f"{self.site.url}{path}?q={{query}}" for path in paths)[len(self.site.url):]  # noqa: E731
+        outputs = {}
+        for search in (chain("/ddg"), chain("/ddg-blocked", "/wiki-api"), chain("/opensearch"), chain("/json-page"),
+                       chain("/ddg-blocked", "/no-results"), chain("/search-203")):
+            a, b = self.call("web_search", "query=cat legs", search=search)
+            self.assertEqual(without_timing(a), without_timing(b), search)
+            outputs[search] = b["output"]
+        self.assertIn("— The cat is a small domesticated carnivorous mammal with four legs.", outputs[chain("/ddg")])
+        # DuckDuckGo refused, so Wikipedia's API answered: ranked by index, each hit with its first sentences
+        self.assertTrue(outputs[chain("/ddg-blocked", "/wiki-api")].startswith("1. Cat — https://en.example.org/wiki/Cat"))
+        self.assertEqual(outputs[chain("/ddg-blocked", "/no-results")], "no results for 'cat legs'")
+        # an engine that refuses, alone or with the others, in the same words
+        for search in (chain("/ddg-blocked"), chain("/captcha"), chain("/ddg-blocked", "/captcha", "/nope")):
+            a, b = self.call("web_search", "query=cats", search=search, expect=1)
+            self.assertEqual(a["error"].replace("radixnet: error: ", ""), b["error"].replace("radixnet: ", ""), search)
+
     def test_the_same_refusals(self):
         for path in ("/nope", "/loop", "/away"):
             a, b = self.call("web_fetch", f"url={self.site.url}{path}", expect=1)
