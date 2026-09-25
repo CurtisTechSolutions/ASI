@@ -4314,7 +4314,9 @@ def _add_tool_options(parser: argparse.ArgumentParser, upload_dir: bool = True) 
     group.add_argument("--allow-private", action="store_true",
                        help="allow private / loopback addresses (refused by default; needed for a local test server)")
     group.add_argument("--search-url", metavar="URL",
-                       help="search endpoint; {query} is replaced by the query (default: $RADIXNET_SEARCH_URL or DuckDuckGo)")
+                       help="search endpoint; {query} is replaced by the query, and several separated by spaces are "
+                            "tried in turn until one has results (default: $RADIXNET_SEARCH_URL, else DuckDuckGo "
+                            "and then Wikipedia's search API)")
     group.add_argument("--web-timeout", type=_float_at_least(0.1), default=20.0, metavar="SECONDS",
                        help="seconds to wait for one page")
     group.add_argument("--max-bytes", type=_int_at_least(1024), default=2_000_000, metavar="N",

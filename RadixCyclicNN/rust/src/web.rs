@@ -29,11 +29,16 @@
 //! (D-076); plain HTTP never leaves the process.
 //!
 //! The HTML reader is a small tokenizer rather than a parser: the text, the
-//! title and the links, with `<script>` and `<style>` taken whole and
-//! `<head>`, `<svg>` and the like dropped with their content.  It does one
-//! thing Python's does not: `<meta>` and `<link>` are void elements, so a
-//! `<meta charset="utf-8">` does not open a drop that never closes (in Python
-//! and Go it does, and every page that has one reads as empty).
+//! title and the links, with `<script>` and `<style>` taken whole, what is
+//! never shown and the page's own chrome (`<head>`, `<nav>`, `<footer>`,
+//! hidden elements, ...) dropped with their content, and the text the page is
+//! about put first ([`html_to_text`]).  `<meta>` and `<link>` are void
+//! elements, so a `<meta charset="utf-8">` cannot open a drop that never
+//! closes - which once made every page that has one read as empty, in all
+//! three ports but this one.
+//!
+//! A search tries each of its endpoints in turn ([`DEFAULT_SEARCH_ENGINES`]),
+//! passing over one that answers with an error, a `202` or a CAPTCHA.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,12 +60,24 @@ pub fn default_user_agent() -> String {
     }
 }
 
-/// The search endpoint, `{query}` replaced by the URL-encoded query
-/// (`$RADIXNET_SEARCH_URL` overrides it).  A JSON answer is understood too.
+/// The search endpoints tried in turn by default: DuckDuckGo's HTML page, its
+/// lite page, and then Wikipedia's own search API, which is made for programs
+/// and so still answers when a search engine takes this client for a bot (each
+/// of its hits carries the first sentences of the article).
+pub const DEFAULT_SEARCH_ENGINES: [&str; 3] = [
+    "https://html.duckduckgo.com/html/?q={query}",
+    "https://lite.duckduckgo.com/lite/?q={query}",
+    "https://en.wikipedia.org/w/api.php?action=query&format=json&formatversion=2&generator=search&gsrlimit=10\
+     &prop=info%7Cextracts&inprop=url&exintro=1&explaintext=1&exsentences=2&exlimit=10&gsrsearch={query}",
+];
+
+/// The search endpoints, separated by spaces and tried in turn until one has
+/// results, `{query}` replaced by the URL-encoded query (`$RADIXNET_SEARCH_URL`
+/// overrides them).  A JSON answer is understood too.
 pub fn default_search_url() -> String {
     match std::env::var("RADIXNET_SEARCH_URL") {
         Ok(named) if !named.trim().is_empty() => named.trim().to_string(),
-        _ => "https://html.duckduckgo.com/html/?q={query}".to_string(),
+        _ => DEFAULT_SEARCH_ENGINES.join(" "),
     }
 }
 
@@ -533,7 +550,8 @@ impl WebClient {
             allow_private: o.allow_private,
             search_url: o
                 .search_url
-                .filter(|u| !u.trim().is_empty())
+                .map(|u| u.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|u| !u.is_empty())
                 .unwrap_or_else(default_search_url),
             fetched: AtomicUsize::new(0),
             browser: o.browser,
@@ -670,21 +688,28 @@ impl WebClient {
     }
 
     /// A fetched page reduced to text: HTML read as a page, JSON as it is,
-    /// anything else with its entities unescaped.
+    /// anything else with its entities unescaped.  The links are absolute
+    /// `http(s)` addresses, each once, and none of them back into this same
+    /// page (a table of contents, a "back to top").
     pub fn page(&self, url: &str) -> Result<Page, String> {
         let response = self.fetch(url)?;
         let (title, text, links) = match response.content_type.as_str() {
             "text/html" | "application/xhtml+xml" | "" => {
                 let page = html_to_text(&response.body);
-                let links = page
-                    .links
-                    .into_iter()
-                    .map(|link| Link {
-                        text: link.text,
-                        url: urljoin(&response.url, &link.url),
-                    })
-                    .filter(|link| matches!(urlsplit(&link.url).scheme.as_str(), "http" | "https"))
-                    .collect();
+                let here = response.url.split('#').next().unwrap_or("");
+                let mut seen = std::collections::HashSet::new();
+                let mut links = Vec::new();
+                for link in page.links {
+                    let url = urljoin(&response.url, &link.url);
+                    if !matches!(urlsplit(&url).scheme.as_str(), "http" | "https") || seen.contains(&url) {
+                        continue;
+                    }
+                    if url.split('#').next().unwrap_or("") == here {
+                        continue;
+                    }
+                    seen.insert(url.clone());
+                    links.push(Link { text: link.text, url });
+                }
                 (page.title, page.text, links)
             }
             "application/json" => (String::new(), response.body.clone(), Vec::new()),
@@ -701,32 +726,65 @@ impl WebClient {
         })
     }
 
-    /// The results for a query from the search endpoint: a JSON answer (SearxNG,
-    /// Brave and the like) is read as such, anything else as the engine's HTML.
+    /// The results for a query from the first endpoint of `search_url` that
+    /// has any.  `search_url` may list several endpoints separated by spaces,
+    /// and the default does ([`DEFAULT_SEARCH_ENGINES`]).  An endpoint that
+    /// refuses rather than answers - an HTTP error, a `202 Accepted`, a
+    /// CAPTCHA where the results should be - is passed over for the next
+    /// one, and when every one of them refused, the error says what each
+    /// answered.  A JSON answer is read as such (SearxNG, MediaWiki,
+    /// OpenSearch, ...), anything else as the engine's HTML.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, String> {
         let text = query.trim();
         if text.is_empty() {
             return Err("the search query is empty".to_string());
         }
         let quoted = quote_plus(text);
-        let url = if self.search_url.contains("{query}") {
-            self.search_url.replace("{query}", &quoted)
-        } else {
-            let join = if self.search_url.contains('?') { '&' } else { '?' };
-            format!("{}{join}q={quoted}", self.search_url)
-        };
-        let response = self.fetch(&url)?;
-        let head = response.body.trim_start();
-        if response.content_type == "application/json" || head.starts_with('{') || head.starts_with('[') {
-            let results = search_from_json(&response.body);
-            if !results.is_empty() {
-                return Ok(results.into_iter().take(limit).collect());
+        let endpoints: Vec<&str> = self.search_url.split_whitespace().collect();
+        let mut refusals = Vec::new();
+        let mut answered = false;
+        for endpoint in &endpoints {
+            let url = if endpoint.contains("{query}") {
+                endpoint.replace("{query}", &quoted)
+            } else {
+                let join = if endpoint.contains('?') { '&' } else { '?' };
+                format!("{endpoint}{join}q={quoted}")
+            };
+            match self.search_at(&url) {
+                Ok(results) if !results.is_empty() => return Ok(results.into_iter().take(limit).collect()),
+                Ok(_) => answered = true,
+                Err(err) if endpoints.len() == 1 => return Err(err),
+                Err(err) => refusals.push(err),
             }
         }
-        Ok(search_from_html(&response.body, &response.url)
-            .into_iter()
-            .take(limit)
-            .collect())
+        if answered || refusals.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(format!("no search engine answered: {}", refusals.join("; ")))
+    }
+
+    /// The hits one search endpoint answers with; an error when it refuses
+    /// instead.
+    fn search_at(&self, url: &str) -> Result<Vec<SearchResult>, String> {
+        let response = self.fetch(url)?;
+        let host = match urlsplit(&response.url).hostname() {
+            host if host.is_empty() => response.url.clone(),
+            host => host,
+        };
+        if response.status == 202 {
+            // "Accepted", and not answered: DuckDuckGo's way of saying no
+            return Err(format!(
+                "{host} answered HTTP {} instead of results - it may be turning automated searches away",
+                response.status
+            ));
+        }
+        let results = search_results(&response.body, &response.content_type, &response.url);
+        if results.is_empty() && is_challenge(&response.body) {
+            return Err(format!(
+                "{host} answered with a CAPTCHA instead of results - it takes this client for a bot"
+            ));
+        }
+        Ok(results)
     }
 }
 
@@ -800,19 +858,63 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-/// Results out of a JSON search API.
+/// The hits in one answer of a search endpoint: a JSON API's results, else
+/// the links out of the engine's page.
+fn search_results(body: &str, content_type: &str, base: &str) -> Vec<SearchResult> {
+    let head = body.trim_start();
+    if content_type == "application/json" || head.starts_with('{') || head.starts_with('[') {
+        let results = search_from_json(body);
+        if !results.is_empty() {
+            return results;
+        }
+    }
+    let page = read_html(body, false); // the hits in the engine's own ranking
+    let results = search_from_links(&page.links, base);
+    if results.is_empty() && (page.text.starts_with('{') || page.text.starts_with('[')) {
+        return search_from_json(&page.text); // a JSON answer that a browser drew as a page
+    }
+    results
+}
+
+/// OpenSearch suggestions, `[query, [titles], [descriptions], [urls]]`, as
+/// the objects the other APIs answer with.
+fn opensearch(list: &[Json]) -> Option<Vec<Json>> {
+    if list.len() < 4 || !matches!(list[0], Json::Str(_)) {
+        return None;
+    }
+    let (Json::Arr(titles), Json::Arr(descriptions), Json::Arr(urls)) = (&list[1], &list[2], &list[3]) else {
+        return None;
+    };
+    Some(
+        titles
+            .iter()
+            .zip(descriptions)
+            .zip(urls)
+            .map(|((title, description), url)| {
+                Json::obj([
+                    ("title", title.clone()),
+                    ("description", description.clone()),
+                    ("url", url.clone()),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// Results out of a JSON search API: SearxNG, Brave, MediaWiki
+/// (`query.pages`), OpenSearch and the like.
 fn search_from_json(body: &str) -> Vec<SearchResult> {
     let Ok(data) = parse(body) else { return Vec::new() };
-    let items: Vec<Json> = match &data {
+    let mut items: Vec<Json> = match &data {
         Json::Obj(_) => {
             let mut found = Vec::new();
-            for key in ["results", "items", "webPages", "web", "data"] {
+            for key in ["results", "items", "webPages", "web", "data", "query"] {
                 let mut value = data.at(key).clone();
                 if let Json::Obj(_) = value {
-                    value = match value.get("value") {
-                        Some(inner) => inner.clone(),
-                        None => value.at("results").clone(),
-                    };
+                    value = ["value", "results", "pages", "search"]
+                        .iter()
+                        .find_map(|k| value.get(k).cloned())
+                        .unwrap_or(Json::Null);
                 }
                 if let Json::Arr(list) = value {
                     found = list;
@@ -821,20 +923,31 @@ fn search_from_json(body: &str) -> Vec<SearchResult> {
             }
             found
         }
-        Json::Arr(list) => list.clone(),
+        Json::Arr(list) => opensearch(list).unwrap_or_else(|| list.clone()),
         _ => Vec::new(),
     };
+    let ranked = |item: &Json| matches!(item, Json::Obj(_)) && matches!(item.at("index"), Json::Int(_) | Json::Num(_));
+    if !items.is_empty() && items.iter().all(ranked) {
+        // MediaWiki lists the pages of a search out of rank
+        let rank = |item: &Json| item.at("index").as_f64().unwrap_or(0.0);
+        items.sort_by(|a, b| rank(a).total_cmp(&rank(b)));
+    }
     let first = |item: &Json, keys: &[&str]| keys.iter().find_map(|k| item.at(k).as_str().map(str::to_string));
     let mut out = Vec::new();
     for item in &items {
         if !matches!(item, Json::Obj(_)) {
             continue;
         }
-        let Some(url) = first(item, &["url", "link", "href"]).filter(|u| !u.is_empty()) else {
+        let Some(url) = first(item, &["url", "link", "href", "fullurl", "canonicalurl"]).filter(|u| !u.is_empty())
+        else {
             continue;
         };
         let title = first(item, &["title", "name", "heading"]).unwrap_or_else(|| url.clone());
-        let snippet = first(item, &["content", "snippet", "description", "body", "summary"]).unwrap_or_default();
+        let snippet = first(
+            item,
+            &["content", "snippet", "description", "body", "summary", "extract"],
+        )
+        .unwrap_or_default();
         out.push(SearchResult {
             title: collapse(&title),
             url,
@@ -854,28 +967,41 @@ fn ddg_redirect(href: &str) -> bool {
     rest.starts_with("//duckduckgo.com/l/?uddg=")
 }
 
-/// Results out of a search engine's HTML: the links that leave the engine,
-/// de-duplicated, DuckDuckGo's redirect wrapper unwrapped.
-fn search_from_html(body: &str, base: &str) -> Vec<SearchResult> {
-    let page = html_to_text(body);
+/// Results out of a search engine's page: the links that leave the engine,
+/// each once, DuckDuckGo's redirect wrapper unwrapped.  An engine links a hit
+/// more than once - its title, its address, a snippet of the page - so a
+/// later link to a hit already listed lends it its text as the snippet: the
+/// longest such text that has a space in it (an address has none), up to 300
+/// characters.
+fn search_from_links(links: &[Link], base: &str) -> Vec<SearchResult> {
     let engine = urlsplit(base).hostname();
     let mut out: Vec<SearchResult> = Vec::new();
-    for link in page.links {
-        let mut href = link.url;
+    for link in links {
+        let mut href = link.url.clone();
         if ddg_redirect(&href) {
             href = query_value(&urlsplit(&href).query, "uddg").unwrap_or_default();
         }
         let href = urljoin(base, &href);
         let parts = urlsplit(&href);
         let host = parts.hostname();
-        if !matches!(parts.scheme.as_str(), "http" | "https")
-            || host.is_empty()
-            || out.iter().any(|r| r.url == href)
-            || link.text.chars().count() < 3
-        {
+        if !matches!(parts.scheme.as_str(), "http" | "https") || host.is_empty() {
             continue;
         }
         if host == engine || engine.ends_with(&format!(".{host}")) || host.ends_with(&format!(".{engine}")) {
+            continue;
+        }
+        if host == "duckduckgo.com" || host.ends_with(".duckduckgo.com") {
+            continue; // its ads (y.js), its feedback page
+        }
+        if let Some(hit) = out.iter_mut().find(|r| r.url == href) {
+            let snippet: String = link.text.chars().take(300).collect();
+            let title: String = link.text.chars().take(200).collect();
+            if snippet.contains(' ') && title != hit.title && snippet.chars().count() > hit.snippet.chars().count() {
+                hit.snippet = snippet;
+            }
+            continue;
+        }
+        if link.text.chars().count() < 3 {
             continue;
         }
         out.push(SearchResult {
@@ -885,6 +1011,22 @@ fn search_from_html(body: &str, base: &str) -> Vec<SearchResult> {
         });
     }
     out
+}
+
+/// What a search engine's "are you a human?" page says where its results
+/// should be.
+const CHALLENGE_MARKERS: [&str; 6] = [
+    "captcha",
+    "anomaly-modal",
+    "unusual traffic",
+    "are you a robot",
+    "not a robot",
+    "bots use duckduckgo",
+];
+
+fn is_challenge(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    CHALLENGE_MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 // -- HTML to text -----------------------------------------------------------------------------------
@@ -898,7 +1040,7 @@ pub struct Html {
 }
 
 /// Tags that start a new line in the text.
-const BLOCK_TAGS: [&str; 20] = [
+const BLOCK_TAGS: [&str; 35] = [
     "p",
     "div",
     "br",
@@ -919,22 +1061,74 @@ const BLOCK_TAGS: [&str; 20] = [
     "blockquote",
     "pre",
     "table",
+    "main",
+    "ul",
+    "ol",
+    "dl",
+    "dt",
+    "dd",
+    "figure",
+    "figcaption",
+    "form",
+    "fieldset",
+    "details",
+    "summary",
+    "caption",
+    "hr",
+    "address",
 ];
 
-/// Tags whose content is dropped with them.
-const DROP_TAGS: [&str; 9] = [
-    "script", "style", "noscript", "template", "svg", "canvas", "head", "meta", "link",
+/// Table cells: set off from the cell before them by a space rather than
+/// glued to it.
+const CELL_TAGS: [&str; 2] = ["td", "th"];
+
+/// Tags whose content goes with them: what is never shown, and the page's own
+/// chrome and controls.
+const DROP_TAGS: [&str; 19] = [
+    "script", "style", "noscript", "template", "svg", "canvas", "head", "nav", "footer", "aside", "dialog", "button",
+    "select", "textarea", "iframe", "object", "audio", "video", "datalist",
 ];
 
-/// Elements that never have content or an end tag: counting one as an open
-/// drop would never be undone.
+/// Elements that have no content and no end tag, so one of them can never
+/// open a drop: a `<meta charset="utf-8">` once did, in Python and Go, and
+/// every page that has one read as empty.
 const VOID_TAGS: [&str; 14] = [
     "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr",
+];
+
+/// Elements whose end tag may be left out: hiding one by its attributes could
+/// hide the rest of the page.
+const OPTIONAL_END_TAGS: [&str; 21] = [
+    "html", "head", "body", "p", "li", "dt", "dd", "tr", "td", "th", "thead", "tbody", "tfoot", "caption", "colgroup",
+    "option", "optgroup", "rb", "rt", "rtc", "rp",
+];
+
+/// ARIA roles of page chrome, dropped like the elements they stand for.
+const DROP_ROLES: [&str; 11] = [
+    "navigation",
+    "banner",
+    "contentinfo",
+    "complementary",
+    "search",
+    "menu",
+    "menubar",
+    "toolbar",
+    "dialog",
+    "alertdialog",
+    "tooltip",
 ];
 
 /// `" ".join(text.split())`.
 pub fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// How many letters and digits a text has: what the link density of a line is
+/// measured in.  (`is_alphanumeric` also counts the combining vowel signs
+/// Python's `isalnum` does not; they sit inside words, so a line reads as
+/// link text or not the same way on both sides.)
+fn letters(text: &str) -> usize {
+    text.chars().filter(|c| c.is_alphanumeric()).count()
 }
 
 /// One tag: its lower-cased name, its attributes, whether it closes an
@@ -1017,74 +1211,391 @@ fn read_tag(markup: &str, at: usize) -> Option<Tag> {
     })
 }
 
-/// The offset of the `</name` that closes a raw-text element, case ignored.
+/// Elements whose content is text rather than markup, taken whole up to their
+/// end tag as Python's `html.parser` takes them (and as HTML has it): a `<`
+/// inside a script or a title is not a tag.  The escapable ones have their
+/// character references read; the others are taken as written.
+const RAW_TEXT: [&str; 6] = ["script", "style", "xmp", "iframe", "noembed", "noframes"];
+const ESCAPABLE_RAW_TEXT: [&str; 2] = ["title", "textarea"];
+
+/// The offset of the `</name` that closes a raw-text element: case ignored,
+/// and the name followed by a space, a `/` or a `>` (`</scripts>` closes no
+/// script).
 fn raw_end(markup: &str, from: usize, name: &str) -> usize {
-    let needle = format!("</{name}");
-    let lower = markup[from..].to_ascii_lowercase();
-    match lower.find(&needle) {
-        Some(at) => from + at,
-        None => markup.len(),
+    let bytes = markup.as_bytes();
+    let mut i = from;
+    while let Some(at) = markup[i..].find("</") {
+        let at = i + at;
+        let end = at + 2 + name.len();
+        if end < bytes.len()
+            && bytes[at + 2..end].eq_ignore_ascii_case(name.as_bytes())
+            && matches!(bytes[end], b'\t' | b'\n' | b'\r' | b'\x0c' | b' ' | b'/' | b'>')
+        {
+            return at;
+        }
+        i = at + 2;
+    }
+    markup.len()
+}
+
+/// The value of an attribute (`""` for a bare one), `None` when the tag has
+/// none; the last of the same name wins, as it does in Python's `dict(attrs)`.
+fn attr<'a>(tag: &'a Tag, name: &str) -> Option<&'a str> {
+    tag.attrs
+        .iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_deref().unwrap_or(""))
+}
+
+/// An element's ARIA role: the first of the roles it lists, lower-cased.
+fn role(tag: &Tag) -> String {
+    attr(tag, "role")
+        .unwrap_or("")
+        .to_lowercase()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// One line of a page as it is read: its text, how many of its letters are
+/// link text, and where it lies.
+#[derive(Default)]
+struct Line {
+    text: String,
+    linked: usize,
+    main: bool,
+    article: bool,
+}
+
+/// The page as a reader meets it rather than as its markup lists it (Python's
+/// `_TextExtractor`):
+///
+/// * what is never shown (`<head>`, `<script>`, an element that is `hidden`
+///   or `display: none`) and the page's own chrome (`<nav>`, `<footer>`,
+///   `<aside>`, the page's `<header>`, buttons, menus, the ARIA navigation /
+///   banner / search roles) go with everything inside them, links included;
+/// * the lines follow the page's blocks: a paragraph written over several
+///   lines of markup is one line, and a `<pre>` keeps its own;
+/// * a run of lines made of nothing but link text (a menu, a list of
+///   languages or of categories) moves after the rest, and so does what lies
+///   outside the page's `<main>` (its `<article>` when it has no main).
+#[derive(Default)]
+struct Reader {
+    lines: Vec<Line>,
+    title: String,
+    /// `(text, href, the line its text starts on)`.
+    anchors: Vec<(String, String, usize)>,
+    /// The element being dropped with everything inside it, and how many
+    /// elements of its name are open, itself included.
+    drop: Option<String>,
+    drop_depth: usize,
+    /// The element that is the page's main region, and the same count.
+    main: Option<String>,
+    main_depth: usize,
+    article: usize,
+    section: usize,
+    pre: usize,
+    in_title: bool,
+    href: Option<String>,
+    anchor: String,
+    anchor_line: Option<usize>,
+}
+
+impl Reader {
+    fn new() -> Reader {
+        Reader {
+            lines: vec![Line::default()],
+            ..Default::default()
+        }
+    }
+
+    fn last(&mut self) -> &mut Line {
+        let at = self.lines.len() - 1;
+        &mut self.lines[at]
+    }
+
+    fn line_break(&mut self) {
+        if !self.last().text.is_empty() {
+            self.lines.push(Line::default());
+        }
+    }
+
+    fn space(&mut self) {
+        let line = self.last();
+        if !line.text.is_empty() {
+            line.text.push(' ');
+        }
+    }
+
+    fn add(&mut self, data: &str) {
+        if data.is_empty() {
+            return;
+        }
+        let at = self.lines.len() - 1;
+        let (main, article, linking) = (self.main.is_some(), self.article > 0, self.href.is_some());
+        let line = &mut self.lines[at];
+        if line.text.is_empty() {
+            line.main = main;
+            line.article = article;
+        }
+        line.text.push_str(data);
+        if linking {
+            let count = letters(data);
+            line.linked += count;
+            if count > 0 && self.anchor_line.is_none() {
+                self.anchor_line = Some(at);
+            }
+        }
+    }
+
+    fn data(&mut self, chunk: &str) {
+        if !chunk.is_empty() {
+            self.text(unescape(chunk));
+        }
+    }
+
+    /// The content of a raw-text element, its references read only when it is
+    /// an escapable one.
+    fn raw(&mut self, chunk: &str, escapable: bool) {
+        if !chunk.is_empty() {
+            self.text(if escapable { unescape(chunk) } else { chunk.to_string() });
+        }
+    }
+
+    fn text(&mut self, chunk: String) {
+        if self.in_title {
+            // the title lives inside <head>, which is otherwise dropped
+            self.title.push_str(&chunk);
+            return;
+        }
+        if self.drop.is_some() {
+            return;
+        }
+        if self.href.is_some() {
+            self.anchor.push_str(&chunk);
+        }
+        if self.pre == 0 {
+            self.add(&chunk);
+            return;
+        }
+        for (i, piece) in chunk.split('\n').enumerate() {
+            // a <pre> keeps its lines
+            if i > 0 {
+                self.line_break();
+            }
+            self.add(piece);
+        }
+    }
+
+    /// Whether an element (not a void one) goes, with everything inside it.
+    fn drops(&self, tag: &Tag) -> bool {
+        let name = tag.name.as_str();
+        if DROP_TAGS.contains(&name) {
+            return true;
+        }
+        if name == "header" && self.main.is_none() && self.article == 0 && self.section == 0 {
+            return true; // the page's banner, not the header of an article or a section
+        }
+        if OPTIONAL_END_TAGS.contains(&name) {
+            return false;
+        }
+        if attr(tag, "hidden").is_some_and(|value| value.trim().to_lowercase() != "until-found") {
+            return true;
+        }
+        if attr(tag, "aria-hidden").is_some_and(|value| value.trim().to_lowercase() == "true") {
+            return true;
+        }
+        if DROP_ROLES.contains(&role(tag).as_str()) {
+            return true;
+        }
+        let style: String = attr(tag, "style")
+            .unwrap_or("")
+            .to_lowercase()
+            .split_whitespace()
+            .collect();
+        style.contains("display:none") || style.contains("visibility:hidden")
+    }
+
+    fn start(&mut self, tag: &Tag) {
+        let name = tag.name.as_str();
+        let void = VOID_TAGS.contains(&name);
+        match &self.main {
+            // the region counts its own name everywhere, dropped or not
+            Some(root) => {
+                if root == name && !void {
+                    self.main_depth += 1;
+                }
+            }
+            None => {
+                if self.drop.is_none() && !void && (name == "main" || role(tag) == "main") {
+                    self.line_break();
+                    self.main = Some(name.to_string());
+                    self.main_depth = 1;
+                }
+            }
+        }
+        if let Some(root) = &self.drop {
+            if root == name && !void {
+                self.drop_depth += 1;
+            } else if name == "body" && root == "head" {
+                self.drop = None; // the head ends where the body begins, </head> or not
+            } else if name == "title" && root == "head" {
+                self.in_title = true;
+            }
+            return;
+        }
+        if !void && self.drops(tag) {
+            if BLOCK_TAGS.contains(&name) {
+                self.line_break();
+            }
+            self.drop = Some(name.to_string());
+            self.drop_depth = 1;
+            return;
+        }
+        match name {
+            "title" => self.in_title = true,
+            "a" => {
+                self.href = tag
+                    .attrs
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == "href")
+                    .and_then(|(_, value)| value.clone());
+                self.anchor.clear();
+                self.anchor_line = None;
+            }
+            _ => {
+                match name {
+                    "article" => self.article += 1,
+                    "section" => self.section += 1,
+                    "pre" => self.pre += 1,
+                    _ => {}
+                }
+                if BLOCK_TAGS.contains(&name) {
+                    self.line_break();
+                } else if CELL_TAGS.contains(&name) {
+                    self.space();
+                }
+            }
+        }
+    }
+
+    fn end(&mut self, name: &str) {
+        let void = VOID_TAGS.contains(&name);
+        if name == "title" {
+            self.in_title = false;
+        } else if name == "a" {
+            self.close_anchor();
+        }
+        if let Some(root) = &self.drop {
+            if root == name && !void {
+                self.drop_depth -= 1;
+                if self.drop_depth == 0 {
+                    self.drop = None;
+                    if BLOCK_TAGS.contains(&name) {
+                        self.line_break();
+                    }
+                }
+            }
+        } else {
+            match name {
+                "article" => self.article = self.article.saturating_sub(1),
+                "section" => self.section = self.section.saturating_sub(1),
+                "pre" => self.pre = self.pre.saturating_sub(1),
+                _ => {}
+            }
+            if BLOCK_TAGS.contains(&name) {
+                self.line_break();
+            }
+        }
+        if self.main.as_deref() == Some(name) && !void {
+            self.main_depth -= 1;
+            if self.main_depth == 0 {
+                self.main = None;
+                self.line_break();
+            }
+        }
+    }
+
+    fn close_anchor(&mut self) {
+        let shown = collapse(&self.anchor);
+        if let Some(target) = self.href.take() {
+            if !target.is_empty() && !shown.is_empty() {
+                let line = self.anchor_line.unwrap_or(self.lines.len() - 1);
+                self.anchors.push((shown, target, line));
+            }
+        }
+        self.anchor.clear();
+        self.anchor_line = None;
+    }
+
+    /// The main text first, then the rest, and the links in the same order;
+    /// or, without `reading_order`, both as the page has them.
+    fn finish(self, reading_order: bool) -> Html {
+        let texts: Vec<String> = self.lines.iter().map(|line| collapse(&line.text)).collect();
+        let shown: Vec<usize> = (0..texts.len()).filter(|&i| !texts[i].is_empty()).collect();
+        let mut order = shown.clone();
+        let mut anchors: Vec<&(String, String, usize)> = self.anchors.iter().collect();
+        if reading_order {
+            let primary: Vec<bool> = if shown.iter().any(|&i| self.lines[i].main) {
+                self.lines.iter().map(|line| line.main).collect()
+            } else if shown.iter().any(|&i| self.lines[i].article) {
+                self.lines.iter().map(|line| line.article).collect()
+            } else {
+                vec![true; self.lines.len()]
+            };
+            // a line of nothing but link text is a menu item when the line beside it is one too
+            let weak: Vec<bool> = shown
+                .iter()
+                .map(|&i| self.lines[i].linked >= letters(&texts[i]))
+                .collect();
+            let mut menu = vec![false; self.lines.len()];
+            for (k, &i) in shown.iter().enumerate() {
+                if weak[k] && ((k > 0 && weak[k - 1]) || (k + 1 < shown.len() && weak[k + 1])) {
+                    menu[i] = true;
+                }
+            }
+            let tier: Vec<usize> = (0..self.lines.len())
+                .map(|i| 2 * usize::from(menu[i]) + usize::from(!primary[i]))
+                .collect();
+            order.sort_by_key(|&i| (tier[i], i));
+            anchors.sort_by_key(|anchor| tier[anchor.2]);
+        }
+        Html {
+            title: collapse(&self.title),
+            text: order.iter().map(|&i| texts[i].as_str()).collect::<Vec<_>>().join("\n"),
+            links: anchors
+                .into_iter()
+                .map(|(text, url, _)| Link {
+                    text: text.clone(),
+                    url: url.clone(),
+                })
+                .collect(),
+        }
     }
 }
 
-/// Reduces a page to readable text, its title and its links; broken markup
-/// yields whatever could be read rather than an error.
+/// Reduces a page to readable text, its title and its links, the text that
+/// the page is about first ([`Reader`]); broken markup yields whatever could
+/// be read rather than an error.
 pub fn html_to_text(markup: &str) -> Html {
-    let mut text = String::new();
-    let mut title = String::new();
-    let mut links = Vec::new();
-    let mut drop = 0usize;
-    let mut in_title = false;
-    let mut href: Option<String> = None;
-    let mut anchor = String::new();
+    read_html(markup, true)
+}
+
+/// [`html_to_text`], or with `reading_order` off the lines and the links as
+/// the page has them (a search engine's hits are ranked by it).
+pub fn read_html(markup: &str, reading_order: bool) -> Html {
+    let mut reader = Reader::new();
     let bytes = markup.as_bytes();
     let mut i = 0;
-    let data = |chunk: &str,
-                text: &mut String,
-                title: &mut String,
-                anchor: &mut String,
-                drop: usize,
-                in_title: bool,
-                linking: bool| {
-        if chunk.is_empty() {
-            return;
-        }
-        let chunk = unescape(chunk);
-        if in_title {
-            // the title lives inside <head>, which is otherwise dropped
-            title.push_str(&chunk);
-            return;
-        }
-        if drop > 0 {
-            return;
-        }
-        text.push_str(&chunk);
-        if linking {
-            anchor.push_str(&chunk);
-        }
-    };
     while i < bytes.len() {
         let Some(offset) = markup[i..].find('<') else {
-            data(
-                &markup[i..],
-                &mut text,
-                &mut title,
-                &mut anchor,
-                drop,
-                in_title,
-                href.is_some(),
-            );
+            reader.data(&markup[i..]);
             break;
         };
-        data(
-            &markup[i..i + offset],
-            &mut text,
-            &mut title,
-            &mut anchor,
-            drop,
-            in_title,
-            href.is_some(),
-        );
+        reader.data(&markup[i..i + offset]);
         i += offset;
         let rest = &markup[i..];
         if let Some(comment) = rest.strip_prefix("<!--") {
@@ -1113,74 +1624,36 @@ pub fn html_to_text(markup: &str) -> Html {
                 continue;
             }
             // a stray '<' is text, as it is to Python's parser
-            data("<", &mut text, &mut title, &mut anchor, drop, in_title, href.is_some());
+            reader.data("<");
             i += 1;
             continue;
         }
         let Some(tag) = read_tag(markup, i) else {
-            // an unterminated tag: the rest is text
-            data(rest, &mut text, &mut title, &mut anchor, drop, in_title, href.is_some());
+            // a tag the document ends inside (a page cut off at the byte cap) is dropped, as Python's parser drops it
             break;
         };
         i = tag.next;
         let name = tag.name.as_str();
         if tag.end {
-            if DROP_TAGS.contains(&name) {
-                drop = drop.saturating_sub(1);
-            } else if name == "title" {
-                in_title = false;
-            } else if BLOCK_TAGS.contains(&name) {
-                text.push('\n');
-            } else if name == "a" {
-                let shown = collapse(&anchor);
-                if let Some(target) = href.take() {
-                    if !target.is_empty() && !shown.is_empty() {
-                        links.push(Link {
-                            text: shown,
-                            url: target,
-                        });
-                    }
-                }
-                anchor.clear();
-            }
+            reader.end(name);
             continue;
         }
         if tag.self_closing {
-            if name == "br" {
-                text.push('\n');
+            if name == "br" && reader.drop.is_none() {
+                reader.line_break();
             }
             continue;
         }
-        if DROP_TAGS.contains(&name) {
-            if !VOID_TAGS.contains(&name) {
-                drop += 1;
-            }
-            if name == "script" || name == "style" {
-                // raw text: a '<' inside a script is not a tag
-                i = raw_end(markup, i, name);
-            }
-            continue;
-        }
-        if name == "title" {
-            in_title = true;
-        } else if BLOCK_TAGS.contains(&name) {
-            text.push('\n');
-        } else if name == "a" {
-            href = tag
-                .attrs
-                .iter()
-                .rev()
-                .find(|(k, _)| k == "href")
-                .and_then(|(_, v)| v.clone());
-            anchor.clear();
+        reader.start(&tag);
+        let escapable = ESCAPABLE_RAW_TEXT.contains(&name);
+        if escapable || RAW_TEXT.contains(&name) {
+            // text rather than markup, up to the end tag
+            let end = raw_end(markup, i, name);
+            reader.raw(&markup[i..end], escapable);
+            i = end;
         }
     }
-    let lines: Vec<String> = text.split('\n').map(collapse).filter(|l| !l.is_empty()).collect();
-    Html {
-        title: collapse(&title),
-        text: lines.join("\n"),
-        links,
-    }
+    reader.finish(reading_order)
 }
 
 /// The named character references a page is likely to use.
@@ -1381,6 +1854,42 @@ mod tests {
         <a href='http://127.0.0.1:1/other'>absolute</a></body></html>";
     const CATS: &str =
         "<html><head><title>Cats</title></head><body><p>A cat has four legs.</p><br><p>And a tail.</p></body></html>";
+    /// A page as real sites write them: a banner, menus, a language list,
+    /// hidden parts and a footer around the article.
+    const ARTICLE: &str = "<html><head><meta charset=\"utf-8\"><title>Cat</title><link rel=stylesheet href=s.css>\
+        </head><body><a href=\"#content\">Jump to content</a>\
+        <header><form role=search><button>Search</button></form><nav><a href=\"/login\">Log in</a></nav></header>\
+        <main id=\"content\"><header><h1>Cat</h1><ul><li><a href=\"https://de.example.org/\">Deutsch</a></li>\
+        <li><a href=\"https://fr.example.org/\">Fran&ccedil;ais</a></li></ul></header>\
+        <p>The cat is a small\n <a href=\"/wiki/Mammal\">mammal</a>; see <a href=\"#Legs\">below</a>.</p>\
+        <table><tr><th>Legs:</th><td><a href=\"/wiki/Mammal\">4</a></td></tr></table>\
+        <div hidden>x</div><input type=hidden hidden><pre>meow()\npurr()</pre>\
+        <div role=\"navigation\"><a href=\"/wiki/Lion\">Lion</a></div></main>\
+        <footer><a href=\"/privacy\">Privacy</a></footer></body></html>";
+    /// DuckDuckGo's page: an ad, then a hit linked three times (its title, its
+    /// address, a snippet) through the duckduckgo.com/l/ redirect.
+    const DDG: &str = "<html><head><meta charset=\"utf-8\"><title>cats at DuckDuckGo</title></head><body>\
+        <form><select name=kl><option>All Regions</option></select></form>\
+        <h2><a href=\"https://duckduckgo.com/y.js?ad_domain=shop.example\">Cat food deals</a></h2>\
+        <h2><a href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.example.org%2Fwiki%2FCat&amp;rut=1\">Cat - Encyclopedia</a></h2>\
+        <a href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.example.org%2Fwiki%2FCat&amp;rut=1\">en.example.org/wiki/Cat</a>\
+        <a href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.example.org%2Fwiki%2FCat&amp;rut=1\">The <b>cat</b> is a small \
+        mammal.</a><a href=\"//duckduckgo.com/feedback.html\">Feedback</a></body></html>";
+    const DDG_BLOCKED: &str = "<html><head><meta charset=\"utf-8\"><title>DuckDuckGo</title></head><body>\
+        <div class=\"anomaly-modal__title\">Unfortunately, bots use DuckDuckGo too.</div></body></html>";
+    const CAPTCHA: &str =
+        "<html><body><p>Our systems have detected unusual traffic.</p><a href='/help'>Why?</a></body></html>";
+    const NO_RESULTS: &str =
+        "<html><head><meta charset=\"utf-8\"><title>No results</title></head><body>No results.</body></html>";
+    const WIKI_API: &str = "{\"query\": {\"pages\": [{\"title\": \"Cat anatomy\", \"index\": 2, \"fullurl\": \
+        \"https://en.example.org/wiki/Cat_anatomy\", \"extract\": \"Cat anatomy is the study of cats.\"}, \
+        {\"title\": \"Cat\", \"index\": 1, \"fullurl\": \"https://en.example.org/wiki/Cat\", \"extract\": \"The cat is a \
+        mammal.\"}]}}";
+    const OPENSEARCH: &str = "[\"cat\", [\"Cat\", \"Catalonia\"], [\"\", \"A region\"], \
+        [\"https://en.example.org/wiki/Cat\", \"https://en.example.org/wiki/Catalonia\"]]";
+    const JSON_PAGE: &str =
+        "<html><body><pre>{\"results\": [{\"title\": \"Cats\", \"url\": \"http://example.org/cats\"}]}\
+        </pre></body></html>";
     const SEARCH_HTML: &str = "<html><body><a href='/internal'>engine link</a>\
         <a href='https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.net%2Fhit'>A wrapped hit</a>\
         <a href='https://example.com/plain'>A plain hit</a></body></html>";
@@ -1406,6 +1915,14 @@ mod tests {
                     "/cats" => ("200 OK", "text/html; charset=utf-8", CATS, String::new()),
                     "/search" => ("200 OK", "application/json", search, String::new()),
                     "/search-html" => ("200 OK", "text/html", SEARCH_HTML, String::new()),
+                    "/article" => ("200 OK", "text/html", ARTICLE, String::new()),
+                    "/ddg" => ("200 OK", "text/html", DDG, String::new()),
+                    "/ddg-blocked" => ("202 Accepted", "text/html", DDG_BLOCKED, String::new()),
+                    "/captcha" => ("200 OK", "text/html", CAPTCHA, String::new()),
+                    "/no-results" => ("200 OK", "text/html", NO_RESULTS, String::new()),
+                    "/wiki-api" => ("200 OK", "application/json", WIKI_API, String::new()),
+                    "/opensearch" => ("200 OK", "application/x-suggestions+json", OPENSEARCH, String::new()),
+                    "/json-page" => ("200 OK", "text/html", JSON_PAGE, String::new()),
                     "/plain" => ("200 OK", "text/plain", "just text", String::new()),
                     "/big" => ("200 OK", "text/html", big.as_str(), String::new()),
                     "/redirect" => ("302 Found", "text/html", "", "Location: /cats\r\n".to_string()),
@@ -1477,6 +1994,205 @@ mod tests {
         assert_eq!(page.title, "T & U");
         assert_eq!(page.text, "Hello & bye now © © x\nLink <1>");
         assert_eq!(page.links[0].url, "/q?a=1&b=2");
+    }
+
+    #[test]
+    fn the_main_text_comes_first() {
+        let page = html_to_text(ARTICLE);
+        assert_eq!(page.title, "Cat");
+        assert_eq!(
+            page.text,
+            "Cat\nThe cat is a small mammal; see below.\nLegs: 4\nmeow()\npurr()\nJump to content\nDeutsch\nFrançais"
+        );
+        let hrefs: Vec<&str> = page.links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(
+            hrefs,
+            [
+                "/wiki/Mammal",
+                "#Legs",
+                "/wiki/Mammal",
+                "#content",
+                "https://de.example.org/",
+                "https://fr.example.org/"
+            ]
+        );
+        // and as the page has them, for a search engine's ranking
+        let written = read_html(ARTICLE, false);
+        assert_eq!(
+            written.text.split('\n').take(3).collect::<Vec<_>>(),
+            ["Jump to content", "Cat", "Deutsch"]
+        );
+        assert_eq!(written.links[0].url, "#content");
+    }
+
+    #[test]
+    fn what_is_never_shown_is_dropped() {
+        let text = html_to_text(
+            "<p>a</p><div hidden><div>nested</div>still hidden</div><p>b</p>\
+             <span style='DISPLAY: none'>x</span><span style='visibility:hidden'>y</span><span aria-hidden=true>z</span>\
+             <div role='navigation'>menu</div><div role='Search box'>find</div><dialog>cookies?</dialog>\
+             <p>c<button>Click</button><select><option>One</option></select><textarea>typed</textarea></p>",
+        )
+        .text;
+        assert_eq!(text, "a\nb\nc");
+        // a void element cannot hide what follows it, nor can one whose end tag may be left out
+        assert_eq!(
+            html_to_text("<p>before</p><input name=\"m\" hidden><img hidden src=x><p>after</p>").text,
+            "before\nafter"
+        );
+        assert_eq!(
+            html_to_text("<ul><li hidden>one<li>two</ul><p>three").text,
+            "one\ntwo\nthree"
+        );
+        assert_eq!(
+            html_to_text("<div hidden=\"until-found\">findable</div>").text,
+            "findable"
+        );
+        // the banner goes, the header of an article or a section stays
+        assert_eq!(
+            html_to_text("<header>Site name</header><article><header><h1>Story</h1></header><p>Body.</p></article>")
+                .text,
+            "Story\nBody."
+        );
+        assert_eq!(
+            html_to_text("<section><header>Part one</header><p>x</p></section>").text,
+            "Part one\nx"
+        );
+        // an unclosed head ends where the body begins; an icon's title is not the page's
+        let page = html_to_text("<html><head><title>T</title><body><a href=/><svg><title>Icon</title></svg>Home</a>");
+        assert_eq!((page.title.as_str(), page.text.as_str()), ("T", "Home"));
+    }
+
+    #[test]
+    fn raw_text_is_taken_whole_and_a_cut_off_tag_dropped() {
+        // a title is text, its references read; a script ends only at its own end tag
+        let page = html_to_text("<title>Use <b> tags &amp; more</title><p>x</p>");
+        assert_eq!((page.title.as_str(), page.text.as_str()), ("Use <b> tags & more", "x"));
+        assert_eq!(
+            html_to_text("<script>if (a) \"</scripts>\"</script><p>after</p>").text,
+            "after"
+        );
+        assert_eq!(html_to_text("<xmp><b>raw</b> &amp;</xmp>").text, "<b>raw</b> &amp;");
+        assert_eq!(html_to_text("<textarea><p>typed</p></textarea><p>b</p>").text, "b");
+        // a page cut off at the byte cap in the middle of a tag
+        let page = html_to_text("<p>cat</p><a href=\"/x");
+        assert_eq!((page.text.as_str(), page.links.len()), ("cat", 0));
+        assert_eq!(html_to_text("cat</").text, "cat</");
+    }
+
+    #[test]
+    fn lines_follow_the_blocks() {
+        // one link on its own line is part of the text; only a run of them is a menu
+        assert_eq!(
+            html_to_text("<p>First.</p><p><a href='/a'>A link</a></p><p>Last.</p>").text,
+            "First.\nA link\nLast."
+        );
+        assert_eq!(
+            html_to_text("<ul><li><a href='/a'>One</a><li><a href='/b'>Two</a></ul><p>Body.</p>").text,
+            "Body.\nOne\nTwo"
+        );
+        assert_eq!(
+            html_to_text(
+                "<div>Promo</div><div role='main'><div>Body<div hidden>x</div></div>more</div><div>After</div>"
+            )
+            .text,
+            "Body\nmore\nPromo\nAfter"
+        );
+        assert_eq!(
+            html_to_text("<table><tr><td>Kingdom:</td><td><a href=/a>Animalia</a></td></tr></table>").text,
+            "Kingdom: Animalia"
+        );
+    }
+
+    #[test]
+    fn a_page_links_each_address_once_and_never_back_to_itself() {
+        let url = site();
+        let page = local(&url).page(&format!("{url}/article")).unwrap();
+        let hrefs: Vec<String> = page.links.into_iter().map(|l| l.url).collect();
+        assert_eq!(
+            hrefs,
+            [
+                format!("{url}/wiki/Mammal"),
+                "https://de.example.org/".to_string(),
+                "https://fr.example.org/".to_string()
+            ]
+        );
+    }
+
+    /// A client that searches the fake site's endpoints, in the order given.
+    fn engines(url: &str, paths: &[&str]) -> WebClient {
+        let chain: Vec<String> = paths.iter().map(|p| format!("{url}{p}?q={{query}}")).collect();
+        WebClient::new(WebOptions {
+            allow_private: true,
+            search_url: Some(chain.join(" ")),
+            timeout: Duration::from_secs(10),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_search_reads_duckduckgo_and_falls_back_from_an_engine_that_refuses() {
+        let url = site();
+        let hits = engines(&url, &["/ddg"]).search("cats", 5).unwrap();
+        assert_eq!(
+            hits,
+            [SearchResult {
+                title: "Cat - Encyclopedia".into(),
+                url: "https://en.example.org/wiki/Cat".into(),
+                snippet: "The cat is a small mammal.".into()
+            }]
+        ); // the ad and the feedback link are DuckDuckGo's own, the address link is no snippet
+        let hits = engines(&url, &["/ddg-blocked", "/wiki-api"])
+            .search("cat legs", 5)
+            .unwrap();
+        let found: Vec<(&str, &str)> = hits.iter().map(|h| (h.title.as_str(), h.snippet.as_str())).collect();
+        assert_eq!(
+            found,
+            [
+                ("Cat", "The cat is a mammal."),
+                ("Cat anatomy", "Cat anatomy is the study of cats.")
+            ]
+        ); // ranked by "index", not in the order the API lists them
+        assert_eq!(
+            engines(&url, &["/ddg-blocked"]).search("cats", 5).unwrap_err(),
+            "127.0.0.1 answered HTTP 202 instead of results - it may be turning automated searches away"
+        );
+        assert!(engines(&url, &["/captcha"])
+            .search("cats", 5)
+            .unwrap_err()
+            .contains("answered with a CAPTCHA instead of results"));
+        let err = engines(&url, &["/ddg-blocked", "/captcha", "/nope"])
+            .search("cats", 5)
+            .unwrap_err();
+        assert!(err.starts_with("no search engine answered: "), "{err}");
+        for part in ["HTTP 202", "CAPTCHA", "HTTP 404"] {
+            assert!(err.contains(part), "{err}");
+        }
+        assert!(engines(&url, &["/ddg-blocked", "/no-results"])
+            .search("cats", 5)
+            .unwrap()
+            .is_empty());
+        let hits = engines(&url, &["/opensearch"]).search("cat", 5).unwrap();
+        let found: Vec<(&str, &str)> = hits.iter().map(|h| (h.title.as_str(), h.snippet.as_str())).collect();
+        assert_eq!(found, [("Cat", ""), ("Catalonia", "A region")]);
+        let hits = engines(&url, &["/json-page"]).search("cats", 5).unwrap();
+        assert_eq!(hits[0].url, "http://example.org/cats"); // a JSON answer drawn as a page, as --browser has it
+    }
+
+    #[test]
+    fn the_default_search_engines() {
+        if std::env::var("RADIXNET_SEARCH_URL").is_ok_and(|v| !v.trim().is_empty()) {
+            return; // the environment names its own
+        }
+        let web = WebClient::new(WebOptions::default()).unwrap();
+        assert_eq!(web.search_url.split(' ').collect::<Vec<_>>(), DEFAULT_SEARCH_ENGINES);
+        let spaced = WebClient::new(WebOptions {
+            search_url: Some("  http://a/?q={query}\n http://b/  ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(spaced.search_url, "http://a/?q={query} http://b/");
     }
 
     #[test]
