@@ -383,6 +383,23 @@ impl Heard {
 /// judges with - the conversation's own, whoever is speaking.
 pub type Veto<'a> = dyn FnMut(&mut Model, &str) -> bool + 'a;
 
+/// Where a reply says what it is doing while it does it: `trace(event)` for
+/// every step of [`reply`], with the events Python's `dialogue.Trace` sends -
+/// `context` (`context`, `usable`), `candidates` (`context`, `offered`,
+/// `mode`), `pick` (`skipped`, `vetoed`, `repeat`, `spoken`, `caught`),
+/// `rethink` (`kind_of`, `noticed`, `cut`, `steps`, `explored`, `found`,
+/// `taught`) and `fresh`.  It is how the assistant format streams the
+/// thinking ([`crate::assistant`]); without one a reply is what it always was.
+pub type Trace<'a> = dyn FnMut(&Json) + 'a;
+
+fn notice(trace: &mut Option<&mut Trace>, kind: &str, fields: Vec<(&str, Json)>) {
+    if let Some(trace) = trace.as_deref_mut() {
+        let mut pairs = vec![("kind".to_string(), Json::str(kind))];
+        pairs.extend(fields.into_iter().map(|(k, v)| (k.to_string(), v)));
+        trace(&Json::Obj(pairs));
+    }
+}
+
 /// How one conversation runs.
 #[derive(Clone, Debug)]
 pub struct ConverseOptions {
@@ -929,6 +946,8 @@ pub struct ReplyOptions<'a, 'v, 's> {
     /// ([`converse`] streams it as `turn`), since a reply may still be refused
     /// for repeating a duplicate already repeated.
     pub stream: Option<&'a mut Stream<'s>>,
+    /// Hears every step as it is taken (see [`Trace`]).
+    pub trace: Option<&'a mut Trace<'v>>,
 }
 
 /// What `voice` says next after `previous` - one turn, or `None` when it has
@@ -948,6 +967,7 @@ pub fn reply(
     let mut scorer = scorer;
     let mut veto = o.veto;
     let mut stream = o.stream;
+    let mut trace = o.trace;
     let look = Look {
         mode,
         beam: o.beam,
@@ -976,6 +996,7 @@ pub fn reply(
     let look_from = |voice: &mut Model,
                      scorer: &mut Option<&mut Model>,
                      veto: &mut Option<&mut Veto>,
+                     trace: &mut Option<&mut Trace>,
                      stream: &mut Option<&mut Stream>,
                      from: &str,
                      keep: &str,
@@ -985,6 +1006,15 @@ pub fn reply(
      -> Result<(Option<PathResult>, bool), String> {
         let cands = candidates(voice, from, look, o.k, rng)?;
         counts.0 += cands.len();
+        notice(
+            trace,
+            "candidates",
+            vec![
+                ("context", Json::str(from)),
+                ("offered", Json::Int(cands.len() as i64)),
+                ("mode", Json::str(mode)),
+            ],
+        );
         let p = {
             let mut refuse = |text: &str| match veto.as_mut() {
                 Some(v) => match scorer.as_deref_mut() {
@@ -997,6 +1027,29 @@ pub fn reply(
         };
         counts.1 += p.skipped;
         counts.2 += p.vetoed;
+        notice(
+            trace,
+            "pick",
+            vec![
+                ("skipped", Json::Int(p.skipped as i64)),
+                ("vetoed", Json::Int(p.vetoed as i64)),
+                ("repeat", Json::Bool(p.repeat)),
+                (
+                    "spoken",
+                    p.spoken
+                        .as_ref()
+                        .map(|c| Json::str(c.full_text.clone()))
+                        .unwrap_or(Json::Null),
+                ),
+                (
+                    "caught",
+                    p.caught
+                        .as_ref()
+                        .map(|c| Json::str(c.full_text.clone()))
+                        .unwrap_or(Json::Null),
+                ),
+            ],
+        );
         let Some(caught) = p.caught.as_ref() else {
             return Ok((p.spoken, p.repeat));
         };
@@ -1045,6 +1098,19 @@ pub fn reply(
             rng,
         )?;
         counts.0 += record.explored;
+        notice(
+            trace,
+            "rethink",
+            vec![
+                ("kind_of", Json::str(record.kind.clone())),
+                ("noticed", Json::str(record.noticed.clone())),
+                ("cut", Json::str(record.cut.clone())),
+                ("steps", Json::Int(record.steps as i64)),
+                ("explored", Json::Int(record.explored as i64)),
+                ("found", Json::Bool(record.found)),
+                ("taught", Json::Int(record.taught)),
+            ],
+        );
         *rethought = Some(record);
         match found {
             Some(found) => Ok((Some(found), false)),
@@ -1053,7 +1119,13 @@ pub fn reply(
     };
     let mut counts = (0usize, 0usize, 0usize);
     while !ctx.is_empty() {
-        if usable(voice, &ctx) {
+        let known = usable(voice, &ctx);
+        notice(
+            &mut trace,
+            "context",
+            vec![("context", Json::str(ctx.clone())), ("usable", Json::Bool(known))],
+        );
+        if known {
             looking(&mut stream, &ctx);
             for _ in 0..draws {
                 let keep = ctx.clone();
@@ -1061,6 +1133,7 @@ pub fn reply(
                     voice,
                     &mut scorer,
                     &mut veto,
+                    &mut trace,
                     &mut stream,
                     &ctx,
                     &keep,
@@ -1082,6 +1155,7 @@ pub fn reply(
     }
     if spoken.is_none() || repeat {
         // nothing (new) follows the previous line: change the subject with a fresh text
+        notice(&mut trace, "fresh", Vec::new());
         let mut fresh: Option<PathResult> = None;
         let mut fresh_repeat = false;
         looking(&mut stream, "");
@@ -1090,6 +1164,7 @@ pub fn reply(
                 voice,
                 &mut scorer,
                 &mut veto,
+                &mut trace,
                 &mut stream,
                 "",
                 "",
@@ -1216,6 +1291,7 @@ pub fn converse(
             veto: veto.as_deref_mut(),
             think: o.think,
             think_depth: o.think_depth,
+            trace: None,
             stream: stream.as_deref_mut(),
         };
         let said_next = match (index % 2, partner.as_deref_mut()) {

@@ -345,6 +345,11 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
         "the model thinks: one thought from the THINK sentinel, questioning itself where it learned to",
     ),
     (
+        "talk",
+        crate::assistant::cli,
+        "talk to the model in today's format: messages in, a reply out, the thinking first, streamed",
+    ),
+    (
         "chat",
         crate::chat::cli,
         "an LLM converses with the model and marks every reply",

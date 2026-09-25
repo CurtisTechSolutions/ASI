@@ -1208,5 +1208,214 @@ class TestModelService(unittest.TestCase):
         self.assertEqual(server.socket.fileno(), -1)  # closed
 
 
+
+# ---------------------------------------------------------------------------
+# today's format: /v1/chat/completions, /v1/messages, /v1/models
+# ---------------------------------------------------------------------------
+
+
+def _read_response(server, payload):
+    """Send raw bytes; return ``(status, headers, body)`` once the server closes the connection."""
+    raw = raw_request(server, payload)
+    head, _, body = raw.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    status = int(lines[0].split()[1])
+    headers = {}
+    for line in lines[1:]:
+        name, _, value = line.partition(":")
+        headers[name.strip().lower()] = value.strip()
+    return status, headers, body.decode("utf-8")
+
+
+def _frames(body):
+    """The events of a server-sent stream: ``(event name or None, data)`` each, JSON decoded where it is JSON."""
+    out = []
+    for frame in body.split("\n\n"):
+        if not frame.strip():
+            continue
+        name, data = None, []
+        for line in frame.split("\n"):
+            if line.startswith("event: "):
+                name = line[7:]
+            elif line.startswith("data: "):
+                data.append(line[6:])
+        text = "\n".join(data)
+        try:
+            out.append((name, json.loads(text)))
+        except ValueError:
+            out.append((name, text))
+    return out
+
+
+class TestTodaysFormat(unittest.TestCase):
+    """The ``/v1`` routes: messages in, thinking and text out, in both dialects, streamed and not."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client, cls.server, cls.service = start_server(cls.addClassCleanup, kind="count")
+        cls.service.model.train(CORPUS, epochs=2)
+
+    def _post_raw(self, path, body):
+        payload = json.dumps(body).encode("utf-8")
+        request = (
+            f"POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n"
+        ).encode("ascii") + payload
+        return _read_response(self.server, request)
+
+    def test_models(self):
+        status, doc, _ = self.client.get("/v1/models")
+        self.assertEqual(status, 200, doc)
+        self.assertEqual(doc["object"], "list")
+        ids = [m["id"] for m in doc["data"]]
+        self.assertEqual(ids[0], "radixnet-count", "the active model comes first")
+        self.assertTrue(set(ids) <= {"radixnet-count", "radixnet-negative"}, ids)  # a taught negative network is in memory too
+        model = doc["data"][0]
+        self.assertEqual(set(model), {"id", "object", "created", "owned_by", "kind", "label", "encoding", "units", "active"})
+        self.assertEqual((model["object"], model["owned_by"], model["kind"], model["units"], model["active"]),
+                         ("model", "radixnet", "count", "chars", True))
+
+    def test_chat_completions(self):
+        body = {"model": "radixnet-count", "messages": [{"role": "user", "content": "tell me about the cat"}],
+                "max_tokens": 30, "learn": False}
+        status, doc, headers = self.client.post("/v1/chat/completions", body)
+        self.assertEqual(status, 200, doc)
+        self.assertTrue(headers["Content-Type"].startswith("application/json"))
+        self.assertEqual((doc["object"], doc["model"]), ("chat.completion", "radixnet-count"))
+        self.assertTrue(doc["id"].startswith("chatcmpl-"))
+        message = doc["choices"][0]["message"]
+        self.assertEqual(message["role"], "assistant")
+        self.assertTrue(message["content"])
+        self.assertTrue(message["reasoning_content"].startswith('answering "tell me about the cat"'), message["reasoning_content"])
+        self.assertIn(doc["choices"][0]["finish_reason"], ("stop", "length"))
+        self.assertEqual(doc["usage"]["prompt_tokens"], len("tell me about the cat"))
+        self.assertEqual(doc["usage"]["total_tokens"], doc["usage"]["prompt_tokens"] + doc["usage"]["completion_tokens"])
+        self.assertEqual(doc["radixnet"]["choices"][0]["turn"]["text"], message["content"])
+        self.assertEqual(doc["radixnet"]["units"], "chars")
+        # the active model answers to any of its names, and to none
+        for name in ("", "radixnet", "count", "RadixNet-Count"):
+            status, again, _ = self.client.post("/v1/chat/completions", {**body, "model": name})
+            self.assertEqual((status, again["choices"][0]["message"]["content"]), (200, message["content"]), name)
+        # a conversation carried on: what was said is heard, and not said again
+        status, more, _ = self.client.post("/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "tell me about the cat"}, {"role": "assistant", "content": message["content"]},
+                         {"role": "user", "content": "tell me about the cat"}], "learn": False})
+        self.assertEqual(status, 200, more)
+        self.assertNotEqual(more["choices"][0]["message"]["content"], message["content"])
+        self.assertIn("(2 earlier line(s) heard)", more["choices"][0]["message"]["reasoning_content"])
+        # n alternatives, each unheard by the last; no thinking when it is not wanted
+        status, three, _ = self.client.post("/v1/chat/completions", {**body, "n": 3, "thinking": False})
+        self.assertEqual(status, 200, three)
+        texts = [c["message"]["content"] for c in three["choices"]]
+        self.assertEqual(len(set(texts)), 3, texts)
+        self.assertNotIn("reasoning_content", three["choices"][0]["message"])
+
+    def test_messages(self):
+        body = {"model": "radixnet-count", "system": "be brief", "messages": [{"role": "user", "content": "the dog runs"}],
+                "max_tokens": 30, "learn": False}
+        status, doc, _ = self.client.post("/v1/messages", body)
+        self.assertEqual(status, 200, doc)
+        self.assertEqual((doc["type"], doc["role"], doc["model"]), ("message", "assistant", "radixnet-count"))
+        self.assertTrue(doc["id"].startswith("msg_"))
+        self.assertEqual([b["type"] for b in doc["content"]], ["thinking", "text"])
+        self.assertTrue(doc["content"][1]["text"])
+        self.assertIn("a system prompt was given", doc["content"][0]["thinking"])
+        self.assertIn(doc["stop_reason"], ("end_turn", "max_tokens"))
+        self.assertEqual(doc["usage"]["input_tokens"], len("be brief") + len("the dog runs"))
+        status, counted, _ = self.client.post("/v1/messages/count_tokens", {"system": "be brief", "messages": body["messages"]})
+        self.assertEqual((status, counted), (200, {"input_tokens": len("be brief") + len("the dog runs")}))
+        status, quiet, _ = self.client.post("/v1/messages", {**body, "thinking": {"type": "disabled"}})
+        self.assertEqual([b["type"] for b in quiet["content"]], ["text"])
+        self.assertEqual(quiet["content"][0]["text"], doc["content"][1]["text"])
+
+    def test_the_errors_take_the_dialect_s_shape(self):
+        status, doc, _ = self.client.post("/v1/chat/completions", {"messages": "no"})
+        self.assertEqual(status, 400)
+        self.assertEqual(doc, {"error": {"message": "messages must be a list of {role, content} objects",
+                                         "type": "invalid_request_error", "param": "messages", "code": None}})
+        status, doc, _ = self.client.post("/v1/chat/completions", {"model": "radixnet-resonant", "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(status, 404)
+        self.assertEqual((doc["error"]["type"], doc["error"]["param"], doc["error"]["code"]), ("invalid_request_error", "model", "model_not_found"))
+        self.assertIn("radixnet-count", doc["error"]["message"])
+        status, doc, _ = self.client.post("/v1/messages", {"model": "resonant", "messages": [{"role": "user", "content": "x"}]})
+        self.assertEqual(status, 404)
+        self.assertEqual(doc["type"], "error")
+        self.assertEqual(doc["error"]["type"], "not_found_error")
+        status, doc, _ = self.client.post("/v1/messages", {"messages": [{"role": "system", "content": "x"}]})
+        self.assertEqual(status, 400)
+        self.assertEqual(doc["error"]["type"], "invalid_request_error")
+        status, doc, _ = self.client.get("/v1/nothing")
+        self.assertEqual((status, doc["error"]["type"]), (404, "invalid_request_error"))
+        status, doc, headers = self.client.get("/v1/chat/completions")
+        self.assertEqual((status, doc["error"]["type"]), (405, "invalid_request_error"))
+        self.assertEqual(headers["Allow"], "POST, OPTIONS")
+        status, doc, _ = self.client.request("POST", "/v1/chat/completions", raw=b"{not json")
+        self.assertEqual(status, 400)
+        self.assertEqual(doc["error"]["type"], "invalid_request_error")
+
+    def test_streaming(self):
+        body = {"messages": [{"role": "user", "content": "the cat sat"}], "max_tokens": 30, "learn": False}
+        status, whole, _ = self.client.post("/v1/chat/completions", body)
+        self.assertEqual(status, 200)
+        said = whole["choices"][0]["message"]["content"]
+        thought = whole["choices"][0]["message"]["reasoning_content"]
+        status, headers, text = self._post_raw("/v1/chat/completions", {**body, "stream": True, "stream_options": {"include_usage": True}})
+        self.assertEqual(status, 200, text)
+        self.assertEqual(headers["content-type"], "text/event-stream; charset=utf-8")
+        self.assertEqual(headers["connection"], "close")
+        self.assertNotIn("content-length", headers)
+        frames = _frames(text)
+        self.assertEqual(frames[-1], (None, "[DONE]"))
+        chunks = [data for _name, data in frames[:-1]]
+        self.assertTrue(all(c["object"] == "chat.completion.chunk" for c in chunks))
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant", "content": ""})
+        self.assertEqual("".join(c["choices"][0]["delta"].get("content", "") for c in chunks if c["choices"]), said)
+        self.assertEqual("".join(c["choices"][0]["delta"].get("reasoning_content", "") for c in chunks if c["choices"]), thought)
+        self.assertEqual(chunks[-2]["choices"][0]["finish_reason"], whole["choices"][0]["finish_reason"])
+        self.assertEqual(chunks[-1]["usage"]["prompt_tokens"], whole["usage"]["prompt_tokens"])
+        self.assertGreater(len([c for c in chunks if c["choices"] and "content" in c["choices"][0]["delta"]]), 2, "the text streams in pieces")
+        # the Messages dialect streams typed blocks
+        status, headers, text = self._post_raw("/v1/messages", {**body, "stream": True})
+        self.assertEqual(status, 200, text)
+        frames = _frames(text)
+        names = [name for name, _data in frames]
+        self.assertEqual(names[0], "message_start")
+        self.assertEqual(names[-2:], ["message_delta", "message_stop"])
+        starts = [data["content_block"]["type"] for name, data in frames if name == "content_block_start"]
+        self.assertEqual(starts, ["thinking", "text"])
+        streamed = "".join(data["delta"]["text"] for name, data in frames
+                           if name == "content_block_delta" and data["delta"]["type"] == "text_delta")
+        self.assertEqual(streamed, said)
+        self.assertEqual(frames[-2][1]["delta"]["stop_reason"], whole["radixnet"]["choices"][0]["stop_reason"])
+        # a model that is not here is a 404 document, not a stream
+        status, headers, text = self._post_raw("/v1/messages", {**body, "model": "nope", "stream": True})
+        self.assertEqual(status, 404)
+        self.assertTrue(headers["content-type"].startswith("application/json"))
+        self.assertEqual(json.loads(text)["error"]["type"], "not_found_error")
+
+    def test_learning_and_the_guard(self):
+        before = json.dumps(self.service.model.to_dict(), sort_keys=True)
+        body = {"messages": [{"role": "user", "content": "the cat sat on the mat"}], "n": 3, "learn": False}
+        status, doc, _ = self.client.post("/v1/chat/completions", body)
+        self.assertEqual(status, 200, doc)
+        self.assertEqual(json.dumps(self.service.model.to_dict(), sort_keys=True), before, "learn: false leaves the model as it was")
+        self.assertIsNone(doc["radixnet"]["choices"][0]["guard"], "no negative network: nothing guards")
+        said = doc["choices"][0]["message"]["content"]
+        # the negative network guards the answer once it has been taught a failure
+        status, _taught, _ = self.client.post("/api/negative/blame", {"texts": [said], "reason": "nonsense", "severity": 5})
+        self.assertEqual(status, 200)
+        status, guarded, _ = self.client.post("/v1/chat/completions", {**body, "n": 1})
+        self.assertEqual(status, 200, guarded)
+        report = guarded["radixnet"]["choices"][0]["guard"]
+        self.assertIsNotNone(report)
+        self.assertGreaterEqual(report["vetoed"], 1)
+        self.assertEqual(report["rejected"][0]["text"], said)
+        self.assertIn("the negative network vetoed", guarded["choices"][0]["message"]["reasoning_content"])
+        self.assertNotEqual(guarded["choices"][0]["message"]["content"], said)
+        status, unguarded, _ = self.client.post("/v1/chat/completions", {**body, "n": 1, "guard": False})
+        self.assertEqual(unguarded["choices"][0]["message"]["content"], said)
+        self.assertIsNone(unguarded["radixnet"]["choices"][0]["guard"])
+        self.client.post("/api/negative/reset", {})
+
 if __name__ == "__main__":
     unittest.main()

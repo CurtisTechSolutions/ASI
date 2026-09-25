@@ -289,6 +289,7 @@ commands:
   info       statistics and the training history tail
   converse   the model talks to itself
   think      the model thinks: one thought from the THINK sentinel, questioning itself where it learned to
+  talk       talk to the model in today's format: messages in, a reply out, the thinking first, streamed
   chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
   ollama     a corpus written to order, the adversarial review, the copy editor and a thinking model's thoughts (models | corpus | review | correct | think)
@@ -395,6 +396,8 @@ func main() {
 		cmdConverse(rest)
 	case "think":
 		cmdThink(rest)
+	case "talk":
+		cmdTalk(rest)
 	case "chat":
 		cmdChat(rest)
 	case "ollama":

@@ -125,6 +125,8 @@ pub struct Service {
     /// Every route the server answers, filled in by [`build`]: `/api/status`
     /// reports it, and the frontend shows a tab when its route is there.
     routes: std::sync::OnceLock<Vec<String>>,
+    /// When this server started: what `/v1/models` reports as every model's `created`.
+    pub(crate) born: i64,
 }
 
 impl Service {
@@ -159,7 +161,87 @@ impl Service {
             codegen: Default::default(),
             agent: Default::default(),
             routes: std::sync::OnceLock::new(),
+            born: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
         }
+    }
+
+    /// How strictly the negative network guards the output paths, as set.
+    pub(crate) fn guard_config(&self) -> crate::duo::FilterConfig {
+        self.guard.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Runs `f` on the model a request's `model` names (`crate::assistant::kind_of_id`):
+    /// the running one for `""`, `radixnet` or its own kind, else the model of
+    /// that kind kept in memory - which is what `partner` does for
+    /// `/api/converse` - and a 404 for a kind that is not here.  Takes the
+    /// running model's lock, or the parked models', for as long as `f` runs.
+    pub(crate) fn with_voice<T>(&self, name: &str, f: impl FnOnce(&mut Model) -> T) -> Result<T, ApiError> {
+        let kind = crate::assistant::kind_of_id(name);
+        let (active, active_words) = self.with_model(|m| (m.kind(), m.encoding().unit == Unit::Words));
+        if kind.is_empty() || kind == active || (kind == "word" && active == "count" && active_words) {
+            return Ok(self.with_model(f));
+        }
+        let found = if kind == "word" {
+            let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+            parked
+                .iter_mut()
+                .find(|(_, m)| m.kind() == "count" && m.encoding().unit == Unit::Words)
+                .map(|(_, m)| f(m))
+        } else {
+            self.with_parked_kind(&kind, f)
+        };
+        found.ok_or_else(|| {
+            ApiError::with_status(
+                404,
+                format!(
+                    "the model {} is not in memory; the models here are {} (select a kind once to load it)",
+                    crate::negative::python_repr(name),
+                    self.model_ids().join(", ")
+                ),
+            )
+        })
+    }
+
+    /// The ids of every model in memory, the running one first.
+    pub(crate) fn model_ids(&self) -> Vec<String> {
+        self.models_json()
+            .at("data")
+            .as_array()
+            .iter()
+            .filter_map(|m| m.at("id").as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// `GET /v1/models`: the models in memory as an OpenAI model list, `radixnet-<kind>` each.
+    pub(crate) fn models_json(&self) -> Json {
+        let describe = |m: &Model, active: bool| {
+            Json::obj([
+                ("id", Json::str(crate::assistant::model_id(m))),
+                ("object", Json::str("model")),
+                ("created", Json::Int(self.born)),
+                ("owned_by", Json::str("radixnet")),
+                ("kind", Json::str(m.kind())),
+                ("label", Json::str(kinds::label(m.kind()))),
+                ("encoding", Json::str(m.encoding().to_string())),
+                ("units", Json::str(m.encoding().units_name())),
+                ("active", Json::Bool(active)),
+            ])
+        };
+        let mut data = vec![self.with_model(|m| describe(m, true))];
+        {
+            let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+            data.extend(parked.iter().map(|(_, m)| describe(m, false)));
+        }
+        if !self.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+            let slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(negative) = slot.as_ref() {
+                data.push(describe(negative, false));
+            }
+        }
+        Json::obj([("object", Json::str("list")), ("data", Json::Arr(data))])
     }
 
     /// Reads the `serve` command's flags into every area's state.
@@ -1900,6 +1982,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     crate::chat::routes(&mut server);
     crate::codegen::routes(&mut server);
     crate::agent::routes(&mut server);
+    crate::assistant::routes(&mut server);
     let _ = server.state().routes.set(server.routes());
     if let Some(dir) = frontend {
         server.frontend(dir);

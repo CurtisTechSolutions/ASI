@@ -8,6 +8,7 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
+from .assistant import Ask, Reply, complete, respond, stream, to_anthropic, to_openai
 from .activation import (
     DEFAULT_A,
     DEFAULT_B,
@@ -69,6 +70,7 @@ from .speech import (
 
 __all__ = [
     "__version__",
+    "Ask", "Reply", "complete", "respond", "stream", "to_anthropic", "to_openai",
     "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
     "NegativeNet", "NegativeGraph", "NegativeFilter", "FilterConfig",
     "ResonantNet", "ResonantGraph", "MetaLayer", "trigram_phase",

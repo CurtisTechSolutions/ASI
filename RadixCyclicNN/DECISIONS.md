@@ -87,11 +87,14 @@ D-073 words as symbols (superseded by it)
 D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 
 **Part XVIII — More ways to search and to train** · D-078 every method off by default, and none draws a random
-number · D-079 a setting's home is decided by who keeps it · D-084 a model is taught backwards by its run, and asked
+number · D-079 a setting's home is decided by who keeps it · D-080 thinking is a fourth sentinel that faces both
+ways, and a thought is a walk that begins there · D-084 a model is taught backwards by its run, and asked
 backwards by its caller
 
 **Part XIX — The copy editor** · D-082 a correction is a diff, and the LLM is asked for the smallest one ·
 D-083 the veto can keep its provenance to itself
+
+**Part XX — Today's format** · D-085 the format is a rendering of the search, and the thinking is its trace
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -3408,6 +3411,57 @@ server-wide default rather than a flag the negative network carries.
 `_guard_report`, `negative_settings`), `radixnet/cli.py` (`add_guard_flags`,
 `_guard_doc`), `frontend/src/components/GuardNotice.jsx`, `rust/src/duo.rs`,
 `go/radixnet/duo.go`
+
+---
+
+# Part XX — Today's format
+
+### D-085 — Today's format is a rendering of the search, and the thinking is its trace
+
+**Status** Accepted · 2026-09-24 · **Layer** surface · **Beside** D-032, D-055, D-062, D-063, D-068
+
+**Context** Every language model is talked to through one shape now - a conversation of messages in, an assistant
+message out, its thinking first and then the text, streamed - and every client, SDK and front end speaks it. This
+model had a conversation (D-032), a reply function one call deep (D-055) and a record of its second thoughts (D-062,
+D-063), and none of it was reachable by a client that speaks the format. What was missing was not a capability but a
+rendering - and a rendering is exactly where a system built to say what it did could start to pretend.
+
+**Decision** Serve the two dialects that cover the ecosystem - OpenAI's Chat Completions and Anthropic's Messages - as
+one area, `assistant`, under three rules:
+
+1. **A reply is `dialogue.reply`.** No prompt template, no instruction following: the last line is picked up and
+   continued as the Converse and Chat tabs continue it, everything said on both sides is heard, a trailing assistant
+   message is continued as a prefill. A system prompt is *accepted and not read*, and the thinking says so.
+2. **The thinking is the search's own trace**, streamed as the search takes each step through a `trace` hook in
+   `reply`, in fixed lines every port writes character for character - never generated prose, and checkable against
+   the turn record that rides beside the answer (D-063: the metacognition is a record).
+3. **The text streams one node of the walk at a time**, and a token is one unit of the encoding.
+
+The dialogue's dials travel in the same body by their `/api/converse` names, and `learn` stays on by default, as in
+every conversation here (D-068).
+
+**Alternatives rejected**
+* **A prompt template that makes the network "follow" a system prompt.** It cannot; the format merely invites the
+  pretence. Refusing it costs one honest line of thinking per request.
+* **Thinking written by an LLM about the walk.** Not the model's, and the trace already exists.
+* **One dialect only.** OpenAI's is what most clients speak; Anthropic's is where the thinking block comes from. The
+  internal event stream is one, and each dialect is a renderer of about a hundred lines.
+* **Learn off by default for a "stateless" endpoint.** A conversation changes the model here; a client that wants it
+  read-only says `learn: false`, as the Converse tab's checkbox does.
+* **A native `/api/talk` route of the project's own.** The point is interoperability: an off-the-shelf client must work
+  by pointing at the server, so the routes are `/v1/...` and the errors take each dialect's envelope.
+
+**Consequences**
+* `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens` and `/v1/models` on all three servers, the same
+  documents from each, streamed from inside the search (the model lock is held for the stream; Python and Rust close the
+  connection to end it, Go chunks it). The Rust server gained a streaming route kind (`Streamed`).
+* `dialogue.reply` gained the `trace` hook in all three ports; without one it is exactly what it was.
+* `talk` in every CLI, the Talk tab, and two parity suites that hold the ports to Python's thinking and text.
+* The thinking's lines are a contract (DESIGN §37.3): a change to one is a change to three ports and two suites.
+
+**Lives in** `radixnet/assistant.py`, `radixnet/dialogue.py` (`Trace`), `radixnet/api.py`, `radixnet/cli.py`,
+`frontend/src/components/TalkPanel.jsx`, `frontend/src/sse.js`, `go/radixnet/assistant.go`, `go/server/assistant.go`,
+`go/cmd/radixnet-count/talk.go`, `rust/src/assistant.rs`, `rust/src/http.rs` (`Streamed`)
 
 ---
 

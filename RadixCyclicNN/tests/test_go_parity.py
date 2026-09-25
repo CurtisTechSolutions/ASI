@@ -1908,6 +1908,152 @@ class TestGoSearchAndTraining(unittest.TestCase):
                                                     *map(str, args)], cwd=ROOT, capture_output=True).returncode, 0)
 
 
+
+class TestGoAssistantParity(unittest.TestCase):
+    """Today's format (``go/radixnet/assistant.go``) against ``radixnet/assistant.py``: the same thinking, the same text,
+    the same stop reason and units from the CLI, and the same documents from the server's ``/v1`` routes."""
+
+    FLOATS = ("cost", "probability", "step_costs")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="radixnet-go-assistant-")
+        cls.model = os.path.join(cls.tmp.name, "m.count.json")
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=cls.model)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def copy(self, name):
+        model = os.path.join(self.tmp.name, f"{name}.count.json")
+        shutil.copy(self.model, model)
+        return model
+
+    def request(self, name, body):
+        path = os.path.join(self.tmp.name, f"{name}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(body, fh)
+        return path
+
+    @staticmethod
+    def strip(doc):
+        doc = json.loads(json.dumps(doc))
+        doc.pop("id", None)
+        doc.pop("created", None)
+        return doc
+
+    def assert_same_reply(self, a, b):
+        a, b = self.strip(a), self.strip(b)
+        ra, rb = a.pop("radixnet"), b.pop("radixnet")
+        self.assertEqual(a, b)
+        self.assertEqual((ra["kind"], ra["units"], len(ra["choices"])), (rb["kind"], rb["units"], len(rb["choices"])))
+        for x, y in zip(ra["choices"], rb["choices"]):
+            self.assertEqual((x["index"], x["stop_reason"]), (y["index"], y["stop_reason"]))
+            tx, ty = x["turn"], y["turn"]
+            if tx is None or ty is None:
+                self.assertEqual(tx, ty)
+                continue
+            self.assertEqual({k: v for k, v in tx.items() if k not in self.FLOATS},
+                             {k: v for k, v in ty.items() if k not in self.FLOATS})
+            self.assertLessEqual(abs(tx["cost"] - ty["cost"]), 1e-9)
+            self.assertLessEqual(abs(tx["probability"] - ty["probability"]), 1e-9)
+            assert_close(self, tx["step_costs"], ty["step_costs"])
+
+    def test_the_same_thinking_and_the_same_text(self):
+        for dialect, body in (
+            ("openai", {"messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 40, "learn": False}),
+            ("openai", {"messages": [{"role": "system", "content": "be brief"}, {"role": "user", "content": "tell me about the cat"},
+                                     {"role": "assistant", "content": "the cat night"}, {"role": "user", "content": "and the dog"}],
+                        "n": 3, "max_tokens": 40, "learn": False}),
+            ("openai", {"messages": [{"role": "user", "content": "the cat sat"}, {"role": "assistant", "content": "on the"}],
+                        "stop": ["at"], "learn": False}),
+            ("anthropic", {"system": "be brief", "messages": [{"role": "user", "content": "the dog runs in the park"}],
+                           "max_tokens": 30, "stop_sequences": ["zzz"], "learn": False}),
+            ("anthropic", {"messages": [{"role": "user", "content": "the cat sat"}], "thinking": {"type": "disabled"}, "learn": False}),
+        ):
+            request = self.request("req", body)
+            a = py("talk", "--format", dialect, "--request", request, model=self.copy("tp"))
+            b = go("talk", "--format", dialect, "--request", request, model=self.copy("tg"))
+            self.assert_same_reply(a, b)
+
+    def test_a_conversation_from_the_flags_learns_the_same(self):
+        args = ["talk", "--message", "the cat sat on the mat", "--message", "the cat sat on the mat",
+                "--message", "the cat sat on the mat", "--message", "the cat sat on the mat", "--k", 2, "--save"]
+        pm, gm = self.copy("lp"), self.copy("lg")
+        a = py(*args, model=pm)
+        b = go(*args, model=gm)
+        self.assertEqual((a["format"], a["taught"]), (b["format"], b["taught"]))
+        for x, y in zip(a["exchanges"], b["exchanges"]):
+            self.assert_same_reply(x, y)
+        pg, gg = load_json(pm)["graph"], load_json(gm)["graph"]
+        self.assertEqual(pg["nodes"]["labels"], gg["nodes"]["labels"])
+        self.assertEqual(pg["edges"]["reward"], gg["edges"]["reward"])
+
+    def test_the_routes_answer_the_same_documents(self):
+        import socket
+        import time
+        from tests.test_api import Client
+
+        model = self.copy("server")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        proc = subprocess.Popen(
+            [BINARY, "--model", model, "--exact", "serve", "--host", "127.0.0.1", "--port", str(port)],
+            cwd=GO_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        def stop():
+            proc.kill()
+            proc.communicate()
+
+        self.addCleanup(stop)
+        client = Client(f"http://127.0.0.1:{port}")
+        for _ in range(200):
+            try:
+                if client.get("/api/health")[0] == 200:
+                    break
+            except Exception:  # noqa: BLE001 - the server is still starting
+                pass
+            time.sleep(0.05)
+        else:
+            raise AssertionError("the Go server did not start")
+        body = {"messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 30, "learn": False}
+        request = self.request("route", body)
+        for dialect, path in (("openai", "/v1/chat/completions"), ("anthropic", "/v1/messages")):
+            expected = py("talk", "--format", dialect, "--request", request, model=self.copy("rp"))
+            status, doc, _ = client.post(path, body)
+            self.assertEqual(status, 200, doc)
+            self.assert_same_reply(doc, expected)
+        status, models, _ = client.get("/v1/models")
+        self.assertEqual(status, 200)
+        self.assertEqual([m["id"] for m in models["data"]], ["radixnet-count"])
+        status, bad, _ = client.post("/v1/chat/completions", {"messages": "no"})
+        self.assertEqual(status, 400)
+        self.assertEqual(bad["error"]["param"], "messages")
+        # the stream carries the same text
+        payload = json.dumps({**body, "stream": True}).encode("utf-8")
+        head = (f"POST /v1/messages HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n").encode("ascii")
+        with socket.create_connection(("127.0.0.1", port), timeout=120) as sock:
+            sock.sendall(head + payload)
+            chunks = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        raw = b"".join(chunks).decode("utf-8")
+        self.assertIn("text/event-stream", raw.split("\r\n\r\n", 1)[0])
+        text = ""
+        for frame in raw.split("\r\n\r\n", 1)[1].split("\n\n"):
+            for line in frame.split("\n"):
+                if line.startswith("data: "):
+                    data = json.loads(line[6:])
+                    if data.get("type") == "content_block_delta" and data["delta"]["type"] == "text_delta":
+                        text += data["delta"]["text"]
+        self.assertEqual(text, expected["content"][1]["text"] if expected["type"] == "message" else expected["choices"][0]["message"]["content"])
+
 if __name__ == "__main__":
     unittest.main()
 
