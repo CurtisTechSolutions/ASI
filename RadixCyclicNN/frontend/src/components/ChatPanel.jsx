@@ -5,6 +5,7 @@ import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
+import { ThoughtLine } from "./ThoughtView.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 
 const isObject = (value) => Boolean(value) && typeof value === "object";
@@ -230,6 +231,7 @@ export default function ChatPanel({ status }) {
                       {r.rethink ? <> · {rethinkSays(r)}</> : null}
                       {mark && mark.critique ? <> · {mark.critique}</> : null}
                     </div>
+                    <ThoughtLine thought={r.rethink ? r.rethink.thought : null} />
                   </li>
                 </Fragment>
               );

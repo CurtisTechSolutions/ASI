@@ -2413,6 +2413,7 @@ fn train_negative_phase(
                 phase: Some("negative".to_string()),
                 chunk_size: 0,
                 plan: config.plan.clone(),
+                origin: crate::graph::START,
             };
             model.train_with(texts, &options, on_epoch)
         }

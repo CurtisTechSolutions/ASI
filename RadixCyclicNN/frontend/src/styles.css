@@ -1629,3 +1629,96 @@ table.data b.bad {
 table.data tr.stopped td {
   font-weight: 600;
 }
+
+/* ---- Thinking: the Think tab, the thoughts under a turn, a thinking model's thinking ---- */
+
+/* what a voice thought before backing up, under its turn (Converse, Chat) */
+.thought-line {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+  font-style: italic;
+  max-width: 100%;
+}
+
+.thought-line .thought-question {
+  font-style: normal;
+}
+
+ol.thoughts {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+ol.thoughts > li + li {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.thought .thought-summary {
+  margin: 0 0 6px;
+}
+
+.thought .thought-text {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thought dl.kv {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.thought .thought-path {
+  margin-bottom: 8px;
+}
+
+/* the questions a thought asked itself: one level deeper each */
+ol.thought-questions {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0 0 0 14px;
+  border-left: 3px solid var(--accent-2);
+}
+
+.thought.question .thought-summary {
+  font-size: 13px;
+}
+
+/* a thinking model's answers, with the questions it asked itself marked */
+ol.thinking-list {
+  padding-left: 20px;
+  margin: 0 0 10px;
+}
+
+ol.thinking-list li {
+  margin-bottom: 12px;
+}
+
+ol.thinking-list .question,
+ol.thinking-list .answer {
+  margin: 0 0 4px;
+}
+
+.thinking-text {
+  margin: 0 0 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thinking-text mark {
+  background: var(--hl);
+  color: var(--hl-text);
+  border-radius: 3px;
+  padding: 0 2px;
+}

@@ -117,21 +117,30 @@ type PathResult struct {
 // probability, and when it is the cheapest of them the model's most likely next
 // step at this node is to stop rather than carry on: the walk hands over, which
 // here means the branch offers nothing and the search goes on with its others
-// (Graph.ObserveBack).
+// (Graph.ObserveBack).  Think is not a continuation either - a walk never
+// passes through it - but it hands nothing over: where the model has learned to
+// stop and think, the walk carries on and the *thought* is somebody else's
+// business (thinking.go, which asks Graph.ThinksAt along a finished path).
 func Onward(costs []ChildCost) []ChildCost {
-	back, hasBack := math.Inf(1), false
+	back, hasBack, sentinels := math.Inf(1), false, 0
 	for _, it := range costs {
-		if it.Child == Back && (!hasBack || it.Cost < back) {
-			back, hasBack = it.Cost, true
+		switch it.Child {
+		case Back:
+			sentinels++
+			if !hasBack || it.Cost < back {
+				back, hasBack = it.Cost, true
+			}
+		case Think:
+			sentinels++
 		}
 	}
-	if !hasBack {
+	if sentinels == 0 {
 		return costs
 	}
-	onward := make([]ChildCost, 0, len(costs))
-	handOver := true
+	onward := make([]ChildCost, 0, len(costs)-sentinels)
+	handOver := hasBack
 	for _, it := range costs {
-		if it.Child == Back {
+		if it.Child == Back || it.Child == Think {
 			continue
 		}
 		onward = append(onward, it)
@@ -153,12 +162,12 @@ func (r *PathResult) Probability() float64 {
 }
 
 // startEmission is the number of units the start node emits (its remainder
-// after the matched gram); START and END emit nothing.
+// after the matched gram); the sentinels emit nothing.
 func startEmission(g *Graph, startNode, startOffset int) (int, error) {
 	if startNode < 0 || startNode >= len(g.Labels) || !g.Alive[startNode] {
 		return 0, fmt.Errorf("start node %d is not alive", startNode)
 	}
-	if startNode == Start || startNode == End {
+	if startNode < First {
 		return 0, nil
 	}
 	remainder := g.labelLen[startNode] - (startOffset + g.Enc.N)
@@ -169,25 +178,26 @@ func startEmission(g *Graph, startNode, startOffset int) (int, error) {
 }
 
 // buildResult decodes a node path into a PathResult.  includeContext nil
-// defaults to "true from START, false otherwise"; maxChars < 0 means no cap
-// (and counts the encoding's units, so words under a word encoding).
+// defaults to "true from an origin sentinel (START, THINK), false otherwise";
+// maxChars < 0 means no cap (and counts the encoding's units, so words under a
+// word encoding).
 func buildResult(g *Graph, nodeIDs []int, stepCosts []float64, startOffset, maxChars, expanded int, includeContext *bool) *PathResult {
 	labels := make([]string, len(nodeIDs))
 	for i, n := range nodeIDs {
 		labels[i] = g.Labels[n]
 	}
 	startNode := nodeIDs[0]
-	ctx := startNode == Start
+	ctx := IsOrigin(startNode)
 	if includeContext != nil {
 		ctx = *includeContext
 	}
 	offset := startOffset
-	if startNode == Start || startNode == End {
+	if startNode < First {
 		offset = 0
 	}
 	real := make([]string, 0, len(labels))
 	for i, n := range nodeIDs {
-		if n != Start && n != End {
+		if n >= First {
 			real = append(real, labels[i])
 		}
 	}
@@ -351,8 +361,8 @@ func (g *Graph) SampleWalkFiltered(startNode, startOffset, maxChars int, tempera
 	punish := 0.0
 	steps := 0
 	cameFrom := -1
-	if startNode == Start {
-		cameFrom = Start // every walk from the sentinel starts in the same context
+	if IsOrigin(startNode) {
+		cameFrom = startNode // every walk from a sentinel starts in the same context
 	}
 	for {
 		if node == End || (maxChars >= 0 && chars >= maxChars) {

@@ -242,7 +242,7 @@ func init() {
 	route("POST", "/api/model/weights", rModelWeights)
 	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
 	route("GET", "/api/encoding", rEncoding)
-	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, configurable: false (the window is part of the model format, not a setting), note}")
+	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, think_label, configurable: false (the window is part of the model format, not a setting), note}")
 	route("POST", "/api/encoding/preview", rEncodingPreview)
 	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}")
 	route("POST", "/api/train", rTrain)
@@ -259,6 +259,8 @@ func init() {
 	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/converse/stream", rConverseStream)
 	doc("POST", "/api/converse/stream", "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes it) are the answer and are never taken back; between them is the window a backtrack may still rewrite: look (from: the context it continues, \"\" for a fresh text), draft (text, cost: what it was about to say), caught (kind, noticed, cut: what it keeps), backtrack (step, cut, wider), found (text, cost, explored) or stuck (explored); the last line is {event: done, ...} with the /api/converse document; a failure after the first line is {event: error, error}")
+	route("POST", "/api/think", rThink)
+	doc("POST", "/api/think", "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught (POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this text ends, and teach the model to stop and think there), mode: beam | sample, k, beam, max_length, temperature, step_penalty, seed, depth (how deep it may question itself; 0 = never), questions (per thought), learn (default on: it teaches the model where it stopped to think - a thought changes the model)} -> {kind, trigger, at, about, text, depth, stopped: end | length | nothing, then: end | back | think, taught, handed_over, cost, probability, expanded, questioned, questions, labels, node_ids, step_costs}")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -904,6 +906,12 @@ func converseRequest(rq *request) (opening string, o radixnet.ConverseOptions, g
 	if o.Learn, err = f.flag("learn", true); err != nil {
 		return "", o, false, err
 	}
+	if o.Think, err = f.flag("think", true); err != nil {
+		return "", o, false, err
+	}
+	if o.ThinkDepth, _, err = f.integer("think_depth", radixnet.ThinkDepth, intp(0)); err != nil {
+		return "", o, false, err
+	}
 	if guard, err = f.flag("guard", true); err != nil {
 		return "", o, false, err
 	}
@@ -962,6 +970,55 @@ func rConverseStream(rq *request) (int, any, error) {
 		doc["event"] = "done"
 		return write(doc)
 	}}, nil
+}
+
+func rThink(rq *request) (int, any, error) {
+	f := rq.f
+	o := radixnet.DefaultThinkOptions()
+	var err error
+	if o.About, err = f.optText("about", ""); err != nil {
+		return 0, nil, err
+	}
+	if o.Mode, err = f.optText("mode", "beam"); err != nil {
+		return 0, nil, err
+	}
+	if o.K, _, err = f.integer("k", 5, intp(1)); err != nil {
+		return 0, nil, err
+	}
+	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
+		return 0, nil, err
+	}
+	if o.MaxLength, _, err = f.integer("max_length", radixnet.ThinkLength, intp(0)); err != nil {
+		return 0, nil, err
+	}
+	if o.Temperature, _, err = f.number("temperature", 1.0, floatp(0)); err != nil {
+		return 0, nil, err
+	}
+	if o.StepPenalty, _, err = f.number("step_penalty", 0, floatp(0)); err != nil {
+		return 0, nil, err
+	}
+	seed, present, err := f.integer("seed", 0, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if present {
+		s := int64(seed)
+		o.Seed = &s
+	}
+	if o.MaxDepth, _, err = f.integer("depth", radixnet.ThinkDepth, intp(0)); err != nil {
+		return 0, nil, err
+	}
+	if o.MaxQuestions, _, err = f.integer("questions", radixnet.ThinkQuestions, intp(0)); err != nil {
+		return 0, nil, err
+	}
+	if o.Learn, err = f.flag("learn", true); err != nil {
+		return 0, nil, err
+	}
+	doc, err := rq.svc.Think(o)
+	if err != nil {
+		return 0, nil, err
+	}
+	return 200, doc, nil
 }
 
 func rScore(rq *request) (int, any, error) {

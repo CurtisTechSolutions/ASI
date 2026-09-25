@@ -263,8 +263,19 @@ function EncodingCard({ status }) {
             </dd>
             <dt>sentinels</dt>
             <dd>
-              <code>{String(info.start_label)}</code> <code>{String(info.end_label)}</code>{" "}
-              <code>{String(info.back_label)}</code>
+              <code title="where every text begins">{String(info.start_label)}</code>{" "}
+              <code title="where every text ends">{String(info.end_label)}</code>{" "}
+              <code title="where the graph has learned a walk goes round: taught by the rethinks, never by a corpus">
+                {String(info.back_label)}
+              </code>
+              {info.think_label ? (
+                <>
+                  {" "}
+                  <code title="where the graph has learned to stop and think, and where its thoughts begin">
+                    {String(info.think_label)}
+                  </code>
+                </>
+              ) : null}
             </dd>
           </dl>
           <p className="muted">

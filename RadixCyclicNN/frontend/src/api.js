@@ -189,6 +189,11 @@ export const api = {
    * promise resolves to the `done` document, which is what `converse` answers with.
    */
   converseStream: (body, onEvent) => stream("/api/converse/stream", body, onEvent),
+  /**
+   * The model thinks (see ThinkPanel): one thought from the THINK sentinel, questioning itself where it has
+   * learned to. Body: about, mode, k, beam, max_length, temperature, step_penalty, seed, depth, questions, learn.
+   */
+  think: (body) => post("/api/think", body),
   score: (body) => post("/api/score", body),
   twoNrl: (body) => post("/api/2nrl", body),
   /** Rated texts -> 2NRL (both kinds), reward (thumbs up only) or punish (thumbs down only). */
@@ -253,6 +258,12 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /**
+   * A thinking model thinks about a prompt: questions, the thinking behind each answer, and - with `train` -
+   * a job teaching that thinking to the network as thoughts. Body: prompt, lines, think, temperature, url,
+   * model, save_as, train, with_answers, questions, epochs, lr, batch_size.
+   */
+  ollamaThink: (body) => post("/api/ollama/think", body),
   /** Images as text (see ImagesPanel): the Stable Diffusion VAE run backwards, quantised and base64-encoded. */
   images: () => get("/api/images"),
   imageEncode: (file, { size, encoder, train, saveAs } = {}) => {

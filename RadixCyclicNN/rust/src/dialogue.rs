@@ -43,6 +43,7 @@ use crate::mt19937::Mt19937;
 use crate::penalty::DEFAULT_TRAVERSAL;
 use crate::search::PathResult;
 use crate::service::Service;
+use crate::thinking::{think, ThinkOptions, Thought, THINK_DEPTH, THINK_QUESTIONS};
 
 /// The two voices of a conversation.
 pub const DEFAULT_SPEAKERS: [&str; 2] = ["A", "B"];
@@ -118,6 +119,8 @@ pub struct Rethink {
     pub found: bool,
     /// The node it taught to hand over at, or -1 when it taught nothing.
     pub taught: i64,
+    /// What it thought before backing up ([`crate::thinking::think`]).
+    pub thought: Option<Thought>,
 }
 
 impl Rethink {
@@ -130,6 +133,10 @@ impl Rethink {
             ("explored", Json::Int(self.explored as i64)),
             ("found", Json::Bool(self.found)),
             ("taught", Json::Int(self.taught)),
+            (
+                "thought",
+                self.thought.as_ref().map(|t| t.to_json()).unwrap_or(Json::Null),
+            ),
         ])
     }
 }
@@ -399,6 +406,11 @@ pub struct ConverseOptions {
     /// Teaches the model what each rethink found out; a conversation with
     /// this on changes the model.
     pub learn: bool,
+    /// A voice that catches itself repeating thinks about it before it backs
+    /// up ([`crate::thinking`]); the thought rides on the turn's rethink.
+    pub think: bool,
+    /// How deep such a thought may question itself.
+    pub think_depth: usize,
 }
 
 impl Default for ConverseOptions {
@@ -419,6 +431,8 @@ impl Default for ConverseOptions {
             avoid_word_repeats: true,
             explore: EXPLORE,
             learn: true,
+            think: true,
+            think_depth: THINK_DEPTH,
         }
     }
 }
@@ -449,7 +463,7 @@ fn usable(voice: &Model, context: &str) -> bool {
 
 /// How one search for candidates runs.
 #[derive(Clone, Copy)]
-struct Look<'o> {
+pub(crate) struct Look<'o> {
     mode: &'o str,
     beam: usize,
     max_length: usize,
@@ -527,10 +541,23 @@ fn offer(
 /// gets cheaper.  From then on the search itself hands over at that node,
 /// wherever it is walking: the trait is the model's, not the conversation's.
 pub fn teach_back(voice: &mut Model, text: &str, at: usize, found: Option<&PathResult>, amount: f64) -> i64 {
-    let (node, _, lead) = voice.prefix_start(&text[..at]);
-    if node < FIRST || !lead.is_empty() || !voice.g.is_alive(node) {
+    let (node, went, instead) = backing(voice, text, at, found);
+    if node < 0 {
         // nothing of its own to mark: the repeat started where the graph could not place it
         return -1;
+    }
+    match voice.g.observe_back(node as usize, went, instead, amount) {
+        Ok(_) => node,
+        Err(_) => -1,
+    }
+}
+
+/// Where a rethink backs up to, and what it teaches: `(node, went, instead)`,
+/// `node = -1` when the graph cannot place the repeat.
+fn backing(voice: &Model, text: &str, at: usize, found: Option<&PathResult>) -> (i64, Option<usize>, Option<usize>) {
+    let (node, _, lead) = voice.prefix_start(&text[..at]);
+    if node < FIRST || !lead.is_empty() || !voice.g.is_alive(node) {
+        return (-1, None, None);
     }
     let rest = &text[at..];
     let word = match rest.find(' ') {
@@ -546,10 +573,80 @@ pub fn teach_back(voice: &mut Model, text: &str, at: usize, found: Option<&PathR
     let instead = found
         .and_then(|f| f.node_ids.get(1).copied())
         .filter(|&n| voice.g.edge(node, n).is_some());
-    match voice.g.observe_back(node, went, instead, amount) {
-        Ok(_) => node as i64,
-        Err(_) => -1,
+    (node as i64, went, instead)
+}
+
+/// A voice that caught itself repeating **thinks** before it backs up
+/// ([`crate::thinking::think`]): the event is the rethink itself (`kind`),
+/// the node it thinks at is the one it backed up to, and when the thought
+/// stops it hands over to `BACK` with the lesson [`teach_back`] used to write
+/// directly.  With `learn` off the voice still thinks, and teaches nothing.
+/// `None` when the graph cannot place the repeat: nothing of its own to think at.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn think_back(
+    voice: &mut Model,
+    text: &str,
+    at: usize,
+    found: Option<&PathResult>,
+    kind: &str,
+    learn: bool,
+    think_depth: usize,
+    look: Look,
+    k: usize,
+    rng: &mut Option<Mt19937>,
+) -> Result<Option<Thought>, String> {
+    let (node, went, instead) = backing(voice, text, at, found);
+    if node < 0 {
+        return Ok(None);
     }
+    let o = ThinkOptions {
+        about: text.to_string(),
+        at: Some(node as usize),
+        trigger: kind.to_string(),
+        went,
+        instead,
+        mode: look.mode.to_string(),
+        k,
+        beam: look.beam,
+        max_length: look.max_length,
+        step_penalty: look.step_penalty,
+        temperature: look.temperature,
+        seed: None,
+        max_depth: think_depth,
+        max_questions: THINK_QUESTIONS,
+        learn,
+        amount: 1.0,
+    };
+    Ok(Some(think(voice, &o, rng)?))
+}
+
+/// What a rethink teaches: a thought that hands over to BACK when it stops
+/// (`think`), else BACK directly (`learn`).  Returns the node taught to hand over.
+#[allow(clippy::too_many_arguments)]
+fn teach(
+    voice: &mut Model,
+    text: &str,
+    at: usize,
+    found: Option<&PathResult>,
+    record: &mut Rethink,
+    learn: bool,
+    thinking: bool,
+    think_depth: usize,
+    look: Look,
+    k: usize,
+    rng: &mut Option<Mt19937>,
+) -> Result<i64, String> {
+    if thinking {
+        let thought = think_back(voice, text, at, found, &record.kind, learn, think_depth, look, k, rng)?;
+        let taught = thought.as_ref().map(|t| t.handed_over).unwrap_or(-1);
+        record.thought = thought;
+        return Ok(taught);
+    }
+    Ok(if learn {
+        teach_back(voice, text, at, found, 1.0)
+    } else {
+        -1
+    })
 }
 
 /// How one [`backtrack`] runs.
@@ -570,6 +667,9 @@ pub struct BacktrackOptions<'a, 'v, 's> {
     pub avoid_word_repeats: bool,
     pub learn: bool,
     pub veto: Option<&'a mut Veto<'v>>,
+    /// Think about the repeat before backing up ([`think_back`]).
+    pub think: bool,
+    pub think_depth: usize,
     /// Watches the backing up happen ([`Stream`]): `caught` the moment it
     /// notices, `backtrack` for every step back, then `found` or `stuck`.  It
     /// changes nothing about what is found.
@@ -686,9 +786,19 @@ pub fn backtrack(
                 continue;
             }
             record.found = true;
-            if o.learn {
-                record.taught = teach_back(voice, text, at, Some(&cand), 1.0);
-            }
+            record.taught = teach(
+                voice,
+                text,
+                at,
+                Some(&cand),
+                &mut record,
+                o.learn,
+                o.think,
+                o.think_depth,
+                look,
+                o.k,
+                rng,
+            )?;
             if let Some(s) = stream.as_mut() {
                 s(Json::obj([
                     ("event", Json::str("found")),
@@ -708,10 +818,20 @@ pub fn backtrack(
         }
         cut = less;
     }
-    if o.learn {
-        // it goes round here even if it found no way out
-        record.taught = teach_back(voice, text, at, None, 1.0);
-    }
+    // it goes round here even if it found no way out
+    record.taught = teach(
+        voice,
+        text,
+        at,
+        None,
+        &mut record,
+        o.learn,
+        o.think,
+        o.think_depth,
+        look,
+        o.k,
+        rng,
+    )?;
     if record.steps > 0 {
         if let Some(s) = stream.as_mut() {
             s(Json::obj([
@@ -799,6 +919,9 @@ pub struct ReplyOptions<'a, 'v, 's> {
     pub explore: usize,
     pub learn: bool,
     pub veto: Option<&'a mut Veto<'v>>,
+    /// Think about a repeat before backing up ([`think_back`]).
+    pub think: bool,
+    pub think_depth: usize,
     /// Watches the turn being found ([`Stream`]): `look` for every context it
     /// continues (and `""` for a fresh text), then - when a candidate is
     /// caught repeating - `draft` and what [`backtrack`] does about it.  The
@@ -915,6 +1038,8 @@ pub fn reply(
                 avoid_word_repeats: o.avoid_word_repeats,
                 learn: o.learn,
                 veto: veto.as_deref_mut(),
+                think: o.think,
+                think_depth: o.think_depth,
                 stream: Some(&mut watch as &mut Stream),
             },
             rng,
@@ -1089,6 +1214,8 @@ pub fn converse(
             explore: o.explore,
             learn: o.learn,
             veto: veto.as_deref_mut(),
+            think: o.think,
+            think_depth: o.think_depth,
             stream: stream.as_deref_mut(),
         };
         let said_next = match (index % 2, partner.as_deref_mut()) {
@@ -1245,6 +1372,9 @@ fn say_turn(turn: &Turn) {
             ));
         }
         println!("{thought}");
+        if let Some(t) = r.thought.as_ref() {
+            println!("    {}", crate::thinking::summarize(t));
+        }
     }
 }
 
@@ -1359,6 +1489,7 @@ impl Turn {
                     explored: r.at("explored").as_i64().unwrap_or(0).max(0) as usize,
                     found: r.at("found").as_bool().unwrap_or(false),
                     taught: r.at("taught").as_i64().unwrap_or(-1),
+                    thought: Thought::from_json(r.at("thought")),
                 })
             }
             _ => None,
@@ -1443,6 +1574,8 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         avoid_word_repeats: !args.on("allow-word-repeats"),
         explore: args.usize("explore", EXPLORE)?,
         learn: !args.on("no-learn"),
+        think: !args.on("no-think"),
+        think_depth: args.usize("think-depth", THINK_DEPTH)?,
     };
     // --stream: the conversation is printed as it happens - each turn the moment it is spoken, and
     // before it what the voice does: the context it continues, a draft it catches itself on, where it
@@ -1480,6 +1613,14 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         .collect();
     taught.sort_unstable();
     taught.dedup();
+    // the nodes the conversation's thoughts taught to stop and think at
+    let mut thought_at: Vec<i64> = turns
+        .iter()
+        .filter_map(|t| t.rethink.as_ref().and_then(|r| r.thought.as_ref()).map(|th| th.taught))
+        .filter(|&n| n >= 0)
+        .collect();
+    thought_at.sort_unstable();
+    thought_at.dedup();
     let mut doc = vec![
         ("guard".to_string(), guard),
         ("turns".to_string(), turns_json(&turns)),
@@ -1494,8 +1635,9 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         ),
         ("repeats".to_string(), Json::strs(said_twice)),
         ("taught".to_string(), Json::ints(taught.iter().copied())),
+        ("thought_at".to_string(), Json::ints(thought_at.iter().copied())),
     ];
-    if !taught.is_empty() && args.on("save") {
+    if (!taught.is_empty() || !thought_at.is_empty()) && args.on("save") {
         let path = ctx.save(&mut model)?;
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         doc.push((
@@ -1578,6 +1720,8 @@ fn converse_request(svc: &Arc<Service>, r: &Request) -> Result<ConverseRequest, 
         avoid_word_repeats: r.flag("avoid_word_repeats", true),
         explore: r.usize("explore", EXPLORE)?,
         learn: r.flag("learn", true),
+        think: r.flag("think", true),
+        think_depth: r.usize("think_depth", THINK_DEPTH)?,
     };
     Ok(ConverseRequest {
         opening: r.text("opening", ""),
@@ -1946,6 +2090,8 @@ mod tests {
             avoid_repeats: true,
             avoid_word_repeats: true,
             learn: false,
+            think: false,
+            think_depth: THINK_DEPTH,
             veto: None,
             stream: Some(watch),
         }
@@ -2022,6 +2168,8 @@ mod tests {
                 avoid_word_repeats: true,
                 learn: true,
                 veto: None,
+                think: true,
+                think_depth: THINK_DEPTH,
                 stream: None,
             },
             &mut None,

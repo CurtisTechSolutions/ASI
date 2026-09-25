@@ -47,7 +47,7 @@ from .beam import Prediction
 from . import diff
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder, Encoding
-from .graph import BACK, END, START, RadixCyclicGraph
+from .graph import BACK, END, ORIGINS, START, THINK, RadixCyclicGraph
 from .model import (
     MODEL_FORMAT_VERSION,
     GraphModel,
@@ -71,10 +71,11 @@ _MAX_LOG_PPL = 700.0
 
 
 def _walks(transitions: Sequence[tuple[int, int]]) -> list[list[tuple[int, int]]]:
-    """Cut a pass's transitions back into one walk per text: every text starts at START, nothing else does."""
+    """Cut a pass's transitions back into one walk per text: every text starts at START (a thought at THINK),
+    nothing else does."""
     walks: list[list[tuple[int, int]]] = []
     for step in transitions:
-        if step[0] == START or not walks:
+        if step[0] in ORIGINS or not walks:
             walks.append([])
         walks[-1].append(step)
     return walks
@@ -219,7 +220,8 @@ class CountRewardGraph(RadixCyclicGraph):
             return 0
         alive = self.edge_alive
         touched = 0
-        prev = START
+        first = transitions[0][0]
+        prev = first if first in ORIGINS else START  # the origin is the context of its own first step
         for index, (parent, edge) in enumerate(transitions):
             if index:
                 prev = transitions[index - 1][0]
@@ -596,8 +598,8 @@ class CountRewardGraph(RadixCyclicGraph):
         self._path_parents = None
         return True
 
-    def observe_sequence(self, trigrams, count: bool = True) -> list[tuple[int, int]]:
-        transitions = super().observe_sequence(trigrams, count)
+    def observe_sequence(self, trigrams, count: bool = True, origin: int = START) -> list[tuple[int, int]]:
+        transitions = super().observe_sequence(trigrams, count, origin)
         if count and transitions:
             self.record_traversals(transitions)
             self.recompute_weights()
@@ -619,6 +621,15 @@ class CountRewardGraph(RadixCyclicGraph):
             edge = self.children[p].get(child) if child is not None and child != BACK else None
             if edge is not None:
                 self.add_reward([edge], sign * amount)
+        self.recompute_weights()
+        return e
+
+    def observe_think(self, p: int, amount: float = 1.0) -> int:
+        """As :meth:`RadixCyclicGraph.observe_think`, learned the way this model learns everything: the
+        ``THINK`` edge is counted and rewarded, and the weight follows from that."""
+        e = super().observe_think(p, amount=0.0)  # no weight is nudged by hand here
+        self.record_traversals([(p, e)])
+        self.add_reward([e], amount)
         self.recompute_weights()
         return e
 
@@ -930,13 +941,15 @@ class CountRewardNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         planned: bool = False,
+        origin: int = START,
     ) -> list[dict]:
         """``cfg.epochs`` passes over ``texts``: each traverses (``count``) and / or rewards (``reward``) every path.
 
         ``planned`` (plain training) walks them the way ``cfg`` says - the order,
         the curriculum, the rehearsal of the replay buffer and the early stop of
         ``../SPEC-SearchAndTraining.md``; the feedback passes walk every text in
-        corpus order, as they always have.
+        corpus order, as they always have.  ``origin`` is the sentinel every
+        walk begins at: START for texts, THINK for thoughts.
         """
         texts, skipped_short = self._clean_texts(texts)
         plan = self._plan(texts, cfg) if planned else None
@@ -952,7 +965,7 @@ class CountRewardNet(GraphModel):
             meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         # build the structure first (no counting) and compress it, so every pass - the first included - walks
         # the same transitions: steps inside a compressed node are deterministic and never counted
-        self._observe_grams(grams + [rehearsal[t] for t in rehearsed], False)
+        self._observe_grams(grams + [rehearsal[t] for t in rehearsed], False, origin)
         pending_merges = graph.compress() if cfg.auto_compress else 0
         outcome = None if not reward else reward > 0  # a rewarded path was judged correct, a penalised one wrong
         for j in range(cfg.epochs):
@@ -962,7 +975,7 @@ class CountRewardNet(GraphModel):
             else:
                 chosen, again = plan.epoch(j, meta_counter(meta, "epochs_total").bumped(1).value)
                 walked = [grams[i] for i in chosen] + [rehearsal[t] for t in again]
-            transitions = self._observe_grams(walked, count)
+            transitions = self._observe_grams(walked, count, origin)
             edges = [e for _, e in transitions]
             for walk in _walks(transitions):  # what each text did, in its own context
                 graph.record_path(walk, outcome, create=outcome is not None)
@@ -1021,17 +1034,20 @@ class CountRewardNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         phase: str | None = None,
+        origin: int = START,
         **overrides,
     ) -> list[dict]:
         """Count one traversal of every text's path per epoch (structure is built on demand, as in RadixNet).
 
         The loss is the mean ``-log P`` of the transitions after the pass;
         ``lr`` / ``act_lr`` / ``batch_size`` in the config are ignored.
+        ``origin=THINK`` trains the texts as thoughts (:mod:`radixnet.thinking`).
         """
         cfg = _resolve_config(config, overrides)
         return self._passes(
             texts, cfg, count=True, reward=0.0, phase=phase, checkpoint_manager=checkpoint_manager,
             progress=progress, stop_event=stop_event, planned=phase is None,  # a phase marks a feedback pass
+            origin=origin,
         )
 
     def reward(

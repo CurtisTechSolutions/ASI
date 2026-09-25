@@ -45,7 +45,7 @@ from heapq import heappop, heappush
 
 from .beam import default_beam, diverse_pick
 from .encoding import WINDOW
-from .graph import BACK, END, FIRST
+from .graph import BACK, END, FIRST, THINK
 from .metacog import ABORT, ESCAPE, RIDE, cycle_signature
 from .search import CostFn, PathResult, _build_result, _start_emission, check_sampling, onward, sampling_filter
 
@@ -364,7 +364,7 @@ def _expand(graph, meta, node: int, phase: int, depth: dict, step_penalty: float
         # But a walk meeting that hand-over has not closed a cycle yet - it is on its *first* visit - so
         # there is no signature to look up, only what the layer remembers about cycles here.  When that
         # memory is of riding them, metacognition overrules the reflex; with no memory the hand-over stands.
-        raw = [item for item in every if item[0] != BACK]
+        raw = [item for item in every if item[0] != BACK and item[0] != THINK]
     out = []
     for c, e, cost in raw:
         nphase = (phase + advance[c]) % buckets

@@ -3,11 +3,13 @@ import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { applyEvent } from "../stream.js";
+import { THINK_DEPTH, thoughtNodes, thoughtsOf } from "../thinking.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
+import { ThoughtLine } from "./ThoughtView.jsx";
 
 /**
  * The model converses with itself. Two voices take turns; every reply is the
@@ -22,9 +24,11 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * counts as one of those while "Avoid repeated words" is on, though a voice
  * that catches itself repeating - its own words, or the conversation's - first
  * backs up to where it would have said them again and explores other ways on
- * ("Explore"), and says so. New turns are
- * appended to the top of
- * the conversation and push the older ones down, so nothing has to scroll.
+ * ("Explore"), and says so. With "Think before backing up" on, it first thinks:
+ * a thought from the THINK sentinel, questioning itself where the model has
+ * learned to ("Think depth"), that hands over to BACK when it stops - and the
+ * turn shows what it thought. New turns are appended to the top of the
+ * conversation and push the older ones down, so nothing has to scroll.
  *
  * With "Stream" on (the default) the conversation arrives as it happens
  * (`POST /api/converse/stream`, JSON Lines): every turn the moment it is
@@ -95,6 +99,8 @@ export default function ConversePanel({ status }) {
   const [explore, setExplore] = useStoredState("converse.explore", "3");
   const [learn, setLearn] = useStoredState("converse.learn", true);
   const [streaming, setStreaming] = useStoredState("converse.stream", true);
+  const [think, setThink] = useStoredState("converse.think", true);
+  const [thinkDepth, setThinkDepth] = useStoredState("converse.thinkDepth", String(THINK_DEPTH));
   const [inMemory, setInMemory] = useState(null); // null until GET /api/model answers
   const [transcript, setTranscript] = useState(null);
   const [live, setLive] = useState(null); // the turn being spoken, while a streamed conversation runs
@@ -149,6 +155,8 @@ export default function ConversePanel({ status }) {
       avoid_word_repeats: avoidWordRepeats,
       explore: parseInteger(explore, 3),
       learn,
+      think,
+      think_depth: Math.max(0, parseInteger(thinkDepth, THINK_DEPTH)),
       ...(partner ? { partner } : {}),
       ...(history.length ? { history } : opening.trim() ? { opening } : {}),
     };
@@ -196,6 +204,14 @@ export default function ConversePanel({ status }) {
       const punished = punishRepeats ? punish(duplicates) : 0;
       const notes = [];
       if (!fresh.length && history.length) notes.push("The model had nothing more to say.");
+      const thought = thoughtsOf(fresh).length;
+      if (thought) {
+        const at = thoughtNodes(fresh).length;
+        notes.push(
+          `It thought ${thought === 1 ? "once" : `${fmtInt(thought)} times`} before backing up` +
+            (at ? `, and learned to stop and think at ${fmtInt(at)} node${at === 1 ? "" : "s"}.` : "."),
+        );
+      }
       if (punished) {
         notes.push(
           `${punished} duplicate${punished === 1 ? "" : "s"} the model could not avoid:` +
@@ -232,7 +248,8 @@ export default function ConversePanel({ status }) {
           last words of the previous line (the <b>context</b>) and continuing them to the end of a text.{" "}
           <b>beam</b> speaks the most likely continuation the conversation has not heard yet; <b>sample</b> draws a
           stochastic walk. When nothing follows, the context loses a word at a time and finally the voice changes
-          the subject with a fresh text.
+          the subject with a fresh text. A voice that catches itself repeating backs up and looks for another way
+          on; with <b>Think before backing up</b> it thinks first, and the turn shows what it thought (💭).
         </p>
         <TextField
           label="Opening line"
@@ -267,6 +284,15 @@ export default function ConversePanel({ status }) {
             disabled={!avoidWordRepeats}
           />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min={0} disabled={mode !== "sample"} />
+          <NumberField
+            label="Think depth"
+            hint="how deep a thought may question itself (0 = never)"
+            value={thinkDepth}
+            onChange={setThinkDepth}
+            min={0}
+            step={1}
+            disabled={!think}
+          />
         </div>
         <div className="row">
           <TextField label="First voice" value={speakerA} onChange={setSpeakerA} placeholder="A" />
@@ -297,6 +323,13 @@ export default function ConversePanel({ status }) {
           hint="what a rethink finds out is taught to the graph, so the model itself hands over there next time (this changes the model)"
           checked={learn}
           onChange={setLearn}
+          disabled={loading || !explore || explore === "0"}
+        />
+        <CheckField
+          label="Think before backing up"
+          hint="a voice that caught itself repeating thinks first - a thought from the THINK sentinel that hands over to BACK when it stops"
+          checked={think}
+          onChange={setThink}
           disabled={loading || !explore || explore === "0"}
         />
         <CheckField
@@ -407,6 +440,7 @@ export default function ConversePanel({ status }) {
                       label={`turn ${position}`}
                     />
                   </div>
+                  <ThoughtLine thought={t.rethink ? t.rethink.thought : null} />
                 </li>
               );
             })}

@@ -8,7 +8,7 @@
 //! come back as the dearest paths - or, following the blame, the most punished
 //! ones.
 
-use crate::graph::{Graph, END, START};
+use crate::graph::{Graph, END};
 use crate::penalty::PenaltyCosts;
 use crate::search::{build_result, least_punished, onward, start_emission, PathResult, Traversal};
 use crate::weights::ChildCost;
@@ -218,7 +218,7 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
             // where the walk came from: a judged path prices the next step by it
             let prev = match entries[st.entry].parent {
                 Some(parent) => Some(entries[parent].node),
-                None if st.node == START => Some(START),
+                None if crate::graph::is_origin(st.node) => Some(st.node),
                 None => None,
             };
             g.step_costs_into(st.node, prev, o.costs, &mut children);
