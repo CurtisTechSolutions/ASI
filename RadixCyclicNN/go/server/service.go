@@ -591,8 +591,10 @@ func (s *Service) Status() (map[string]any, error) {
 // DescribeModel is GET /api/model.
 func (s *Service) DescribeModel() (map[string]any, error) {
 	var attention radixnet.AttentionConfig
+	var window radixnet.WindowConfig
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		attention = m.AttentionConfig()
+		window = m.WindowConfig()
 		return m.G.WeightConfig(), nil
 	})
 	if err != nil {
@@ -606,8 +608,50 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 	return map[string]any{
 		"kind": active, "label": label, "units": units, "kinds": s.kinds(), "model_path": modelPath,
 		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out,
-		"attention": attention, "engine": "go",
+		"attention": attention, "dynamic_window": window, "engine": "go",
 	}, nil
+}
+
+// Window is GET /api/model/window: the model's dynamic window - the ladder of
+// node sizes and where it stands (radixnet/window.go).
+func (s *Service) Window() (map[string]any, error) {
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		return map[string]any{"kind": m.Kind(), "window": m.WindowConfig()}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// ConfigureWindow is POST /api/model/window: the window on (at the ladder given) or off.
+func (s *Service) ConfigureWindow(on *bool, top, floor, size *int, auto *bool) (map[string]any, error) {
+	out, err := s.mutate(func(m *radixnet.Model) (any, error) {
+		cfg, err := m.ConfigureWindow(on, top, floor, size, auto)
+		if err != nil {
+			return nil, badRequest("%v", err)
+		}
+		return map[string]any{"kind": m.Kind(), "window": cfg, "stats": m.Stats()}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// WindowStep is POST /api/model/window/step: the window stepped by hand.
+func (s *Service) WindowStep(steps int) (map[string]any, error) {
+	out, err := s.mutate(func(m *radixnet.Model) (any, error) {
+		done, err := m.WindowStep(steps, true)
+		if err != nil {
+			return nil, badRequest("%v", err)
+		}
+		return map[string]any{"kind": m.Kind(), "step": done, "window": done.Window, "stats": m.Stats()}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
 }
 
 // Attention is GET /api/model/attention: where inside a gram the model's

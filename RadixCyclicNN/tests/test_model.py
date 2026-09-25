@@ -121,8 +121,8 @@ class TestConstruction(unittest.TestCase):
         self.assertEqual(
             set(stats),
             {
-                "kind", "nodes", "edges", "trigrams", "grams", "compression_ratio", "inverted", "backend", "device",
-                "encoding", "unit", "units", "ngram", "stride",
+                "kind", "nodes", "edges", "trigrams", "grams", "compression_ratio", "dynamic_window", "inverted",
+                "backend", "device", "encoding", "unit", "units", "ngram", "stride",
                 "epochs_total", "epochs_total_resets", "trained_chars", "trained_chars_resets",
                 "trained_texts", "trained_texts_resets", "twonrl_runs", "twonrl_runs_resets",
                 "history_len", "last_loss",

@@ -146,6 +146,11 @@ pub struct EpochRecord {
     pub trigrams: usize,
     pub compression_ratio: f64,
     pub merges: usize,
+    /// What the dynamic window's automatic step did at the end of the epoch
+    /// (`crate::window`): the nodes halved and the size applied, or `None`
+    /// while it is off or stepped by hand - then the entry does not carry them.
+    pub splits: Option<usize>,
+    pub window: Option<usize>,
     pub transitions: i64,
     pub seconds: f64,
     pub skipped_short: usize,
@@ -184,13 +189,10 @@ impl EpochRecord {
         }
     }
 
-    /// The record as a `history` entry.
-    pub fn to_json(&self) -> Json {
-        match self.layout() {
-            "resonant" => return self.keyed_json(&["traversed", "reward", "cycles", "signatures"], false),
-            "radix" => return self.keyed_json(&["lr", "act_lr"], true),
-            _ => {}
-        }
+    /// The fields every layout opens with, in Python's order: the common ones
+    /// to `merges`, then - only when the dynamic window stepped - `splits` and
+    /// `window`, which every kind writes right after `merges`.
+    fn head(&self) -> Vec<(String, Json)> {
         let mut pairs: Vec<(String, Json)> = vec![
             ("epoch".to_string(), Json::Int(self.epoch)),
             ("loss".to_string(), Json::Num(self.loss)),
@@ -200,10 +202,29 @@ impl EpochRecord {
             ("trigrams".to_string(), Json::Int(self.trigrams as i64)),
             ("compression_ratio".to_string(), Json::Num(self.compression_ratio)),
             ("merges".to_string(), Json::Int(self.merges as i64)),
+        ];
+        if let Some(splits) = self.splits {
+            pairs.push(("splits".to_string(), Json::Int(splits as i64)));
+        }
+        if let Some(window) = self.window {
+            pairs.push(("window".to_string(), Json::Int(window as i64)));
+        }
+        pairs
+    }
+
+    /// The record as a `history` entry.
+    pub fn to_json(&self) -> Json {
+        match self.layout() {
+            "resonant" => return self.keyed_json(&["traversed", "reward", "cycles", "signatures"], false),
+            "radix" => return self.keyed_json(&["lr", "act_lr"], true),
+            _ => {}
+        }
+        let mut pairs = self.head();
+        pairs.extend([
             ("transitions".to_string(), Json::Int(self.transitions)),
             ("seconds".to_string(), Json::Num(self.seconds)),
             ("skipped_short".to_string(), Json::Int(self.skipped_short as i64)),
-        ];
+        ]);
         // a negative network's passes neither traverse nor reward: their
         // records carry what was blamed or cleared instead (Python's `_pass`)
         if !self.is_negative_pass() {
@@ -222,17 +243,8 @@ impl EpochRecord {
     /// field) either after `skipped_short` (`own_last`) or before `seconds`,
     /// then the phase and whatever else the record carries (`weight`).
     fn keyed_json(&self, own: &[&str], own_last: bool) -> Json {
-        let mut pairs: Vec<(String, Json)> = vec![
-            ("epoch".to_string(), Json::Int(self.epoch)),
-            ("loss".to_string(), Json::Num(self.loss)),
-            ("perplexity".to_string(), Json::Num(self.perplexity)),
-            ("nodes".to_string(), Json::Int(self.nodes as i64)),
-            ("edges".to_string(), Json::Int(self.edges as i64)),
-            ("trigrams".to_string(), Json::Int(self.trigrams as i64)),
-            ("compression_ratio".to_string(), Json::Num(self.compression_ratio)),
-            ("merges".to_string(), Json::Int(self.merges as i64)),
-            ("transitions".to_string(), Json::Int(self.transitions)),
-        ];
+        let mut pairs = self.head();
+        pairs.push(("transitions".to_string(), Json::Int(self.transitions)));
         let own_pairs: Vec<(String, Json)> = own
             .iter()
             .map(|&key| {
@@ -261,7 +273,7 @@ impl EpochRecord {
 
     /// One `history` entry, keeping any field this implementation does not write.
     pub fn from_json(doc: &Json) -> EpochRecord {
-        const KNOWN: [&str; 14] = [
+        const KNOWN: [&str; 16] = [
             "epoch",
             "loss",
             "perplexity",
@@ -270,6 +282,8 @@ impl EpochRecord {
             "trigrams",
             "compression_ratio",
             "merges",
+            "splits",
+            "window",
             "transitions",
             "seconds",
             "skipped_short",
@@ -295,6 +309,8 @@ impl EpochRecord {
             trigrams: doc.at("trigrams").as_i64().unwrap_or(0) as usize,
             compression_ratio: doc.at("compression_ratio").as_f64().unwrap_or(0.0),
             merges: doc.at("merges").as_i64().unwrap_or(0) as usize,
+            splits: doc.at("splits").as_i64().map(|v| v as usize),
+            window: doc.at("window").as_i64().map(|v| v as usize),
             transitions: doc.at("transitions").as_i64().unwrap_or(0),
             seconds: doc.at("seconds").as_f64().unwrap_or(0.0),
             skipped_short: doc.at("skipped_short").as_i64().unwrap_or(0) as usize,
@@ -880,6 +896,7 @@ impl Model {
             if opts.auto_compress {
                 merges += self.g.compress();
             }
+            let stepped = self.window_epoch(false); // the dynamic window's step, after the compression it rides on
             self.g.carry_counters(false); // the epoch is over: wrap whatever reached the limit
             self.meta.epochs_total.add(1);
             let stopping = plan.as_mut().is_some_and(|p| p.stop(j, loss));
@@ -892,6 +909,8 @@ impl Model {
                 trigrams: self.g.num_trigrams(),
                 compression_ratio: self.g.compression_ratio(),
                 merges,
+                splits: stepped.as_ref().map(|s| s.splits),
+                window: stepped.as_ref().map(|s| s.from),
                 transitions: total,
                 seconds: started.elapsed().as_secs_f64(),
                 skipped_short,

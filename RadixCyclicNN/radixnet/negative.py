@@ -125,6 +125,7 @@ class NegativeGraph(RadixCyclicGraph):
     """
 
     SMOOTHING = 0.5
+    learns_weights = False  # a weight is the blame function of the evidence: recompute_weights writes it
 
     def __init__(
         self,
@@ -444,6 +445,13 @@ class NegativeGraph(RadixCyclicGraph):
                 return False
         return super().merge_child(p)
 
+    def split_window(self, size: int) -> int:
+        """Halve what is longer than the window; a bridge carries no evidence yet, and its weight says so."""
+        splits = super().split_window(size)
+        if splits:
+            self.recompute_weights()
+        return splits
+
     def invert(self) -> None:
         """Swap blame and clearing: what the tutor rejected becomes what it accepted, and back.
 
@@ -720,6 +728,8 @@ class NegativeNet(GraphModel):
             loss = self._mean_cost(flat)
             merges = (graph.compress() if (blame and cfg.auto_compress) else 0) + pending_merges
             pending_merges = 0
+            # the dynamic window's step, after the compression it rides on: a blame pass is a training pass
+            stepped = self._window_epoch() if blame else None
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             epoch = meta_add(meta, "epochs_total", 1)
             record = {
@@ -731,6 +741,7 @@ class NegativeNet(GraphModel):
                 "trigrams": graph.num_trigrams(),
                 "compression_ratio": graph.compression_ratio(),
                 "merges": merges,
+                **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
                 "transitions": len(flat),
                 "seconds": time.perf_counter() - t0,
                 "skipped_short": skipped_short,
@@ -1347,6 +1358,7 @@ class NegativeNet(GraphModel):
             "stride": self.encoding.stride,
             "attention_blur": g.attention.blur,
             "compression_ratio": g.compression_ratio(),
+            "dynamic_window": g.dynamic_window.size,
             "inverted": g.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,

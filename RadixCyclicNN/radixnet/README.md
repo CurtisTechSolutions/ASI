@@ -27,6 +27,7 @@ does what.
 | `activation.py` | the parametric sine `f(x) = a·sin(b(x−h)) + k`, all four parameters learnable per node |
 | `encoding.py` | `Encoding` — how a text becomes grams and comes back: the unit (characters or words), the n of the n-gram and the stride (1 = the sliding window, n = non-overlapping groups), with the encoder and decoder halves |
 | `attention.py` | the attention band: each gram read sharp at its centre and blurred towards its ends, so a correction's blame and credit land on the gram that has a changed unit at its centre (`AttentionBand`, `spread`, the preview; `../SPEC-AttentionBand.md`) |
+| `window.py` | the dynamic window: a ladder of node sizes in the binary number system - 32, 16, 8, 4 and back to 32 - that halves every node longer than the window into two halves with the same data and a heavy connection, and lets compression regrow them at the top (`DynamicWindow`, the ladder; the halving is `graph.py`'s `split_window`; `../SPEC-DynamicWindow.md`) |
 | `counter.py` | cyclic counters — the odometer every growing integer in the model runs on, wrapping at `10^15` and counting the reset |
 | `backend.py` | the training backends and the one-hop learning rule |
 | `backend_torch.py` | the same rule fully vectorised over a mini-batch, on `cuda` / `mps` / `cpu`. Optional |

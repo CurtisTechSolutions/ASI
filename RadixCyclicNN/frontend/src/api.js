@@ -228,6 +228,12 @@ export const api = {
   setAttention: (body) => post("/api/model/attention", body),
   /** Where one correction would land, gram by gram, under the writer rule and a band ({wrong, right, blur}). */
   attentionPreview: (body) => post("/api/model/attention/preview", body),
+  /** The dynamic window: the ladder of node sizes (32, 16, 8, 4 and back up) and where it stands (every kind). */
+  window: () => get("/api/model/window"),
+  /** Switch the window: {on, top, floor, size, auto} - on: false switches it off, any setting switches it on. */
+  setWindow: (body) => post("/api/model/window", body),
+  /** Step the window by hand ({steps}): merge what fits, halve what is longer, move the window down the ladder. */
+  windowStep: (body) => post("/api/model/window/step", body),
   /** The text encoding every kind shares: the sliding window, its stride and the sentinels (read-only). */
   encoding: () => get("/api/encoding"),
   /** One text through the encoder and back, and through the graph's own (possibly merged) node labels. */

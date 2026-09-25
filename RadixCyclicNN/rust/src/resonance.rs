@@ -1231,6 +1231,8 @@ impl Model {
             if o.count || o.reward != 0.0 || o.sharpen != 1.0 {
                 self.g.resonant_recompute();
             }
+            // the dynamic window's step; this kind compresses once before its passes, so the step merges as well
+            let stepped = self.window_epoch(o.auto_compress);
             self.g.carry_counters(false); // the epoch is over: wrap whatever reached the limit
             let loss = cost / transitions.max(1) as f64;
             let signatures = self.res.as_ref().map(|r| r.metacog.len()).unwrap_or(0);
@@ -1252,7 +1254,9 @@ impl Model {
                 edges: self.g.num_edges(),
                 trigrams: self.g.num_trigrams(),
                 compression_ratio: self.g.compression_ratio(),
-                merges: 0,
+                merges: stepped.as_ref().map_or(0, |s| s.merges),
+                splits: stepped.as_ref().map(|s| s.splits),
+                window: stepped.as_ref().map(|s| s.from),
                 transitions: transitions as i64,
                 seconds: started.elapsed().as_secs_f64(),
                 skipped_short: skipped,
@@ -2041,6 +2045,7 @@ pub fn stats_json(model: &Model) -> Json {
         ("ngram".to_string(), Json::Int(enc.n as i64)),
         ("stride".to_string(), Json::Int(enc.stride as i64)),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
+        ("dynamic_window".to_string(), g.dynamic_window.size_json()),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str(crate::backend::NAME)),
         ("device".to_string(), Json::str(crate::backend::DEVICE)),

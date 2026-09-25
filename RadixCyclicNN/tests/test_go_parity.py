@@ -519,6 +519,61 @@ class TestGoParity(unittest.TestCase):
         self.assertEqual(go("attention", model=py_path)["attention"]["blur"], 0.3)
         self.assertEqual(py("attention", model=go_path)["attention"]["blur"], 0.3)
 
+    def test_the_dynamic_window_halves_the_same_nodes(self):
+        """With the window on (../SPEC-DynamicWindow.md) both sides halve the same nodes at the same grams, give
+        every bridge the same count, hold the same chains apart, regrow the same ones at the top - by hand and
+        at the end of every epoch - and each reads the other's window from its file."""
+        # long sentences that share a long opening: the sample corpus branches too early to leave a node the
+        # ladder's upper rungs would ever halve
+        corpus = os.path.join(TMP.name, "window_corpus.txt")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write(
+                "the quick brown fox jumps over the lazy dog while the cat sat on the mat and the bird sang in the "
+                "tree all afternoon\nthe quick brown fox jumps over the lazy dog while the cat ran to the door\n"
+                "a bird sang in the tree all afternoon\n"
+            )
+        py_path = os.path.join(TMP.name, "window_py.count.json")
+        go_path = os.path.join(TMP.name, "window_go.count.json")
+        py("--kind", "count", "--seed", 1, "train", "--data", corpus, "--epochs", 1, model=py_path)
+        go("--seed", 1, "train", "--data", corpus, "--epochs", 1, "--workers", 4, model=go_path)
+        a = py("window", "--on", "--manual", model=py_path)
+        b = go("window", "--on", "--manual", model=go_path)
+        self.assertEqual(a["window"], b["window"])
+        self.assertEqual(a["changed"], b["changed"])
+        self.assertEqual((a["window"]["sizes"], a["window"]["size"], a["window"]["auto"]), ([32, 16, 8, 4], 32, False))
+        self.assertGreater(a["window"]["longest"], 16)
+        a = py("window", "--step", 4, model=py_path)
+        b = go("window", "--step", 4, model=go_path)
+        self.assertEqual(a["step"], b["step"])
+        self.assertEqual((a["step"]["sizes"], a["step"]["to"]), ([32, 16, 8, 4], 32))
+        self.assertGreater(a["step"]["splits"], 0)
+        a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertEqual(a_doc["dynamic_window"], {"top": 32, "floor": 4, "size": 32, "auto": False})
+        self.assertEqual(a_doc["dynamic_window"], b_doc["dynamic_window"])
+        self.assertEqual(a_doc["nodes"]["labels"], b_doc["nodes"]["labels"])
+        self.assertEqual(a_doc["nodes"]["count"], b_doc["nodes"]["count"])
+        for key in ("src", "dst", "count", "reward"):
+            self.assertEqual(a_doc["edges"][key], b_doc["edges"][key], key)
+        assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
+        self.assertLessEqual(max(len(label) for label in a_doc["nodes"]["labels"][4:]), 4)
+        a = py("window", "--step", model=py_path)  # back at the top: what stayed unary merges back
+        b = go("window", "--step", 1, model=go_path)
+        self.assertEqual(a["step"], b["step"])
+        self.assertGreater(a["step"]["merges"], 0)
+        self.assertEqual(go("window", model=py_path)["window"], py("window", model=go_path)["window"])
+        py("window", "--auto", model=py_path)
+        go("window", "--auto", model=go_path)
+        a = py("train", "--data", corpus, "--epochs", 3, model=py_path)
+        b = go("train", "--data", corpus, "--epochs", 3, "--workers", 4, model=go_path)
+        for x, y in zip(a["records"], b["records"]):
+            self.assertEqual((x["window"], x["splits"], x["merges"], x["nodes"]), (y["window"], y["splits"], y["merges"], y["nodes"]))
+        self.assertEqual([r["window"] for r in a["records"]], [16, 8, 4])
+        a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertEqual(a_doc["nodes"]["labels"], b_doc["nodes"]["labels"])
+        self.assertEqual(a_doc["edges"]["count"], b_doc["edges"]["count"])
+        self.assertEqual(a_doc["dynamic_window"], {"top": 32, "floor": 4, "size": 32, "auto": True})
+        self.assertEqual(py("info", model=py_path)["stats"]["dynamic_window"], go("info", model=go_path)["stats"]["dynamic_window"])
+
     def test_zip_corpus_streams_through_identically(self):
         """Both sides train from the same ZIP archive: Python unpacks it, Go streams it in chunks."""
         import io

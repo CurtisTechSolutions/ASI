@@ -45,6 +45,8 @@ pub fn stats(model: &Model) -> Json {
             g.attention.blur.map(Json::Num).unwrap_or(Json::Null),
         ),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
+        // the dynamic window's size, null while it is off
+        ("dynamic_window".to_string(), g.dynamic_window.size_json()),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str("rust")),
         ("device".to_string(), Json::str(model.device_label())),

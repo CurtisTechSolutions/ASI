@@ -754,7 +754,8 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 		if opts.AutoCompress {
 			merges += g.Compress()
 		}
-		g.CarryCounters(false) // the epoch is over: wrap whatever reached the limit
+		stepped := m.windowEpoch() // the dynamic window's step, after the compression it rides on
+		g.CarryCounters(false)     // the epoch is over: wrap whatever reached the limit
 		record := map[string]any{
 			"epoch":             m.metaAddInt("epochs_total", 1),
 			"loss":              loss,
@@ -771,6 +772,9 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 			"skipped_short":     int(stats.skippedShort),
 			"traversed":         count,
 			"reward":            reward,
+		}
+		if stepped != nil {
+			record["splits"], record["window"] = stepped.Splits, stepped.From
 		}
 		if plan != nil && plan.Texts != nil {
 			record["skipped_short"] = plan.Skipped // the run's texts, not the list the structure pass read
@@ -1500,6 +1504,7 @@ func (m *Model) Stats() map[string]any {
 		"stride":                  g.Enc.Stride,
 		"attention_blur":          g.Attention.BlurOrNil(),
 		"compression_ratio":       g.CompressionRatio(),
+		"dynamic_window":          g.DynamicWindow.SizeOrNil(),
 		"inverted":                g.Inverted,
 		"backend":                 "go",
 		"device":                  m.deviceLabel(),

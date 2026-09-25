@@ -54,6 +54,7 @@ from .penalty import (
 from .phasesearch import phase_beam, phase_dijkstra, phase_walk
 from .resonance import ResonantGraph, ResonantNet, trigram_phase
 from .search import PathResult, dijkstra_predict, sample_walk
+from .window import DEFAULT_FLOOR as WINDOW_FLOOR, DEFAULT_TOP as WINDOW_TOP, DynamicWindow
 from .speech import (
     ASR_BACKENDS,
     CODECS as SPEECH_CODECS,
@@ -85,6 +86,7 @@ __all__ = [
     "SPEECH_TOKEN", "SPEECH_CODECS", "SPEECH_RATE", "ASR_BACKENDS", "Audio", "SpeechError",
     "encode_audio", "speech_texts", "teach_by_speech", "transcribe", "utterance_token",
     "END", "START", "RadixCyclicGraph",
+    "DynamicWindow", "WINDOW_TOP", "WINDOW_FLOOR",
     "PathResult", "dijkstra_predict", "sample_walk",
     "phase_beam", "phase_dijkstra", "phase_walk",
     "TRAVERSALS", "DEFAULT_TRAVERSAL", "PenaltyCosts", "PhasePenaltyCosts",

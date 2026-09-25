@@ -231,6 +231,12 @@ pub struct Graph {
     /// holds, so it can be switched at any time; it travels with the file
     /// while it is on.
     pub attention: crate::attention::AttentionBand,
+    /// The ceiling on a node's length and the ladder it moves down and back
+    /// up ([`crate::window`]): off by default - compression is unbounded and
+    /// no node is ever halved.  On, [`Graph::merge_child`] merges nothing
+    /// longer than its size and a step ([`Graph::split_window`]) halves what
+    /// is longer.  It travels with the model file while it is on.
+    pub dynamic_window: crate::window::DynamicWindow,
     pub inverted: bool,
 
     pub(crate) version: Counter,
@@ -314,6 +320,7 @@ impl Graph {
             workers: 0,
             enc: opts.encoding,
             attention: crate::attention::AttentionBand::default(),
+            dynamic_window: crate::window::DynamicWindow::default(),
         };
         g.new_node(START_LABEL.to_string(), 0, 0);
         g.new_node(END_LABEL.to_string(), 0, 0);
@@ -655,6 +662,10 @@ impl Graph {
         if self.blocks_merge(self.children[p].edges[0]) {
             return false;
         }
+        // the merged node would be longer than the dynamic window allows
+        if self.held_apart(p, c) {
+            return false;
+        }
         let enc = self.enc;
         let lp: Units = enc.units(&self.labels[p]);
         let lc: Units = enc.units(&self.labels[c]);
@@ -725,6 +736,8 @@ impl Graph {
     }
 
     /// Merges every unary chain until none remains; returns the merge count.
+    /// With the dynamic window on, a chain whose merged label would be longer
+    /// than the window's size is left as it is ([`Graph::merge_child`]).
     pub fn compress(&mut self) -> usize {
         let mut merges = 0;
         loop {
@@ -1147,7 +1160,8 @@ impl Graph {
             for p in FIRST..n {
                 if self.alive[p] && self.children[p].size() == 1 {
                     let c = self.children[p].order[0];
-                    if c != p && c >= FIRST && self.parents[c].size() == 1 {
+                    // a chain the dynamic window holds apart - merged, it would be longer than the window - stays
+                    if c != p && c >= FIRST && self.parents[c].size() == 1 && !self.held_apart(p, c) {
                         return Err(format!("unary chain {p}->{c} survived compress"));
                     }
                 }

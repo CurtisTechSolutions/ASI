@@ -291,6 +291,7 @@ commands:
   bench      how fast this build counts and predicts
   weights    show or change the dual frequency weight function
   attention  the attention band: where inside a gram a correction's blame and credit land (--blur, --off, --wrong/--right)
+  window     the dynamic window: a ladder of node sizes halving from 32 to 4 and back up (--on, --top, --floor, --size, --auto/--manual, --step N, --off)
   info       statistics and the training history tail
   converse   the model talks to itself
   think      the model thinks: one thought from the THINK sentinel, questioning itself where it learned to
@@ -399,6 +400,8 @@ func main() {
 		cmdWeights(rest)
 	case "attention":
 		cmdAttention(rest)
+	case "window":
+		cmdWindow(rest)
 	case "info":
 		cmdInfo(rest)
 	case "converse":
@@ -1370,6 +1373,110 @@ func cmdAttention(args []string) {
 				fmt.Println("  nothing in it changed")
 			}
 		}
+	}
+}
+
+// cmdWindow shows the dynamic window, sets its ladder, switches it on or off,
+// or steps it by hand (radixnet/window.py, window.go).
+func cmdWindow(args []string) {
+	fs := subFlagSet("window")
+	on := fs.Bool("on", false, "switch the window on (at the ladder it had, else 32 down to 4, standing at the top)")
+	off := fs.Bool("off", false, "switch the window off: compression is unbounded again, the graph stays as it is")
+	top := fs.Int("top", 0, "the largest window, a power of two (default 32); switches it on")
+	floor := fs.Int("floor", 0, "the smallest window before it goes back to the top, a power of two (default 4)")
+	size := fs.Int("size", 0, "where on the ladder the window stands now")
+	auto := fs.Bool("auto", false, "step at the end of every training epoch (the default)")
+	manual := fs.Bool("manual", false, "step only when --step asks")
+	step := fs.Int("step", 0, "take N steps: merge what fits, halve what is longer, move the window")
+	dryRun := fs.Bool("dry-run", false, "change the window in memory only; nothing is saved")
+	_ = fs.Parse(args)
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	settings := *on || *auto || *manual || set["top"] || set["floor"] || set["size"]
+	if *on && *off {
+		fail("--on and --off contradict each other")
+	}
+	if *off && settings {
+		fail("--off takes no other setting: switching the window off is all it does")
+	}
+	if *off && set["step"] {
+		fail("--off and --step contradict each other: a step needs the window on")
+	}
+	if *auto && *manual {
+		fail("--auto and --manual contradict each other")
+	}
+	m := openModel(true)
+	changed := map[string]any{}
+	var stepped *radixnet.WindowStep
+	saved := ""
+	if settings || *off {
+		onArg := true
+		if *off {
+			onArg = false
+		}
+		var topArg, floorArg, sizeArg *int
+		var autoArg *bool
+		if set["top"] {
+			topArg = top
+		}
+		if set["floor"] {
+			floorArg = floor
+		}
+		if set["size"] {
+			sizeArg = size
+		}
+		if *auto || *manual {
+			value := *auto
+			autoArg = &value
+		}
+		if _, err := m.ConfigureWindow(&onArg, topArg, floorArg, sizeArg, autoArg); err != nil {
+			fail("%v", err)
+		}
+		if w := m.G.DynamicWindow; w.On {
+			changed = map[string]any{"top": w.Top, "floor": w.Floor, "size": w.Size, "auto": w.Auto}
+		} else {
+			changed = map[string]any{"on": false}
+		}
+	}
+	if set["step"] {
+		done, err := m.WindowStep(*step, true)
+		if err != nil {
+			fail("%v", err)
+		}
+		stepped = done
+	}
+	if (len(changed) > 0 || stepped != nil) && !*dryRun {
+		saved = saveModel(m)
+	}
+	cfg := m.WindowConfig()
+	if jsonMode {
+		var savedDoc, stepDoc any
+		if saved != "" {
+			savedDoc = saved
+		}
+		if stepped != nil {
+			stepDoc = stepped
+		}
+		emit(map[string]any{"window": cfg, "changed": changed, "step": stepDoc, "saved": savedDoc})
+		return
+	}
+	fmt.Printf("window         %s\n", m.G.DynamicWindow.Describe(cfg.Units))
+	nodes := fmt.Sprintf("%d real node(s), the longest %d %s", cfg.Nodes, cfg.Longest, cfg.Units)
+	if cfg.Longer != nil {
+		nodes += fmt.Sprintf(", %d longer than the window", *cfg.Longer)
+	}
+	fmt.Printf("nodes          %s\n", nodes)
+	fmt.Println("heavy          the bridge between two halves carries the node's whole count")
+	if len(changed) > 0 {
+		fmt.Printf("changed        %v\n", changed)
+	}
+	if stepped != nil {
+		fmt.Printf("step           %d step(s) at %v: %d merge(s), %d split(s), nodes %d -> %d, edges %d -> %d\n",
+			stepped.Steps, stepped.Sizes, stepped.Merges, stepped.Splits, stepped.NodesBefore, stepped.NodesAfter,
+			stepped.EdgesBefore, stepped.EdgesAfter)
+	}
+	if saved != "" {
+		fmt.Printf("saved          %s\n", saved)
 	}
 }
 

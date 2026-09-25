@@ -36,12 +36,13 @@ from .attention import DEFAULT_BLUR, AttentionBand
 from .backend import Backend, get_backend
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder, Encoding, _piece
-from .graph import BACK, END, FIRST, ORIGINS, START, THINK, RadixCyclicGraph
+from .graph import BACK, END, FIRST, ORIGINS, START, THINK, W_HEAVY, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
 from .search import LEAST_PUNISHED, REWARD, PathResult, check_sampling, dijkstra_predict, parse_traversal, sample_walk
 from .schedule import preview_points
 from .training import ReplayBuffer, TrainingPlan, check_plan
+from .window import DEFAULT_FLOOR, DEFAULT_TOP, DynamicWindow, check_ladder
 
 __all__ = [
     "GraphModel",
@@ -599,6 +600,127 @@ class GraphModel:
             "wrong": attention_band.preview(enc, weights, wrong, wrong_spans),
             "right": attention_band.preview(enc, weights, right, right_spans),
         }
+
+    # -- the dynamic window: a ladder of node sizes, halving down and back up ------
+
+    def window_config(self) -> dict:
+        """The dynamic window as the API, the CLI and the frontend show it (:mod:`radixnet.window`).
+
+        ``sizes`` is the ladder (empty while off), ``next`` the size after the
+        current one, ``longer`` how many real nodes a step would halve (``None``
+        while off) and ``longest`` the longest label in the graph, both in the
+        encoding's units; ``heavy`` is the bridge weight of the sine model
+        (``None`` for a kind whose bridge is heavy by its count).
+        """
+        graph = self.graph
+        window = graph.dynamic_window
+        enc = self.encoding
+        longer, longest = graph.longer_than(window.size if window.on else 0)
+        return {
+            "on": window.on,
+            "top": window.top,
+            "floor": window.floor,
+            "size": window.size,
+            "auto": window.auto,
+            "sizes": window.sizes(),
+            "next": window.next_size(),
+            "unit": enc.unit,
+            "units": enc.units_name,
+            "ngram": enc.n,
+            "longer": longer if window.on else None,
+            "longest": longest,
+            "nodes": graph.num_nodes() - FIRST,
+            "heavy": W_HEAVY if graph.learns_weights else None,
+            "default_top": DEFAULT_TOP,
+            "default_floor": DEFAULT_FLOOR,
+        }
+
+    def configure_window(
+        self, *, on: bool | None = None, top: int | None = None, floor: int | None = None, size: int | None = None,
+        auto: bool | None = None,
+    ) -> dict:
+        """Switch the window on or off, or move its ladder; returns :meth:`window_config`.
+
+        ``on=False`` switches it off, whatever else is given: the graph stays as
+        the last step left it, and compression is unbounded again.  ``on=True``
+        or any setting switches it on - at the values given over the ones it
+        had, else the defaults (``32`` down to ``4``, standing at the top,
+        stepping at the end of every epoch).  A new top or floor keeps the
+        size on the ladder: above the top it becomes the top, below the floor
+        the floor.  ``ValueError`` for a size that is not a power of two, a
+        floor over the top or a size off the ladder.  Nothing here touches the
+        graph: only a step does (:meth:`window_step`).
+        """
+        current = self.graph.dynamic_window
+        if on is False:
+            self.graph.dynamic_window = DynamicWindow()
+            return self.window_config()
+        if on is None and top is None and floor is None and size is None and auto is None:
+            return self.window_config()
+        top = (current.top if current.on else DEFAULT_TOP) if top is None else int(top)
+        floor = (current.floor if current.on else DEFAULT_FLOOR) if floor is None else int(floor)
+        auto = (current.auto if current.on else True) if auto is None else bool(auto)
+        check_ladder(top, floor)
+        if size is None:
+            size = current.size if current.on else top
+            size = min(top, max(floor, size))  # a new top or floor keeps the size on the ladder
+        self.graph.dynamic_window = DynamicWindow(top, floor, int(size), auto)
+        return self.window_config()
+
+    def window_step(self, steps: int = 1, compress: bool = True) -> dict:
+        """Step the ladder ``steps`` times: merge what fits the window, halve what does not, move the window.
+
+        Each step compresses the graph (within the current size), halves every
+        node longer than the size (:meth:`RadixCyclicGraph.split_window`) and
+        moves the window down the ladder - back to the top from the floor.
+        ``compress=False`` leaves the merging to a caller that has just done
+        it.  Returns what happened: the sizes applied, the merges, the splits
+        and the graph's size before and after, with :meth:`window_config` as
+        ``window``.  ``ValueError`` while the window is off.
+        """
+        graph = self.graph
+        if not graph.dynamic_window.on:
+            raise ValueError("the dynamic window is off: switch it on first (window --on)")
+        if steps < 1:
+            raise ValueError(f"steps must be >= 1, got {steps}")
+        nodes_before, edges_before = graph.num_nodes(), graph.num_edges()
+        applied: list[int] = []
+        merges = splits = 0
+        for _ in range(steps):
+            window = graph.dynamic_window
+            if compress:
+                merges += graph.compress()
+            splits += graph.split_window(window.size)
+            applied.append(window.size)
+            graph.dynamic_window = window.advanced()
+        return {
+            "steps": steps,
+            "sizes": applied,
+            "from": applied[0],
+            "to": graph.dynamic_window.size,
+            "merges": merges,
+            "splits": splits,
+            "nodes_before": nodes_before,
+            "nodes_after": graph.num_nodes(),
+            "edges_before": edges_before,
+            "edges_after": graph.num_edges(),
+            "window": self.window_config(),
+        }
+
+    def _window_epoch(self, compress: bool = False) -> dict | None:
+        """The window's automatic step at the end of a training epoch, or ``None`` when it is off or stepped by hand.
+
+        Returns ``{"window": the size applied, "splits", "merges"}``; the
+        epoch's record carries the first two, and its ``merges`` the third.
+        Every kind's loop has compressed the graph just before, so the step
+        only halves and moves - a kind that does not compress per epoch (the
+        phase model) asks for the merging here with ``compress=True``.
+        """
+        window = self.graph.dynamic_window
+        if not (window.on and window.auto):
+            return None
+        done = self.window_step(1, compress=compress)
+        return {"window": done["from"], "splits": done["splits"], "merges": done["merges"]}
 
     def _paths_of(self, texts: list[str]) -> list[list[int]]:
         """Node paths (sentinels included) of texts, registering a text structurally when it cannot be walked yet."""
@@ -1207,6 +1329,7 @@ class RadixNet(GraphModel):
             graph.apply_node_params(params)
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
             pending_merges = 0
+            stepped = self._window_epoch()  # the dynamic window's step, after the compression it rides on
             loss = loss_sum / n if n else 0.0
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             epoch = meta_add(meta, "epochs_total", 1)
@@ -1219,6 +1342,7 @@ class RadixNet(GraphModel):
                 "trigrams": graph.num_trigrams(),
                 "compression_ratio": graph.compression_ratio(),
                 "merges": merges,
+                **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
                 "transitions": n,
                 "seconds": time.perf_counter() - t0,
                 "skipped_short": skipped_short,
@@ -1602,6 +1726,7 @@ class RadixNet(GraphModel):
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
             "compression_ratio": g.compression_ratio(),
+            "dynamic_window": g.dynamic_window.size,
             "inverted": g.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,
