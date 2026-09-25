@@ -154,6 +154,53 @@ impl Thought {
             ("step_costs", Json::nums(self.step_costs.clone())),
         ])
     }
+
+    /// A thought read back from [`Thought::to_json`] (what a streamed turn
+    /// carries), questions and all; `None` for anything but an object.
+    pub fn from_json(doc: &Json) -> Option<Thought> {
+        let Json::Obj(_) = doc else { return None };
+        let text = |key: &str, fallback: &str| doc.at(key).as_str().unwrap_or(fallback).to_string();
+        let int = |key: &str, fallback: i64| doc.at(key).as_i64().unwrap_or(fallback);
+        let base = Thought::default();
+        Some(Thought {
+            trigger: text("trigger", &base.trigger),
+            at: int("at", -1),
+            about: text("about", ""),
+            text: text("text", ""),
+            depth: int("depth", 0).max(0) as usize,
+            stopped: text("stopped", &base.stopped),
+            then: text("then", &base.then),
+            taught: int("taught", -1),
+            handed_over: int("handed_over", -1),
+            cost: doc.at("cost").as_f64().unwrap_or(0.0),
+            probability: doc.at("probability").as_f64().unwrap_or(1.0),
+            expanded: int("expanded", 0).max(0) as usize,
+            questions: doc
+                .at("questions")
+                .as_array()
+                .iter()
+                .filter_map(Thought::from_json)
+                .collect(),
+            labels: doc
+                .at("labels")
+                .as_array()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            node_ids: doc
+                .at("node_ids")
+                .as_array()
+                .iter()
+                .filter_map(|v| v.as_i64().map(|n| n.max(0) as usize))
+                .collect(),
+            step_costs: doc
+                .at("step_costs")
+                .as_array()
+                .iter()
+                .filter_map(|v| v.as_f64())
+                .collect(),
+        })
+    }
 }
 
 /// How one [`think`] runs (`thinking.think`'s keyword arguments).

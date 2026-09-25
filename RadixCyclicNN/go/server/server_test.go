@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -261,6 +262,88 @@ func TestTrainJobAndInference(t *testing.T) {
 	status, c = e.post("/api/converse", map[string]any{"turns": 2, "history": []string{corpus[0], corpus[1]}})
 	if status != 200 || c["turns"].([]any)[0].(map[string]any)["index"] != 2.0 {
 		t.Fatalf("history: %d %v", status, c)
+	}
+}
+
+// POST /api/converse/stream: the same conversation as it happens, one JSON object per line - the turns are the
+// answer, the rest is the window a backtrack may still rewrite, and the last line is the /api/converse document.
+func TestConverseStreamRoute(t *testing.T) {
+	e := newEnv(t, false)
+	status, doc := e.post("/api/train", map[string]any{"texts": corpus, "epochs": 2})
+	if status != 202 {
+		t.Fatalf("train: %d %v", status, doc)
+	}
+	e.waitJob()
+	body := map[string]any{"opening": corpus[0], "turns": 4, "learn": false}
+	raw, _ := json.Marshal(body)
+	resp, err := http.Post(e.ts.URL+"/api/converse/stream", "application/json", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.HasPrefix(resp.Header.Get("Content-Type"), "application/x-ndjson") {
+		t.Fatalf("stream: %d %v", resp.StatusCode, resp.Header)
+	}
+	if resp.Header.Get("Content-Length") != "" {
+		t.Fatalf("a stream has no length: %v", resp.Header)
+	}
+	lines, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(string(lines)), "\n") {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("not a JSON line: %q (%v)", line, err)
+		}
+		events = append(events, event)
+	}
+	if len(events) < 2 || events[len(events)-1]["event"] != "done" {
+		t.Fatalf("events: %v", events)
+	}
+	kinds := map[string]bool{"look": true, "draft": true, "caught": true, "backtrack": true, "found": true, "stuck": true, "turn": true}
+	spoken := []any{}
+	for _, event := range events[:len(events)-1] {
+		kind, _ := event["event"].(string)
+		if !kinds[kind] || event["index"] == nil || event["speaker"] == nil {
+			t.Fatalf("event: %v", event)
+		}
+		if kind == "turn" {
+			spoken = append(spoken, event["turn"])
+		}
+	}
+	// the turn events are the answer, and the last line is what /api/converse answers with
+	status, plain := e.post("/api/converse", body)
+	if status != 200 {
+		t.Fatalf("converse: %d %v", status, plain)
+	}
+	done := events[len(events)-1]
+	delete(done, "event")
+	if !reflect.DeepEqual(done, plain) {
+		t.Fatalf("done:\n%v\nvs\n%v", done, plain)
+	}
+	if !reflect.DeepEqual(spoken, plain["turns"]) || len(spoken) != 5 {
+		t.Fatalf("turns:\n%v\nvs\n%v", spoken, plain["turns"])
+	}
+	// a request refused before anything was streamed is an ordinary 400
+	status, doc = e.post("/api/converse/stream", map[string]any{"k": 0})
+	if status != 400 || doc["error"] == nil {
+		t.Fatalf("k 0: %d %v", status, doc)
+	}
+	status, doc = e.post("/api/converse/stream", map[string]any{"partner": "radix"})
+	if status != 400 {
+		t.Fatalf("partner: %d %v", status, doc)
+	}
+	// nothing to say: only the done line
+	resp, err = http.Post(e.ts.URL+"/api/converse/stream", "application/json", strings.NewReader(`{"turns": 0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	lines, _ = io.ReadAll(resp.Body)
+	if only := strings.Split(strings.TrimSpace(string(lines)), "\n"); len(only) != 1 || !strings.HasPrefix(only[0], `{"count":0,`) {
+		t.Fatalf("turns 0: %q", string(lines))
 	}
 }
 
