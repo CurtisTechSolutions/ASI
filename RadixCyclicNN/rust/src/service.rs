@@ -829,6 +829,7 @@ fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
         ("paths", Json::Obj(paths)),
         ("in_memory", Json::strs(svc.in_memory())),
         ("weights", weights),
+        ("attention", svc.with_model(|m| m.attention_config())),
         ("engine", Json::str(ENGINE)),
     ]))
 }
@@ -893,6 +894,64 @@ fn model_weights(svc: &Arc<Service>, r: &Request) -> Answer {
     let out = svc.with_model(|m| -> Result<Json, String> {
         let weights = kinds::configure_weights(m, &options)?;
         Ok(Json::obj([("weights", weights), ("stats", stats(m))]))
+    })?;
+    Ok(out)
+}
+
+/// A boolean body field that may be absent or null (then `None`), the way
+/// Python's fields treat null as "not given".
+fn optional_flag(r: &Request, key: &str) -> Result<Option<bool>, ApiError> {
+    match r.body.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(ApiError::bad_request(format!("'{key}' must be a boolean"))),
+    }
+}
+
+/// A number body field that may be absent or null (then `None`).
+fn optional_number(r: &Request, key: &str) -> Result<Option<f64>, ApiError> {
+    match r.body.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Num(x)) => Ok(Some(*x)),
+        Some(Json::Int(n)) => Ok(Some(*n as f64)),
+        Some(_) => Err(ApiError::bad_request(format!("{key:?} must be a number"))),
+    }
+}
+
+/// `GET /api/model/attention`: where inside a gram the running model's
+/// corrections land ([`crate::attention`]).
+fn attention(svc: &Arc<Service>, _r: &Request) -> Answer {
+    Ok(svc.with_model(|m| Json::obj([("kind", Json::str(m.kind())), ("attention", m.attention_config())])))
+}
+
+/// `POST /api/model/attention`: the band on (at `blur`) or off; a kind that is
+/// never corrected refuses.
+fn attention_set(svc: &Arc<Service>, r: &Request) -> Answer {
+    svc.ensure_idle()?;
+    let on = optional_flag(r, "on")?;
+    let blur = optional_number(r, "blur")?;
+    let out = svc.with_model(|m| -> Result<Json, String> {
+        let config = m.configure_attention(on, blur)?;
+        Ok(Json::obj([
+            ("kind", Json::str(m.kind())),
+            ("attention", config),
+            ("stats", stats(m)),
+        ]))
+    })?;
+    Ok(out)
+}
+
+/// `POST /api/model/attention/preview`: where one correction would land, gram
+/// by gram, under the writer rule and a band; nothing changes.
+fn attention_preview(svc: &Arc<Service>, r: &Request) -> Answer {
+    let (wrong, right) = (r.text("wrong", ""), r.text("right", ""));
+    let blur = optional_number(r, "blur")?;
+    let out = svc.with_model(|m| -> Result<Json, String> {
+        let mut pairs = vec![("kind".to_string(), Json::str(m.kind()))];
+        if let Json::Obj(rest) = m.attention_preview(&wrong, &right, blur)? {
+            pairs.extend(rest);
+        }
+        Ok(Json::Obj(pairs))
     })?;
     Ok(out)
 }
@@ -1940,6 +1999,9 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("GET", "/api/model", model_info);
     server.route("POST", "/api/model/select", model_select);
     server.route("POST", "/api/model/weights", model_weights);
+    server.route("GET", "/api/model/attention", attention);
+    server.route("POST", "/api/model/attention", attention_set);
+    server.route("POST", "/api/model/attention/preview", attention_preview);
     server.route("POST", "/api/predict", predict);
     server.route("POST", "/api/generate", generate);
     server.route("POST", "/api/score", score);

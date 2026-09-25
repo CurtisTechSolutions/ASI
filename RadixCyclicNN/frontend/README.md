@@ -228,6 +228,11 @@ another model is loaded.
   apply). The sine model has no score function to set and says why; the
   negative network's blame function stays on the Negative tab beside the
   failures it weighs;
+* the **attention band** (`GET` / `POST /api/model/attention`): where inside a
+  gram a correction lands - on or off, the blur, the band drawn over one gram
+  with its units blurred as the band sees them, and a correction you type
+  previewed under both rules at the slider's blur before anything is applied
+  (`POST /api/model/attention/preview`);
 * the **encoder / decoder** (`GET /api/encoding`, `POST /api/encoding/preview`):
   the unit, the n and the stride, the four sentinels, and a live preview that
   encodes a text, decodes it back and walks it through the graph's own node
@@ -260,6 +265,7 @@ The old `#network` link opens Model settings.
     src/hooks/useJob.js         async job lifecycle (start, poll /api/job, stop)
     src/settings.js             the site-wide settings' rules: ranges, what a mode reads, request bodies (pure)
     src/backwards.js            turning a query and an answer around for a model trained backwards (pure)
+    src/attention.js            the attention band read for display: the band over a gram, how sharply a unit is drawn (pure)
     src/hooks/useSiteSettings.jsx     the settings several panels share, held once (search, training, backwards)
     src/hooks/useNetworkSettings.jsx  the traversal, one of them
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

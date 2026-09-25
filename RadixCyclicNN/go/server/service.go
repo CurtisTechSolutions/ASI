@@ -590,7 +590,11 @@ func (s *Service) Status() (map[string]any, error) {
 
 // DescribeModel is GET /api/model.
 func (s *Service) DescribeModel() (map[string]any, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.G.WeightConfig(), nil })
+	var attention radixnet.AttentionConfig
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		attention = m.AttentionConfig()
+		return m.G.WeightConfig(), nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -601,8 +605,55 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 	active, label, units := "count", ModelLabel, s.units()
 	return map[string]any{
 		"kind": active, "label": label, "units": units, "kinds": s.kinds(), "model_path": modelPath,
-		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out, "engine": "go",
+		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out,
+		"attention": attention, "engine": "go",
 	}, nil
+}
+
+// Attention is GET /api/model/attention: where inside a gram the model's
+// corrections land (radixnet/attention.go).
+func (s *Service) Attention() (map[string]any, error) {
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		return map[string]any{"kind": m.Kind(), "attention": m.AttentionConfig()}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// ConfigureAttention is POST /api/model/attention: the band on (at blur) or off.
+func (s *Service) ConfigureAttention(on *bool, blur *float64) (map[string]any, error) {
+	out, err := s.mutate(func(m *radixnet.Model) (any, error) {
+		cfg, err := m.ConfigureAttention(on, blur)
+		if err != nil {
+			return nil, badRequest("%v", err)
+		}
+		return map[string]any{"kind": m.Kind(), "attention": cfg, "stats": m.Stats()}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// AttentionPreview is POST /api/model/attention/preview: where one correction
+// would land, gram by gram, under the writer rule and a band; nothing changes.
+func (s *Service) AttentionPreview(wrong, right string, blur *float64) (map[string]any, error) {
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		p, err := m.AttentionPreview(wrong, right, blur)
+		if err != nil {
+			return nil, badRequest("%v", err)
+		}
+		return map[string]any{
+			"kind": m.Kind(), "attention": p.Attention, "blur": p.Blur, "weights": p.Weights,
+			"changes": p.Changes, "wrong": p.Wrong, "right": p.Right,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
 }
 
 // Encoding is GET /api/encoding: how the active model reads text - the unit,

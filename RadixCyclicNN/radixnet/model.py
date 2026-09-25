@@ -31,6 +31,8 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import attention as attention_band
+from .attention import DEFAULT_BLUR, AttentionBand
 from .backend import Backend, get_backend
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder, Encoding, _piece
@@ -338,6 +340,9 @@ class GraphModel:
     description = ""
     units = "chars"
     """What a *new* model of this kind counts in; the encoding decides for a live one."""
+    takes_corrections = False
+    """Does this kind learn from a diff (``correct``)?  Only such a kind has anything for the attention band
+    (:mod:`radixnet.attention`) to spread, so only such a kind accepts one."""
 
     @property
     def counts_in(self) -> str:
@@ -478,6 +483,122 @@ class GraphModel:
                 out.append((prev, edge))
             position += size - overlap
         return out
+
+    def _charged_steps(
+        self, grams: list[str], length: int, spans: Sequence[tuple[int, int]]
+    ) -> list[tuple[int, int, float, bool]]:
+        """The steps of a traced text a correction charges, as ``(prev node, edge, charge, focus)`` in path order.
+
+        With the attention band off these are exactly :meth:`_steps_over`'s
+        steps, each charged 1 and each the focus.  With it on, every changed
+        unit is shared out over the grams that see it (:func:`radixnet.attention.spread`)
+        and a step is charged what the grams of its node collected - capped at
+        one, since a step is one decision - and is the *focus* when one of them
+        sees a changed unit most sharply.  The step into END answers for the
+        position after the last unit either way.  ``length`` is the text's
+        length in the encoding's units.
+        """
+        band = self.graph.attention
+        if not band.on:
+            return [(prev, edge, 1.0, True) for prev, edge in self._steps_over(grams, length, spans)]
+        graph = self.graph
+        path = graph.node_path(grams)
+        if not path or len(path) < 2:
+            return []
+        enc = graph.encoding
+        n, stride = enc.n, enc.stride
+        shared = attention_band.spread(n, stride, len(grams), length, spans, band.weights(n))
+        children = graph.children
+        out: list[tuple[int, int, float, bool]] = []
+        gram = 0  # the text's first gram inside the node being entered
+        for index in range(1, len(path)):
+            node = path[index]
+            prev = path[index - 2] if index >= 2 else START
+            edge = children[path[index - 1]].get(node)
+            if node == END:
+                if edge is not None and shared.end:
+                    out.append((prev, edge, 1.0, True))
+                break
+            held = (graph.label_len(node) - n) // stride + 1  # the grams a node of this length holds
+            charge = 0.0
+            focus = False
+            for g in range(gram, min(gram + held, len(grams))):
+                charge += shared.shares[g]
+                focus = focus or shared.focus[g]
+            gram += held
+            if edge is not None and charge > 0.0:
+                out.append((prev, edge, min(1.0, charge), focus))
+        return out
+
+    # -- the attention band: where a correction lands --------------------------
+
+    def attention_config(self) -> dict:
+        """The attention band as the API, the CLI and the frontend show it.
+
+        ``weights`` is the band over one gram of this model's encoding (``None``
+        while it is off); ``applies`` says whether this kind is ever corrected,
+        i.e. whether the band has anything to spread.
+        """
+        band = self.graph.attention
+        enc = self.encoding
+        return {
+            "on": band.on,
+            "blur": band.blur,
+            "weights": band.weights(enc.n),
+            "ngram": enc.n,
+            "stride": enc.stride,
+            "unit": enc.unit,
+            "units": enc.units_name,
+            "applies": self.takes_corrections,
+            "default_blur": DEFAULT_BLUR,
+        }
+
+    def configure_attention(self, *, on: bool | None = None, blur: float | None = None) -> dict:
+        """Switch the band on (at ``blur``, else the blur it had, else :data:`~radixnet.attention.DEFAULT_BLUR`)
+        or off; returns :meth:`attention_config`.
+
+        ``blur`` alone switches it on at that blur; ``on=False`` switches it off
+        whatever ``blur`` says.  A kind that is never corrected refuses rather
+        than keeping a setting that could not do anything.
+        """
+        if not self.takes_corrections:
+            raise ValueError(
+                f"the {self.kind} model is never corrected, so an attention band would have nothing to spread; "
+                "it belongs to the kinds that learn from a diff (count, negative)"
+            )
+        current = self.graph.attention
+        if on is False:
+            self.graph.attention = AttentionBand()
+        elif on is True or blur is not None:
+            if blur is None:
+                blur = current.blur if current.on else DEFAULT_BLUR
+            self.graph.attention = AttentionBand(blur)
+        return self.attention_config()
+
+    def attention_preview(self, wrong: str, right: str, blur: float | None = None) -> dict:
+        """Where one correction's charges land, gram by gram - under the writer rule and under a band.
+
+        The band shown is ``blur`` when given, else the model's own, else the
+        default one: a preview is how to see a blur before applying it, so it
+        never needs the band to be on and never changes anything.  Needs only
+        the encoding, not the graph.
+        """
+        from . import diff  # local import, as the negative network does: only corrections need the alignment
+
+        wrong, right = str(wrong or ""), str(right or "")
+        band = self.graph.attention
+        shown = AttentionBand(blur if blur is not None else (band.blur if band.on else DEFAULT_BLUR))
+        enc = self.encoding
+        weights = shown.weights(enc.n)
+        wrong_spans, right_spans = diff.changed_spans(wrong, right, enc)
+        return {
+            "attention": self.attention_config(),
+            "blur": shown.blur,
+            "weights": weights,
+            "changes": diff.summary(wrong, right, limit=0, encoding=enc),
+            "wrong": attention_band.preview(enc, weights, wrong, wrong_spans),
+            "right": attention_band.preview(enc, weights, right, right_spans),
+        }
 
     def _paths_of(self, texts: list[str]) -> list[list[int]]:
         """Node paths (sentinels included) of texts, registering a text structurally when it cannot be walked yet."""

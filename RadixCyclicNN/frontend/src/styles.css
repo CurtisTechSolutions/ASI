@@ -568,6 +568,107 @@ dl.kv dd {
   font-style: italic;
 }
 
+/* the attention band (Model settings): the band over one gram, and grams drawn through it -
+   sharp at the centre, blurred towards the ends, as the eye reads a line */
+.band-picture {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 4px;
+}
+
+.band-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 64px;
+}
+
+.band-bar-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  width: 34px;
+}
+
+.band-bar {
+  width: 100%;
+  background: var(--accent);
+  border-radius: 4px 4px 0 0;
+}
+
+.band-bar-slot small {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.band-gram {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 18px;
+  display: inline-flex;
+  gap: 2px;
+}
+
+.band-table .band-gram {
+  font-size: 14px;
+}
+
+/* under the bars, each unit sits beneath the bar that says how sharply it is seen */
+.band-picture .band-gram {
+  gap: 6px;
+}
+
+.band-picture .band-unit {
+  width: 34px;
+}
+
+.band-unit {
+  display: inline-block;
+  min-width: 0.6em;
+  text-align: center;
+}
+
+.band-table {
+  border-collapse: collapse;
+  margin: 4px 0 12px;
+}
+
+.band-table th,
+.band-table td {
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.band-table tr.focus td {
+  font-weight: 600;
+}
+
+.band-share {
+  display: inline-block;
+  width: 60px;
+  height: 7px;
+  background: var(--chip);
+  border-radius: 4px;
+  vertical-align: middle;
+  overflow: hidden;
+}
+
+.band-share span {
+  display: block;
+  height: 100%;
+  background: var(--accent-2);
+}
+
+.text-display.inline {
+  display: inline;
+  font-weight: normal;
+}
+
 /* a gram the model has never seen (the encoder preview on the Model settings tab) */
 .chip.unknown {
   border-style: dashed;

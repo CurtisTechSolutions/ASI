@@ -26,6 +26,7 @@ and an optional GPU backend (torch) are built in.
 | Custom activation `-1 * sin(x / 3.0)` | Every node owns `f(x) = a · sin(b · (x - h)) + k`, initialised to `a = -1, b = 1/3, h = 0, k = 0` (exactly `-sin(x/3)`); all four are learned per node. |
 | Shortest path prediction, cost function, Dijkstra | Edge cost `-log P(c | p) + step_penalty` where `P` is a softmax over the parent's edge signals. Dijkstra runs over the graph unrolled by emitted characters and returns the cheapest path that emits the requested length, or the cheapest path to the end-of-text node. |
 | A second way through: the least punished | `--traversal least-punished` (Python, Go and Rust, `predict` / `generate` / `bench`, `traversal` in the HTTP API and a selector on the Predict and Generate tabs): the walk is ranked by the **blame** on its worst step first and by the cost only between steps nothing is held against, and at every node it may only take the children the model has the least against. A step's punishment is the penalty side of its reward plus `log(1 + incorrect)` of the judged path context - the failures counted **against nothing**, so a reward cannot buy blame off the way it nets it off the edge. On a graph where nothing was ever punished it is the ordinary search, to the bit. `SPEC-LeastPunished.md` is the specification. |
+| An attention band for each n-gram | `radixnet attention --blur 0.5` (Python, Go and Rust; `POST /api/model/attention`; the Attention band card on Model settings): each gram is read the way an eye reads a line - sharp at its centre, blurred towards its ends - so a **correction** charges the gram that has a changed unit at its centre the most, and the grams that only glimpse it at an edge less, instead of charging only the step that wrote it. Every changed unit hands out one charge; a thumbs up or down, which marks every unit alike, is untouched. Off by default, saved with the model. `SPEC-AttentionBand.md` is the specification. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
 | Traverse by the punishments, not the rewards | `--traversal punishment` (`traversal` in the HTTP API, a selector on the Predict and Generate tabs, all three languages): the rewards leave the score altogether and the **penalties** price every step, so the cheapest path is the one that accumulated the **least punishment**. It is *what* a search looks for, as opposed to `--mode`, which is how it looks - every mode of every kind can run either traversal. See below. |
 | Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): the teacher - a local Ollama model or ChatGPT - writes sentence openings that drill a point of grammar, the network completes them with the prediction search, the same teacher marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), the failures are asked about (*why* is this wrong, and what else is wrong the same way - see below), and the round's mistakes become the next round's syllabus. |
@@ -226,6 +227,7 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 | `speech info` / `transcribe FILE` / `teach FILE` / `listen` / `tutor FILE...` / `decode` | teaching by talking. `info`: backends, recorders, codecs. `transcribe FILE [--backend auto\|given\|faster-whisper\|whisper\|server] [--text TEXT] [--language en] [--asr-model] [--asr-url] [--out]`: the words. `teach FILE`: the transcript **and** the waveform behind one unique token - `--text` (what you said, skips the ASR), `--rate 8000`, `--codec auto\|mu\|pcm8`, `--normalise`, `--no-waveform`, `--pair` (also learn waveform → transcript), `--token` / `--shared-token`, `--out FILE`, `--train --epochs 3 --lr 0.5 --batch-size 8 --model-out`. `listen --seconds 5 [--recorder arecord\|rec\|sox\|ffmpeg] [--save clip.wav]`: record from the microphone first, then the same. `tutor FILE...`: the recall tutor - ask it to say back what it was taught and mark what comes back, `--length 400` (payload characters asked for, and what the marking compares against), `--lead`, `--attempts`, `--mode beam\|sample`, `--threshold 6`, `--listen-back` (transcribe what it said and compare the words), `--train` (teach it first), `--blame` / `--negative PATH`. `decode (--text\|--data) --out out.wav [--codec]`: an encoded or *predicted* waveform as audio |
 | `tutor` | automated English lessons: `--blame` / `--negative PATH` (every failed sentence also teaches the negative network what the teacher marked it down for), `--variants 3` / `--variant-weight 0.5` (with `--blame`: the teacher explains why each failure is wrong and writes that many more sentences with the same mistake, blamed at that share of its severity), `--topic TEXT`, `--rounds 3`, `--batches 1` (auto run: batches of `--rounds` rounds, each planned from the one before; 0 = until Ctrl-C), `--exercises 5`, `--attempts 1`, `--focus TEXT` (one point of grammar), `--level`, `--words "3 to 6"`, `--brief TEXT` (what this batch is being taught to: the prompt the last report card led to), `--tutor-provider ollama\|chatgpt`, `--tutor-model`, `--grader-provider`, `--grader-model`, `--url`, `--grader-url`, `--timeout`; completion: `--mode dijkstra\|beam\|sample`, `--length 20`, `--max-length 80`, `--temperature`, `--no-to-end`, `--beam N`; marking: `--threshold 6` (pass mark), `--grammar-weight 0.6`, `--batch 10`, `--no-adapt`, `--drills N`, `--plan N` (plan the next N lessons from the report card at the end), `--no-teach-answer`, `--dry-run`; corrections: `--keep-weight 0`, `--no-diff-corrections`; 2NRL: `--twonrl-per round\|lesson`, `--min-weight 0.25`, `--neg-epochs 2 --pos-epochs 3 --neg-lr 0.5 --pos-lr 0.1 --batch-size 4 --strength`, `--no-replay`, `--replay-limit`, checkpoint options, `--out`, `--report FILE` |
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0` (what the unchanged words still earn; a whole path is only rewarded when the answer was right), `--no-count`, `--dry-run` (show the alignment only), `--out` |
+| `attention` | the attention band - where inside a gram a correction lands: without options it is shown; `--on` (at the blur it had, else 0.5), `--blur X` (0..1: the band is 1 at a gram's centre and 1 - X at its ends; switches it on), `--off` (each changed unit charged to the step that wrote it) change it and save the model (`--dry-run`: in memory only, `--out PATH`); `--wrong TEXT --right TEXT` prints where that correction would land, gram by gram, under the band and without it. The count model and the negative network take a band (point `--model` at the negative file for its own); the sine and phase models refuse one |
 | `paths` | count model: the judged paths - `--limit 20`, `--node LABEL` (only the paths leaving one node). Each line is `prev -> parent -> child`, its correct / incorrect counter, how often it has been walked since (`seen`) and what that says about the edge (`seen ratio`, `correct ratio`) |
 | `words` | word model: its alphabet - `--limit 20` (0 = all). Every word it has read, with how many of the graph's three-word windows hold it; a word graph is addressed in words everywhere else too (`nodes --node "sat on the mat"`) |
 | `nodes` | count model: each node against the nodes around it - `--limit 10`, `--node LABEL`. A row per previous node and a row per next node, each with its share of that side's traffic (`seen %`) and of that side's reward (`reward %`, signed), how much of the edge a judged context has been watching, and what those contexts made of it |
@@ -256,6 +258,9 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/model/select` | `{"kind": "radix"\|"count"\|"word"\|"resonant"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
 | `GET /api/encoding` | how the active model reads text: `{"encoding": "char:3:1", "unit", "ngram", "stride", "overlap", "start_label", "end_label", "back_label", "configurable": true, "note"}` (`window` is `ngram` under its old name). The encoding is chosen when a model is made - `POST /api/reset` with an `encoding` - and fixed for its life |
 | `POST /api/encoding/preview` | `{"text"}` -> the same document plus `{"chars", "windows", "count", "decoded", "round_trip", "unknown_windows", "kind", "path": {"known", "reason", "labels", "node_ids", "decoded", "nodes", "compressed"}}`: one text through the encoder, back through the decoder, and through the graph's own (possibly merged) node labels. `path.known` is false with the reason - a window never seen, or a text that cannot be walked from START to END as it stands |
+| `GET /api/model/attention` | the active model's attention band: `{"kind", "attention": {"on", "blur", "weights" (the band over one gram, null while off), "ngram", "stride", "unit", "units", "applies" (false for a kind that is never corrected), "default_blur"}}` |
+| `POST /api/model/attention` | `{"on", "blur"}`: a blur alone switches the band on, `on: true` alone uses the blur it had (else 0.5), `on: false` switches it off -> `{"kind", "attention", "stats"}`; 400 for a blur outside [0, 1] or a kind that is never corrected |
+| `POST /api/model/attention/preview` | `{"wrong", "right", "blur"}` -> `{"kind", "attention", "blur", "weights", "changes", "wrong", "right"}`, each side `{"text", "units", "grams", "spans", "writer", "charges", "focus", "end"}`: where one correction would land, gram by gram - `writer` the rule with the band off, `charges` each gram's share under the band, `focus` the gram that sees a change most sharply. Changes nothing |
 | `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress`, and how the run walks its texts: `order`, `curriculum`, `replay`, `replay_size`, `patience`, `min_delta` (each off when left out; a value out of range is a 400), and `reverse` (read every text backwards, in the model's units - [Training in reverse](#training-in-reverse)) -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used, and the one that stopped the run early `"early_stop": true` |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
 | `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005, "reverse_schedule": false}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
@@ -629,6 +634,10 @@ One **round** is:
    python -m radixnet correct --wrong "he go to school" --right "he goes to school" --dry-run
    go/bin/radixnet-count correct --wrong "a apple a day" --right "an apple a day" --keep 0
    ```
+
+   Which steps answer for a changed character is the **attention band**'s to
+   say (below): off, the step that wrote it takes all of it; on, the gram with
+   the change at its centre takes the most.
 
 ### Counting paths, not edges
 
@@ -2289,6 +2298,55 @@ A model that is not `char:3:1` writes an `encoding` block into its file, and
 trains the same corpus on both sides under nine encodings and holds them to the
 same graph, the same file and the same predictions.
 
+## The attention band: where inside a gram a correction lands
+
+The eye does not read a line evenly: it fixes on one point and sees it
+sharply, and the letters either side blur with the distance. A gram is this
+model's fixation, and the **attention band** is how sharply each of its
+positions is seen - 1 at the centre, falling to `1 - blur` at the first and
+the last unit:
+
+```
+blur 0.5, trigrams:  0.5  1  0.5          blur 0.5, 5-grams:  0.5  0.75  1  0.75  0.5
+```
+
+What it changes is where a **correction** lands. The diff marks the units the
+teacher changed; without the band each is charged, in full, to the step that
+*wrote* it - the gram that has it at its newest position, the edge of its
+window. With the band, each changed unit hands out one charge, shared among the
+grams that *see* it by how centrally each sees it:
+
+```bash
+python -m radixnet --model model.count.json attention --blur 0.5 \
+    --wrong "the cat sat on the mat" --right "the bat sat on the mat"
+#   gram   writer (off)   band (blur 0.5)   focus
+#   "e c"  1              0.25
+#   " ca"  -              0.50              *
+#   "cat"  -              0.25
+```
+
+The penalty is `strength * weight * charge`, the fix earns `strength * reward *
+(charge + (1 - charge) * keep)`, the judged-path verdict goes to the **focus**
+(`" ca"`), and the negative network is blamed by the same shares. A thumbs up
+or down, 2NRL and training mark every unit alike, and no band changes them; a
+grouping encoding (`char:4:4`), a gram of one word, and the first and last unit
+of a text have one gram each seeing a unit, which takes all of it as before.
+
+```bash
+python -m radixnet --model model.count.json attention            # show it
+python -m radixnet --model model.count.json attention --on       # on, at blur 0.5
+python -m radixnet --model model.count.json attention --off      # the writer rule again
+go/bin/radixnet-count --model model.count.json attention --blur 0.3
+rust/target/release/radixnet --model model.count.json attention --blur 0.3
+```
+
+It is saved with the model (`"attention": {"blur": 0.5}` in the graph block,
+only while it is on), reported as `attention_blur` in the stats, and set on the
+**Model settings** tab's Attention band card, which draws the band over a gram
+and previews a correction under both rules before anything is applied. All
+three implementations write the same file for it. `SPEC-AttentionBand.md` is
+the specification and `DECISIONS.md` D-086 the reasoning.
+
 ## Go implementation of the count / reward model
 
 `go/` holds a Go port of the count / reward model (`CountRewardNet`) **and of
@@ -2678,6 +2736,7 @@ RadixCyclicNN/
   Dockerfile, docker-compose.yml, docker-compose.gpu.yml, .env.example, Makefile
   DESIGN.md           the specification
   SPEC-LeastPunished.md   the traversal that follows the blame (built)
+  SPEC-AttentionBand.md   where inside a gram a correction lands (built)
   SPEC-EdgeDecay.md   a node's edges fading on the graph's own clock (proposed)
 ```
 

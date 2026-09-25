@@ -254,6 +254,12 @@ func init() {
 	doc("POST", "/api/model/select", "{kind: count}: the Go server runs the count / reward model only")
 	route("POST", "/api/model/weights", rModelWeights)
 	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
+	route("GET", "/api/model/attention", rAttention)
+	doc("GET", "/api/model/attention", "the model's attention band - where inside a gram a correction's blame and credit land: {kind, attention: {on, blur, weights (the band over one gram, 1 at the centre, 1 - blur at both ends; null while off), ngram, stride, unit, units, applies, default_blur}}")
+	route("POST", "/api/model/attention", rAttentionSet)
+	doc("POST", "/api/model/attention", "switch the band: {on, blur} - blur (0..1) alone switches it on, on: true without a blur uses the one it had (else default_blur), on: false switches it off -> {kind, attention, stats}")
+	route("POST", "/api/model/attention/preview", rAttentionPreview)
+	doc("POST", "/api/model/attention/preview", "where one correction would land, gram by gram, and nothing changes: {wrong, right, blur} -> {kind, attention, blur, weights, changes, wrong, right}, each side {text, units, grams, spans, writer, charges, focus, end}")
 	route("GET", "/api/encoding", rEncoding)
 	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, think_label, configurable: false (the window is part of the model format, not a setting), note}")
 	route("POST", "/api/encoding/preview", rEncodingPreview)
@@ -429,6 +435,50 @@ func rEncodingPreview(rq *request) (int, any, error) {
 		return 0, nil, err
 	}
 	out, err := rq.svc.EncodingPreview(text)
+	return 200, out, err
+}
+
+// nullableNumber reads a finite number that may be absent or null (then nil).
+func nullableNumber(f fields, name string) (*float64, error) {
+	v, present, err := f.number(name, 0, nil)
+	if err != nil || !present {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func rAttention(rq *request) (int, any, error) {
+	out, err := rq.svc.Attention()
+	return 200, out, err
+}
+
+func rAttentionSet(rq *request) (int, any, error) {
+	on, err := optionalFlag(rq.f, "on")
+	if err != nil {
+		return 0, nil, err
+	}
+	blur, err := nullableNumber(rq.f, "blur")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.ConfigureAttention(on, blur)
+	return 200, out, err
+}
+
+func rAttentionPreview(rq *request) (int, any, error) {
+	wrong, err := rq.f.optText("wrong", "")
+	if err != nil {
+		return 0, nil, err
+	}
+	right, err := rq.f.optText("right", "")
+	if err != nil {
+		return 0, nil, err
+	}
+	blur, err := nullableNumber(rq.f, "blur")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.AttentionPreview(wrong, right, blur)
 	return 200, out, err
 }
 

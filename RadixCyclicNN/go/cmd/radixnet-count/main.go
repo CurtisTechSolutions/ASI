@@ -286,6 +286,7 @@ commands:
   checkpoints list a checkpoint directory, or restore one (--restore NAME | latest)
   bench      how fast this build counts and predicts
   weights    show or change the dual frequency weight function
+  attention  the attention band: where inside a gram a correction's blame and credit land (--blur, --off, --wrong/--right)
   info       statistics and the training history tail
   converse   the model talks to itself
   think      the model thinks: one thought from the THINK sentinel, questioning itself where it learned to
@@ -390,6 +391,8 @@ func main() {
 		cmdInvert(rest)
 	case "weights":
 		cmdWeights(rest)
+	case "attention":
+		cmdAttention(rest)
 	case "info":
 		cmdInfo(rest)
 	case "converse":
@@ -1159,6 +1162,122 @@ func cmdWeights(args []string) {
 		counterText(m.G.TotalTraversals), m.G.WindowTraversals())
 	if saved != "" {
 		fmt.Printf("saved %s\n", saved)
+	}
+}
+
+// cmdAttention shows the attention band, switches it, or shows where one
+// correction would land through it (radixnet/attention.py, attention.go).
+func cmdAttention(args []string) {
+	fs := subFlagSet("attention")
+	on := fs.Bool("on", false, "switch the band on (at --blur, else the blur it had, else 0.5)")
+	off := fs.Bool("off", false, "switch the band off: each changed unit is charged to the step that wrote it")
+	blur := fs.Float64("blur", 0, "how blurred the ends of a gram are, 0..1: the band is 1 at the centre and 1 - blur at both ends (switches the band on)")
+	wrong := fs.String("wrong", "", "preview a correction: what the network wrote")
+	right := fs.String("right", "", "preview a correction: what it should have written")
+	dryRun := fs.Bool("dry-run", false, "change the band in memory only; nothing is saved")
+	_ = fs.Parse(args)
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if *on && *off {
+		fail("--on and --off contradict each other")
+	}
+	if *off && set["blur"] {
+		fail("--off and --blur contradict each other: a blur switches the band on")
+	}
+	if set["wrong"] != set["right"] {
+		fail("a preview needs both --wrong (what the network wrote) and --right (what it should say)")
+	}
+	m := openModel(true)
+	changed := map[string]any{}
+	saved := ""
+	if *on || *off || set["blur"] {
+		var onArg *bool
+		var blurArg *float64
+		if *on || *off {
+			value := *on
+			onArg = &value
+		}
+		if set["blur"] {
+			value := *blur
+			blurArg = &value
+		}
+		if _, err := m.ConfigureAttention(onArg, blurArg); err != nil {
+			fail("%v", err)
+		}
+		changed = map[string]any{"on": m.G.Attention.On, "blur": m.G.Attention.BlurOrNil()}
+		if !*dryRun {
+			saved = saveModel(m)
+		}
+	}
+	cfg := m.AttentionConfig()
+	var preview *radixnet.AttentionPreview
+	if set["wrong"] {
+		p, err := m.AttentionPreview(*wrong, *right, nil)
+		if err != nil {
+			fail("%v", err)
+		}
+		preview = p
+	}
+	if jsonMode {
+		var savedDoc any
+		if saved != "" {
+			savedDoc = saved
+		}
+		emit(map[string]any{"attention": cfg, "changed": changed, "saved": savedDoc, "preview": preview})
+		return
+	}
+	unit := "character"
+	if cfg.Unit == "word" {
+		unit = "word"
+	}
+	band := fmt.Sprintf("- (off: each changed %s is charged to the step that wrote it)", unit)
+	if cfg.On {
+		parts := make([]string, len(cfg.Weights))
+		for i, w := range cfg.Weights {
+			parts[i] = strconv.FormatFloat(w, 'g', 4, 64)
+		}
+		band = strings.Join(parts, " ")
+	}
+	fmt.Printf("band           %s\nover one gram  %s\ngram           %d %ss, stride %d\n",
+		m.G.Attention.Describe(cfg.Ngram), band, cfg.Ngram, unit, cfg.Stride)
+	if len(changed) > 0 {
+		fmt.Printf("changed        on=%v blur=%v\n", changed["on"], changed["blur"])
+	}
+	if saved != "" {
+		fmt.Printf("saved          %s\n", saved)
+	}
+	if preview != nil {
+		sayChanges(*wrong, *right, preview.Changes)
+		for _, side := range []struct {
+			title string
+			doc   radixnet.AttentionSide
+		}{{"the network wrote", preview.Wrong}, {"the teacher wrote", preview.Right}} {
+			fmt.Printf("\n%s: %q\n", side.title, side.doc.Text)
+			fmt.Printf("%-5s %-24s %-13s %-18s %s\n", "gram", "text", "writer (off)", fmt.Sprintf("band (blur %g)", preview.Blur), "focus")
+			rows := 0
+			for g, gram := range side.doc.Grams {
+				writes, charge := side.doc.Writer[g], side.doc.Charges[g]
+				if !writes && charge == 0 {
+					continue
+				}
+				mark, focus := "-", ""
+				if writes {
+					mark = "1"
+				}
+				if side.doc.Focus[g] && charge > 0 {
+					focus = "*"
+				}
+				fmt.Printf("%-5d %-24q %-13s %-18.4f %s\n", g, gram, mark, charge, focus)
+				rows++
+			}
+			if side.doc.End {
+				fmt.Printf("%-5s %-24s %-13s %-18s %s\n", "end", "(after the last unit)", "1", "1", "*")
+				rows++
+			}
+			if rows == 0 {
+				fmt.Println("  nothing in it changed")
+			}
+		}
 	}
 }
 

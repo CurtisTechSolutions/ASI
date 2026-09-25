@@ -1498,6 +1498,7 @@ func (m *Model) Stats() map[string]any {
 		"unit":                    string(g.Enc.Unit),
 		"ngram":                   g.Enc.N,
 		"stride":                  g.Enc.Stride,
+		"attention_blur":          g.Attention.BlurOrNil(),
 		"compression_ratio":       g.CompressionRatio(),
 		"inverted":                g.Inverted,
 		"backend":                 "go",

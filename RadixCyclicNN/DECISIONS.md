@@ -96,6 +96,8 @@ D-083 the veto can keep its provenance to itself
 
 **Part XX — Today's format** · D-085 the format is a rendering of the search, and the thinking is its trace
 
+**Part XXI — Attention** · D-086 the attention band: a correction lands where the gram looks, not where it wrote
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -3465,6 +3467,83 @@ every conversation here (D-068).
 
 ---
 
+# Part XXI — Attention
+
+### D-086 — A correction lands where a gram *looks*, not where it wrote: the attention band
+
+**Status** Research claim · 2026-09-25 · **Layer** learning · **Extends** D-006, D-046 ·
+**Specified in** `SPEC-AttentionBand.md`
+
+**Context — my reason** When the eye reads, it fixes on one point of a line: that point is sharp, and the letters
+to the left and the right of it - and the lines above and below - blur with the distance. D-006 already reads the
+trigram as a fixation - the shared character is the pivot, with context either side - and the claim here is that
+the rest of the analogy holds too: a gram should *attend* to its centre more than to its ends. So each n-gram gets
+an **attention adjustment band** that rewards the centre of the window more than its beginning and its end.
+
+What the model had instead was the opposite. A correction's diff (D-046) marks the units the teacher changed, and
+each marked unit was charged, in full, to the step that **wrote** it - the step whose gram *ends* on it. That is a
+band too, in the limit: all of the attention on the newest unit of the window, the one the eye has only just
+reached, at the very edge of its focus. The gram that had the mistake squarely at its centre - the one that saw it
+best - was never charged at all.
+
+**Decision** A band over each gram's `n` positions, 1 at the centre and falling in a straight line to `1 - blur` at
+the first and the last unit, and one rule for what it does. With the band on, **each unit a correction marks hands
+out exactly one charge**, shared among the grams that see it in proportion to how sharply each sees it; a step is
+charged what its grams collected, capped at one full charge (a step is one decision, however much of it was
+wrong); the judged-path verdict - a count, which cannot be shared - goes to the **focus**, the step that sees a
+marked unit most sharply. The step into END is not a gram: it answers for the position after the last unit, in
+full, as it always did. The count model's penalty becomes `strength * weight * charge` and the fix's reward
+`strength * reward * (charge + (1 - charge) * keep)`; the negative network blames `severity * charge`.
+
+It is a setting of the **model** (D-079): off by default, written into the graph document beside the encoding only
+while it is on, switchable at any time because it changes nothing the graph holds - `radixnet attention --blur X`,
+`POST /api/model/attention`, and an *Attention band* card on the Model settings tab that draws the band and shows,
+for a correction the user types, where both rules would put the blame. All three implementations carry it.
+
+**Alternatives rejected**
+* **Charging every gram that sees a marked unit, each by its band weight.** Louder corrections - a unit that one
+  step answered for is answered for by up to `n` - and no gradation: a gram wholly inside a changed word and one
+  whose centre merely touches it are charged alike. Sharing keeps a correction as loud as it was.
+* **A gram's charge as the band-weighted *fraction* of its window that is marked.** Inert on a whole text and
+  centre-weighted, but it under-charges the ends of a text: the first and the last unit are only ever seen at an
+  edge, so a mistake there would teach at a quarter of its strength under the default blur. Sharing per unit gives
+  a unit only one gram sees to that gram in full - the first and last units, and every unit of a grouping encoding.
+* **A Gaussian band.** Closer to a lens, but `exp` is not bit-identical across Go's `math.Exp` and the C library
+  Python and Rust call, and D-039 holds the ports to the same bits. The tent needs nothing but correctly rounded
+  `+ - * /` - and the one multiply-add in it is rounded explicitly in Go, which may otherwise fuse it.
+* **Applying it to whole-text feedback.** A thumbs up or down marks every unit alike; every gram then sees only
+  marked units and no band can tell one from another. Any rule honest about that is inert there, and this one is
+  by construction - not by a switch.
+* **Making it part of the encoding.** The encoding is fixed for a graph's life because every label is written in
+  it (D-071). The band writes nothing into the graph.
+* **Blurring *recognition* as well** - reading an unknown gram as the known one that agrees with it at the centre.
+  The other half of the analogy, and a different feature: it changes where a prediction starts, not where a
+  correction lands. Left open as Q-19.
+
+**Consequences**
+* **Off is the old rule to the bit** - but for the one fix below. Both kinds, seven encodings and a run of
+  corrections write the model files they wrote before this existed, whether the band was never touched or switched
+  on and back off; a file without the block reads as off.
+* **Where it changes anything.** Only a correction that marks *part* of a text, under an encoding whose grams
+  overlap - a sliding window of three or more units. A grouping encoding, a gram of one, and the edges of a text
+  give each unit one viewer, who takes it all; a gram of two has no centre, so its two viewers share evenly.
+* **Every correction, from any teacher.** The tutor's, the CLI's and the copy editor's (D-082: `ollama correct`,
+  `negative auto --correct`) all reach the graph through the same `correct`, so all of them land through the band
+  when it is on - the copy editor's smallest diffs are exactly the partial judgements it exists for.
+* **What it cost to get right.** Python's count model measured a correction's END position in characters where the
+  spans are in units, so a word model's sentence that stopped too early was never blamed; the Rust port had
+  documented the gap in a parity test. It is fixed, and both parity suites now hold all three ports to it.
+* **A text is one line.** The band has a left and a right; the eye's "above and below" has no counterpart in a
+  one-dimensional gram.
+* **Nothing is graded.** Whether the centre is where the blame belongs, and which blur, is the research question -
+  the band makes it askable (`--wrong/--right` shows both rules side by side), not answered.
+
+**Lives in** `radixnet/attention.py`, `radixnet/model.py::_charged_steps`, `radixnet/countnet.py::correct`,
+`radixnet/negative.py::correct`, `go/radixnet/attention.go`, `rust/src/attention.rs`,
+`frontend/src/components/AttentionBandCard.jsx`, `SPEC-AttentionBand.md`
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.
@@ -3615,3 +3694,11 @@ and the output a judge sees are systematically different. That is deliberate and
 well argued. But it also means the quality a user experiences is partly the
 filter's, and no measurement currently separates "the model got better" from
 "the filter got better at hiding it". Should there be one?
+
+**Q-19 — Should the band blur recognition too (D-086)?** The band decides where a
+correction lands. The eye's blur also does something else: it *recognises* a word
+whose edges it cannot quite see. The model reads a prefix by exact grams and falls
+back to the last `n - 1` units, then the last one (`GraphModel._locate`); a blurred
+reader would first try the known gram that agrees with it at the centre. That
+changes where a prediction starts - so what should it cost, and should the same
+blur govern both?
