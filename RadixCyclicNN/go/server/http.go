@@ -1466,13 +1466,12 @@ func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) 
 	return writeJSON(w, 400, map[string]any{"error": err.Error()}, r.Method)
 }
 
-// MaxJSONUploadBytes caps the JSON upload forms (inline content); multipart and
-// raw uploads stream to disk and have no limit.
-const MaxJSONUploadBytes = 512 << 20
-
 // streamUpload handles POST /api/uploads without buffering: multipart file
 // parts and raw bodies stream straight into the upload directory (an archive
-// of any size), the JSON forms are parsed as before.
+// of any size), the JSON forms are parsed as before.  No form is capped
+// (D-035): a JSON form carries its file inline and so is held in memory
+// while it is parsed, as the Python server holds it, but it is not refused
+// for its size.
 func (h *Handler) streamUpload(r *http.Request) (int, any, error) {
 	if h.svc.uploads == nil {
 		return 0, nil, badRequest("uploads are disabled: start the server with --upload-dir")
@@ -1519,12 +1518,9 @@ func (h *Handler) streamUpload(r *http.Request) (int, any, error) {
 			return 0, nil, badRequest("multipart body contains no file parts (use -F file=@corpus.txt)")
 		}
 	case ct == "application/json" || (ct == "" && len(query["name"]) == 0):
-		body, err := io.ReadAll(io.LimitReader(r.Body, MaxJSONUploadBytes+1))
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return 0, nil, badRequest("could not read the request body")
-		}
-		if len(body) > MaxJSONUploadBytes {
-			return 0, nil, &apiError{413, fmt.Sprintf("JSON upload larger than %d bytes: send the file as multipart/form-data or a raw body, which stream", MaxJSONUploadBytes)}
 		}
 		rq := &request{svc: h.svc, query: query, body: body, header: r.Header}
 		files, err := uploadFiles(rq)
