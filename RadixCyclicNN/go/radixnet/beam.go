@@ -172,8 +172,8 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 			prev := -1
 			if parent := entries[st.entry].parent; parent >= 0 {
 				prev = entries[parent].node
-			} else if st.node == Start {
-				prev = Start
+			} else if IsOrigin(st.node) {
+				prev = st.node
 			}
 			children := Onward(childCosts(st.node, prev))
 			if traversal == ByLeastPunished {

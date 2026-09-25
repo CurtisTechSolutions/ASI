@@ -28,7 +28,7 @@
 //! insertion orders - so the same paths come back in the same order.
 
 use crate::fsum::fsum;
-use crate::graph::{Graph, BACK, END, FIRST};
+use crate::graph::{Graph, BACK, END, FIRST, THINK};
 use crate::hash::{map, Map};
 use crate::metacog::{action_index, cycle_signature, MetaLayer, ABORT, ESCAPE, RIDE};
 use crate::mt19937::Mt19937;
@@ -146,7 +146,11 @@ fn expand(
         }
         if raw.is_empty() && meta.rides(g.label(node)) {
             // `onward` handed the branch over, but the layer remembers riding cycles here: it overrules
-            raw = every.iter().filter(|cc| cc.child != BACK).cloned().collect();
+            raw = every
+                .iter()
+                .filter(|cc| cc.child != BACK && cc.child != THINK)
+                .cloned()
+                .collect();
         }
     }
     raw.into_iter()

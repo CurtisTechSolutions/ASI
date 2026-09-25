@@ -13,6 +13,12 @@ Two ways of hooking the network into a local large language model served by
   network's own generations (or given texts) and partitions them into ``bad``
   (failed) and ``good`` (passed) sets, ready for a 2NRL pass — an external
   discriminator in the spirit of the GAN loop.
+* **Thoughts** — a thinking model (``qwen3``, ``deepseek-r1``, ``gpt-oss``,
+  ...) answers with its reasoning beside the answer when asked to
+  (``think: true``; Ollama returns it as ``thinking``, older models inline it
+  between ``<think>`` tags).  :func:`thoughts_from_prompt` asks the LLM for
+  questions about a prompt and then for its thinking on each, which is what
+  the network's own thoughts are trained from (:func:`radixnet.thinking.think_on`).
 
 The Ollama endpoint is taken from the ``OLLAMA_HOST`` environment variable
 (Ollama's own convention; ``host:port`` without a scheme is accepted), else
@@ -48,6 +54,9 @@ __all__ = [
     "review_texts",
     "sample_texts",
     "summarise_reviews",
+    "split_thinking",
+    "thoughts_from_prompt",
+    "questions_from_prompt",
 ]
 
 DEFAULT_TIMEOUT = 120.0
@@ -141,8 +150,36 @@ class OllamaClient:
         json_mode: bool = False,
         options: dict | None = None,
         timeout: float | None = None,
+        think: bool | str | None = None,
     ) -> str:
-        """One completion (``POST /api/generate``, non-streaming); ``json_mode`` asks for a JSON answer."""
+        """One completion (``POST /api/generate``, non-streaming); ``json_mode`` asks for a JSON answer.
+
+        ``think`` is Ollama's own switch for a thinking model's reasoning (``True`` / ``False``, or a level
+        such as ``"high"``); the reasoning itself is not returned here - :meth:`complete` gives both halves.
+        """
+        return self.complete(
+            prompt, system=system, model=model, json_mode=json_mode, options=options, timeout=timeout, think=think,
+        )["response"]
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        json_mode: bool = False,
+        options: dict | None = None,
+        timeout: float | None = None,
+        think: bool | str | None = None,
+    ) -> dict:
+        """One completion with the model's thinking beside its answer: ``{"response", "thinking"}``.
+
+        ``think`` asks a thinking model for its reasoning (Ollama's ``think`` field: ``True``, ``False`` or a
+        level - ``"low"``, ``"medium"``, ``"high"``); ``None`` leaves the choice to the model.  The reasoning
+        comes back as Ollama's ``thinking`` field when the server separates it, or is cut out of the answer
+        when the model wrote it inline between ``<think>`` tags (:func:`split_thinking`); it is ``""`` for a
+        model that does not think.
+        """
         body: dict[str, Any] = {"model": model or self.model, "prompt": prompt, "stream": False}
         if system:
             body["system"] = system
@@ -150,11 +187,17 @@ class OllamaClient:
             body["format"] = "json"
         if options:
             body["options"] = dict(options)
+        thinking_asked = think_value(think)
+        if thinking_asked is not None:
+            body["think"] = thinking_asked
         data = self._request("POST", "/api/generate", body, timeout)
         text = data.get("response") if isinstance(data, dict) else None
         if not isinstance(text, str):
             raise OllamaError("unexpected /api/generate response (no 'response' text)")
-        return text
+        thinking = data.get("thinking") if isinstance(data, dict) else None
+        if not isinstance(thinking, str) or not thinking.strip():
+            thinking, text = split_thinking(text)
+        return {"response": text, "thinking": thinking.strip()}
 
     def chat(
         self,
@@ -165,10 +208,11 @@ class OllamaClient:
         options: dict | None = None,
         timeout: float | None = None,
         tools: list[dict] | None = None,
+        think: bool | str | None = None,
     ) -> str:
         """One chat turn (``POST /api/chat``); ``messages`` are ``{"role", "content"}`` dicts."""
         message = self.chat_message(
-            messages, model=model, json_mode=json_mode, options=options, timeout=timeout, tools=tools
+            messages, model=model, json_mode=json_mode, options=options, timeout=timeout, tools=tools, think=think,
         )
         content = message.get("content")
         if not isinstance(content, str):
@@ -184,14 +228,16 @@ class OllamaClient:
         options: dict | None = None,
         timeout: float | None = None,
         tools: list[dict] | None = None,
+        think: bool | str | None = None,
     ) -> dict:
         """The whole assistant message of one chat turn.
 
         ``tools`` are JSON-schema function definitions (Ollama's own ``tools``
         format, see :meth:`radixnet.tools.ToolBox.schemas`); a model that
         supports tool calling answers with ``{"tool_calls": [...]}`` beside (or
-        instead of) ``content``.  The message is returned as it came, with
-        ``content`` guaranteed to be a string.
+        instead of) ``content``.  ``think`` asks a thinking model for its
+        reasoning, which comes back as the message's ``thinking``.  The message
+        is returned as it came, with ``content`` guaranteed to be a string.
         """
         body: dict[str, Any] = {"model": model or self.model, "messages": list(messages), "stream": False}
         if json_mode:
@@ -200,6 +246,9 @@ class OllamaClient:
             body["options"] = dict(options)
         if tools:
             body["tools"] = list(tools)
+        thinking_asked = think_value(think)
+        if thinking_asked is not None:
+            body["think"] = thinking_asked
         data = self._request("POST", "/api/chat", body, timeout)
         message = data.get("message") if isinstance(data, dict) else None
         if not isinstance(message, dict):
@@ -207,6 +256,52 @@ class OllamaClient:
         if not isinstance(message.get("content"), str):
             message["content"] = ""
         return message
+
+
+THINK_LEVELS = ("low", "medium", "high")
+"""The reasoning levels a thinking model may be asked for, beside plain on / off."""
+
+
+def think_value(think: bool | str | None) -> bool | str | None:
+    """Ollama's ``think`` field for a request: ``None`` (not sent), a bool, or one of :data:`THINK_LEVELS`.
+
+    A string is read leniently - ``"true"`` / ``"on"`` / ``"yes"`` and ``"false"`` / ``"off"`` / ``"no"`` are
+    the two bools, a level is a level - so the flag can come from a command line or a JSON body as it is.
+    """
+    if think is None or isinstance(think, bool):
+        return think
+    text = str(think).strip().lower()
+    if text in ("", "none", "default"):
+        return None
+    if text in ("true", "on", "yes", "1"):
+        return True
+    if text in ("false", "off", "no", "0"):
+        return False
+    if text in THINK_LEVELS:
+        return text
+    raise ValueError(f"think must be true, false or one of {', '.join(THINK_LEVELS)} (got {think!r})")
+
+
+_THINK_OPEN = re.compile(r"<(think|thinking|reasoning)>", re.IGNORECASE)
+
+
+def split_thinking(text: str) -> tuple[str, str]:
+    """``(thinking, answer)`` of an answer that wrote its reasoning inline between ``<think>`` tags.
+
+    The first tagged block is the thinking and everything else the answer; a
+    block left open is thinking to the end.  A text without tags is all answer.
+    """
+    text = str(text or "")
+    match = _THINK_OPEN.search(text)
+    if match is None:
+        return "", text.strip()
+    tag = match.group(1)
+    close = re.compile(rf"</{re.escape(tag)}>", re.IGNORECASE).search(text, match.end())
+    if close is None:
+        return text[match.end():].strip(), text[:match.start()].strip()
+    thinking = text[match.end():close.start()].strip()
+    answer = (text[:match.start()] + text[close.end():]).strip()
+    return thinking, answer
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +360,65 @@ def corpus_from_prompt(
     user = f"Topic / instructions: {prompt.strip()}\n\nWrite the {lines} lines now."
     text = client.generate(user, system=system, model=model, options={"temperature": 0.9 if style == "good" else 1.1})
     return parse_lines(text, limit=lines)
+
+
+_QUESTIONS_SYSTEM = (
+    "You write questions for a small language model to think about. Answer with exactly {n} lines and nothing "
+    "else: one short, concrete question per line, plain text, no numbering, no bullets, no quotes, no blank "
+    "lines, no headings and no commentary. Every question must be about the topic requested and answerable "
+    "in a sentence or two."
+)
+_THINK_SYSTEM = (
+    "Think the question through before you answer, step by step, in short plain sentences - say what you "
+    "know, what you are unsure of and ask yourself whether you are right - and then answer in one short "
+    "sentence."
+)
+
+
+def questions_from_prompt(
+    client: OllamaClient, prompt: str, lines: int = 5, model: str | None = None
+) -> list[str]:
+    """Ask the LLM for ``lines`` short questions about ``prompt`` - what the network will be taught to think about."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+    if lines < 1:
+        raise ValueError("lines must be >= 1")
+    user = f"Topic / instructions: {prompt.strip()}\n\nWrite the {lines} questions now."
+    text = client.generate(user, system=_QUESTIONS_SYSTEM.format(n=lines), model=model, options={"temperature": 0.9})
+    return parse_lines(text, limit=lines)
+
+
+def thoughts_from_prompt(
+    client: OllamaClient,
+    prompt: str,
+    lines: int = 5,
+    *,
+    model: str | None = None,
+    think: bool | str | None = True,
+    temperature: float = 0.7,
+) -> list[dict]:
+    """The LLM's thinking about ``prompt``: ``lines`` questions about it, and the thinking behind each answer.
+
+    Two calls a question: :func:`questions_from_prompt` writes the questions and
+    :meth:`OllamaClient.complete` (``think``) answers each one with its
+    reasoning.  Every entry is ``{"question", "thinking", "answer"}``, the
+    thinking and the answer each collapsed to one line; ``thinking`` is ``""``
+    for a model that does not think, which the caller reports rather than
+    trains on.  The thinking is what :func:`radixnet.thinking.think_on` teaches
+    the network as its own thoughts.
+    """
+    questions = questions_from_prompt(client, prompt, lines, model)
+    out: list[dict] = []
+    for question in questions:
+        got = client.complete(
+            question, system=_THINK_SYSTEM, model=model, think=think, options={"temperature": temperature},
+        )
+        out.append({
+            "question": question,
+            "thinking": " ".join(got["thinking"].split()),
+            "answer": " ".join(got["response"].split()),
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------

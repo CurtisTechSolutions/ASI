@@ -42,6 +42,11 @@ START_LABEL = "<s>"
 END_LABEL = "</s>"
 BACK_LABEL = "<back>"
 """The third sentinel: where the graph has learned that a walk goes round (``graph.BACK``)."""
+THINK_LABEL = "<think>"
+"""The fourth sentinel: where the graph has learned to stop and think, and where its thoughts begin
+(``graph.THINK``)."""
+SENTINEL_LABELS = (START_LABEL, END_LABEL, BACK_LABEL, THINK_LABEL)
+"""The labels of the four sentinel nodes, in node id order."""
 
 # A "unit view" is whatever slices by unit: a str for characters (Python slices
 # strings by code point already), a list of words for words.  ``len`` is the
@@ -250,7 +255,7 @@ class Encoding:
         parts: list[str] = []
         first = True
         for label in labels:
-            if skip_sentinels and label in (START_LABEL, END_LABEL, BACK_LABEL):
+            if skip_sentinels and label in SENTINEL_LABELS:
                 continue
             parts.append(self.piece(label, first_cut if first else self.overlap))
             first = False

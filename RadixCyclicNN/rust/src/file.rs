@@ -24,8 +24,8 @@ use std::sync::atomic::Ordering;
 
 use crate::clock::utc_now;
 use crate::counter::Counter;
-use crate::encoding::{Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL};
-use crate::graph::{Graph, GraphOptions, Loc, BACK, END, FIRST, START};
+use crate::encoding::{Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL};
+use crate::graph::{Graph, GraphOptions, Loc, BACK, END, FIRST, START, THINK};
 use crate::json::{parse, Json};
 use crate::model::{EpochRecord, Model};
 use crate::weights::SMOOTHING;
@@ -55,8 +55,9 @@ fn read_encoding(doc: &Json) -> Result<Encoding, String> {
 
 /// The graph document format.
 pub const GRAPH_FORMAT: &str = "radixnet-graph";
-/// 3 added the `BACK` sentinel; older documents gain an unvisited one on load.
-pub const GRAPH_FORMAT_VERSION: i64 = 3;
+/// 3 added the `BACK` sentinel and 4 the `THINK` sentinel; older documents gain
+/// an unvisited one on load.
+pub const GRAPH_FORMAT_VERSION: i64 = 4;
 
 /// The sine model's defaults, written so its reader finds what it expects: the
 /// count model's activation is the constant 1 (`a = 0`, `k = 1`), which is why
@@ -64,8 +65,9 @@ pub const GRAPH_FORMAT_VERSION: i64 = 3;
 const DEFAULT_B: f64 = 1.0 / 3.0;
 const DEFAULT_H: f64 = 0.0;
 /// The `BACK` sentinel's state, fixed at the far edge of the range the sine
-/// model draws from rather than drawn from it.
+/// model draws from rather than drawn from it; `THINK`'s is the other edge.
 const BACK_Z: f64 = 4.5;
+const THINK_Z: f64 = -4.5;
 
 impl Graph {
     /// The graph as a `radixnet-graph` document.
@@ -85,7 +87,11 @@ impl Graph {
         let mut count_resets = Vec::with_capacity(order.len());
         for &old in &order {
             labels.push(self.labels[old].clone());
-            z.push(if old == BACK { BACK_Z } else { 0.0 });
+            z.push(match old {
+                BACK => BACK_Z,
+                THINK => THINK_Z,
+                _ => 0.0,
+            });
             count.push(self.count[old].load(Ordering::Relaxed));
             count_resets.push(self.count_resets.get(&old).copied().unwrap_or(0));
         }
@@ -303,7 +309,7 @@ impl Graph {
     }
 
     /// Rebuilds a graph from a `radixnet-graph` document, upgrading one written
-    /// before the `BACK` sentinel existed.  The weight function says the kind:
+    /// before the `BACK` or the `THINK` sentinel existed.  The weight function says the kind:
     /// the blame one a negative graph, the resonant one a phase graph, anything
     /// else a count graph ([`Graph::from_doc_as`] reads a sine graph, whose
     /// document has no weight function to say so).
@@ -322,15 +328,20 @@ impl Graph {
         let doc = if doc.at("format_version").as_i64().unwrap_or(1) >= GRAPH_FORMAT_VERSION {
             doc
         } else {
-            upgraded = with_back(doc);
+            upgraded = with_sentinels(doc);
             &upgraded
         };
         let nodes = doc.at("nodes");
         let edges = doc.at("edges");
         let labels = nodes.at("labels").to_strings();
         let n = labels.len();
-        if n < FIRST || labels[START] != START_LABEL || labels[END] != END_LABEL || labels[BACK] != BACK_LABEL {
-            return Err("graph document is missing the START/END/BACK sentinels".to_string());
+        if n < FIRST
+            || labels[START] != START_LABEL
+            || labels[END] != END_LABEL
+            || labels[BACK] != BACK_LABEL
+            || labels[THINK] != THINK_LABEL
+        {
+            return Err("graph document is missing the START/END/BACK/THINK sentinels".to_string());
         }
         let weights = doc.at("weights");
         let window = weights.at("window").as_i64().unwrap_or(10_000).max(1) as usize;
@@ -503,19 +514,35 @@ impl Graph {
     }
 }
 
-/// A graph document with the `BACK` sentinel in it: anything older than format
-/// 3 gains an unvisited one at [`BACK`], and every node id from there up shifts
-/// by one.  A model that has never caught itself repeating has nothing to say
-/// about where it goes round.
-fn with_back(doc: &Json) -> Json {
+/// A graph document with every sentinel in it: one older than format 3 gains
+/// an unvisited `BACK`, one older than format 4 an unvisited `THINK`, each at
+/// its id, and every node id from there up shifts by one.  A model that has
+/// never caught itself repeating has nothing to say about where it goes round,
+/// and one that has never thought nothing about where it stops to think.
+fn with_sentinels(doc: &Json) -> Json {
+    let version = doc.at("format_version").as_i64().unwrap_or(1);
+    let mut out = doc.clone();
+    if version < 3 {
+        out = with_sentinel(&out, BACK, BACK_LABEL, BACK_Z);
+    }
+    if version < 4 {
+        out = with_sentinel(&out, THINK, THINK_LABEL, THINK_Z);
+    }
+    out
+}
+
+/// A graph document with the sentinel `label` inserted at node id `at`, with
+/// the fixed state `z`, START's activation parameters and no edges; the
+/// document is left alone when the sentinel is already there.
+fn with_sentinel(doc: &Json, at: usize, label: &str, z: f64) -> Json {
     let nodes = doc.at("nodes");
     let labels = nodes.at("labels").to_strings();
-    if labels.len() < BACK || (labels.len() > BACK && labels[BACK] == BACK_LABEL) {
+    if labels.len() < at || (labels.len() > at && labels[at] == label) {
         return doc.clone();
     }
     let insert = |values: Vec<Json>, blank: Json| -> Json {
         let mut out = values;
-        out.insert(BACK, blank);
+        out.insert(at, blank);
         Json::Arr(out)
     };
     let mut new_nodes: Vec<(String, Json)> = Vec::new();
@@ -530,8 +557,8 @@ fn with_back(doc: &Json) -> Json {
         }
         // the sentinel takes START's activation parameters and its own fixed state
         let blank = match key.as_str() {
-            "labels" => Json::str(BACK_LABEL),
-            "z" => Json::Num(BACK_Z),
+            "labels" => Json::str(label),
+            "z" => Json::Num(z),
             "count" | "count_resets" => Json::Int(0),
             _ => items[START].clone(),
         };
@@ -542,7 +569,7 @@ fn with_back(doc: &Json) -> Json {
             value
                 .to_i64s()
                 .into_iter()
-                .map(|i| if i as usize >= BACK { i + 1 } else { i }),
+                .map(|i| if i as usize >= at { i + 1 } else { i }),
         )
     };
     let edges = doc.at("edges");

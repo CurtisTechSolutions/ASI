@@ -12,7 +12,8 @@ radix-tree operations shape the graph:
   back into a single node - path compression.
 
 Repeated trigrams create cycles (``"aaaa"`` gives a self-loop); that is a
-feature, not an error.  Node ids ``0`` (START) and ``1`` (END) are sentinels.
+feature, not an error.  Node ids ``0`` (START), ``1`` (END), ``2`` (BACK) and
+``3`` (THINK) are sentinels.
 
 Storage is flat parallel lists indexed by node id / edge id; per-node dicts
 hold the edges for O(1) lookup.  Removed nodes and edges are tombstoned (ids
@@ -36,20 +37,30 @@ from .activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K
 from .backend import CSR, NodeParams
 from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
 from .encoding import (
-    BACK_LABEL, CHARS, END_LABEL, START_LABEL, WINDOW, Decoder, Encoder, Encoding, _piece,
+    BACK_LABEL, CHARS, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, Decoder, Encoder, Encoding, _piece,
 )
 
-__all__ = ["START", "END", "BACK", "FIRST", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
+__all__ = ["START", "END", "BACK", "THINK", "FIRST", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
 
-START, END, BACK = 0, 1, 2
+START, END, BACK, THINK = 0, 1, 2, 3
 """The sentinels.  START and END are where a text begins and ends - observed in the corpus, like everything
 else.  BACK is where the graph has learned that a walk *goes round*: nothing in a corpus says so, so its edges
 are taught by the voices that caught themselves repeating (:func:`radixnet.dialogue.backtrack`).  An edge
 ``p -> BACK`` competes for probability with ``p``'s real children, so the more often walks through ``p`` had to
-be backed out of, the likelier the search is to hand over there instead of carrying on."""
+be backed out of, the likelier the search is to hand over there instead of carrying on.
 
-FIRST = BACK + 1
+THINK is where the graph *stops to think*, and it faces both ways.  An edge ``p -> THINK`` is taught by
+experience - an event at ``p`` made the model think there (:func:`radixnet.thinking.think`) - and, like BACK's,
+competes with ``p``'s real children for probability.  Its out-edges are how thoughts begin: a thought is a text
+whose walk starts at THINK instead of START (:meth:`RadixCyclicGraph.observe_sequence` with ``origin=THINK``),
+observed from an LLM's thinking the way texts are observed from a corpus.  Neither sentinel is a continuation:
+no text passes through them, and the search never walks into them (:func:`radixnet.search.onward`)."""
+
+FIRST = THINK + 1
 """The first node id that is not a sentinel."""
+
+ORIGINS = (START, THINK)
+"""The sentinels a walk may begin at: START for a text, THINK for a thought."""
 
 _NO_NODES: frozenset[int] = frozenset()
 
@@ -74,30 +85,35 @@ model ever written.  A fixed, firmly non-zero activation is also what lets an ed
 weight at all: the cost of an edge is a softmax over ``w * f(p) * f(c)``, so a sentinel activating at zero
 could never be learned toward."""
 
+THINK_Z = -Z_RANGE
+"""THINK's state, fixed at the *other* edge of the range: as firmly non-zero as BACK's, drawn from no stream, and
+distinguishable from it - the activation a walk hands over to when it thinks is the mirror of the one it hands
+over to when it goes round."""
+
 _GRAPH_FORMAT = "radixnet-graph"
-_GRAPH_FORMAT_VERSION = 3   # 2 added the counter reset fields; 3 the BACK sentinel (older files gain an
-                            # unvisited one on load, and their node ids shift up by one)
+_GRAPH_FORMAT_VERSION = 4   # 2 added the counter reset fields; 3 the BACK sentinel and 4 the THINK sentinel
+                            # (older files gain an unvisited one on load, and their node ids shift up by one)
 
 
-def _with_back(d: dict) -> dict:
-    """A graph document with the BACK sentinel in it: format 3 as it is, anything older upgraded.
+def _with_sentinel(d: dict, at: int, label: str, z: float, since: int) -> dict:
+    """A graph document with the sentinel ``label`` at node id ``at``: format ``since`` as it is, older upgraded.
 
-    Files written before BACK existed have START and END and then their real nodes, so the sentinel is inserted
-    at :data:`BACK` and every node id from there up shifts by one.  It arrives unvisited and with no edges: a
-    model that has never caught itself repeating has nothing to say about where it goes round.
+    Files written before the sentinel existed have the sentinels before it and then their real nodes, so it is
+    inserted at ``at`` and every node id from there up shifts by one.  It arrives unvisited and with no edges: a
+    model that has never caught itself repeating has nothing to say about where it goes round, and one that has
+    never thought has nothing to say about where it stops to think, or how a thought begins.
     """
-    if int(d.get("format_version", 1)) >= 3:
+    if int(d.get("format_version", 1)) >= since:
         return d
     nodes = dict(d["nodes"])
     edges = dict(d["edges"])
     labels = list(nodes["labels"])
-    if len(labels) < BACK or (len(labels) > BACK and labels[BACK] == BACK_LABEL):
+    if len(labels) < at or (len(labels) > at and labels[at] == label):
         return d
-    at = BACK
-    nodes["labels"] = labels[:at] + [BACK_LABEL] + labels[at:]
+    nodes["labels"] = labels[:at] + [label] + labels[at:]
     # the sentinel takes START's activation parameters, whatever kind of model wrote the file (the count
     # model's a = 0, k = 1 make every activation 1; the sine model's are the defaults), and its own fixed state
-    for key, blank in (("z", BACK_Z), ("a", None), ("b", None), ("h", None), ("k", None),
+    for key, blank in (("z", z), ("a", None), ("b", None), ("h", None), ("k", None),
                        ("count", 0), ("count_resets", 0)):
         if key in nodes and nodes[key]:
             values = list(nodes[key])
@@ -105,7 +121,17 @@ def _with_back(d: dict) -> dict:
     shift = lambda i: i + 1 if i >= at else i  # noqa: E731 - one expression, used twice below
     edges["src"] = [shift(int(i)) for i in edges["src"]]
     edges["dst"] = [shift(int(i)) for i in edges["dst"]]
-    return {**d, "nodes": nodes, "edges": edges, "format_version": _GRAPH_FORMAT_VERSION}
+    return {**d, "nodes": nodes, "edges": edges, "format_version": since}
+
+
+def _with_back(d: dict) -> dict:
+    """A graph document with the BACK sentinel in it: format 3 as it is, anything older upgraded."""
+    return _with_sentinel(d, BACK, BACK_LABEL, BACK_Z, 3)
+
+
+def _with_think(d: dict) -> dict:
+    """A graph document with the THINK sentinel in it: format 4 as it is, anything older upgraded (BACK first)."""
+    return _with_sentinel(_with_back(d), THINK, THINK_LABEL, THINK_Z, _GRAPH_FORMAT_VERSION)
 
 
 
@@ -157,6 +183,7 @@ class RadixCyclicGraph:
         self._new_node(START_LABEL)
         self._new_node(END_LABEL)
         self._new_node(BACK_LABEL, z=BACK_Z)
+        self._new_node(THINK_LABEL, z=THINK_Z)
 
     # -- counters ------------------------------------------------------------
 
@@ -471,7 +498,9 @@ class RadixCyclicGraph:
                 return merges
             merges += done
 
-    def observe_sequence(self, trigrams: Sequence[str], count: bool = True) -> list[tuple[int, int]]:
+    def observe_sequence(
+        self, trigrams: Sequence[str], count: bool = True, origin: int = START
+    ) -> list[tuple[int, int]]:
         """Register a training sequence ``START -> t0 -> ... -> tn -> END``.
 
         Splits nodes so that every transition either stays inside a compressed
@@ -481,9 +510,16 @@ class RadixCyclicGraph:
         exactly what the backend trains on.  ``count`` also bumps the node and
         edge visit counters.  Consecutive trigrams must overlap by two
         characters (``x[1:] == y[:2]``) as produced by :class:`Encoder`.
+
+        ``origin`` is the sentinel the sequence begins at: ``START`` for a
+        text, ``THINK`` for a *thought* - the same structure, the same
+        counting, the same edge into END, only the first edge leaves the other
+        sentinel (:data:`ORIGINS`).
         """
         if not trigrams:
             return []
+        if origin not in ORIGINS:
+            raise ValueError(f"a sequence begins at START or THINK, not at node {origin}")
         index = self.trigram_index
         labels = self.labels
         children = self.children
@@ -509,12 +545,12 @@ class RadixCyclicGraph:
             px = split(px, ox)[1]
             ox = 0
             did_split = True
-        e = children[START].get(px)
+        e = children[origin].get(px)
         if e is None:
-            e = new_edge(START, px)
-        transitions.append((START, e))
+            e = new_edge(origin, px)
+        transitions.append((origin, e))
         if count:
-            counts[START] += 1
+            counts[origin] += 1
             counts[px] += 1
             ecounts[e] += 1
 
@@ -561,25 +597,28 @@ class RadixCyclicGraph:
             ecounts[e] += 1
 
         if count:
-            # every transition bumped one node counter and one edge counter, plus START's:
+            # every transition bumped one node counter and one edge counter, plus the origin's:
             # the total bounds each of them and so decides when carry_counters() has work
             self.traversals += 2 * len(transitions) + 1
 
         if did_split:
             # a later split may have moved an out-edge recorded earlier in this
             # sequence to the new B node; re-derive the transitions structurally
-            traced = self._trace(trigrams)
+            traced = self._trace(trigrams, origin)
             if traced is None:
                 raise RuntimeError("internal error: observed sequence is not walkable")
             transitions = traced[0]
         return transitions
 
-    def _trace(self, trigrams: Sequence[str]) -> tuple[list[tuple[int, int]], list[int]] | None:
+    def _trace(
+        self, trigrams: Sequence[str], origin: int = START
+    ) -> tuple[list[tuple[int, int]], list[int]] | None:
         """Walk a sequence through the structure without modifying it.
 
-        Returns ``(transitions, node_path)`` (``node_path`` starts with START
-        and ends with END) or ``None`` when a trigram is unknown, an edge is
-        missing or a split would be required.
+        Returns ``(transitions, node_path)`` (``node_path`` starts with the
+        ``origin`` - START for a text, THINK for a thought - and ends with
+        END) or ``None`` when a trigram is unknown, an edge is missing or a
+        split would be required.
         """
         if not trigrams:
             return None
@@ -591,11 +630,11 @@ class RadixCyclicGraph:
         if loc is None or loc[1] != 0:
             return None
         px, ox = loc
-        e = children[START].get(px)
+        e = children[origin].get(px)
         if e is None:
             return None
-        transitions = [(START, e)]
-        path = [START, px]
+        transitions = [(origin, e)]
+        path = [origin, px]
         for idx in range(1, len(trigrams)):
             loc = index.get(trigrams[idx])
             if loc is None:
@@ -621,23 +660,26 @@ class RadixCyclicGraph:
         path.append(END)
         return transitions, path
 
-    def trace(self, trigrams: Sequence[str]) -> tuple[list[tuple[int, int]], list[int]] | None:
+    def trace(
+        self, trigrams: Sequence[str], origin: int = START
+    ) -> tuple[list[tuple[int, int]], list[int]] | None:
         """``(transitions, node_path)`` of a sequence through the current structure, or ``None``.
 
         Like :meth:`observe_sequence` without the observing: nothing is
         created, split or counted, so ``None`` means the structure cannot
         represent the sequence as it stands (see :meth:`node_path`).
         """
-        return self._trace(trigrams)
+        return self._trace(trigrams, origin)
 
-    def node_path(self, trigrams: Sequence[str]) -> list[int] | None:
+    def node_path(self, trigrams: Sequence[str], origin: int = START) -> list[int] | None:
         """Node ids ``[START, n0, ..., END]`` visited by a sequence, or ``None``.
 
         ``None`` means the sequence is not representable by the current
         structure without a split (unknown trigram, missing edge, or a
-        transition into / out of the middle of a compressed node).
+        transition into / out of the middle of a compressed node).  A thought
+        is traced from ``origin=THINK``.
         """
-        traced = self._trace(trigrams)
+        traced = self._trace(trigrams, origin)
         return None if traced is None else traced[1]
 
     def invert(self) -> None:
@@ -811,6 +853,52 @@ class RadixCyclicGraph:
                 return cost
         return None
 
+    def observe_think(self, p: int, amount: float = 1.0) -> int:
+        """Teach that something at ``p`` made the model stop and think.
+
+        The twin of :meth:`observe_back`, learned the same way - from experience, never from a corpus: an event
+        at ``p`` (a voice catching itself repeating, a question asked about the text that ends here, a thought
+        questioning itself) called for a thought, and the model remembers where (:func:`radixnet.thinking.think`).
+        ``p -> THINK`` is created on first use and bumped like any observed transition, its weight moving to
+        make the transition likelier; it competes with ``p``'s real children for probability, so the oftener
+        walks through ``p`` had to stop and think, the likelier a thought passing through ``p`` is to question
+        itself there.  Nothing is taught about what to do instead - that is the thought's business, and what it
+        hands over to when it stops (BACK, or nothing).  Returns the ``THINK`` edge id.
+        """
+        if p < FIRST or p >= len(self.labels) or not self.alive[p]:
+            raise ValueError(f"node {p} is not a real node to think at")
+        if amount < 0:
+            raise ValueError(f"amount must be >= 0, got {amount}")
+        e = self.children[p].get(THINK)
+        if e is None:
+            e = self._new_edge(p, THINK)
+        self.count[THINK] += 1
+        self.edge_count[e] += 1
+        self.traversals += 1
+        self.version += 1
+        self.nudge_edge(p, THINK, amount)
+        return e
+
+    def think_cost(self, p: int) -> float | None:
+        """What the model thinks it costs to stop and think at ``p``, or ``None`` when it never had to.
+
+        The cost of ``p``'s ``THINK`` edge, to compare with the costs of its real children: when it is the
+        cheapest of them the model's most likely next step is to question what it is doing, which is what a
+        thought passing through ``p`` acts on (:func:`radixnet.thinking.think`).
+        """
+        for c, _e, cost in self.child_costs(p):
+            if c == THINK:
+                return cost
+        return None
+
+    def thinks_at(self, p: int) -> bool:
+        """Whether the model has learned to stop and think at ``p``: its THINK edge is the cheapest way on."""
+        costs = self.child_costs(p)
+        thinking = [cost for c, _e, cost in costs if c == THINK]
+        if not thinking:
+            return False
+        return all(cost >= thinking[0] for c, _e, cost in costs if c != THINK and c != BACK)
+
     def nodes_with_paths(self) -> set[int]:
         """Nodes whose costs depend on where the walk came from; empty unless the model counts paths."""
         return _NO_NODES
@@ -912,7 +1000,7 @@ class RadixCyclicGraph:
     def to_dict(self) -> dict:
         """JSON-serialisable snapshot with dead nodes/edges compacted away.
 
-        Node ids are remapped (START=0, END=1, then alive nodes in id order);
+        Node ids are remapped (the four sentinels first, then alive nodes in id order);
         the trigram index is rebuilt from the labels on load.  The RNG state is
         included so training continues reproducibly after a reload.
         """
@@ -970,13 +1058,14 @@ class RadixCyclicGraph:
         """Inverse of :meth:`to_dict`."""
         if d.get("format") != _GRAPH_FORMAT:
             raise ValueError(f"not a {_GRAPH_FORMAT} document")
-        d = _with_back(d)
+        d = _with_think(d)
         nodes = d["nodes"]
         edges = d["edges"]
         labels = list(nodes["labels"])
         n = len(labels)
-        if n < FIRST or labels[START] != START_LABEL or labels[END] != END_LABEL or labels[BACK] != BACK_LABEL:
-            raise ValueError("graph document is missing the START/END/BACK sentinels")
+        if n < FIRST or labels[START] != START_LABEL or labels[END] != END_LABEL or labels[BACK] != BACK_LABEL \
+                or labels[THINK] != THINK_LABEL:
+            raise ValueError("graph document is missing the START/END/BACK/THINK sentinels")
         g = cls(seed=int(d.get("seed", 0)), encoding=Encoding.from_dict(d.get("encoding")))
         enc = g.encoding
         g.inverted = bool(d.get("inverted", False))
@@ -1066,10 +1155,13 @@ class RadixCyclicGraph:
             assert all(0 < r < COUNTER_LIMIT and 0 <= i < len(values) for i, r in resets.items()), (
                 f"a {name} counter reset count is out of range or belongs to no counter"
             )
-        assert n >= 2 and alive[START] and alive[END], "sentinels must exist and be alive"
-        assert labels[START] == START_LABEL and labels[END] == END_LABEL, "sentinel labels changed"
+        assert n >= FIRST and alive[START] and alive[END] and alive[BACK] and alive[THINK], (
+            "sentinels must exist and be alive"
+        )
+        assert labels[:FIRST] == [START_LABEL, END_LABEL, BACK_LABEL, THINK_LABEL], "sentinel labels changed"
         assert not parents[START], "START must not have parents"
         assert not children[END], "END must not have children"
+        assert not children[BACK], "BACK must not have children"
         assert sum(alive) == self._n_alive_nodes, "alive node counter is stale"
         seen: dict[int, tuple[int, int]] = {}
         for p in range(n):

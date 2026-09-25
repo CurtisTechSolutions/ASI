@@ -168,6 +168,10 @@ pub struct LlmOptions {
     pub options: Vec<(String, Json)>,
     /// How long this one answer may take (`None` = the client's own timeout).
     pub timeout: Option<Duration>,
+    /// Ollama's own switch for a thinking model's reasoning: `true` / `false`,
+    /// or a level (`"low"`, `"medium"`, `"high"`); `None` leaves the choice to
+    /// the model.  The ChatGPT client ignores it.
+    pub think: Option<Json>,
 }
 
 impl LlmOptions {
@@ -189,6 +193,11 @@ impl LlmOptions {
     /// The sampling temperature (replacing one already set).
     pub fn temperature(self, temperature: f64) -> LlmOptions {
         self.option("temperature", Json::Num(temperature))
+    }
+    /// Ask a thinking model for its reasoning (Ollama's `think`).
+    pub fn think(mut self, value: Json) -> LlmOptions {
+        self.think = Some(value);
+        self
     }
     /// One sampling knob under its Ollama name (replacing one already set).
     pub fn option(mut self, name: &str, value: Json) -> LlmOptions {

@@ -340,7 +340,7 @@ func (c *Chat) Converse(progress func(map[string]any)) (*ChatHeld, error) {
 			Heard: heard, Index: len(held.Transcript), Speaker: ChatSpeakers[1], Mode: cfg.Mode,
 			MaxLength: cfg.MaxLength, Context: cfg.Context, Temperature: cfg.Temperature, K: cfg.K,
 			RNG: rng, AvoidRepeats: cfg.AvoidRepeats, AvoidWordRepeats: cfg.AvoidWordRepeats,
-			Explore: cfg.Explore, Learn: cfg.Learn, Veto: vetoFn,
+			Explore: cfg.Explore, Learn: cfg.Learn, Think: true, ThinkDepth: ThinkDepth, Veto: vetoFn,
 		})
 		if err != nil {
 			return nil, err

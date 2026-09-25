@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from .backend import Backend, get_backend
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder, Encoding, _piece
-from .graph import BACK, END, FIRST, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, ORIGINS, START, THINK, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
 from .search import LEAST_PUNISHED, REWARD, PathResult, check_sampling, dijkstra_predict, parse_traversal, sample_walk
@@ -507,13 +507,17 @@ class GraphModel:
                 kept.append(t)
         return kept, skipped
 
-    def _observe_grams(self, grams: list[list[str]], count: bool) -> list[tuple[int, int]]:
+    def _observe_grams(
+        self, grams: list[list[str]], count: bool, origin: int = START
+    ) -> list[tuple[int, int]]:
         """Register encoded texts structurally; returns the ``(parent_id, edge_id)`` transitions.
 
         A text observed later can split a node that an earlier text's
         transition points at (the edge moves to the new node), so whenever the
         first pass changed the structure a second, non-counting pass re-derives
         every transition from the final structure - that pass never splits.
+        ``origin`` is the sentinel every sequence begins at (START; THINK for
+        thoughts).
         """
         graph = self.graph
         observe = graph.observe_sequence
@@ -521,17 +525,17 @@ class GraphModel:
         transitions: list[tuple[int, int]] = []
         extend = transitions.extend
         for g in grams:
-            extend(observe(g, count))
+            extend(observe(g, count, origin))
         if graph.structure_version != before:
             transitions = []
             extend = transitions.extend
             for g in grams:
-                extend(observe(g, False))
+                extend(observe(g, False, origin))
         return transitions
 
-    def _observe(self, texts: list[str], count: bool) -> tuple[list[tuple[int, int]], int]:
+    def _observe(self, texts: list[str], count: bool, origin: int = START) -> tuple[list[tuple[int, int]], int]:
         """Register every text structurally; returns ``(transitions, structure_version)``."""
-        transitions = self._observe_grams([self.encoder.encode(t) for t in texts], count)
+        transitions = self._observe_grams([self.encoder.encode(t) for t in texts], count, origin)
         return transitions, self.graph.structure_version
 
     # -- locating a prefix ---------------------------------------------------
@@ -638,6 +642,20 @@ class GraphModel:
         )
         return node, offset, lead
 
+    def _walk_start(self, prefix: str, origin: int = START) -> tuple[int, int, str]:
+        """Where a walk begins: at the end of ``prefix``, or - with no prefix - at the ``origin`` sentinel.
+
+        ``origin=THINK`` is a thought (:mod:`radixnet.thinking`): the same
+        search from the other sentinel, through the openings the model learned
+        for its thoughts rather than for its texts.  A prefix wins over the
+        origin, because a located prefix already says where the walk stands.
+        """
+        if origin not in ORIGINS:
+            raise ValueError(f"a walk begins at START or THINK, not at node {origin}")
+        if not prefix and origin != START:
+            return origin, 0, ""
+        return self._prefix_start(prefix)
+
     # -- the prediction search (shared by every kind) ------------------------
 
     @staticmethod
@@ -672,6 +690,7 @@ class GraphModel:
         top_p: float = 1.0,
         min_p: float = 0.0,
         diversity: float = 0.0,
+        origin: int = START,
     ) -> Prediction:
         """The prediction search from where ``prefix`` ends: ``"beam"`` (the ``k`` most and least likely
         continuations) or ``"sample"`` (one stochastic walk).  The result *is* the best path and carries ``top`` /
@@ -680,12 +699,13 @@ class GraphModel:
         (``"punishment"``, :mod:`radixnet.penalty`) or, with ``"least-punished"``,
         what a walk is *ranked* by (``../SPEC-LeastPunished.md``).  ``top_k`` / ``top_p`` / ``min_p`` narrow what
         a sampled step draws from and ``diversity`` spreads the top beam out
-        (``../SPEC-SearchAndTraining.md`` §1-2); each is off at its default."""
+        (``../SPEC-SearchAndTraining.md`` §1-2); each is off at its default.  ``origin=THINK`` with an empty
+        prefix walks a *thought* (:mod:`radixnet.thinking`)."""
         graph = self.graph
         enc = self.encoding
         traversal = resolve_traversal(traversal)
         costs = traversal_costs(graph, traversal, penalty_scale, merit_scale)
-        node, offset, lead = self._prefix_start(prefix)
+        node, offset, lead = self._walk_start(prefix, origin)
         # the lead is the unmatched rest of the located gram: a length in the encoding's units, as
         # `length` and `max_length` are - its words under a word encoding, not its characters
         lead_len = enc.length(lead)
@@ -955,6 +975,7 @@ class RadixNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         phase: str | None = None,
+        origin: int = START,
         **overrides,
     ) -> list[dict]:
         """Train on ``texts`` (one string or an iterable of strings).
@@ -982,8 +1003,13 @@ class RadixNet(GraphModel):
         (:meth:`reward`, :meth:`punish`, :meth:`two_nrl`), walks every text in
         corpus order, and neither reads the replay buffer nor offers it a text -
         a punished text is not one to rehearse.
+
+        ``origin`` is the sentinel every text's walk begins at: START, or
+        THINK to train the texts as *thoughts* (:mod:`radixnet.thinking`).
         """
         cfg = _resolve_config(config, overrides)
+        if origin not in ORIGINS:
+            raise ValueError(f"a text begins at START or THINK, not at node {origin}")
         texts, skipped_short = self._clean_texts(texts)
         plan = self._plan(texts, cfg) if phase is None else None
         rehearsed = plan.replayed() if plan is not None else []
@@ -993,10 +1019,10 @@ class RadixNet(GraphModel):
         meta = self.meta
         records: list[dict] = []
 
-        transitions, observed_version = self._observe(texts, count=True)
+        transitions, observed_version = self._observe(texts, count=True, origin=origin)
         if rehearsed:
-            self._observe(rehearsed, count=False)  # a rehearsed text is not new: nothing to count
-            transitions, observed_version = self._observe(texts, count=False)
+            self._observe(rehearsed, count=False, origin=origin)  # a rehearsed text is not new: nothing to count
+            transitions, observed_version = self._observe(texts, count=False, origin=origin)
         meta_add(meta, "trained_texts", len(texts))
         meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         pending_merges = graph.compress() if cfg.auto_compress else 0
@@ -1013,11 +1039,11 @@ class RadixNet(GraphModel):
                 # this epoch's texts: the order, the curriculum and the rehearsal (../SPEC-SearchAndTraining.md)
                 chosen, again = plan.epoch(k, meta_counter(meta, "epochs_total").bumped(1).value)
                 walked = [texts[i] for i in chosen] + again
-                transitions, observed_version = self._observe(walked, count=False)
+                transitions, observed_version = self._observe(walked, count=False, origin=origin)
                 arrays_version = -1
             elif graph.structure_version != observed_version:
                 # a merge (or an external structural change) moved edge ids
-                transitions, observed_version = self._observe(walked, count=False)
+                transitions, observed_version = self._observe(walked, count=False, origin=origin)
             csr = graph.to_csr()
             state = backend.prepare(csr, graph.node_params())
             if arrays_version != observed_version:

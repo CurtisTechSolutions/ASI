@@ -415,6 +415,8 @@ impl<'a> Chat<'a> {
                     } else {
                         None
                     },
+                    think: true,
+                    think_depth: crate::thinking::THINK_DEPTH,
                 };
                 reply(model, None, &line, options, &mut rng)
             })??;
