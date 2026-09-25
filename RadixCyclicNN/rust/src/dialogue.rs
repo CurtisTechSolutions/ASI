@@ -1810,7 +1810,7 @@ fn converse_stream_route(svc: &Arc<Service>, r: &Request, sink: &mut Sink) -> Re
 /// `POST /api/converse` and `POST /api/converse/stream`.
 pub fn routes(server: &mut Server<Service>) {
     server.route("POST", "/api/converse", converse_route);
-    server.stream_route("POST", "/api/converse/stream", converse_stream_route);
+    server.event_route("POST", "/api/converse/stream", converse_stream_route);
 }
 
 #[cfg(test)]
