@@ -30,6 +30,8 @@ TRAVERSAL   ?= reward
 COUNT       ?= 5
 MAX_LENGTH  ?= 60
 TEXT        ?= the cat sat on the mat
+SAY         ?= tell me about the cat
+FORMAT      ?= openai
 GENERATIONS ?= 3
 SAMPLES     ?= 8
 NEGATIVE    ?= $(basename $(MODEL)).negative$(suffix $(MODEL))
@@ -93,10 +95,10 @@ DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
-        rust-build rust-test rust-parity bench-compare train resume predict generate score 2nrl invert compress \
+        rust-build rust-test rust-parity rust-talk go-talk bench-compare train resume predict generate score talk talk-repl 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
-        frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-2nrl \
+        frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-correct ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
         speech-info speech-teach speech-listen speech-tutor speech-decode \
         tools agent explore explore-forever mcp \
@@ -130,6 +132,9 @@ go-build: ## Build the Go count / reward model CLI into go/bin/radixnet-count
 
 go-test: ## Run the Go tests with the race detector
 	cd go && $(GO) vet ./... && $(GO) test -race ./...
+
+go-talk: go-build ## Talk to the Go model in today's format: SAY is the message (FORMAT=openai|anthropic)
+	go/bin/radixnet-count --model $(MODEL_COUNT) talk --message "$(SAY)" --format $(FORMAT)
 
 go-negative: go-build ## The Go negative network: blame GARBAGE, then judge TEXT through it
 	go/bin/radixnet-count --model $(MODEL) --negative $(NEGATIVE) negative blame --data $(GARBAGE) --reason $(REASON) --severity $(SEVERITY) --source make
@@ -181,6 +186,9 @@ rust-predict: rust-build ## Continue PREFIX: the K likeliest and K least likely 
 rust-generate: rust-build ## Generate COUNT whole texts of at most MAX_LENGTH symbols each
 	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) generate --count $(COUNT) --max-length $(MAX_LENGTH) --mode beam \
 	    --traversal $(TRAVERSAL)
+
+rust-talk: rust-build ## Talk to the Rust model in today's format: SAY is the message (FORMAT=openai|anthropic)
+	rust/target/release/radixnet --model $(MODEL_RUST) talk --message "$(SAY)" --format $(FORMAT)
 
 rust-score: rust-build ## Log-probability of TEXT under the Rust model
 	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) score --text "$(TEXT)"
@@ -244,6 +252,12 @@ generate: ## Generate COUNT texts from scratch (up to MAX_LENGTH characters each
 
 score: ## Log-probability of TEXT under the model
 	$(RADIXNET) $(GLOBAL) score --text "$(TEXT)"
+
+talk: ## Talk to the model in today's format: SAY is the message, the thinking comes first, then the reply (FORMAT=openai|anthropic)
+	$(RADIXNET) $(GLOBAL) talk --message "$(SAY)" --format $(FORMAT)
+
+talk-repl: ## Talk to the model line by line at a prompt (Ctrl-D ends it); --save writes what it learned back
+	$(RADIXNET) $(GLOBAL) talk --format $(FORMAT)
 
 2nrl: ## 2NRL: train on GARBAGE, invert the network, fine-tune on DATA
 	$(RADIXNET) $(GLOBAL) 2nrl --bad $(GARBAGE) --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)
@@ -372,6 +386,9 @@ ollama-review: ## Let Ollama adversarially rate COUNT samples from the model (pa
 
 ollama-blame: ## Review COUNT samples and teach the negative network why the failures failed (critique -> reason)
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --blame --negative $(NEGATIVE)
+
+ollama-correct: ## Copy-edit COUNT samples letter by letter and blame only the characters Ollama changed (SEVERITY per corrected text)
+	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) correct --count $(COUNT) --max-length $(MAX_LENGTH) --blame --severity $(SEVERITY) --negative $(NEGATIVE)
 
 ollama-2nrl: ## Review COUNT samples, then 2NRL: failed samples as garbage, passed samples + DATA as correct data
 	$(RADIXNET) $(GLOBAL) ollama $(OLLAMA_FLAGS) review --count $(COUNT) --max-length $(MAX_LENGTH) --threshold $(THRESHOLD) --2nrl --good $(DATA) --neg-lr $(NEG_LR) --pos-lr $(POS_LR) --batch-size $(BATCH)

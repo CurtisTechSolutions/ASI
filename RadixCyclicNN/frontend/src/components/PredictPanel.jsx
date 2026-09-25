@@ -12,9 +12,11 @@ import {
   parseNumber,
   showWhitespace,
   unitName,
+  unitsOf,
   yesNo,
 } from "../util.js";
 import Alert from "./Alert.jsx";
+import BackwardsField from "./BackwardsField.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
@@ -22,6 +24,7 @@ import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { problemText, searchProblemsFor } from "../settings.js";
+import { readingOrder, reverseUnits } from "../backwards.js";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
@@ -43,8 +46,32 @@ function LikeButton({ text, liked, disabled, onLike, label, compact = false }) {
   );
 }
 
+/**
+ * A prefix and its continuation, highlighted - or, for a query asked backwards
+ * (`flip` = the model's units), in reading order: what the model says came
+ * before, highlighted, then the query.
+ */
+function Continued({ prefix, continuation, flip }) {
+  if (flip) {
+    const { before, gap, query } = readingOrder(prefix, continuation, flip);
+    return (
+      <>
+        <span className="continuation">{before}</span>
+        {gap}
+        <span className="prefix">{query}</span>
+      </>
+    );
+  }
+  return (
+    <>
+      <span className="prefix">{prefix}</span>
+      <span className="continuation">{String(continuation ?? "")}</span>
+    </>
+  );
+}
+
 /** One of the top-K / bottom-K continuations of the count / reward model. */
-function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike }) {
+function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, flip }) {
   return (
     <div className="paths">
       <h3>{title}</h3>
@@ -65,13 +92,13 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike }) 
             </thead>
             <tbody>
               {paths.map((p, i) => {
+                // the model's own text: what a like rewards, backwards or not
                 const text = String(p.full_text ?? `${prefix}${p.continuation ?? ""}`);
                 return (
                   <tr key={i}>
                     <td>{i + 1}</td>
                     <td className="text">
-                      <span className="prefix">{prefix}</span>
-                      <span className="continuation">{String(p.continuation ?? "")}</span>
+                      <Continued prefix={prefix} continuation={p.continuation} flip={flip} />
                     </td>
                     <td>{fmtNum(p.probability, 4)}</td>
                     <td>{fmtNum(p.cost, 3)}</td>
@@ -106,6 +133,12 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike }) 
  * A "Like" button rewards a result: it starts a feedback job with the text
  * (prefix + continuation) as a thumbs-up - a positive-phase pass for
  * RadixNet, a traversal plus reward on the path for the count model.
+ *
+ * With Query backwards on (site-wide, `BackwardsField`) the prefix is sent
+ * turned around and every answer shown turned back, for a model trained with
+ * "Read every text backwards": the highlighted part is then what the model
+ * says came *before* the prefix. A like rewards the model's own text, which
+ * is the backwards one.
  */
 export default function PredictPanel({ status }) {
   const [prefix, setPrefix] = useStoredState("predict.prefix", "");
@@ -116,13 +149,16 @@ export default function PredictPanel({ status }) {
   const [toEnd, setToEnd] = useStoredState("predict.toEnd", false);
   const [stepPenalty, setStepPenalty] = useStoredState("predict.stepPenalty", "0");
   const [temperature, setTemperature] = useStoredState("predict.temperature", "1.0");
-  // the traversal, the sampling filters and the diversity are site-wide (the Settings tab)
-  const { network, search } = useSiteSettings();
+  // the traversal, the sampling filters, the diversity and the direction are site-wide (the Settings tab)
+  const { network, search, backwards } = useSiteSettings();
   const [guard, setGuard] = useStoredState("predict.guard", true);
+  const [provenance, setProvenance] = useStoredState("predict.provenance", true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const [sent, setSent] = useState({}); // the search settings the shown result was asked with
+  // the units the shown result was asked backwards in, or null when it was asked the usual way round
+  const [flip, setFlip] = useState(null);
   const [liked, setLiked] = useState(() => new Set());
   const [lastLiked, setLastLiked] = useState(null);
   const { job, running, busy, error: jobError, start, clearError } = useJob("feedback");
@@ -158,14 +194,17 @@ export default function PredictPanel({ status }) {
     setError(null);
     try {
       const tuning = search.body(effectiveMode);
+      // backwards: the model read every text from its end, so it is asked the same way
+      const units = backwards.on ? unitsOf(status) : null;
       const body = {
-        prefix,
+        prefix: units ? reverseUnits(prefix, units) : prefix,
         length: parseInteger(length, 20),
         mode: effectiveMode,
         to_end: toEnd,
         step_penalty: parseNumber(stepPenalty, 0),
         temperature: parseNumber(temperature, 1),
         guard,
+        provenance,
         ...network.body,
         ...tuning,
       };
@@ -177,6 +216,7 @@ export default function PredictPanel({ status }) {
       const data = await api.predict(body);
       setResult(data && typeof data === "object" ? data : {});
       setSent(tuning);
+      setFlip(units);
       setLastLiked(null);
     } catch (err) {
       setError(err.message);
@@ -193,14 +233,22 @@ export default function PredictPanel({ status }) {
   const top = asArray(result && result.top);
   const bottom = asArray(result && result.bottom);
   const resultIsCount = Boolean(result && Array.isArray(result.top));
-  const shownPrefix = result ? String(result.prefix ?? prefix) : prefix;
+  // the prefix as the model saw it - turned around when it was asked backwards
+  const shownPrefix = result ? String(result.prefix ?? (flip ? reverseUnits(prefix, flip) : prefix)) : prefix;
+  // the model's own text, which is what a like rewards: backwards when it was asked backwards
   const fullText = result ? String(result.full_text ?? `${shownPrefix}${result.continuation ?? ""}`) : "";
 
   return (
     <>
       <form className="card" onSubmit={handleSubmit}>
         <h2>Predict</h2>
-        <TextField label="Prefix" value={prefix} onChange={setPrefix} placeholder="the quick br" />
+        <TextField
+          label="Prefix"
+          hint={backwards.on ? "backwards: the end of a text - the model says what came before it" : undefined}
+          value={prefix}
+          onChange={setPrefix}
+          placeholder={backwards.on ? "over the lazy dog" : "the quick br"}
+        />
         <div className="row">
           <NumberField
             label="Length"
@@ -271,12 +319,20 @@ export default function PredictPanel({ status }) {
         </div>
         <SearchFields mode={effectiveMode} compact />
         <TraversalFields compact />
+        <BackwardsField compact status={status} />
         <CheckField label="Run to END (cheapest complete path)" checked={toEnd} onChange={setToEnd} />
         <CheckField
           label="Filter with the negative network"
           hint="the best continuation it does not veto; none survives, none comes back"
           checked={guard}
           onChange={setGuard}
+        />
+        <CheckField
+          label="Say why it vetoed"
+          hint="the provenance of each veto: the rule, the reasons and the blamed fragments; off, the guard reports how many it stopped"
+          checked={provenance}
+          onChange={setProvenance}
+          disabled={!guard}
         />
         <div className="actions">
           <button type="submit" className="primary" disabled={loading || Boolean(searchProblem)}>
@@ -300,9 +356,15 @@ export default function PredictPanel({ status }) {
         ) : (
           <>
             <p className="text-display">
-              <span className="prefix">{shownPrefix}</span>
-              <span className="continuation">{String(result.continuation ?? "")}</span>
+              <Continued prefix={shownPrefix} continuation={result.continuation} flip={flip} />
             </p>
+            {flip ? (
+              <p className="muted">
+                Asked backwards: the model was sent {JSON.stringify(shownPrefix)} and its answer is shown turned back
+                round - the highlighted part is what it says came <b>before</b> your text. A like rewards the text the
+                way the model reads it, backwards.
+              </p>
+            ) : null}
             <div className="like-row">
               <LikeButton
                 text={fullText}
@@ -321,7 +383,10 @@ export default function PredictPanel({ status }) {
               <JobStatus job={job} emptyText="" />
             ) : null}
             {lastLiked !== null && job && job.state === "done" ? (
-              <p className="muted">Rewarded: {JSON.stringify(lastLiked.length > 80 ? `${lastLiked.slice(0, 80)}…` : lastLiked)}</p>
+              <p className="muted">
+                Rewarded{flip ? " (as the model reads it, backwards)" : ""}:{" "}
+                {JSON.stringify(lastLiked.length > 80 ? `${lastLiked.slice(0, 80)}…` : lastLiked)}
+              </p>
             ) : null}
             <Alert message={jobError} onDismiss={clearError} />
             <dl className="kv">
@@ -376,6 +441,7 @@ export default function PredictPanel({ status }) {
                   liked={liked}
                   likeDisabled={likeDisabled}
                   onLike={like}
+                  flip={flip}
                 />
                 <PathTable
                   title={`Bottom ${bottom.length} (least likely)`}
@@ -385,10 +451,14 @@ export default function PredictPanel({ status }) {
                   liked={liked}
                   likeDisabled={likeDisabled}
                   onLike={like}
+                  flip={flip}
                 />
               </>
             ) : null}
             <h3>Path</h3>
+            {flip && path.length > 0 ? (
+              <p className="muted">The model&apos;s own walk, as it reads: backwards.</p>
+            ) : null}
             {path.length === 0 ? (
               <p className="muted">Empty path.</p>
             ) : (

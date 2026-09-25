@@ -71,6 +71,11 @@ var noGuard = false
 // guardConfig is how strictly the guard filters (the flags below set it).
 var guardConfig = radixnet.DefaultFilterConfig()
 
+// noProvenance makes the guard veto without saying why: the report counts the
+// candidates it stopped instead of listing them with the rule, the reasons and
+// the fragments behind each.
+var noProvenance = false
+
 // addGuardFlags registers the guard on a command that writes something: the
 // negative network filters its output by default.
 func addGuardFlags(fs *flag.FlagSet) {
@@ -89,6 +94,9 @@ func addGuardFlags(fs *flag.FlagSet) {
 	})
 	fs.IntVar(&guardConfig.OverSample, "over-sample", guardConfig.OverSample,
 		"generate: candidates drawn per wanted text, so the guard has something to choose from")
+	fs.BoolVar(&noProvenance, "no-provenance", noProvenance,
+		"veto without saying why: report how many candidates the guard stopped, not which nor the rule, "+
+			"the reasons and the fragments behind each")
 }
 
 // openGuard is the negative network guarding positive's output, or nil when
@@ -106,6 +114,7 @@ func openGuard(positive *radixnet.Model) *radixnet.Filter {
 		return nil
 	}
 	negative := openNegative(true)
+	guardConfig.Provenance = !noProvenance
 	pair, err := radixnet.NewFilter(positive, negative, guardConfig)
 	if err != nil {
 		fail("%v", err)
@@ -118,7 +127,7 @@ func openGuard(positive *radixnet.Model) *radixnet.Filter {
 }
 
 // printVetoes reports the guard's work: what it let through, what it stopped
-// and why.
+// and - with provenance - why.
 func printVetoes(verdicts []*radixnet.FilterVerdict, what string) {
 	rejected := []*radixnet.FilterVerdict{}
 	for _, verdict := range verdicts {
@@ -127,7 +136,7 @@ func printVetoes(verdicts []*radixnet.FilterVerdict, what string) {
 		}
 	}
 	fmt.Printf("\nguard: %d of %d %s passed the negative network\n", len(verdicts)-len(rejected), len(verdicts), what)
-	if len(rejected) == 0 {
+	if len(rejected) == 0 || !guardConfig.Provenance {
 		return
 	}
 	fmt.Printf("%-8s %8s %8s %8s  %-18s %s\n", "rule", "risk", "peak", "ratio", "reason", "vetoed")
@@ -146,7 +155,8 @@ func printVetoes(verdicts []*radixnet.FilterVerdict, what string) {
 }
 
 // guardDoc is the guard's report for --json: every veto, with the reason and
-// the fragment behind it.
+// the fragment behind it.  With -no-provenance it is the counts alone: how
+// many were judged and how many vetoed, neither listed.
 func guardDoc(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra map[string]any) map[string]any {
 	rejected := []*radixnet.FilterVerdict{}
 	for _, verdict := range verdicts {
@@ -154,9 +164,17 @@ func guardDoc(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra m
 			rejected = append(rejected, verdict)
 		}
 	}
-	out := map[string]any{
-		"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
-		"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+	var out map[string]any
+	if pair.Config.Provenance {
+		out = map[string]any{
+			"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
+			"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+		}
+	} else {
+		out = map[string]any{
+			"on": true, "provenance": false, "judged": len(verdicts), "vetoed": len(rejected),
+			"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+		}
 	}
 	for k, v := range extra {
 		out[k] = v
@@ -399,6 +417,7 @@ func cmdNegativeFilter(args []string) {
 	strict := fs.Bool("strict", false, "also drop candidates the negative network only finds suspect")
 	spans := fs.Int("spans", 3, "blamed fragments per verdict")
 	learn := fs.Bool("learn", false, "blame what the filter rejects (off: the tutor supplies the negatives)")
+	terse := fs.Bool("no-provenance", false, "report the decisions alone: no risk, no reasons, no blamed fragments behind a veto")
 	var texts, data multiFlag
 	fs.Var(&texts, "text", "judge this text instead of generating (repeatable)")
 	fs.Var(&data, "data", "judge the texts of a file instead of generating")
@@ -410,6 +429,7 @@ func cmdNegativeFilter(args []string) {
 	positive := openModel(true)
 	config := radixnet.DefaultFilterConfig()
 	config.OverSample, config.Strict, config.Spans, config.Learn = *overSample, *strict, *spans, *learn
+	config.Provenance = !*terse
 	if *threshold >= 0 {
 		config.Threshold = threshold
 	}
@@ -452,7 +472,11 @@ func cmdNegativeFilter(args []string) {
 	if err != nil {
 		fail("%v", err)
 	}
-	say("%-9s %-6s %8s %8s %9s %-14s %s", "decision", "rule", "risk", "peak", "ratio", "reason", "text")
+	if config.Provenance {
+		say("%-9s %-6s %8s %8s %9s %-14s %s", "decision", "rule", "risk", "peak", "ratio", "reason", "text")
+	} else { // the decisions alone: what was kept and what was vetoed, not why
+		say("%-9s %-6s %s", "decision", "rule", "text")
+	}
 	for _, v := range outcome.Verdicts {
 		reason := "-"
 		if len(v.Reasons) > 0 {
@@ -461,6 +485,10 @@ func cmdNegativeFilter(args []string) {
 		rule := "-"
 		if v.Rule != nil {
 			rule = *v.Rule
+		}
+		if !config.Provenance {
+			say("%-9s %-6s %q", v.Decision, rule, v.Text)
+			continue
 		}
 		say("%-9s %-6s %8.4f %8.4f %9.4f %-14s %q", v.Decision, rule, v.Risk, v.Peak, v.Ratio, reason, v.Text)
 	}
@@ -477,6 +505,10 @@ func cmdNegativeFilter(args []string) {
 		say("  %q", text)
 	}
 	for _, v := range outcome.Rejected {
+		if v.Why == "" {
+			say("  vetoed: %q", v.Text)
+			continue
+		}
 		say("  vetoed: %q - %s", v.Text, v.Why)
 	}
 	doc := map[string]any{
@@ -546,6 +578,9 @@ func cmdNegativeForget(args []string) {
 
 // cmdNegativeAuto is the Negative tab without anyone typing a failure into it:
 // the model writes, an LLM reviews, the failures are blamed - round after round.
+// With -correct the LLM is a copy editor instead of a critic: it writes each
+// text out correctly changing as little as it can, and only the characters it
+// changed are blamed.
 func cmdNegativeAuto(args []string) {
 	cfg := radixnet.DefaultCriticConfig()
 	fs := flag.NewFlagSet("negative auto", flag.ExitOnError)
@@ -562,13 +597,17 @@ func cmdNegativeAuto(args []string) {
 	timeout := fs.Float64("timeout", 0, "per-request timeout in seconds")
 	epochs := fs.Int("epochs", cfg.Epochs, "blame epochs per round")
 	noClear := fs.Bool("no-clear", false, "do not let the texts it passed take blame off what they share")
+	correct := fs.Bool("correct", false, "ask for letter-level corrections instead of marks: the LLM writes each text "+
+		"out correctly changing as little as it can, and only the characters it changed are blamed (the texts it "+
+		"handed back unchanged clear blame); no pass mark applies")
+	severity := fs.Float64("severity", cfg.Severity, "blame per corrected text with -correct (1 = one ordinary failure)")
 	addNegativeFlag(fs)
 	_ = fs.Parse(args)
 
 	cfg.Rounds, cfg.Count, cfg.Prefix, cfg.MaxLength = *rounds, *count, *prefix, *maxLength
 	cfg.Temperature, cfg.Threshold, cfg.Context = *temperature, *threshold, *context
 	cfg.Provider, cfg.ReviewerModel, cfg.Epochs = *provider, *reviewerModel, *epochs
-	cfg.ClearPasses = !*noClear
+	cfg.ClearPasses, cfg.Correct, cfg.Severity = !*noClear, *correct, *severity
 	seed := seedFlag
 	cfg.Seed = &seed
 	if err := cfg.Validate(); err != nil {
@@ -593,8 +632,16 @@ func cmdNegativeAuto(args []string) {
 		roundsText = "until interrupted"
 	}
 	say("negative model: %s", negativeFile())
-	say("reviewer: %s: %s at %s", cfg.Provider, client.ModelName(), client.BaseURL())
-	say("%s round(s) x %d text(s) of %d chars, pass at %g/10%s", roundsText, cfg.Count, cfg.MaxLength, cfg.Threshold,
+	role := "reviewer"
+	if cfg.Correct {
+		role = "editor"
+	}
+	say("%s: %s: %s at %s", role, cfg.Provider, client.ModelName(), client.BaseURL())
+	lesson := fmt.Sprintf("pass at %g/10", cfg.Threshold)
+	if cfg.Correct {
+		lesson = fmt.Sprintf("letter-level corrections, %g blame per corrected text", cfg.Severity)
+	}
+	say("%s round(s) x %d text(s) of %d chars, %s%s", roundsText, cfg.Count, cfg.MaxLength, lesson,
 		map[bool]string{true: "", false: " (passes do not clear)"}[cfg.ClearPasses])
 	if strings.TrimSpace(cfg.Context) != "" {
 		say("context: %s", cfg.Context)
@@ -605,6 +652,12 @@ func cmdNegativeAuto(args []string) {
 	if !jsonMode {
 		loop.Progress = func(record map[string]any) {
 			if record["kind"] != "round" {
+				return
+			}
+			if record["mode"] == "correct" {
+				say("round %v: %v/%v corrected (%v change(s)), blamed %v over %v edge(s), cleared %v%s",
+					record["round"], record["corrected"], record["texts"], record["edits"], record["blamed"],
+					record["edges"], record["cleared"], reasonSummary(record["reasons"]))
 				return
 			}
 			say("round %v: %v/%v failed, blamed %v over %v edge(s), cleared %v%s",
@@ -624,9 +677,15 @@ func cmdNegativeAuto(args []string) {
 		}
 	}
 	say("")
-	say("%v round(s): reviewed %v, blamed %v, cleared %v; mean mark %s/10%s",
-		card["rounds"], card["reviewed"], card["blamed"], card["cleared"], fmtMark(card["mean_rating"]),
-		trendSummary(card["trend"]))
+	if cfg.Correct {
+		say("%v round(s): corrected %v of %v (%v change(s)), blamed %v, cleared %v; change rate %s%s",
+			card["rounds"], card["corrected"], card["reviewed"], card["edits"], card["blamed"], card["cleared"],
+			fmtRate(ratePtr(card["change_rate"])), trendSummary(card["change_trend"]))
+	} else {
+		say("%v round(s): reviewed %v, blamed %v, cleared %v; mean mark %s/10%s",
+			card["rounds"], card["reviewed"], card["blamed"], card["cleared"], fmtMark(card["mean_rating"]),
+			trendSummary(card["trend"]))
+	}
 	say("negative model: %s", saved)
 	reasonTable(negative, 10)
 	if jsonMode {
@@ -637,6 +696,17 @@ func cmdNegativeAuto(args []string) {
 			},
 		})
 	}
+}
+
+// ratePtr reads a report card's rate however it was stored.
+func ratePtr(value any) *float64 {
+	switch v := value.(type) {
+	case *float64:
+		return v
+	case float64:
+		return &v
+	}
+	return nil
 }
 
 // reasonSummary renders a round's reason histogram as "; repetition x3".

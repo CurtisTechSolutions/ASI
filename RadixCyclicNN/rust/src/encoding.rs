@@ -235,6 +235,22 @@ impl Encoding {
         text == prefix || (text.starts_with(prefix) && text.as_bytes().get(prefix.len()) == Some(&b' '))
     }
 
+    /// The text read backwards, unit by unit: its last character first, or
+    /// its last word - what a run with `reverse` trains on
+    /// (`../../SPEC-SearchAndTraining.md` section 9).
+    ///
+    /// Characters are reversed code point by code point, so reversing twice
+    /// gives the text back; a word encoding reverses the order of the words
+    /// and writes them with single spaces - the layout it keeps anyway - each
+    /// word's letters in their order.  Python's `Encoding.reverse`, character
+    /// for character.
+    pub fn reverse(&self, text: &str) -> String {
+        match self.unit {
+            Unit::Chars => text.chars().rev().collect(),
+            Unit::Words => text.split_whitespace().rev().collect::<Vec<_>>().join(" "),
+        }
+    }
+
     // -- encoder -------------------------------------------------------------
 
     /// The grams of a text: `n` units each, `stride` units apart; empty when it

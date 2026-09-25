@@ -7,6 +7,14 @@
 //! `frontend/dist` runs against this server unchanged
 //! (`../../DESIGN.md` §12).
 //!
+//! A route reads its body one of two ways.  Most take JSON and get it parsed
+//! ([`Server::route`]): the body is read whole, under [`MAX_BODY`].  A
+//! *streaming* route ([`Server::stream_route`]) is handed the body as it
+//! arrives instead, with no cap on its size - `POST /api/uploads` is one, so an
+//! archive of any size goes straight to disk, as it does on the Go server
+//! (D-035), and a client that announces `Expect: 100-continue` (curl, for a
+//! large file) gets the nod before it sends.
+//!
 //! What it deliberately does *not* do: TLS, HTTP/2, chunked request bodies,
 //! keep-alive.  It answers one request per connection and closes, which is what
 //! a localhost model server needs and nothing more.  Every connection is a
@@ -21,9 +29,10 @@ use std::sync::Arc;
 use crate::json::{parse, Json};
 use crate::log::Level;
 
-/// How much of a request body the server will read (16 MiB): an uploaded corpus
-/// arrives this way, and the cap is what keeps a bad `Content-Length` from
-/// asking for the machine's memory.
+/// How much of a request body a route that reads it whole will take (16 MiB):
+/// the cap is what keeps a bad `Content-Length` from asking for the machine's
+/// memory.  A streaming route ([`Server::stream_route`]) has no cap - an
+/// upload is read as it arrives and never held.
 pub const MAX_BODY: usize = 16 * 1024 * 1024;
 
 /// One request, parsed.
@@ -33,9 +42,10 @@ pub struct Request {
     /// The query string as `[(key, value)]`, percent-decoded.
     pub query: Vec<(String, String)>,
     /// The body parsed as JSON (`Json::Null` when there is none, or when it
-    /// is not JSON - an upload arrives as multipart or as raw bytes).
+    /// is not JSON - an upload arrives as multipart or as raw bytes).  A
+    /// streaming route's request holds no body at all: the route reads it.
     pub body: Json,
-    /// The body as it arrived.
+    /// The body as it arrived (empty on a streaming route).
     pub raw: Vec<u8>,
     /// The headers, names lower-cased, in the order sent.
     pub headers: Vec<(String, String)>,
@@ -195,6 +205,14 @@ pub fn accepted(doc: Json) -> Json {
     ])
 }
 
+/// A successful answer with any status: the document and the code it goes out with.
+pub fn answer_with(status: u16, doc: Json) -> Json {
+    Json::Obj(vec![
+        (STATUS_KEY.to_string(), Json::Int(status as i64)),
+        ("body".to_string(), doc),
+    ])
+}
+
 /// The key [`accepted`] marks a status with; no API document has a key like it.
 const STATUS_KEY: &str = "__status";
 
@@ -217,10 +235,132 @@ fn status_of(doc: Json) -> (u16, Json) {
 /// (which is how `train` and `2nrl` answer before the work is done).
 pub type Handler<S> = fn(&Arc<S>, &Request) -> Answer;
 
+/// What a streaming route answers with: a whole document after all, or the
+/// frames of a server-sent event stream, written by `run` as they are produced.
+///
+/// `run` gets a function that writes one frame; the headers are out by then,
+/// so an error it returns is written as `error(message)` - the frame the
+/// dialect reports a failure with - rather than as a status.
+pub enum Streamed {
+    Document(u16, Json),
+    Events { run: StreamRun, error: fn(&str) -> String },
+}
+
+/// Where a stream's frames go: one call per frame, in order.
+pub type FrameSink<'a> = dyn FnMut(&str) -> std::io::Result<()> + 'a;
+
+/// What writes a stream: it is handed the sink once the headers are out.
+pub type StreamRun = Box<dyn FnOnce(&mut FrameSink) -> Result<(), ApiError> + Send>;
+
+/// A route that may answer with server-sent events (the `/v1` routes:
+/// `stream: true` in the body decides), once its body was read whole.
+pub type SseHandler<S> = fn(&Arc<S>, &Request) -> Result<Streamed, ApiError>;
+
+/// What answers a streaming route: the state, the request without its body
+/// (`raw` is empty and `body` is `Null`), and the body itself as it arrives.
+///
+/// The reader ends where `Content-Length` says the body ends, and fails with
+/// `UnexpectedEof` when the client sent less than it declared, so nothing
+/// short is ever taken for whole.  The route need not drain it.
+pub type StreamHandler<S> = fn(&Arc<S>, &Request, &mut dyn Read) -> Answer;
+
+/// What answers a route that answers as it happens: it writes JSON Lines into
+/// a [`Sink`] - one object per line, each flushed as it is sent.  A request it
+/// refuses before anything was sent gets that error as an ordinary JSON answer;
+/// a failure after the first line becomes the stream's last event,
+/// `{"event": "error"}`, because the status line has already gone.
+pub type EventHandler<S> = fn(&Arc<S>, &Request, &mut Sink) -> Result<(), ApiError>;
+
+/// Where a streaming route writes: chunked `application/x-ndjson`, one JSON
+/// object per line, each flushed as it is sent, so a client reads the events
+/// while the model is still talking.  The headers wait for the first event.
+/// A client that goes away is remembered ([`Sink::failed`]) and everything
+/// after that is dropped rather than reported, since the conversation behind
+/// the stream finishes either way.
+pub struct Sink<'a> {
+    out: &'a mut dyn Write,
+    started: bool,
+    failed: bool,
+}
+
+impl<'a> Sink<'a> {
+    pub fn new(out: &'a mut dyn Write) -> Sink<'a> {
+        Sink {
+            out,
+            started: false,
+            failed: false,
+        }
+    }
+
+    /// Whether the headers have gone (after which the status cannot change).
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Whether a write failed: the client went away.
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Sends one event as its own line.
+    pub fn send(&mut self, doc: &Json) {
+        if self.failed {
+            return;
+        }
+        let line = doc.render(0) + "\n";
+        let mut chunk = String::new();
+        if !self.started {
+            self.started = true;
+            chunk.push_str(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\n\
+                 Transfer-Encoding: chunked\r\nCache-Control: no-store\r\n\
+                 Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+            );
+        }
+        chunk.push_str(&format!("{:x}\r\n{line}\r\n", line.len()));
+        if self
+            .out
+            .write_all(chunk.as_bytes())
+            .and_then(|_| self.out.flush())
+            .is_err()
+        {
+            self.failed = true;
+        }
+    }
+
+    /// Ends the stream (the empty chunk), once something was sent.
+    pub fn finish(&mut self) {
+        if self.started && !self.failed && self.out.write_all(b"0\r\n\r\n").and_then(|_| self.out.flush()).is_err() {
+            self.failed = true;
+        }
+    }
+}
+
+/// A route, by how it takes its body, or gives its answer.
+enum Route<S> {
+    /// The body is read whole (under [`MAX_BODY`]) and parsed as JSON first.
+    Json(Handler<S>),
+    /// The body is handed over as it arrives, of any size.
+    Stream(StreamHandler<S>),
+    /// The answer is written as it happens, as JSON Lines through a [`Sink`].
+    Events(EventHandler<S>),
+    /// The answer is a whole document, or a stream of server-sent events ([`Streamed`]).
+    Sse(SseHandler<S>),
+}
+
+// a function pointer copies whatever `S` is, which a derive would not know
+impl<S> Clone for Route<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S> Copy for Route<S> {}
+
 /// A server: the routes, and where the prebuilt frontend lives.
 pub struct Server<S> {
     state: Arc<S>,
-    routes: Vec<(&'static str, &'static str, Handler<S>)>,
+    routes: Vec<(&'static str, &'static str, Route<S>)>,
     frontend: Option<PathBuf>,
 }
 
@@ -235,7 +375,23 @@ impl<S: Send + Sync + 'static> Server<S> {
 
     /// Adds one route; the first match wins.
     pub fn route(&mut self, method: &'static str, path: &'static str, handler: Handler<S>) {
-        self.routes.push((method, path, handler));
+        self.routes.push((method, path, Route::Json(handler)));
+    }
+
+    /// Adds a route that reads its body as it arrives, with no cap on its
+    /// size: the handler gets the request without a body, and a reader of it.
+    pub fn stream_route(&mut self, method: &'static str, path: &'static str, handler: StreamHandler<S>) {
+        self.routes.push((method, path, Route::Stream(handler)));
+    }
+
+    /// Adds one route that answers as it happens, as JSON Lines ([`EventHandler`]).
+    pub fn event_route(&mut self, method: &'static str, path: &'static str, handler: EventHandler<S>) {
+        self.routes.push((method, path, Route::Events(handler)));
+    }
+
+    /// Adds one route that may answer with a stream of server-sent events ([`SseHandler`]).
+    pub fn route_stream(&mut self, method: &'static str, path: &'static str, handler: SseHandler<S>) {
+        self.routes.push((method, path, Route::Sse(handler)));
     }
 
     /// Every route, as `"METHOD /path"`, in the order added.
@@ -284,20 +440,73 @@ impl<S: Send + Sync + 'static> Server<S> {
 
     fn handle(&self, mut stream: TcpStream) -> std::io::Result<()> {
         let started = std::time::Instant::now();
-        let request = match read_request(&mut stream) {
-            Ok(Some(request)) => request,
+        let head = match read_head(&mut stream) {
+            Ok(Some(head)) => head,
             Ok(None) => return Ok(()),
-            Err(message) => {
-                crate::log_warn!(LOG, "400 (unreadable request): {message}");
-                return write_json(&mut stream, 400, &error_doc(&message));
+            Err((status, message)) => {
+                crate::log_warn!(LOG, "{status} (unreadable request): {message}");
+                return write_json(&mut stream, status, &error_doc(&message));
+            }
+        };
+        let Head {
+            mut request,
+            length,
+            mut reader,
+            expects_continue,
+        } = head;
+        let route = self.match_route(&request);
+        // a streaming route takes the body as it arrives; every other request
+        // reads it whole first, under the cap that keeps a bad Content-Length
+        // from asking for the machine's memory
+        let answer = match route {
+            Some(Route::Stream(handler)) => {
+                if expects_continue && length > 0 {
+                    send_continue(&mut stream)?;
+                }
+                let mut body = Body {
+                    reader: &mut reader,
+                    remaining: length as u64,
+                };
+                let answer = handler(&self.state, &request, &mut body);
+                // what the client is still sending is taken off the wire, up to
+                // a point, so it reads the answer rather than a reset
+                body.discard(DISCARD_BYTES);
+                Some(answer)
+            }
+            other => {
+                if length > MAX_BODY {
+                    let message = format!("request body larger than {MAX_BODY} bytes");
+                    crate::log_warn!(LOG, "400 (unreadable request): {message}");
+                    return write_json(&mut stream, 400, &error_doc(&message));
+                }
+                if expects_continue && length > 0 {
+                    send_continue(&mut stream)?;
+                }
+                match read_whole(&mut reader, length) {
+                    Ok(raw) => {
+                        request.body = parse_json(&raw);
+                        request.raw = raw;
+                    }
+                    Err(message) => {
+                        crate::log_warn!(LOG, "400 (unreadable request): {message}");
+                        return write_json(&mut stream, 400, &error_doc(&message));
+                    }
+                }
+                match other {
+                    Some(Route::Json(handler)) => Some(handler(&self.state, &request)),
+                    // answered as it happens: the sink writes the lines, and the log line, itself
+                    Some(Route::Events(handler)) => return self.answer_events(&mut stream, &request, handler, started),
+                    // a document or server-sent events: the handler decides once the body is read
+                    Some(Route::Sse(handler)) => return self.handle_stream(&mut stream, &request, handler, started),
+                    _ => None,
+                }
             }
         };
         // an API route, the prebuilt frontend, or a 404 that says which
-        if let Some(handler) = self.match_route(&request) {
-            let answer = handler(&self.state, &request);
+        if let Some(answer) = answer {
             let (status, doc) = match answer {
                 Ok(doc) => status_of(doc),
-                Err(err) => (err.status, error_doc(&err.message)),
+                Err(err) => (err.status, error_doc_at(&request.path, err.status, &err.message)),
             };
             // one line per request, with what it cost: a 4xx or 5xx is worth a
             // warning because it is the server refusing, and a 2xx is the
@@ -317,23 +526,128 @@ impl<S: Send + Sync + 'static> Server<S> {
             );
             return write_json(&mut stream, status, &doc);
         }
-        if request.path.starts_with("/api/") {
+        if request.path.starts_with("/api/") || request.path.starts_with("/v1/") {
             crate::log_warn!(LOG, "404 no route {} {}", request.method, request.path);
-            return write_json(
-                &mut stream,
-                404,
-                &error_doc(&format!("no route {} {}", request.method, request.path)),
-            );
+            let message = format!("no route {} {}", request.method, request.path);
+            return write_json(&mut stream, 404, &error_doc_at(&request.path, 404, &message));
         }
         crate::log_trace!(LOG, "{} {} (static)", request.method, request.path);
         self.serve_static(&mut stream, &request)
     }
 
-    fn match_route(&self, request: &Request) -> Option<Handler<S>> {
+    fn match_route(&self, request: &Request) -> Option<Route<S>> {
         self.routes
             .iter()
             .find(|(method, path, _)| *path == request.path && *method == request.method)
-            .map(|(_, _, handler)| *handler)
+            .map(|(_, _, route)| *route)
+    }
+
+    /// Answers a [`Route::Events`] route: the handler writes its lines into a
+    /// [`Sink`] on the connection, and the outcome is logged the way a JSON
+    /// answer is.  A refusal before anything was sent is an ordinary error
+    /// answer; a failure after the first line is the stream's last event.
+    fn answer_events(
+        &self,
+        stream: &mut TcpStream,
+        request: &Request,
+        handler: EventHandler<S>,
+        started: std::time::Instant,
+    ) -> std::io::Result<()> {
+        let mut sink = Sink::new(stream);
+        let outcome = handler(&self.state, request, &mut sink);
+        let (level, status, why) = match &outcome {
+            Ok(()) => (Level::Debug, 200, String::new()),
+            Err(err) if !sink.started() => (Level::Warn, err.status, format!(": {}", err.message)),
+            Err(err) => (
+                Level::Warn,
+                200,
+                format!(" (the stream ended in an error: {})", err.message),
+            ),
+        };
+        crate::log_at!(
+            LOG,
+            level,
+            "{} {} -> {status} in {:.1}ms{why}",
+            request.method,
+            request.path,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        match outcome {
+            Err(err) if !sink.started() => return write_json(stream, err.status, &error_doc(&err.message)),
+            Err(err) => sink.send(&Json::obj([
+                ("event", Json::str("error")),
+                ("error", Json::str(err.message)),
+            ])),
+            Ok(()) => {}
+        }
+        if !sink.started() {
+            // a stream that had nothing to say is still a stream: an empty body
+            sink.send(&Json::obj([("event", Json::str("done"))]));
+        }
+        sink.finish();
+        Ok(())
+    }
+
+    /// A route that may stream: a document is written as any other answer; a
+    /// stream gets its headers, then every frame the moment it is produced,
+    /// and the connection closes at the end (no length can be known in
+    /// advance, and this server closes every connection anyway).
+    fn handle_stream(
+        &self,
+        stream: &mut TcpStream,
+        request: &Request,
+        handler: SseHandler<S>,
+        started: std::time::Instant,
+    ) -> std::io::Result<()> {
+        let log = |status: u16, note: &str| {
+            let level = if status >= 400 { Level::Warn } else { Level::Debug };
+            crate::log_at!(
+                LOG,
+                level,
+                "{} {} -> {status} in {:.1}ms{note}",
+                request.method,
+                request.path,
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        };
+        match handler(&self.state, request) {
+            Ok(Streamed::Document(status, doc)) => {
+                log(
+                    status,
+                    &doc.at("error")
+                        .at("message")
+                        .as_str()
+                        .map(|w| format!(": {w}"))
+                        .unwrap_or_default(),
+                );
+                write_json(stream, status, &doc)
+            }
+            Ok(Streamed::Events { run, error }) => {
+                let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\n\
+                            Cache-Control: no-cache\r\nX-Accel-Buffering: no\r\n\
+                            Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
+                stream.write_all(head.as_bytes())?;
+                stream.flush()?;
+                let mut sink = |frame: &str| -> std::io::Result<()> {
+                    stream.write_all(frame.as_bytes())?;
+                    stream.flush()
+                };
+                if let Err(err) = run(&mut sink) {
+                    // the headers are out: the failure goes down the stream in the dialect's own frame
+                    let _ = sink(&error(&err.message));
+                }
+                log(200, " (streamed)");
+                Ok(())
+            }
+            Err(err) => {
+                log(err.status, &format!(": {}", err.message));
+                write_json(
+                    stream,
+                    err.status,
+                    &error_doc_at(&request.path, err.status, &err.message),
+                )
+            }
+        }
     }
 
     fn serve_static(&self, stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
@@ -392,24 +706,37 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
-/// Reads one request; `Ok(None)` when the connection closed before sending one.
-fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
-    let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+/// A request's head, read: the request without its body, how long the body
+/// says it is, and the reader it is still in.
+struct Head {
+    request: Request,
+    length: usize,
+    reader: BufReader<TcpStream>,
+    /// `Expect: 100-continue`: the client waits for a nod before it sends the body.
+    expects_continue: bool,
+}
+
+/// Reads one request's line and headers; `Ok(None)` when the connection
+/// closed before sending one, `Err((status, message))` for one that cannot be
+/// read.  The body stays in the reader.
+fn read_head(stream: &mut TcpStream) -> Result<Option<Head>, (u16, String)> {
+    let unreadable = |e: std::io::Error| (400, e.to_string());
+    let mut reader = BufReader::new(stream.try_clone().map_err(unreadable)?);
     let mut line = String::new();
-    if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
+    if reader.read_line(&mut line).map_err(unreadable)? == 0 {
         return Ok(None);
     }
     let mut parts = line.trim_end().split(' ');
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
     if method.is_empty() {
-        return Err("empty request line".to_string());
+        return Err((400, "empty request line".to_string()));
     }
     let mut length = 0usize;
     let mut headers: Vec<(String, String)> = Vec::new();
     loop {
         let mut header = String::new();
-        if reader.read_line(&mut header).map_err(|e| e.to_string())? == 0 {
+        if reader.read_line(&mut header).map_err(unreadable)? == 0 {
             break;
         }
         let header = header.trim_end();
@@ -423,29 +750,99 @@ fn read_request(stream: &mut TcpStream) -> Result<Option<Request>, String> {
             headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
         }
     }
-    if length > MAX_BODY {
-        return Err(format!("request body larger than {MAX_BODY} bytes"));
+    // a chunked body has no length to read by: 411, as the Python server answers
+    if headers
+        .iter()
+        .any(|(name, value)| name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked"))
+    {
+        return Err((
+            411,
+            "chunked request bodies are not supported; send a Content-Length header".to_string(),
+        ));
     }
-    let mut body = vec![0u8; length];
-    if length > 0 {
-        reader.read_exact(&mut body).map_err(|e| e.to_string())?;
-    }
+    let expects_continue = headers
+        .iter()
+        .any(|(name, value)| name == "expect" && value.eq_ignore_ascii_case("100-continue"));
     let (path, query) = match target.split_once('?') {
         Some((path, query)) => (path.to_string(), parse_query(query)),
         None => (target, Vec::new()),
     };
-    let parsed = match std::str::from_utf8(&body) {
+    Ok(Some(Head {
+        request: Request {
+            method,
+            path,
+            query,
+            body: Json::Null,
+            raw: Vec::new(),
+            headers,
+        },
+        length,
+        reader,
+        expects_continue,
+    }))
+}
+
+/// Reads a body whole, as a route that takes JSON needs it (`length` is
+/// under [`MAX_BODY`] by the time this is called).
+fn read_whole(reader: &mut BufReader<TcpStream>, length: usize) -> Result<Vec<u8>, String> {
+    let mut body = vec![0u8; length];
+    if length > 0 {
+        reader.read_exact(&mut body).map_err(|e| e.to_string())?;
+    }
+    Ok(body)
+}
+
+/// The JSON a body holds; `Null` when it holds none, or something else.
+fn parse_json(body: &[u8]) -> Json {
+    match std::str::from_utf8(body) {
         Ok(text) if !text.trim().is_empty() => parse(text).unwrap_or(Json::Null),
         _ => Json::Null,
-    };
-    Ok(Some(Request {
-        method,
-        path,
-        query,
-        body: parsed,
-        raw: body,
-        headers,
-    }))
+    }
+}
+
+/// `100 Continue`: the nod a client that sent `Expect: 100-continue` waits for
+/// before it sends the body (curl does, for a large upload).
+fn send_continue(stream: &mut TcpStream) -> std::io::Result<()> {
+    stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+    stream.flush()
+}
+
+/// How much of a body a streaming route left unread is taken off the wire
+/// before the connection closes, so the client reads the answer rather than a
+/// reset (the Go server does the same).
+const DISCARD_BYTES: u64 = 1 << 20;
+
+/// The body of a request to a streaming route, as it arrives: it ends where
+/// `Content-Length` says, and a client that sends less than it declared is an
+/// `UnexpectedEof`, so nothing short is ever taken for whole.
+struct Body<'a> {
+    reader: &'a mut BufReader<TcpStream>,
+    remaining: u64,
+}
+
+impl Read for Body<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 || out.is_empty() {
+            return Ok(0);
+        }
+        let want = out.len().min(self.remaining.min(usize::MAX as u64) as usize);
+        let n = self.reader.read(&mut out[..want])?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "incomplete request body",
+            ));
+        }
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
+
+impl Body<'_> {
+    /// Takes up to `limit` of what is left off the wire and drops it.
+    fn discard(&mut self, limit: u64) {
+        let _ = std::io::copy(&mut self.by_ref().take(limit), &mut std::io::sink());
+    }
 }
 
 fn parse_query(query: &str) -> Vec<(String, String)> {
@@ -496,6 +893,15 @@ fn error_doc(message: &str) -> Json {
     Json::obj([("error", Json::str(message))])
 }
 
+/// An error as the client of `path` expects it: the API's `{"error": "..."}`,
+/// or - under `/v1` - the dialect's own envelope (`crate::assistant::shape_error`).
+fn error_doc_at(path: &str, status: u16, message: &str) -> Json {
+    if path == "/v1" || path.starts_with("/v1/") {
+        return crate::assistant::shape_error(crate::assistant::dialect_of(path), status, message, None);
+    }
+    error_doc(message)
+}
+
 fn write_json(stream: &mut TcpStream, status: u16, doc: &Json) -> std::io::Result<()> {
     write_bytes(
         stream,
@@ -506,14 +912,18 @@ fn write_json(stream: &mut TcpStream, status: u16, doc: &Json) -> std::io::Resul
 }
 
 fn write_bytes(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
-    let head = format!(
+    let mut answer = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\n\
          Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
         reason = reason(status),
         len = body.len(),
-    );
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(body)?;
+    )
+    .into_bytes();
+    // in one write: the head alone would go at once and the body wait for its
+    // acknowledgement (Nagle), and a connection closed on a body it did not
+    // read - a refused upload - discards what is still waiting to go
+    answer.extend_from_slice(body);
+    stream.write_all(&answer)?;
     stream.flush()
 }
 
@@ -525,6 +935,7 @@ fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
         501 => "Not Implemented",
@@ -546,6 +957,43 @@ mod tests {
         assert_eq!(parsed[1], ("node".to_string(), "the cat".to_string()));
         assert_eq!(parsed[2], ("flag".to_string(), String::new()));
         assert_eq!(percent_decode("a+b%2Fc"), "a b/c");
+    }
+
+    #[test]
+    fn a_sink_streams_one_line_per_event_with_late_headers() {
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut sink = Sink::new(&mut out);
+            assert!(!sink.started());
+            sink.send(&Json::obj([
+                ("event", Json::str("look")),
+                ("from", Json::str("the cat")),
+            ]));
+            assert!(sink.started());
+            sink.send(&Json::obj([("event", Json::str("done"))]));
+            sink.finish();
+            assert!(!sink.failed());
+        }
+        let text = String::from_utf8(out).unwrap();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert!(head.contains("Content-Type: application/x-ndjson; charset=utf-8\r\n"));
+        assert!(head.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(!head.contains("Content-Length"));
+        let first = "{\"event\":\"look\",\"from\":\"the cat\"}\n";
+        let second = "{\"event\":\"done\"}\n";
+        assert_eq!(
+            body,
+            format!(
+                "{:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\n\r\n",
+                first.len(),
+                second.len()
+            )
+        );
+        // nothing sent, nothing ended: an untouched sink writes no bytes at all
+        let mut out: Vec<u8> = Vec::new();
+        Sink::new(&mut out).finish();
+        assert!(out.is_empty());
     }
 
     #[test]

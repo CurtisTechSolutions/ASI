@@ -590,7 +590,11 @@ func (s *Service) Status() (map[string]any, error) {
 
 // DescribeModel is GET /api/model.
 func (s *Service) DescribeModel() (map[string]any, error) {
-	out, err := s.read(func(m *radixnet.Model) (any, error) { return m.G.WeightConfig(), nil })
+	var attention radixnet.AttentionConfig
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		attention = m.AttentionConfig()
+		return m.G.WeightConfig(), nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -601,8 +605,55 @@ func (s *Service) DescribeModel() (map[string]any, error) {
 	active, label, units := "count", ModelLabel, s.units()
 	return map[string]any{
 		"kind": active, "label": label, "units": units, "kinds": s.kinds(), "model_path": modelPath,
-		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out, "engine": "go",
+		"paths": map[string]any{active: modelPath}, "in_memory": []string{active}, "weights": out,
+		"attention": attention, "engine": "go",
 	}, nil
+}
+
+// Attention is GET /api/model/attention: where inside a gram the model's
+// corrections land (radixnet/attention.go).
+func (s *Service) Attention() (map[string]any, error) {
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		return map[string]any{"kind": m.Kind(), "attention": m.AttentionConfig()}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// ConfigureAttention is POST /api/model/attention: the band on (at blur) or off.
+func (s *Service) ConfigureAttention(on *bool, blur *float64) (map[string]any, error) {
+	out, err := s.mutate(func(m *radixnet.Model) (any, error) {
+		cfg, err := m.ConfigureAttention(on, blur)
+		if err != nil {
+			return nil, badRequest("%v", err)
+		}
+		return map[string]any{"kind": m.Kind(), "attention": cfg, "stats": m.Stats()}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
+}
+
+// AttentionPreview is POST /api/model/attention/preview: where one correction
+// would land, gram by gram, under the writer rule and a band; nothing changes.
+func (s *Service) AttentionPreview(wrong, right string, blur *float64) (map[string]any, error) {
+	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		p, err := m.AttentionPreview(wrong, right, blur)
+		if err != nil {
+			return nil, badRequest("%v", err)
+		}
+		return map[string]any{
+			"kind": m.Kind(), "attention": p.Attention, "blur": p.Blur, "weights": p.Weights,
+			"changes": p.Changes, "wrong": p.Wrong, "right": p.Right,
+		}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out.(map[string]any), nil
 }
 
 // Encoding is GET /api/encoding: how the active model reads text - the unit,
@@ -1162,7 +1213,11 @@ func graphView(g *radixnet.Graph, limit int) map[string]any {
 // negative network is never created here - an answer is not the place to
 // bring one into being.  Call it with the model lock held; the output paths
 // do.
-func (s *Service) guard() *radixnet.Filter {
+//
+// provenance overrides the server's own setting for this one answer (POST
+// /api/negative/settings {"provenance": false} sets it for every answer):
+// off, the vetoes still apply but the report says how many, not which or why.
+func (s *Service) guard(provenance *bool) *radixnet.Filter {
 	negative := s.negative
 	if negative == nil {
 		path := s.negativePath()
@@ -1177,7 +1232,11 @@ func (s *Service) guard() *radixnet.Filter {
 			return nil
 		}
 	}
-	pair, err := radixnet.NewFilter(s.model, negative, s.guardConfig)
+	config := s.guardConfig
+	if provenance != nil {
+		config.Provenance = *provenance // this answer's own choice
+	}
+	pair, err := radixnet.NewFilter(s.model, negative, config)
 	if err != nil || !pair.Ready() {
 		return nil
 	}
@@ -1185,7 +1244,10 @@ func (s *Service) guard() *radixnet.Filter {
 }
 
 // guardReport is what the guard did, for the caller to show: the vetoes, with
-// the reason and the fragment behind each.
+// the reason and the fragment behind each.  Without provenance
+// (FilterConfig.Provenance off) the report is the counts alone - how many
+// candidates were judged and how many vetoed - and neither the vetoes nor the
+// verdicts are listed.
 func guardReport(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extra map[string]any) map[string]any {
 	rejected := []*radixnet.FilterVerdict{}
 	for _, verdict := range verdicts {
@@ -1193,9 +1255,17 @@ func guardReport(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extr
 			rejected = append(rejected, verdict)
 		}
 	}
-	out := map[string]any{
-		"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
-		"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+	var out map[string]any
+	if pair.Config.Provenance {
+		out = map[string]any{
+			"on": true, "vetoed": len(rejected), "rejected": rejected, "verdicts": verdicts,
+			"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+		}
+	} else {
+		out = map[string]any{
+			"on": true, "provenance": false, "judged": len(verdicts), "vetoed": len(rejected),
+			"negative": pair.Negative.Stats(), "config": pair.Describe()["config"],
+		}
 	}
 	for k, v := range extra {
 		out[k] = v
@@ -1203,14 +1273,17 @@ func guardReport(pair *radixnet.Filter, verdicts []*radixnet.FilterVerdict, extr
 	return out
 }
 
-func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool) (*radixnet.Prediction, map[string]any, error) {
+// Predict continues a prefix; with guard the negative network vetoes the
+// continuations it recognises as failures, and provenance (nil: the server's
+// setting) says whether the report lists the vetoes or only counts them.
+func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool, provenance *bool) (*radixnet.Prediction, map[string]any, error) {
 	var report map[string]any
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		found, err := m.Predict(prefix, o)
 		if err != nil || !guard {
 			return found, err
 		}
-		if pair := s.guard(); pair != nil {
+		if pair := s.guard(provenance); pair != nil {
 			ranked, verdicts := pair.Rank(prefix, found) // the survivors, best first
 			kept := 0
 			for _, verdict := range verdicts {
@@ -1229,12 +1302,15 @@ func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool) 
 	return out.(*radixnet.Prediction), report, nil
 }
 
-func (s *Service) Generate(o radixnet.GenerateOptions, guard bool) ([]*radixnet.PathResult, map[string]any, error) {
+// Generate writes whole texts; with guard the model over-samples and the
+// negative network vetoes what it recognises as failure (provenance as in
+// Predict).
+func (s *Service) Generate(o radixnet.GenerateOptions, guard bool, provenance *bool) ([]*radixnet.PathResult, map[string]any, error) {
 	var report map[string]any
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		pair := (*radixnet.Filter)(nil)
 		if guard {
-			pair = s.guard()
+			pair = s.guard(provenance)
 		}
 		if pair == nil {
 			return m.Generate(o)
@@ -1303,12 +1379,14 @@ func (s *Service) StartTrainThoughts(thoughts, answers []string, epochs int, que
 	})
 }
 
-func (s *Service) Converse(opening string, o radixnet.ConverseOptions, guard bool) ([]*radixnet.Turn, map[string]any, error) {
+// Converse holds a conversation; with guard a reply the negative network
+// vetoes is left unsaid (provenance as in Predict).
+func (s *Service) Converse(opening string, o radixnet.ConverseOptions, guard bool, provenance *bool) ([]*radixnet.Turn, map[string]any, error) {
 	var report map[string]any
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		pair := (*radixnet.Filter)(nil)
 		if guard {
-			pair = s.guard()
+			pair = s.guard(provenance)
 		}
 		if pair == nil {
 			return m.Converse(opening, o)

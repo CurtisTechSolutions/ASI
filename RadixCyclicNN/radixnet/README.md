@@ -26,6 +26,7 @@ does what.
 | `graph.py` | `RadixCyclicGraph` — the self-compressing cyclic graph: split, merge, the invariants |
 | `activation.py` | the parametric sine `f(x) = a·sin(b(x−h)) + k`, all four parameters learnable per node |
 | `encoding.py` | `Encoding` — how a text becomes grams and comes back: the unit (characters or words), the n of the n-gram and the stride (1 = the sliding window, n = non-overlapping groups), with the encoder and decoder halves |
+| `attention.py` | the attention band: each gram read sharp at its centre and blurred towards its ends, so a correction's blame and credit land on the gram that has a changed unit at its centre (`AttentionBand`, `spread`, the preview; `../SPEC-AttentionBand.md`) |
 | `counter.py` | cyclic counters — the odometer every growing integer in the model runs on, wrapping at `10^15` and counting the reset |
 | `backend.py` | the training backends and the one-hop learning rule |
 | `backend_torch.py` | the same rule fully vectorised over a mini-batch, on `cuda` / `mps` / `cpu`. Optional |
@@ -61,7 +62,7 @@ does what.
 |---|---|
 | `tutor.py` | automated English lessons: the tutor sets the exercise, the network completes it, the tutor marks it (and, thinking, teaches how it reasoned) |
 | `recall.py` | what the network remembers of what it was shown — the recall tutor for speech and images |
-| `dialogue.py` | the model conversing with itself, with stutter detection and backtracking |
+| `dialogue.py` | the model conversing with itself, with stutter detection and backtracking - and the stream of events a conversation is watched through as it happens (`stream=`: the turns as they are spoken, and the window a backtrack may still rewrite between them) |
 | `chat.py` | the model in conversation with an LLM, and the LLM marking the conversation |
 | `codegen.py` | code generation with a sandbox, an LLM teacher / judge and 2NRL rewards |
 | `agent.py` | tool use: the network browses and solves on its own, an LLM sets the bar and teaches |

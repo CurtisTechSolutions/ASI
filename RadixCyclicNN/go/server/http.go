@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,19 @@ func (f fields) text(name string, def *string) (string, error) {
 }
 
 func (f fields) optText(name, def string) (string, error) { return f.text(name, &def) }
+
+// optionalFlag is a boolean the request may leave out (or set to null): nil then.
+func optionalFlag(f fields, name string) (*bool, error) {
+	v, ok := f.lookup(name)
+	if !ok || v == nil {
+		return nil, nil
+	}
+	value, err := f.flag(name, false)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
 
 func (f fields) flag(name string, def bool) (bool, error) {
 	v, ok := f.lookup(name)
@@ -201,6 +215,17 @@ func (rq *request) queryValue(name string) (string, bool) {
 
 type routeFn func(rq *request) (int, any, error)
 
+// A streamResponse is a route's answer written as it happens: one JSON object
+// per line (application/x-ndjson).  run does the work and hands every event to
+// write; the handler sends the headers with the first one and flushes the rest
+// out as they come, so a client reads the events while the model is still
+// talking.  A request refused before the first event is an ordinary 4xx JSON
+// error; a failure after it is the stream's last event, {"event": "error"},
+// because the status line has already gone.
+type streamResponse struct {
+	run func(write func(any) error) error
+}
+
 var routes = map[string]map[string]routeFn{}
 
 func route(method, p string, fn routeFn) {
@@ -229,22 +254,30 @@ func init() {
 	doc("POST", "/api/model/select", "{kind: count}: the Go server runs the count / reward model only")
 	route("POST", "/api/model/weights", rModelWeights)
 	doc("POST", "/api/model/weights", "change the dual frequency weight function: {count_scale, global_scale, window_scale, reward_scale, path_scale, window}")
+	route("GET", "/api/model/attention", rAttention)
+	doc("GET", "/api/model/attention", "the model's attention band - where inside a gram a correction's blame and credit land: {kind, attention: {on, blur, weights (the band over one gram, 1 at the centre, 1 - blur at both ends; null while off), ngram, stride, unit, units, applies, default_blur}}")
+	route("POST", "/api/model/attention", rAttentionSet)
+	doc("POST", "/api/model/attention", "switch the band: {on, blur} - blur (0..1) alone switches it on, on: true without a blur uses the one it had (else default_blur), on: false switches it off -> {kind, attention, stats}")
+	route("POST", "/api/model/attention/preview", rAttentionPreview)
+	doc("POST", "/api/model/attention/preview", "where one correction would land, gram by gram, and nothing changes: {wrong, right, blur} -> {kind, attention, blur, weights, changes, wrong, right}, each side {text, units, grams, spans, writer, charges, focus, end}")
 	route("GET", "/api/encoding", rEncoding)
 	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, think_label, configurable: false (the window is part of the model format, not a setting), note}")
 	route("POST", "/api/encoding/preview", rEncodingPreview)
 	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}")
 	route("POST", "/api/train", rTrain)
-	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts, order: corpus | shortest-first | longest-first | shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay (the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the buffer's capacity from now on; 0 drops it), patience, min_delta (stop after patience full epochs without the loss improving by min_delta; 0 = off)}; uploads stream through in chunks, whatever their size - unless an order, a curriculum or a replay buffer needs the whole list first")
+	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts, order: corpus | shortest-first | longest-first | shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay (the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the buffer's capacity from now on; 0 drops it), patience, min_delta (stop after patience full epochs without the loss improving by min_delta; 0 = off), reverse (read every text backwards, in the model's units - its last character or word first - so the model learns what comes before; off by default)}; uploads stream through in chunks, whatever their size - reversed or not - unless an order, a curriculum or a replay buffer needs the whole list first")
 	route("GET", "/api/job", rJob)
 	doc("GET", "/api/job", "status of the current / last job")
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures)}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures), provenance (false: the guard's report counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each; default: the server's setting)}")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure), provenance (default: the server's setting; false counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each)}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), think (default on: a voice that caught itself repeating thinks before it backs up - a thought from the THINK sentinel that hands over to BACK when it stops; each turn's rethink carries it as thought), think_depth (how deep a thought may question itself), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were vetoed, not which nor why; default: the server's setting)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
+	route("POST", "/api/converse/stream", rConverseStream)
+	doc("POST", "/api/converse/stream", "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes it) are the answer and are never taken back; between them is the window a backtrack may still rewrite: look (from: the context it continues, \"\" for a fresh text), draft (text, cost: what it was about to say), caught (kind, noticed, cut: what it keeps), backtrack (step, cut, wider), found (text, cost, explored) or stuck (explored); the last line is {event: done, ...} with the /api/converse document; a failure after the first line is {event: error, error}")
 	route("POST", "/api/think", rThink)
 	doc("POST", "/api/think", "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught (POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this text ends, and teach the model to stop and think there), mode: beam | sample, k, beam, max_length, temperature, step_penalty, seed, depth (how deep it may question itself; 0 = never), questions (per thought), learn (default on: it teaches the model where it stopped to think - a thought changes the model)} -> {kind, trigger, at, about, text, depth, stopped: end | length | nothing, then: end | back | think, taught, handed_over, cost, probability, expanded, questioned, questions, labels, node_ids, step_costs}")
 	route("POST", "/api/score", rScore)
@@ -402,6 +435,50 @@ func rEncodingPreview(rq *request) (int, any, error) {
 		return 0, nil, err
 	}
 	out, err := rq.svc.EncodingPreview(text)
+	return 200, out, err
+}
+
+// nullableNumber reads a finite number that may be absent or null (then nil).
+func nullableNumber(f fields, name string) (*float64, error) {
+	v, present, err := f.number(name, 0, nil)
+	if err != nil || !present {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func rAttention(rq *request) (int, any, error) {
+	out, err := rq.svc.Attention()
+	return 200, out, err
+}
+
+func rAttentionSet(rq *request) (int, any, error) {
+	on, err := optionalFlag(rq.f, "on")
+	if err != nil {
+		return 0, nil, err
+	}
+	blur, err := nullableNumber(rq.f, "blur")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.ConfigureAttention(on, blur)
+	return 200, out, err
+}
+
+func rAttentionPreview(rq *request) (int, any, error) {
+	wrong, err := rq.f.optText("wrong", "")
+	if err != nil {
+		return 0, nil, err
+	}
+	right, err := rq.f.optText("right", "")
+	if err != nil {
+		return 0, nil, err
+	}
+	blur, err := nullableNumber(rq.f, "blur")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.AttentionPreview(wrong, right, blur)
 	return 200, out, err
 }
 
@@ -629,7 +706,7 @@ func traversalFields(f fields) (name string, penaltyScale, meritScale float64, e
 
 // planFields reads how a training run walks its texts: order, curriculum,
 // replay, replay_size, patience and min_delta (../../SPEC-SearchAndTraining.md
-// §3-6), each off when it is not given.
+// §3-6), and reverse (§9), each off when it is not given.
 func planFields(f fields) (radixnet.Plan, error) {
 	var p radixnet.Plan
 	var err error
@@ -659,6 +736,9 @@ func planFields(f fields) (radixnet.Plan, error) {
 		return p, err
 	}
 	if p.MinDelta, _, err = f.number("min_delta", 0, floatp(0)); err != nil {
+		return p, err
+	}
+	if p.Reverse, err = f.flag("reverse", false); err != nil {
 		return p, err
 	}
 	if err := p.Check(); err != nil {
@@ -740,7 +820,11 @@ func rPredict(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	p, report, err := rq.svc.Predict(prefix, o, guard)
+	provenance, err := optionalFlag(f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	p, report, err := rq.svc.Predict(prefix, o, guard, provenance)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -812,7 +896,11 @@ func rGenerate(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	results, report, err := rq.svc.Generate(o, guard)
+	provenance, err := optionalFlag(f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	results, report, err := rq.svc.Generate(o, guard, provenance)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -823,47 +911,48 @@ func rGenerate(rq *request) (int, any, error) {
 	return 200, map[string]any{"samples": samples, "guard": report}, nil
 }
 
-func rConverse(rq *request) (int, any, error) {
+// converseRequest reads the one conversation POST /api/converse and POST
+// /api/converse/stream both take from a body.
+func converseRequest(rq *request) (opening string, o radixnet.ConverseOptions, guard bool, err error) {
 	f := rq.f
-	opening, err := f.optText("opening", "")
-	if err != nil {
-		return 0, nil, err
+	if opening, err = f.optText("opening", ""); err != nil {
+		return "", o, false, err
 	}
-	o := radixnet.DefaultConverseOptions()
+	o = radixnet.DefaultConverseOptions()
 	if o.Turns, _, err = f.integer("turns", 6, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	partner, err := f.optText("partner", "")
 	if err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if partner != "" && strings.ToLower(partner) != "count" {
-		return 0, nil, badRequest("no %s model in memory to converse with; the Go server runs the count / reward model only", partner)
+		return "", o, false, badRequest("no %s model in memory to converse with; the Go server runs the count / reward model only", partner)
 	}
 	if o.Mode, err = f.optText("mode", "beam"); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.MaxLength, _, err = f.integer("max_length", 60, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Context, _, err = f.integer("context", 12, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Temperature, _, err = f.number("temperature", 1.0, floatp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.K, _, err = f.integer("k", 5, intp(1)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Beam, _, err = f.integer("beam", 0, intp(1)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.StepPenalty, _, err = f.number("step_penalty", 0, floatp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	seed, present, err := f.integer("seed", 0, nil)
 	if err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if present {
 		s := int64(seed)
@@ -871,46 +960,98 @@ func rConverse(rq *request) (int, any, error) {
 	}
 	speakers, err := f.names("speakers")
 	if err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if len(speakers) > 0 {
 		o.Speakers = speakers
 	}
 	if o.History, err = f.textsOptional("history", "history_text"); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.AvoidRepeats, err = f.flag("avoid_repeats", true); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.AvoidWordRepeats, err = f.flag("avoid_word_repeats", true); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Explore, _, err = f.integer("explore", radixnet.Explore, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Learn, err = f.flag("learn", true); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.Think, err = f.flag("think", true); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
 	if o.ThinkDepth, _, err = f.integer("think_depth", radixnet.ThinkDepth, intp(0)); err != nil {
-		return 0, nil, err
+		return "", o, false, err
 	}
-	guard, err := f.flag("guard", true)
-	if err != nil {
-		return 0, nil, err
+	if guard, err = f.flag("guard", true); err != nil {
+		return "", o, false, err
 	}
-	turns, report, err := rq.svc.Converse(opening, o, guard)
-	if err != nil {
-		return 0, nil, err
-	}
+	return opening, o, guard, nil
+}
+
+// converseDocument is what a conversation is answered with, by both routes.
+func converseDocument(o radixnet.ConverseOptions, turns []*radixnet.Turn, report map[string]any) map[string]any {
 	if turns == nil {
 		turns = []*radixnet.Turn{}
 	}
 	// repeats: the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
-	return 200, map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
-		"count": len(turns), "repeats": radixnet.Repeats(turns), "guard": report}, nil
+	return map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
+		"count": len(turns), "repeats": radixnet.Repeats(turns), "guard": report}
+}
+
+func rConverse(rq *request) (int, any, error) {
+	opening, o, guard, err := converseRequest(rq)
+	if err != nil {
+		return 0, nil, err
+	}
+	provenance, err := optionalFlag(rq.f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	turns, report, err := rq.svc.Converse(opening, o, guard, provenance)
+	if err != nil {
+		return 0, nil, err
+	}
+	return 200, converseDocument(o, turns, report), nil
+}
+
+// rConverseStream is the same conversation streamed as it happens
+// (radixnet.Stream): every event is one JSON line, "turn" events are the
+// answer and the rest is the window a backtrack may still rewrite, and the last
+// line is {"event": "done", ...} carrying the document /api/converse answers
+// with.
+func rConverseStream(rq *request) (int, any, error) {
+	opening, o, guard, err := converseRequest(rq)
+	if err != nil {
+		return 0, nil, err
+	}
+	provenance, err := optionalFlag(rq.f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	return 200, &streamResponse{run: func(write func(any) error) error {
+		// a client that goes away mid-conversation does not stop the conversation, which finishes under the
+		// model lock as it would have; its events are simply not written any more
+		var gone error
+		o.Stream = func(event map[string]any) {
+			if gone == nil {
+				gone = write(event)
+			}
+		}
+		turns, report, err := rq.svc.Converse(opening, o, guard, provenance)
+		if err != nil {
+			return err
+		}
+		if gone != nil {
+			return nil
+		}
+		doc := converseDocument(o, turns, report)
+		doc["event"] = "done"
+		return write(doc)
+	}}, nil
 }
 
 func rThink(rq *request) (int, any, error) {
@@ -1378,11 +1519,24 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) (status int) {
 	if p == "/api" || strings.HasPrefix(p, "/api/") {
 		return h.serveAPI(w, r, strings.TrimRight(p, "/"))
 	}
+	if p == "/v1" || strings.HasPrefix(p, "/v1/") {
+		// today's format: the same table, its errors in the dialect's own envelope
+		return h.serveAPI(w, r, strings.TrimRight(p, "/"))
+	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return h.serveStatic(w, r, p)
 	}
 	w.Header().Set("Allow", "GET, HEAD, OPTIONS")
 	return writeJSON(w, 405, map[string]any{"error": fmt.Sprintf("method %s is not allowed for %s", r.Method, p)}, r.Method)
+}
+
+// errorDoc is an error as the client of path expects it: the API's {"error": "..."},
+// or - under /v1 - the dialect's own envelope (radixnet.ShapeV1Error).
+func errorDoc(p string, status int, message, param string) map[string]any {
+	if p == "/v1" || strings.HasPrefix(p, "/v1/") {
+		return radixnet.ShapeV1Error(radixnet.DialectOf(p), status, message, param)
+	}
+	return map[string]any{"error": message}
 }
 
 func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int {
@@ -1396,7 +1550,7 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 				return writeJSON(w, 404, map[string]any{"error": fmt.Sprintf("%s is not available on the Go server (it serves the count / reward model only); use the Python server for it", p)}, r.Method)
 			}
 		}
-		return writeJSON(w, 404, map[string]any{"error": fmt.Sprintf("unknown API endpoint %s", p)}, r.Method)
+		return writeJSON(w, 404, errorDoc(p, 404, fmt.Sprintf("unknown API endpoint %s", p), ""), r.Method)
 	}
 	lookup := r.Method
 	if lookup == http.MethodHead {
@@ -1411,7 +1565,7 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 		sort.Strings(methods)
 		allow := strings.Join(append(methods, "OPTIONS"), ", ")
 		w.Header().Set("Allow", allow)
-		return writeJSON(w, 405, map[string]any{"error": fmt.Sprintf("method %s is not allowed for %s; use %s", r.Method, p, allow)}, r.Method)
+		return writeJSON(w, 405, errorDoc(p, 405, fmt.Sprintf("method %s is not allowed for %s; use %s", r.Method, p, allow), ""), r.Method)
 	}
 	if lookup == http.MethodPost && p == "/api/uploads" {
 		status, payload, err := h.streamUpload(r)
@@ -1432,11 +1586,11 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 		if len(strings.TrimSpace(string(body))) > 0 {
 			var parsed any
 			if err := json.Unmarshal(body, &parsed); err != nil {
-				return writeJSON(w, 400, map[string]any{"error": "request body is not valid JSON"}, r.Method)
+				return writeJSON(w, 400, errorDoc(p, 400, "request body is not valid JSON", ""), r.Method)
 			}
 			obj, isObj := parsed.(map[string]any)
 			if !isObj {
-				return writeJSON(w, 400, map[string]any{"error": "request body must be a JSON object"}, r.Method)
+				return writeJSON(w, 400, errorDoc(p, 400, "request body must be a JSON object", ""), r.Method)
 			}
 			rq.f = fields{obj}
 		} else {
@@ -1449,30 +1603,93 @@ func (h *Handler) serveAPI(w http.ResponseWriter, r *http.Request, p string) int
 	if err != nil {
 		return h.writeError(w, r, err)
 	}
+	if es, ok := payload.(*eventStream); ok {
+		if r.Method == http.MethodHead {
+			return writeJSON(w, status, nil, r.Method)
+		}
+		return h.writeEvents(w, es)
+	}
+	if streamed, ok := payload.(*streamResponse); ok {
+		return h.writeStream(w, r, streamed)
+	}
 	if payload == nil {
 		return writeJSON(w, status, nil, r.Method)
 	}
 	return writeJSON(w, status, payload, r.Method)
 }
 
-func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) int {
-	var ae *apiError
-	if errors.As(err, &ae) {
-		return writeJSON(w, ae.status, map[string]any{"error": ae.message}, r.Method)
+// writeStream answers with a streamResponse: chunked application/x-ndjson, one
+// event per line, each flushed as it is written.  The headers wait for the
+// first event, so a request refused before anything was streamed still gets
+// its 4xx JSON; a failure after that is the stream's last event.
+func (h *Handler) writeStream(w http.ResponseWriter, r *http.Request, streamed *streamResponse) int {
+	flusher, _ := w.(http.Flusher)
+	started := false
+	head := func() {
+		started = true
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(200)
 	}
-	if os.IsNotExist(err) {
-		return writeJSON(w, 404, map[string]any{"error": err.Error()}, r.Method)
+	write := func(event any) error {
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(event); err != nil {
+			buf.Reset()
+			buf.WriteString(`{"event":"error","error":"event is not serialisable"}` + "\n")
+		}
+		if !started {
+			head()
+		}
+		if _, err := w.Write(buf.Bytes()); err != nil {
+			return err
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
 	}
-	return writeJSON(w, 400, map[string]any{"error": err.Error()}, r.Method)
+	if err := streamed.run(write); err != nil {
+		if !started {
+			return h.writeError(w, r, err)
+		}
+		message := err.Error()
+		var ae *apiError
+		if errors.As(err, &ae) {
+			message = ae.message
+		}
+		_ = write(map[string]any{"event": "error", "error": message})
+	}
+	if !started {
+		head()
+	}
+	return 200
 }
 
-// MaxJSONUploadBytes caps the JSON upload forms (inline content); multipart and
-// raw uploads stream to disk and have no limit.
-const MaxJSONUploadBytes = 512 << 20
+func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) int {
+	p := strings.TrimRight(r.URL.Path, "/")
+	var v1 *v1Error
+	if errors.As(err, &v1) {
+		return writeJSON(w, v1.status, radixnet.ShapeV1Error(v1.dialect, v1.status, v1.message, v1.param), r.Method)
+	}
+	var ae *apiError
+	if errors.As(err, &ae) {
+		return writeJSON(w, ae.status, errorDoc(p, ae.status, ae.message, ""), r.Method)
+	}
+	if os.IsNotExist(err) {
+		return writeJSON(w, 404, errorDoc(p, 404, err.Error(), ""), r.Method)
+	}
+	return writeJSON(w, 400, errorDoc(p, 400, err.Error(), ""), r.Method)
+}
 
 // streamUpload handles POST /api/uploads without buffering: multipart file
 // parts and raw bodies stream straight into the upload directory (an archive
-// of any size), the JSON forms are parsed as before.
+// of any size), the JSON forms are parsed as before.  No form is capped
+// (D-035): a JSON form carries its file inline and so is held in memory
+// while it is parsed, as the Python server holds it, but it is not refused
+// for its size.
 func (h *Handler) streamUpload(r *http.Request) (int, any, error) {
 	if h.svc.uploads == nil {
 		return 0, nil, badRequest("uploads are disabled: start the server with --upload-dir")
@@ -1519,12 +1736,9 @@ func (h *Handler) streamUpload(r *http.Request) (int, any, error) {
 			return 0, nil, badRequest("multipart body contains no file parts (use -F file=@corpus.txt)")
 		}
 	case ct == "application/json" || (ct == "" && len(query["name"]) == 0):
-		body, err := io.ReadAll(io.LimitReader(r.Body, MaxJSONUploadBytes+1))
+		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			return 0, nil, badRequest("could not read the request body")
-		}
-		if len(body) > MaxJSONUploadBytes {
-			return 0, nil, &apiError{413, fmt.Sprintf("JSON upload larger than %d bytes: send the file as multipart/form-data or a raw body, which stream", MaxJSONUploadBytes)}
 		}
 		rq := &request{svc: h.svc, query: query, body: body, header: r.Header}
 		files, err := uploadFiles(rq)

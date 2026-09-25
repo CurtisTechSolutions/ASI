@@ -210,6 +210,12 @@ type Graph struct {
 	// its units - and travels with the model file.
 	Enc Encoding
 
+	// Attention is where inside a gram a correction's blame and credit land
+	// (attention.go): off by default - each changed unit is charged to the
+	// step that wrote it.  Unlike Enc it changes nothing the graph holds, so
+	// it can be switched at any time; it travels with the model file while on.
+	Attention AttentionBand
+
 	Version          Counter
 	StructureVersion Counter
 	nAliveNodes      int

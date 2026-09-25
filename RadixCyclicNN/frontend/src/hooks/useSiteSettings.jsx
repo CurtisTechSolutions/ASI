@@ -15,15 +15,16 @@ import {
 /**
  * The site-wide settings of this browser, in one place: the traversal every
  * search runs (`useNetworkSettings`, as it always was), the sampling filters
- * and the beam's diversity every search starts from, and how every training
- * run walks its texts (../../SPEC-SearchAndTraining.md).
+ * and the beam's diversity every search starts from, how every training run
+ * walks its texts (../../SPEC-SearchAndTraining.md), and whether Predict and
+ * Generate ask the model backwards (section 9 there).
  *
  * They are edited on the Settings tab, and the Predict, Generate and Train
  * tabs show the same controls: one value, several doors into it - every panel
  * stays mounted while hidden, so per-panel state would drift apart within a
  * session. Everything is remembered in this browser (`useStoredState`, under
- * `site.search.*` and `site.train.*`; the traversal keeps its `network.*`
- * names), and nothing here is saved with a model.
+ * `site.search.*`, `site.train.*` and `site.query.backwards`; the traversal
+ * keeps its `network.*` names), and nothing here is saved with a model.
  */
 
 /** A group used outside the provider: the defaults, and nothing to change them with. */
@@ -42,6 +43,7 @@ function fallbackGroup(defaults) {
 const FALLBACK = Object.freeze({
   search: fallbackGroup(SEARCH_DEFAULTS),
   training: fallbackGroup(TRAINING_DEFAULTS),
+  backwards: Object.freeze({ on: false, shared: false, set: () => {} }),
 });
 
 const SiteSettings = createContext(null);
@@ -76,6 +78,7 @@ function SiteSettingsValue({ children }) {
   const [replaySize, setReplaySize] = useStoredState("site.train.replaySize", TRAINING_DEFAULTS.replaySize);
   const [patience, setPatience] = useStoredState("site.train.patience", TRAINING_DEFAULTS.patience);
   const [minDelta, setMinDelta] = useStoredState("site.train.minDelta", TRAINING_DEFAULTS.minDelta);
+  const [queryBackwards, setQueryBackwards] = useStoredState("site.query.backwards", false);
 
   const search = useMemo(
     () =>
@@ -121,7 +124,11 @@ function SiteSettingsValue({ children }) {
       setMinDelta,
     ],
   );
-  const value = useMemo(() => ({ search, training }), [search, training]);
+  const backwards = useMemo(
+    () => ({ on: queryBackwards, shared: true, set: (next) => setQueryBackwards(Boolean(next)) }),
+    [queryBackwards, setQueryBackwards],
+  );
+  const value = useMemo(() => ({ search, training, backwards }), [search, training, backwards]);
   return <SiteSettings.Provider value={value}>{children}</SiteSettings.Provider>;
 }
 
@@ -135,13 +142,17 @@ export function SiteSettingsProvider({ children }) {
 }
 
 /**
- * `{network, search, training}`: the traversal as `useNetworkSettings()` has
- * it, and the search and training groups - each `{values, problems, active,
- * set, reset, body}`, where `search.body(mode)` and `training.body()` are
- * the request fields. The defaults (unchangeable) outside the provider.
+ * `{network, search, training, backwards}`: the traversal as
+ * `useNetworkSettings()` has it, the search and training groups - each
+ * `{values, problems, active, set, reset, body}`, where `search.body(mode)`
+ * and `training.body()` are the request fields - and `backwards`
+ * (`{on, set}`): whether Predict and Generate ask the model backwards, for a
+ * model trained with "Read every text backwards" (`../backwards.js`). That one
+ * is never sent: it turns the query around before it goes and the answer
+ * around when it comes back. The defaults (unchangeable) outside the provider.
  */
 export function useSiteSettings() {
   const network = useNetworkSettings();
   const site = useContext(SiteSettings) || FALLBACK;
-  return { network, search: site.search, training: site.training };
+  return { network, search: site.search, training: site.training, backwards: site.backwards };
 }

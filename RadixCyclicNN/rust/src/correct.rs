@@ -24,13 +24,20 @@
 //! * the judged-path counters follow the rewards: the blamed steps are marked
 //!   incorrect in their context, the taught ones correct.
 //!
-//! The rewards are applied the way Python applies them - the penalty in one
-//! call, then one call per distinct reward amount - so the counts it reports,
-//! and the totals it keeps, come out the same number for number.
+//! With the attention band on ([`crate::attention`]) a step is charged not
+//! for the units it wrote but for the ones its grams see, each by how
+//! centrally: the penalty is `strength * weight * charge`, the fix earns
+//! `strength * reward * (charge + (1 - charge) * keep)`, and the verdicts go
+//! to the steps that saw a change most sharply.  Off, every charge is 1.
+//!
+//! The rewards are applied the way Python applies them - one call per
+//! distinct penalty, then one per distinct reward amount - so the counts it
+//! reports, and the totals it keeps, come out the same number for number.
 //!
 //! Also here: `radixnet correct`, with Python's flags and JSON, and `--blame`
 //! to teach the negative network the same diff.
 
+use crate::attention::ChargedStep;
 use crate::cli::{negative_stats, Args, Ctx};
 use crate::diff::Edit;
 use crate::encoding::Encoding;
@@ -177,21 +184,20 @@ impl Model {
                 self.g.observe(grams, false)?;
             }
         }
-        // the edges the attempt is blamed on, first seen first
-        let mut penalised: Vec<usize> = Vec::new();
-        let mut blamed_steps: Vec<(usize, usize)> = Vec::new();
+        // the edges the attempt is blamed on, first seen first, each with the
+        // largest charge any of its steps took (1 with the attention band off)
+        let mut penalised: Vec<(usize, f64)> = Vec::new();
+        let mut blamed_steps: Vec<ChargedStep> = Vec::new();
         if !wrong_grams.is_empty() && !wrong_spans.is_empty() && base * o.weight > 0.0 {
-            blamed_steps = self.steps_over(&wrong_grams, enc.len(wrong), &wrong_spans);
-            for &(_, edge) in &blamed_steps {
-                if !penalised.contains(&edge) {
-                    penalised.push(edge);
-                }
+            blamed_steps = self.charged_steps(&wrong_grams, enc.len(wrong), &wrong_spans);
+            for step in &blamed_steps {
+                merge_charge(&mut penalised, step);
             }
         }
         // what each edge of the correction is owed, first seen first
         let mut rewards: Vec<(usize, f64)> = Vec::new();
-        let mut fixed: Vec<usize> = Vec::new();
-        let mut taught_steps: Vec<(usize, usize)> = Vec::new();
+        let mut fixed: Vec<(usize, f64)> = Vec::new();
+        let mut taught_steps: Vec<ChargedStep> = Vec::new();
         if !right_grams.is_empty() {
             let transitions = self.g.observe(&right_grams, o.count)?;
             if o.count {
@@ -203,11 +209,20 @@ impl Model {
                 self.g.record_path(&transitions, PathOutcome::Unjudged, false);
             }
             if !right_spans.is_empty() {
-                taught_steps = self.steps_over(&right_grams, enc.len(right), &right_spans);
-                fixed = taught_steps.iter().map(|&(_, edge)| edge).collect();
+                taught_steps = self.charged_steps(&right_grams, enc.len(right), &right_spans);
+                for step in &taught_steps {
+                    merge_charge(&mut fixed, step);
+                }
             }
             for t in &transitions {
-                let share = if fixed.contains(&t.e) { 1.0 } else { o.keep };
+                let charge = fixed.iter().find(|(e, _)| *e == t.e).map_or(0.0, |&(_, c)| c);
+                let share = if charge >= 1.0 {
+                    1.0 // the whole fix
+                } else if charge > 0.0 {
+                    charge + (1.0 - charge) * o.keep // part of the fix, and what the rest keeps
+                } else {
+                    o.keep // the rest of the correction
+                };
                 let amount = base * o.reward * share;
                 if amount > 0.0 {
                     match rewards.iter_mut().find(|(e, _)| *e == t.e) {
@@ -225,12 +240,20 @@ impl Model {
             });
         }
         let owed = |edge: usize| rewards.iter().any(|(e, _)| *e == edge);
-        // the teacher wrote it too: it is not the mistake
-        let blamed: Vec<usize> = penalised.into_iter().filter(|e| !owed(*e)).collect();
-        if !blamed.is_empty() {
-            let penalty = -base * o.weight;
-            out.penalised = self.g.add_reward(&blamed, penalty);
-            out.penalty = -penalty * out.penalised as f64;
+        // the teacher wrote it too: it is not the mistake - and one call per
+        // distinct penalty, first seen first, as Python groups them
+        let mut penalties: Vec<(f64, Vec<usize>)> = Vec::new();
+        for &(edge, charge) in penalised.iter().filter(|(e, _)| !owed(*e)) {
+            let penalty = -base * o.weight * charge;
+            match penalties.iter_mut().find(|(p, _)| *p == penalty) {
+                Some(group) => group.1.push(edge),
+                None => penalties.push((penalty, vec![edge])),
+            }
+        }
+        for (penalty, edges) in penalties {
+            let touched = self.g.add_reward(&edges, penalty);
+            out.penalised += touched;
+            out.penalty += -penalty * touched as f64;
         }
         // one call per distinct amount: the penalty, the fix, and what the rest keeps
         let mut groups: Vec<(f64, Vec<usize>)> = Vec::new();
@@ -242,23 +265,31 @@ impl Model {
         }
         for (amount, edges) in groups {
             let touched = self.g.add_reward(&edges, amount);
-            if edges.iter().all(|e| fixed.contains(e)) {
+            if edges.iter().all(|e| fixed.iter().any(|(f, _)| f == e)) {
                 out.rewarded += touched;
             } else {
                 out.kept += touched;
             }
             out.reward += amount * touched as f64;
         }
-        // the counters follow the reward: what was blamed is a wrong path here, what was taught a right one
+        // the counters follow the reward: what was blamed is a wrong path here, what was taught a right one -
+        // a count, so it goes to the steps that saw the change most sharply (every charged step, band off)
         let still_blamed: Vec<PathKey> = blamed_steps
             .iter()
-            .filter(|(_, edge)| !owed(*edge))
-            .map(|&(prev, edge)| PathKey { prev, edge })
+            .filter(|s| s.focus && !owed(s.edge))
+            .map(|s| PathKey {
+                prev: s.prev,
+                edge: s.edge,
+            })
             .collect();
         out.marked_incorrect = self.g.mark_steps(&still_blamed, false);
         let taught: Vec<PathKey> = taught_steps
             .iter()
-            .map(|&(prev, edge)| PathKey { prev, edge })
+            .filter(|s| s.focus)
+            .map(|s| PathKey {
+                prev: s.prev,
+                edge: s.edge,
+            })
             .collect();
         out.marked_correct = self.g.mark_steps(&taught, true);
         if out.penalised > 0 || out.rewarded > 0 || out.kept > 0 {
@@ -275,6 +306,14 @@ impl Model {
             out.kept
         );
         Ok(out)
+    }
+}
+
+/// Keeps the largest charge a step of `edge` took, the edge first seen first.
+fn merge_charge(charges: &mut Vec<(usize, f64)>, step: &ChargedStep) {
+    match charges.iter_mut().find(|(e, _)| *e == step.edge) {
+        Some(slot) => slot.1 = slot.1.max(step.charge),
+        None => charges.push((step.edge, step.charge)),
     }
 }
 

@@ -162,6 +162,29 @@ class TestServiceGuard(unittest.TestCase):
         self.assertFalse(set(kept) & {v["text"] for v in report["rejected"]})
         self.assertEqual(report["negative"]["kind"], "negative")
 
+    def test_the_report_can_leave_the_provenance_out(self):
+        svc = service()
+        svc.negative_model().blame([FAILURE], reason="gibberish")
+        report = svc.generate(count=3, mode="sample", seed=1, max_length=40, provenance=False)["guard"]
+        self.assertTrue(report["on"])
+        self.assertFalse(report["provenance"])
+        self.assertEqual(report["judged"], report["candidates"])
+        self.assertNotIn("verdicts", report)  # the counts alone: how many judged, how many vetoed
+        self.assertNotIn("rejected", report)
+        self.assertFalse(report["config"]["provenance"])
+        self.assertEqual(report["asked"], 9)
+        report = svc.predict("the ", length=6, mode="beam", k=3, provenance=False)["guard"]
+        self.assertEqual(set(report) - {"kept", "candidates"}, {"on", "provenance", "judged", "vetoed", "negative", "config"})
+        report = svc.converse(FAILURE, turns=2, provenance=False)["guard"]
+        self.assertNotIn("verdicts", report)
+        self.assertIn("refusals", report)
+        # the server-wide setting, and this answer's own choice over it
+        svc.negative_settings(provenance=False)
+        self.assertFalse(svc.negative_settings()["settings"]["provenance"])
+        self.assertNotIn("verdicts", svc.generate(count=2, mode="sample", seed=1)["guard"])
+        self.assertIn("verdicts", svc.generate(count=2, mode="sample", seed=1, provenance=True)["guard"])
+        self.assertFalse(svc.guard_config.provenance)  # the override never sticks
+
     def test_generate_drops_every_candidate_the_tutor_has_failed(self):
         svc = service()
         svc.negative_model().blame(CORPUS, reason="gibberish")
@@ -266,6 +289,31 @@ class TestGuardApi(unittest.TestCase):
         self.assertEqual(status, 200, data)
         self.assertIsNone(data["guard"])
 
+    def test_provenance_can_be_left_out_per_request_or_for_the_server(self):
+        self.blame()
+        status, data, _ = self.client.post("/api/generate", {"count": 3, "mode": "sample", "seed": 1, "provenance": False})
+        self.assertEqual(status, 200, data)
+        self.assertTrue(data["guard"]["on"])
+        self.assertFalse(data["guard"]["provenance"])
+        self.assertNotIn("verdicts", data["guard"])
+        self.assertNotIn("rejected", data["guard"])
+        self.assertIn("judged", data["guard"])
+        status, data, _ = self.client.post("/api/negative/settings", {"provenance": False})
+        self.assertEqual(status, 200, data)
+        self.assertFalse(data["settings"]["provenance"])
+        status, data, _ = self.client.get("/api/negative")
+        self.assertFalse(data["settings"]["provenance"])
+        status, data, _ = self.client.post("/api/predict", {"prefix": "the ", "mode": "beam", "k": 4})
+        self.assertNotIn("verdicts", data["guard"])
+        status, data, _ = self.client.post("/api/converse", {"opening": FAILURE, "turns": 2, "provenance": True})
+        self.assertIn("verdicts", data["guard"])  # this answer asked for it
+        status, data, _ = self.client.post("/api/negative/filter", {"texts": [FAILURE, "something else"],
+                                                                     "provenance": False})
+        self.assertEqual(status, 200, data)
+        self.assertEqual([set(v) for v in data["verdicts"]], [{"text", "decision", "rule"}] * 2)
+        self.assertEqual(data["rejected"][0]["text"], FAILURE)
+        self.client.post("/api/negative/settings", {"provenance": True})
+
     def test_predict_and_converse_report_the_guard(self):
         self.blame()
         status, data, _ = self.client.post("/api/predict", {"prefix": "the ", "mode": "beam", "k": 4})
@@ -324,6 +372,25 @@ class TestGuardCli(unittest.TestCase):
 
         doc = self.run_json("generate", "--count", 3, "--mode", "sample", "--seed", 3, "--no-guard")
         self.assertIsNone(doc["guard"])
+
+    def test_no_provenance_keeps_the_veto_and_drops_the_why(self):
+        blamed = "the quick brown fox"
+        self.run_json("negative", "blame", "--text", blamed, "--reason", "gibberish")
+        doc = self.run_json("generate", "--count", 3, "--mode", "sample", "--seed", 3, "--max-length", 40,
+                            "--no-provenance")
+        self.assertTrue(doc["guard"]["on"])
+        self.assertFalse(doc["guard"]["provenance"])
+        self.assertEqual(doc["guard"]["judged"], doc["guard"]["candidates"])
+        self.assertNotIn("verdicts", doc["guard"])
+        self.assertNotIn(blamed, [s["text"] for s in doc["samples"]])  # still vetoed
+        doc = self.run_json("predict", "--prefix", "the ", "--mode", "beam", "--k", 4, "--no-provenance")
+        self.assertNotIn("verdicts", doc["guard"])
+        self.assertEqual(len(doc["top"]), doc["guard"]["kept"])
+        doc = self.run_json("converse", "--turns", 2, "--opening", blamed, "--no-provenance")
+        self.assertNotIn("rejected", doc["guard"])
+        doc = self.run_json("negative", "filter", "--text", blamed, "--text", "a fine sentence", "--no-provenance")
+        self.assertEqual([set(v) for v in doc["verdicts"]], [{"text", "decision", "rule"}] * 2)
+        self.assertFalse(doc["pair"]["config"]["provenance"])
 
     def test_the_guard_takes_its_thresholds_from_the_command_line(self):
         self.run_json("negative", "blame", "--text", "the quick brown fox", "--reason", "gibberish")

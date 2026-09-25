@@ -54,6 +54,11 @@ type Plan struct {
 	ReplaySize *int
 	Patience   int
 	MinDelta   float64
+	// Reverse reads every text backwards, in the encoding's units
+	// (Encoding.Reverse, the spec's §9), before anything else sees it - so the
+	// order, the buffer and the counters all see the reversed texts.  It is
+	// applied as the texts stream in: it needs no list and changes no pass.
+	Reverse bool
 }
 
 func (p Plan) order() string {
@@ -107,6 +112,41 @@ func (p Plan) Check() error {
 		return fmt.Errorf("min_delta must be a finite number >= 0, got %v", p.MinDelta)
 	}
 	return nil
+}
+
+// ReversedSource streams the texts of src read backwards in enc's units
+// (Encoding.Reverse): one text at a time, so a corpus of any size still never
+// has to fit in memory, and the parts of a PartSource stay parts - every
+// archive entry or file can still stream on its own goroutine.
+func ReversedSource(src TextSource, enc Encoding) TextSource {
+	return reversedSource{src: src, enc: enc}
+}
+
+type reversedSource struct {
+	src TextSource
+	enc Encoding
+}
+
+func (r reversedSource) Each(fn func(string) error) error {
+	return r.src.Each(func(t string) error { return fn(r.enc.Reverse(t)) })
+}
+
+func (r reversedSource) OpenParts() (Parts, error) {
+	parts, err := openParts(r.src)
+	if err != nil {
+		return nil, err
+	}
+	return reversedParts{Parts: parts, enc: r.enc}, nil
+}
+
+// reversedParts is an open reversed source: its parts, every text reversed.
+type reversedParts struct {
+	Parts
+	enc Encoding
+}
+
+func (p reversedParts) Each(part int, fn func(string) error) error {
+	return p.Parts.Each(part, func(t string) error { return fn(p.enc.Reverse(t)) })
 }
 
 // Paced is how many of the list epoch j (from 0) of epochs walks: the first
