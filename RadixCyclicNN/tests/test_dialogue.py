@@ -20,9 +20,10 @@ from radixnet.dialogue import (  # noqa: E402
     teach_back,
     transcript,
 )
-from radixnet.graph import BACK, FIRST  # noqa: E402
+from radixnet.graph import BACK, FIRST, THINK  # noqa: E402
 from radixnet.model import new_model  # noqa: E402
 from radixnet.search import onward  # noqa: E402
+from radixnet.thinking import THEN_BACK, think_on  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(ROOT, "data", "sample_corpus.txt"), encoding="utf-8") as fh:
@@ -244,6 +245,67 @@ class TestLearnsWhereItGoesRound(unittest.TestCase):
         model = self.model()
         self.assertEqual(teach_back(model, "zzz zzz", 4, None), -1)
         self.assertEqual(model.graph.parents[BACK], {})
+
+
+class TestThinksBeforeBackingUp(unittest.TestCase):
+    """Catching itself repeating is an event the voice thinks about; when the thought stops it hands over to BACK."""
+
+    def model(self):
+        model = new_model("radix", seed=3)
+        model.train(["ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"], epochs=3, **FAST)
+        return model
+
+    def test_the_rethink_carries_the_thought_and_the_thought_teaches_back(self):
+        model = self.model()
+        graph = model.graph
+        found, rethought = backtrack(model, "ha ha ha", k=3)
+        self.assertIsNotNone(rethought.thought)
+        thought = rethought.thought
+        self.assertEqual(thought.trigger, rethought.kind)
+        self.assertEqual(thought.then, THEN_BACK)
+        self.assertEqual(thought.at, rethought.taught)
+        self.assertEqual(thought.handed_over, rethought.taught)
+        self.assertEqual(thought.taught, rethought.taught)  # the event taught it to stop and think here too
+        self.assertIn(THINK, graph.children[rethought.taught])
+        self.assertIn(BACK, graph.children[rethought.taught])
+        self.assertEqual(thought.text, "")  # nothing to think with yet
+        self.assertEqual(rethought.to_dict()["thought"]["then"], THEN_BACK)
+
+    def test_a_model_with_thoughts_thinks_them(self):
+        model = self.model()
+        think_on(model, ["is it going round? maybe."], epochs=3, **FAST)
+        found, rethought = backtrack(model, "ha ha ha", k=3)
+        self.assertIsNotNone(rethought.thought)
+        self.assertNotEqual(rethought.thought.text, "")
+        self.assertEqual(rethought.thought.node_ids[0], THINK)
+
+    def test_thinking_off_teaches_back_directly(self):
+        model = self.model()
+        found, rethought = backtrack(model, "ha ha ha", k=3, think=False)
+        self.assertIsNone(rethought.thought)
+        self.assertGreaterEqual(rethought.taught, FIRST)
+        self.assertIn(BACK, model.graph.children[rethought.taught])
+        self.assertEqual(model.graph.parents[THINK], {})
+
+    def test_learning_off_still_thinks_but_writes_nothing(self):
+        model = self.model()
+        found, rethought = backtrack(model, "ha ha ha", k=3, learn=False)
+        self.assertIsNotNone(rethought.thought)
+        self.assertEqual(rethought.taught, -1)
+        self.assertEqual((rethought.thought.taught, rethought.thought.handed_over), (-1, -1))
+        self.assertEqual(model.graph.parents[BACK], {})
+        self.assertEqual(model.graph.parents[THINK], {})
+
+    def test_a_conversation_thinks_and_learns_where(self):
+        model = self.model()
+        turns = converse(model, turns=6)
+        thoughts = [t.rethink.thought for t in turns if t.rethink is not None and t.rethink.thought is not None]
+        self.assertTrue(thoughts)
+        self.assertTrue(all(th.then == THEN_BACK for th in thoughts))
+        self.assertGreater(len(model.graph.parents[THINK]), 0)
+        quiet = converse(self.model(), turns=6, think=False)
+        self.assertTrue(all(t.rethink.thought is None for t in quiet if t.rethink is not None))
+        self.assertEqual([t.text for t in quiet], [t.text for t in turns])  # thinking changes no reply, only the model
 
 
 class TestHeard(unittest.TestCase):

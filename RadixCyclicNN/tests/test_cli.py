@@ -311,7 +311,7 @@ class TestInference(unittest.TestCase):
         rethinks = [t["rethink"] for t in thought["turns"] if t["rethink"]]
         self.assertTrue(rethinks, thought["transcript"])
         for record in rethinks:
-            self.assertEqual(set(record), {"kind", "noticed", "cut", "steps", "explored", "found", "taught"})
+            self.assertEqual(set(record), {"kind", "noticed", "cut", "steps", "explored", "found", "taught", "thought"})
             self.assertTrue(record["noticed"])
         plain = run_json("converse", "--turns", 4, "--explore", 0, model=ways)
         self.assertFalse([t for t in plain["turns"] if t["rethink"]])

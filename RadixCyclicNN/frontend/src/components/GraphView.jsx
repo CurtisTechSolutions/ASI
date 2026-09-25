@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { isSentinel } from "../thinking.js";
 import { asArray, counterTotal, fmtCounter, fmtInt, fmtNum, parseInteger, showWhitespace } from "../util.js";
 import Alert from "./Alert.jsx";
 import { NumberField } from "./Fields.jsx";
@@ -11,8 +12,6 @@ const MIN_NODE_RADIUS = 4;
 const MAX_NODE_RADIUS = 18;
 const LABEL_LIMIT = 80;
 const LABEL_CHARS = 14;
-const START_ID = 0;
-const END_ID = 1;
 const DEFAULT_LIMIT = 150;
 const EMPTY_SET = new Set();
 
@@ -252,7 +251,7 @@ export default function GraphView() {
       <Alert message={error} onDismiss={() => setError(null)} />
       <p className="muted">
         {fmtInt(nodeList.length)} nodes, {fmtInt(edges.length)} edges shown · node radius ∝ visit count · edge opacity ∝
-        transition probability · red edges carry negative weights · gold nodes are START / END · hover a node for its
+        transition probability · red edges carry negative weights · gold nodes are the sentinels (START, END, and BACK / THINK once visited) · hover a node for its
         activation parameters, click it for what it looks like from where it stands.
       </p>
       <div className="graph-wrap" ref={wrapRef}>
@@ -324,7 +323,8 @@ export default function GraphView() {
           <g>
             {nodeList.map((p) => {
               const id = p.node.id;
-              const sentinel = id === START_ID || id === END_ID;
+              // START and END always, BACK and THINK once they are among the most visited
+              const sentinel = isSentinel(id);
               const hovered = hoverId === id;
               const dimmed = hoverId !== null && !hovered && !neighbours.has(id);
               const showLabel = sentinel || hovered || nodeList.length <= LABEL_LIMIT;

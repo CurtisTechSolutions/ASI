@@ -123,6 +123,11 @@ export const api = {
   generate: (body) => post("/api/generate", body),
   /** The model converses with itself (or with the other kind in memory): turns of a dialogue. */
   converse: (body) => post("/api/converse", body),
+  /**
+   * The model thinks (see ThinkPanel): one thought from the THINK sentinel, questioning itself where it has
+   * learned to. Body: about, mode, k, beam, max_length, temperature, step_penalty, seed, depth, questions, learn.
+   */
+  think: (body) => post("/api/think", body),
   score: (body) => post("/api/score", body),
   twoNrl: (body) => post("/api/2nrl", body),
   /** Rated texts -> 2NRL (both kinds), reward (thumbs up only) or punish (thumbs down only). */
@@ -189,6 +194,12 @@ export const api = {
   ollamaReview: (body) => post("/api/ollama/review", body),
   /** Letter-level corrections of the model's samples or `texts`; `blame` teaches the negative network the diff. */
   ollamaCorrect: (body) => post("/api/ollama/correct", body),
+  /**
+   * A thinking model thinks about a prompt: questions, the thinking behind each answer, and - with `train` -
+   * a job teaching that thinking to the network as thoughts. Body: prompt, lines, think, temperature, url,
+   * model, save_as, train, with_answers, questions, epochs, lr, batch_size.
+   */
+  ollamaThink: (body) => post("/api/ollama/think", body),
   /** Images as text (see ImagesPanel): the Stable Diffusion VAE run backwards, quantised and base64-encoded. */
   images: () => get("/api/images"),
   imageEncode: (file, { size, encoder, train, saveAs } = {}) => {

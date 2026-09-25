@@ -37,6 +37,9 @@ pub const START_LABEL: &str = "<s>";
 pub const END_LABEL: &str = "</s>";
 /// The third sentinel: where the graph has learned a walk goes round.
 pub const BACK_LABEL: &str = "<back>";
+/// The fourth sentinel: where the graph has learned to stop and think, and
+/// where its thoughts begin.
+pub const THINK_LABEL: &str = "<think>";
 
 /// What one position of a text is.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]

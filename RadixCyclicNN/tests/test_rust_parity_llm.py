@@ -548,6 +548,35 @@ class TestRustLLMServer(unittest.TestCase):
         self.assertEqual((s1, s2), (502, 502))
         self.assertEqual(a["error"], b["error"])
 
+    def test_thinking_answers_alike(self):
+        # missing asks the model to think; null and "default" leave it to the model; a level is a level; false is off
+        for extra in ({}, {"think": None}, {"think": "default"}, {"think": "high"}, {"think": False}):
+            with self.subTest(think=extra):
+                body = {"prompt": "the sea", "lines": 2, **extra}
+                (s1, a), (s2, b), py_seen, rs_seen = self.both("POST", "/api/ollama/think", body)
+                self.assertEqual((s1, s2), (200, 200), b)
+                self.assertEqual(a, b)
+                self.assertEqual(py_seen, rs_seen)
+        for body, status, words in (
+            ({"lines": 3}, 400, "prompt"),
+            ({"prompt": "x", "think": "loud"}, 400, "think"),
+            ({"prompt": "x", "lines": 0}, 400, "lines"),
+        ):
+            with self.subTest(body=body):
+                (s1, a), (s2, b), _, _ = self.both("POST", "/api/ollama/think", body)
+                self.assertEqual((s1, s2), (status, status), (a, b))
+                self.assertIn(words, b["error"])
+
+    def test_a_thought_answers_alike(self):
+        self.sync()
+        for body in ({"learn": False}, {"about": "the cat", "learn": False, "depth": 0}):
+            with self.subTest(body=body):
+                (s1, a), (s2, b), _, _ = self.both("POST", "/api/think", body)
+                self.assertEqual((s1, s2), (200, 200), b)
+                self.assertEqual(a, b)
+        (s1, a), (s2, b), _, _ = self.both("POST", "/api/think", {"mode": "walk"})
+        self.assertEqual((s1, s2), (400, 400), (a, b))
+
     def test_a_review_answers_alike(self):
         body = {"texts": ["a good one", "zzz nonsense", "a good two"], "threshold": 6, "context": "plain"}
         (s1, a), (s2, b), py_seen, rs_seen = self.both("POST", "/api/ollama/review", body)

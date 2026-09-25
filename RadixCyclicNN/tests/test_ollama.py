@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import RadixNet, ollama  # noqa: E402
+from radixnet.graph import THINK  # noqa: E402
 from radixnet.ollama import (  # noqa: E402
     OllamaClient,
     OllamaError,
@@ -35,6 +36,9 @@ from radixnet.ollama import (  # noqa: E402
     normalise_url,
     parse_lines,
     review_texts,
+    split_thinking,
+    think_value,
+    thoughts_from_prompt,
 )
 
 try:  # ``python -m unittest discover -s tests`` imports test modules as top-level modules
@@ -95,11 +99,24 @@ class _FakeHandler(BaseHTTPRequestHandler):
             self._raw(200, self.server.raw_response)
             return
         if self.path == "/api/generate":
-            self._json(200, {"model": body.get("model"), "response": self._generate(body), "done": True})
+            reply = {"model": body.get("model"), "response": self._generate(body), "done": True}
+            if body.get("think") and self.server.thinking == "field":
+                reply["thinking"] = self._thinking(body)
+            elif body.get("think") and self.server.thinking == "inline":
+                reply["response"] = f"<think>{self._thinking(body)}</think>\n" + reply["response"]
+            self._json(200, reply)
         elif self.path == "/api/chat":
-            self._json(200, {"model": body.get("model"), "message": {"role": "assistant", "content": "chat reply"}})
+            message = {"role": "assistant", "content": "chat reply"}
+            if body.get("think") and self.server.thinking == "field":
+                message["thinking"] = "a thought about the chat"
+            self._json(200, {"model": body.get("model"), "message": message})
         else:
             self._json(404, {"error": "not found"})
+
+    @staticmethod
+    def _thinking(body):
+        prompt = body.get("prompt", "")
+        return f"Let me think about {prompt} Is that right? Yes, it is."
 
     def _generate(self, body):
         prompt = body.get("prompt", "")
@@ -116,6 +133,14 @@ class _FakeHandler(BaseHTTPRequestHandler):
                     corrections.append({"index": index, "correction": corrected, "reason": reason,
                                         "note": "nothing" if reason == "none" else f"{reason} fixed"})
             return json.dumps({"corrections": corrections})
+        if "one short, concrete question per line" in system:  # questions to think about
+            match = re.search(r"exactly (\d+) lines", system)
+            count = int(match.group(1)) if match else 3
+            match = re.search(r"instructions: (.*)", prompt)
+            topic = match.group(1).strip() if match else "unknown"
+            return "\n".join(f"{i + 1}. question {i + 1} about {topic}?" for i in range(count))
+        if system.startswith("Think the question through") or body.get("think"):
+            return f"The answer to {prompt}"
         if body.get("format") == "json":  # a review request
             if self.server.review_response is not None:
                 return self.server.review_response
@@ -171,6 +196,7 @@ class FakeOllama(ThreadingHTTPServer):
         self.raw_response = None
         self.review_response = None
         self.correction_response = None
+        self.thinking = "field"  # how a thinking request is answered: "field", "inline" or "none"
 
     @property
     def url(self):
@@ -244,6 +270,63 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.fake.requests[-1][2]["format"], "json")
         self.assertEqual(client.chat([{"role": "user", "content": "hi"}]), "chat reply")
         self.assertEqual(self.fake.requests[-1][1], "/api/chat")
+
+    def test_thinking_comes_back_beside_the_answer(self):
+        client = OllamaClient(self.fake.url, "fake:latest")
+        got = client.complete("why is the sky blue?", think=True)
+        self.assertEqual(got["response"], "The answer to why is the sky blue?")
+        self.assertEqual(got["thinking"], "Let me think about why is the sky blue? Is that right? Yes, it is.")
+        self.assertIs(self.fake.requests[-1][2]["think"], True)
+        # a level goes out as Ollama takes it, and off goes out as false
+        client.complete("x", think="high")
+        self.assertEqual(self.fake.requests[-1][2]["think"], "high")
+        client.generate("x", think=False)
+        self.assertIs(self.fake.requests[-1][2]["think"], False)
+        client.generate("x")
+        self.assertNotIn("think", self.fake.requests[-1][2])
+        # a model that writes its thinking inline is read the same way
+        self.fake.thinking = "inline"
+        got = client.complete("why?", think=True)
+        self.assertEqual(got["thinking"], "Let me think about why? Is that right? Yes, it is.")
+        self.assertEqual(got["response"], "The answer to why?")
+        # and one that does not think at all thinks nothing
+        self.fake.thinking = "none"
+        got = client.complete("why?", think=True)
+        self.assertEqual((got["thinking"], got["response"]), ("", "The answer to why?"))
+        message = client.chat_message([{"role": "user", "content": "hi"}], think=True)
+        self.assertEqual(message["content"], "chat reply")
+        self.assertIs(self.fake.requests[-1][2]["think"], True)
+
+    def test_think_values_and_inline_thinking(self):
+        self.assertIsNone(think_value(None))
+        self.assertIsNone(think_value("default"))
+        self.assertIs(think_value(True), True)
+        self.assertIs(think_value("on"), True)
+        self.assertIs(think_value("false"), False)
+        self.assertEqual(think_value(" High "), "high")
+        with self.assertRaises(ValueError):
+            think_value("loud")
+        self.assertEqual(split_thinking("<think>hmm</think> the answer"), ("hmm", "the answer"))
+        self.assertEqual(split_thinking("before <THINKING>\nhmm\n</THINKING> after"), ("hmm", "before  after".replace("  ", " ") if False else "before  after"))
+        self.assertEqual(split_thinking("<think>open ended"), ("open ended", ""))
+        self.assertEqual(split_thinking("no tags"), ("", "no tags"))
+        self.assertEqual(split_thinking(""), ("", ""))
+
+    def test_thoughts_from_prompt(self):
+        client = OllamaClient(self.fake.url, "fake:latest")
+        thoughts = thoughts_from_prompt(client, "the sea", lines=3)
+        self.assertEqual([t["question"] for t in thoughts], [f"question {i} about the sea?" for i in (1, 2, 3)])
+        self.assertEqual(thoughts[0]["thinking"], "Let me think about question 1 about the sea? Is that right? Yes, it is.")
+        self.assertEqual(thoughts[0]["answer"], "The answer to question 1 about the sea?")
+        asked = [r for r in self.fake.requests if r[1] == "/api/generate"]
+        self.assertEqual(len(asked), 4)  # the questions, then one thought each
+        self.assertNotIn("think", asked[0][2])
+        self.assertTrue(all(r[2]["think"] is True for r in asked[1:]))
+        self.fake.thinking = "none"
+        thoughts = thoughts_from_prompt(client, "the sea", lines=2, think="low")
+        self.assertEqual([t["thinking"] for t in thoughts], ["", ""])
+        with self.assertRaises(ValueError):
+            thoughts_from_prompt(client, "", lines=2)
 
     def test_errors_are_ollama_errors(self):
         client = OllamaClient(self.fake.url, "fake:latest")
@@ -538,6 +621,70 @@ class ApiTests(unittest.TestCase):
         status, stats, _ = self.client.get("/api/status")
         self.assertEqual(stats["trained_texts"], 4)
 
+    def test_think(self):
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "the sea", "lines": 2})
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["count"], data["thinking"], data["think"], data["job"], data["upload"]), (2, 2, True, None, None))
+        self.assertEqual(data["thoughts"][1]["question"], "question 2 about the sea?")
+        self.assertTrue(data["thoughts"][1]["thinking"].startswith("Let me think about"))
+
+        body = {"prompt": "the sea", "lines": 3, "train": True, "think": "high", "save_as": "sea-thoughts.txt", **FAST}
+        status, data, _ = self.client.post("/api/ollama/think", body)
+        self.assertEqual(status, 202, data)
+        self.assertEqual(data["think"], "high")
+        self.assertEqual(data["job"]["type"], "train")
+        self.assertEqual(data["upload"]["name"], "sea-thoughts.txt")
+        self.assertEqual(data["upload"]["lines"], 3)
+        self.assertEqual(wait_job(self.client)["state"], "done")
+        graph = self.service.model.graph
+        self.assertGreater(len(graph.children[THINK]), 0)  # it has thoughts now
+        self.assertGreater(len(graph.parents[THINK]), 0)  # and knows where a thought questions itself
+        status, thought, _ = self.client.post("/api/think", {"learn": False})
+        self.assertEqual(status, 200, thought)
+        self.assertNotEqual(thought["text"], "")
+        # the thoughts are thoughts, not texts: nothing from START begins with them
+        status, samples, _ = self.client.post("/api/generate", {"count": 3, "mode": "beam", "guard": False})
+        self.assertEqual(status, 200, samples)
+        self.assertTrue(all(not s["text"].lower().startswith("let me think") for s in samples["samples"]))
+
+        body = {"prompt": "the sea", "lines": 1, "train": True, "with_answers": True, **FAST}
+        status, data, _ = self.client.post("/api/ollama/think", body)
+        self.assertEqual(status, 202, data)
+        self.assertEqual(wait_job(self.client)["state"], "done")
+        status, stats, _ = self.client.get("/api/status")
+        # 3 thoughts + their 6 questions, then 1 thought + its 2 questions + 1 answer
+        self.assertEqual(stats["trained_texts"], 3 + 6 + 1 + 2 + 1)
+
+    def test_think_errors(self):
+        status, data, _ = self.client.post("/api/ollama/think", {"lines": 3})
+        self.assertEqual(status, 400, data)
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x", "think": "loud"})
+        self.assertEqual(status, 400, data)
+        self.fake.thinking = "none"
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x", "lines": 1})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["thinking"], 0)
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x", "lines": 1, "train": True})
+        self.assertEqual(status, 502, data)
+        self.assertIn("no thinking", data["error"])
+        self.fake.thinking = "field"
+        self.fake.fail_with = 500
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x"})
+        self.assertEqual(status, 502, data)
+
+    def test_null_asks_for_thinking_and_default_leaves_it_to_the_model(self):
+        # a null field is a missing one, so null asks the model to think as leaving it out does; "default" leaves
+        # the choice to the model: no think field goes out with the answers, and none comes back
+        for value, sent in ((None, True), ("default", None)):
+            with self.subTest(think=value):
+                self.fake.requests.clear()
+                status, data, _ = self.client.post("/api/ollama/think", {"prompt": "the sea", "lines": 1, "think": value})
+                self.assertEqual(status, 200, data)
+                self.assertEqual(data["think"], sent)
+                answers = [body for _method, path, body in self.fake.requests if path == "/api/generate"][1:]
+                self.assertTrue(answers)
+                self.assertTrue(all(body.get("think") == sent for body in answers), answers)
+
     def test_corpus_errors(self):
         status, data, _ = self.client.post("/api/ollama/corpus", {"lines": 3})
         self.assertEqual(status, 400, data)
@@ -696,6 +843,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doc["trained"]["stats"]["trained_texts"], 4)
         self.assertEqual(len(doc["trained"]["epochs"]), 2)
         self.assertTrue(os.path.isfile(self.model))
+
+    def test_think_out_and_train(self):
+        out = os.path.join(self.dir, "thoughts.txt")
+        doc = self.run_cli("ollama", "think", "--prompt", "mountains", "--lines", "2", "--out", out)
+        self.assertEqual((doc["count"], doc["thinking"], doc["think"], doc["trained"]), (2, 2, True, None))
+        with open(out, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().splitlines(), [t["thinking"] for t in doc["thoughts"]])
+        doc = self.run_cli("ollama", "think", "--prompt", "mountains", "--lines", "2", "--train", "--epochs", "2",
+                           "--think", "medium")
+        self.assertEqual(doc["think"], "medium")
+        # every fake thought asks two questions, and the second of them follows a sentence the graph can place
+        self.assertEqual((doc["trained"]["thoughts"], doc["trained"]["questions"]), (2, 4))
+        self.assertEqual(doc["trained"]["taught"], 2)
+        self.assertTrue(os.path.isfile(self.model))
+        thought = self.run_cli("think", "--no-learn")
+        self.assertNotEqual(thought["text"], "")
+        self.assertEqual(thought["node_ids"][0], THINK)
+        self.run_cli("ollama", "think", "--prompt", "mountains", "--think", "loud", expect=1)
 
     def test_review_and_two_nrl(self):
         doc = self.run_cli("ollama", "review", "--text", "a good line", "--text", "zzz", "--threshold", "6")
