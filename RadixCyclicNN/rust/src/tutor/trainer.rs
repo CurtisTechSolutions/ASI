@@ -51,8 +51,9 @@ use crate::json::Json;
 use crate::kinds;
 use crate::llm::{normalise_provider, LlmClient, DEFAULT_PROVIDER, PROVIDERS};
 use crate::model::{EpochRecord, Model, PredictOptions};
+use crate::ollama::think_value;
 use crate::plan::{count_of, mark_of, plan_lessons, LessonPlan, PlanRequest, DEFAULT_PLAN_LESSONS};
-use crate::radix::Feedback;
+use crate::radix::{Feedback, TrainConfig};
 use crate::review::ReviewError;
 use crate::service::Service;
 
@@ -101,6 +102,16 @@ pub struct TutorConfig {
     pub threshold: f64,
     pub grammar_weight: f64,
     pub batch: usize,
+    /// The thinking level asked of the marker (a thinking Ollama model):
+    /// `None` asks for it only when `learn_thinking` teaches it (then on),
+    /// else `true` / `false` / `low` | `medium` | `high`, or `default` for the
+    /// model's own choice.
+    pub think: Option<Json>,
+    /// Teach the network the marker's thinking as thoughts that begin at the
+    /// THINK sentinel ([`crate::thinking::think_on`]).
+    pub learn_thinking: bool,
+    /// ... and every question in it as a place where the network stops to think.
+    pub think_questions: bool,
     /// Drill the previous round's weakest points.
     pub adapt: bool,
     /// Extra correct example sentences per round.
@@ -170,6 +181,9 @@ impl Default for TutorConfig {
             threshold: 6.0,
             grammar_weight: 0.6,
             batch: 10,
+            think: None,
+            learn_thinking: false,
+            think_questions: true,
             adapt: true,
             drills: 0,
             variants: super::DEFAULT_VARIANTS,
@@ -192,6 +206,19 @@ impl Default for TutorConfig {
             replay_limit: 64,
             checkpoint_every: 0,
         }
+    }
+}
+
+/// The level a `think` setting asks for: `None` for the model's own choice, a
+/// bool or a level - Python's `think_value`, which reads a number by its text
+/// and refuses anything else.
+fn think_level(value: &Json) -> Result<Option<Json>, String> {
+    match value {
+        Json::Null => Ok(None),
+        Json::Bool(b) => Ok(Some(Json::Bool(*b))),
+        Json::Str(s) => think_value(s),
+        Json::Int(n) => think_value(&n.to_string()),
+        other => think_value(&crate::llm::fields::py_repr_of(other)),
     }
 }
 
@@ -234,6 +261,15 @@ impl TutorConfig {
         default_tutor_model(&self.grader_provider)
     }
 
+    /// What the marking asks the teacher for: `think` as given, else - when
+    /// its thinking is taught - on (`None` sends nothing).
+    pub fn resolved_think(&self) -> Option<Json> {
+        match &self.think {
+            None | Some(Json::Null) => self.learn_thinking.then_some(Json::Bool(true)),
+            Some(value) => think_level(value).ok().flatten(),
+        }
+    }
+
     /// Refuses settings the loop cannot run with - Python's messages, in
     /// Python's order.
     pub fn validate(&self) -> Result<(), String> {
@@ -245,6 +281,7 @@ impl TutorConfig {
             ));
         }
         let unit = |x: f64| (0.0..=1.0).contains(&x);
+        let think = self.think.as_ref().and_then(|value| think_level(value).err());
         // every rule with its refusal; the first that fails is the one reported
         let checks: Vec<(bool, String)> = vec![
             (self.topic.trim().is_empty(), "topic must be a non-empty string".into()),
@@ -273,6 +310,7 @@ impl TutorConfig {
             (!unit(self.min_weight), "min_weight must lie in [0, 1]".into()),
             (!unit(self.keep_weight), "keep_weight must lie in [0, 1]".into()),
             (self.batch < 1, "batch must be >= 1".into()),
+            (think.is_some(), think.clone().unwrap_or_default()),
             (
                 self.variants > MAX_VARIANTS,
                 format!("variants must lie in [0, {MAX_VARIANTS}]"),
@@ -324,6 +362,9 @@ impl TutorConfig {
             ("threshold", Json::Num(self.threshold)),
             ("grammar_weight", Json::Num(self.grammar_weight)),
             ("batch", int(self.batch)),
+            ("think", self.think.clone().unwrap_or(Json::Null)),
+            ("learn_thinking", Json::Bool(self.learn_thinking)),
+            ("think_questions", Json::Bool(self.think_questions)),
             ("adapt", Json::Bool(self.adapt)),
             ("drills", int(self.drills)),
             ("variants", int(self.variants)),
@@ -735,8 +776,9 @@ impl<'a> TutorTrainer<'a> {
         Ok(lesson)
     }
 
-    /// Step 3: the marker marks the completions (one call per `batch`).
-    pub fn grade(&self, lessons: &mut [Lesson]) -> Result<(), ReviewError> {
+    /// Step 3: the marker marks the completions (one call per `batch`), and
+    /// says what it thought while it marked - one line per call that thought.
+    pub fn grade(&self, lessons: &mut [Lesson]) -> Result<Vec<String>, ReviewError> {
         let cfg = &self.config;
         grade_completions(
             self.grader,
@@ -749,8 +791,43 @@ impl<'a> TutorTrainer<'a> {
                 batch: cfg.batch,
                 temperature: 0.0,
                 graded_by: self.grader.provider().to_string(),
+                think: cfg.resolved_think(),
             },
         )
+    }
+
+    /// What the teacher thought this round and - with `learn_thinking` - what
+    /// the network learned from it: the thinking taught as thoughts
+    /// ([`crate::thinking::think_on`]: walks that begin at the THINK sentinel)
+    /// at the fine-tune pass's epochs and rate, and with `think_questions`
+    /// every question in it as a node where the network stops to think.  A dry
+    /// run records the thinking and teaches none of it.
+    fn teach_thinking(&self, nets: &mut Networks, thinking: &[String]) -> Result<Vec<(String, Json)>, String> {
+        let cfg = &self.config;
+        let mut taught = (0usize, 0usize, 0usize);
+        if cfg.learn && cfg.learn_thinking && !thinking.is_empty() && !self.stopped() {
+            let settings = kinds::TrainSettings {
+                config: TrainConfig {
+                    epochs: cfg.pos_epochs,
+                    lr: cfg.pos_lr,
+                    batch_size: cfg.batch_size,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let learned = nets.with_model(|m| {
+                crate::thinking::think_on(m, thinking, &settings, cfg.think_questions, 1.0, &mut |_| {
+                    !(self.stop)()
+                })
+            })?;
+            taught = (learned.thoughts, learned.questions, learned.taught);
+        }
+        Ok(vec![
+            ("thinking".to_string(), Json::strs(thinking.iter().cloned())),
+            ("thoughts".to_string(), Json::Int(taught.0 as i64)),
+            ("thought_questions".to_string(), Json::Int(taught.1 as i64)),
+            ("thought_nodes".to_string(), Json::Int(taught.2 as i64)),
+        ])
     }
 
     /// Step 4: why are the failures wrong, and what else is wrong in the same
@@ -1162,8 +1239,9 @@ impl<'a> TutorTrainer<'a> {
                 lessons.push(nets.with_model(|m| self.complete(m, exercise, attempt))?);
             }
         }
+        let mut thinking: Vec<String> = Vec::new();
         if !lessons.is_empty() && !self.stopped() {
-            self.grade(&mut lessons)?;
+            thinking = self.grade(&mut lessons)?;
         }
         let (explained, similar) = self.widen(&mut lessons, round, nets.has_negative());
         for lesson in &lessons {
@@ -1187,6 +1265,7 @@ impl<'a> TutorTrainer<'a> {
         } else {
             Some(self.learn_lessons(nets, &lessons, &drills)?)
         };
+        let thought = self.teach_thinking(nets, &thinking)?;
         let blamed = self.teach_negative(nets, &lessons)?;
         if self.config.adapt {
             self.weak = weakest;
@@ -1209,6 +1288,7 @@ impl<'a> TutorTrainer<'a> {
         if let Some(learned) = &learned {
             pairs.extend(learned.pairs());
         }
+        pairs.extend(thought);
         if let Some(report) = blamed {
             let doc = report.to_json();
             pairs.push(("negative_blamed".to_string(), Json::Int(report.blamed as i64)));
@@ -1447,6 +1527,40 @@ mod tests {
     }
 
     #[test]
+    fn the_thinking_level_is_read_as_python_reads_it() {
+        let mut cfg = config();
+        assert_eq!(cfg.resolved_think(), None);
+        cfg.learn_thinking = true;
+        assert_eq!(
+            cfg.resolved_think(),
+            Some(Json::Bool(true)),
+            "on by default once the thinking is taught"
+        );
+        for (think, want) in [
+            (Json::str("default"), None),
+            (Json::Bool(false), Some(Json::Bool(false))),
+            (Json::str("High"), Some(Json::str("high"))),
+            (Json::Int(1), Some(Json::Bool(true))),
+            (Json::Null, Some(Json::Bool(true))),
+        ] {
+            cfg.think = Some(think.clone());
+            assert!(cfg.validate().is_ok(), "{think:?}");
+            assert_eq!(cfg.resolved_think(), want, "{think:?}");
+        }
+        cfg.think = Some(Json::str("loud"));
+        let err = cfg.validate().unwrap_err();
+        assert_eq!(
+            err,
+            "think must be true, false or one of low, medium, high (got 'loud')"
+        );
+        let doc = TutorConfig::default().to_json();
+        assert_eq!(
+            (doc.at("think"), doc.at("learn_thinking"), doc.at("think_questions")),
+            (&Json::Null, &Json::Bool(false), &Json::Bool(true))
+        );
+    }
+
+    #[test]
     fn the_defaults_are_python_s_and_nonsense_is_refused() {
         let d = TutorConfig::default();
         assert!(d.validate().is_ok());
@@ -1455,8 +1569,8 @@ mod tests {
             Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
             _ => Vec::new(),
         };
-        assert_eq!(keys.len(), 42);
-        assert_eq!((keys[0], keys[41]), ("topic", "checkpoint_every"));
+        assert_eq!(keys.len(), 45);
+        assert_eq!((keys[0], keys[44]), ("topic", "checkpoint_every"));
         assert_eq!(doc.at("mode").as_str(), Some("dijkstra"));
         assert!(doc.at("strength").is_null() && doc.at("beam").is_null() && doc.at("focus").is_null());
         for (bad, words) in [

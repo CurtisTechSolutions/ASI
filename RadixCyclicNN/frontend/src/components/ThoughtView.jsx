@@ -3,6 +3,7 @@ import { fmtInt, fmtNum, showWhitespace } from "../util.js";
 import {
   isSentinel,
   learnedSays,
+  questionRuns,
   questionsOf,
   stoppedSays,
   summarizeThought,
@@ -10,6 +11,26 @@ import {
   thoughtTree,
   triggerSays,
 } from "../thinking.js";
+
+/**
+ * A teacher's thinking, with the questions it asked itself marked: taught, each one is a place where the
+ * network stops to think (the Ollama tab's thinking cards and the Tutor tab's rounds).
+ */
+export function ThinkingText({ text }) {
+  return (
+    <p className="thinking-text">
+      {questionRuns(text).map((run, i) =>
+        run.question ? (
+          <mark key={i} title="a question it asked itself: taught, the network stops to think here">
+            {run.text}
+          </mark>
+        ) : (
+          <span key={i}>{run.text}</span>
+        ),
+      )}
+    </p>
+  );
+}
 
 /**
  * What a voice thought before backing up out of a repeat, in a transcript: the summary of the thought and,

@@ -102,6 +102,31 @@ export function ollamaThinkRequest(form, overrides = {}) {
   return body;
 }
 
+/**
+ * The Tutor tab's thinking settings as POST /api/tutor/start and /api/tutor/lesson take them: `think` only when a
+ * level was chosen ("" leaves it to the server - on while the thinking is taught, else not asked), whether the
+ * teacher's thinking is taught as thoughts (`learn_thinking`), and whether its questions are (`think_questions`).
+ */
+export function tutorThinkingBody(form) {
+  const f = form || {};
+  const body = { learn_thinking: Boolean(f.learnThinking), think_questions: f.thinkQuestions !== false };
+  if (String(f.think ?? "").trim()) body.think = thinkLevel(f.think);
+  return body;
+}
+
+/** What a tutor round learned from its teacher's thinking, in words ("" when it taught nothing). */
+export function roundThinkingSays(round) {
+  const r = round || {};
+  const thoughts = Number(r.thoughts) || 0;
+  if (!thoughts) return "";
+  const asked = Number(r.thought_questions) || 0;
+  const nodes = Number(r.thought_nodes) || 0;
+  return (
+    `taught ${thoughts} thought${thoughts === 1 ? "" : "s"} and ${asked} question${asked === 1 ? "" : "s"} it asked ` +
+    `itself; it now stops to think at ${nodes} more node${nodes === 1 ? "" : "s"}`
+  );
+}
+
 const THEN_SAYS = { back: "then backed up", think: "then went back to the thought", end: "then went on" };
 
 /** The questions a thought asked itself (its `questions`, or none). */

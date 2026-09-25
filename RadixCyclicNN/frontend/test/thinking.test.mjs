@@ -16,6 +16,7 @@ import {
   ollamaThinkRequest,
   questionRuns,
   questionsIn,
+  roundThinkingSays,
   stoppedSays,
   summarizeThought,
   thenSays,
@@ -26,6 +27,7 @@ import {
   thoughtTree,
   thoughtsOf,
   triggerSays,
+  tutorThinkingBody,
 } from "../src/thinking.js";
 
 test("the sentinels are the first four node ids", () => {
@@ -215,4 +217,31 @@ test("the Ollama thinking card asks for exactly what its fields say", () => {
   assert.equal(ollamaThinkRequest({ prompt: "x", think: "default" }).think, "default");
   assert.equal(ollamaThinkRequest({ prompt: "x" }, { train: true }).train, false);
   assert.equal(ollamaThinkRequest({ prompt: "x", lines: "0" }).lines, 1);
+});
+
+test("the Tutor tab sends its thinking settings as the servers read them", () => {
+  // nothing chosen: the server decides - on while the thinking is taught, not asked otherwise
+  assert.deepEqual(tutorThinkingBody({}), { learn_thinking: false, think_questions: true });
+  assert.deepEqual(tutorThinkingBody({ learnThinking: true, think: "" }), { learn_thinking: true, think_questions: true });
+  assert.deepEqual(tutorThinkingBody({ think: "high", thinkQuestions: false }), {
+    learn_thinking: false,
+    think_questions: false,
+    think: "high",
+  });
+  assert.equal(tutorThinkingBody({ think: "true" }).think, true);
+  assert.equal(tutorThinkingBody({ think: "false" }).think, false);
+  assert.equal(tutorThinkingBody({ think: "default" }).think, "default");
+});
+
+test("what a tutor round learned from its teacher's thinking", () => {
+  assert.equal(
+    roundThinkingSays({ thoughts: 1, thought_questions: 2, thought_nodes: 2 }),
+    "taught 1 thought and 2 questions it asked itself; it now stops to think at 2 more nodes",
+  );
+  assert.equal(
+    roundThinkingSays({ thoughts: 2, thought_questions: 1, thought_nodes: 1 }),
+    "taught 2 thoughts and 1 question it asked itself; it now stops to think at 1 more node",
+  );
+  assert.equal(roundThinkingSays({ thoughts: 0, thinking: ["hmm"] }), "");
+  assert.equal(roundThinkingSays(undefined), "");
 });

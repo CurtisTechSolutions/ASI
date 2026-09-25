@@ -22,7 +22,7 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `NegativePanel.jsx` | Negative | the negative network: the failures, why they were failures, and the automatic reviewer loop |
 | `EvolvePanel.jsx` | Evolve | the self-upgrading loop |
 | `OllamaPanel.jsx` | Ollama | a corpus written from a prompt, adversarial review, and a thinking model's thinking taught to the network as thoughts (`POST /api/ollama/think`) |
-| `TutorPanel.jsx` | Tutor | the automated English lessons and the report card that plans the next batch |
+| `TutorPanel.jsx` | Tutor | the automated English lessons and the report card that plans the next batch; with a thinking marker, what it thought while it marked - shown by a dry run, listed round by round, and taught to the network as thoughts ("The teacher's thinking" settings) |
 | `CodeGenPanel.jsx` | Code | the code-generation loop — problems, attempts, sandbox runs, the teacher selector |
 | `AgentPanel.jsx` | Agent | tool use: the network browses, an LLM judges, 2NRL follows |
 | `ImagesPanel.jsx` | Images | the Stable Diffusion encoder, base64, and what the model remembers of a picture |
@@ -46,7 +46,7 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `RatingsCard.jsx` | 👍 / 👎 on an output, and training on the ratings collected |
 | `RecallCard.jsx` | what the model remembers of what it was shown |
 | `GuardNotice.jsx` | what the negative network stopped on the way out |
-| `ThoughtView.jsx` | a thought record: `ThoughtView` shows one in full - the summary, the thought, what set it off, how it stopped, what it triggered and taught, the path from `<think>` - with its questions nested; `ThoughtLine` is the one-line 💭 version under a Converse or Chat turn |
+| `ThoughtView.jsx` | a thought record: `ThoughtView` shows one in full - the summary, the thought, what set it off, how it stopped, what it triggered and taught, the path from `<think>` - with its questions nested; `ThoughtLine` is the one-line 💭 version under a Converse or Chat turn; `ThinkingText` is an LLM's thinking with the questions it asked itself marked (the Ollama and Tutor tabs) |
 | `TraversalFields.jsx` | the **traversal** the search runs — *what* it looks for, as opposed to the mode, which is how it looks. `reward` follows the model's own distribution, rewards and all; `punishment` takes the rewards out of the score and lets the penalties price every step, so the cheapest path is the least punished one. It reads and writes the shared setting (`../hooks/useNetworkSettings.jsx`), so the same control appears on the Settings, Predict and Generate tabs and all three move together; `compact` is the version without the explanation |
 | `SearchFields.jsx` | the **sampling filters** (top-K, top-p, min-p) and the beam's **diversity** (`../../../SPEC-SearchAndTraining.md` §1-2), over `useSiteSettings().search`. Given the mode the search really runs in, `compact` shows only what that mode reads, and a value out of range as an error beside the field |
 | `TrainingPlanFields.jsx` | **how a run walks its texts** — the order, the curriculum, the replay and its buffer's size, the early stop (§3-6) — over `useSiteSettings().training`. On the Train tab (`compact`) it previews how many texts each epoch walks and what the model's buffer holds |

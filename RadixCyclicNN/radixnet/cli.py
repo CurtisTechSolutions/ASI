@@ -409,6 +409,13 @@ class LessonPrinter(_RowPrinter):
                 f"mean {fmt(record.get('mean_score'))} (grammar {fmt(record.get('mean_grammar'))}), "
                 f"weakest: {weakest} -> {learned} (bad={record.get('bad')}, good={record.get('good')})"
             )
+            for thought in record.get("thinking") or []:
+                self.console.note(f"    thinking: {clip(str(thought), 100)}")
+            if record.get("thoughts"):
+                self.console.note(
+                    f"    taught {record.get('thoughts')} thought(s) and {record.get('thought_questions')} question(s) "
+                    f"it asked itself; it now stops to think at {record.get('thought_nodes')} more node(s)"
+                )
             if record.get("similar"):
                 self.console.note(
                     f"    negative network: {record.get('explained')} mistake(s) explained, "
@@ -2820,7 +2827,8 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         tutor_model=args.tutor_model or default_tutor_model(args.tutor_provider),
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
-        grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
+        grammar_weight=args.grammar_weight, batch=args.batch, think=args.think, learn_thinking=args.learn_thinking,
+        think_questions=not args.no_think_questions, adapt=not args.no_adapt, drills=args.drills,
         variants=args.variants, variant_weight=args.variant_weight, plan=args.plan or 0, batches=args.batches,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
         diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
@@ -2842,6 +2850,8 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     except ValueError as exc:
         raise CliError(str(exc)) from exc
     model, origin = open_model(args, console, required=False)
+    if config.learn and config.learn_thinking and model.kind == "negative":
+        raise CliError("the negative network judges; it does not think (--kind negative cannot be taught thoughts)")
     out = args.out or args.model
     console.pairs([
         ("model", origin.describe()),
@@ -2854,6 +2864,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
                        + (f", temperature={fmt(config.temperature)}" if config.mode == "sample" else "")),
         ("marking", f"pass at {fmt(config.threshold)}/10, grammar weight {fmt(config.grammar_weight)}, "
                     f"{config.batch} per call" + (", adapting to the weakest points" if config.adapt else "")),
+        ("thinking", _tutor_thinking_line(config)),
         ("corrections", "from the diff with what the network wrote: only what changed moves"
                         f" (the rest keeps {fmt(config.keep_weight)})" if config.diff_corrections
                         else "as whole sentences (--no-diff-corrections)"),
@@ -2949,6 +2960,20 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
             json.dump({k: doc[k] for k in ("config", "records", "lessons", "report", "plan")}, fh, indent=2)
         console.say(f"wrote report to {args.report}")
     return doc
+def _tutor_thinking_line(config: Any) -> str:
+    """What the tutor does with its marker's thinking, for the settings table."""
+    think = config.resolved_think
+    if think is None and not config.learn_thinking:
+        return "not asked (--think LEVEL shows it, --learn-thinking teaches it)"
+    asked = "the model's choice" if think is None else ("on" if think is True else "off" if think is False else think)
+    if not config.learn_thinking:
+        return f"the marker thinks ({asked}); shown, not taught (--learn-thinking)"
+    if not config.learn:
+        return f"the marker thinks ({asked}); a dry run teaches none of it"
+    questions = " and every question in it as a place to stop and think" if config.think_questions else ""
+    return f"the marker thinks ({asked}); taught as thoughts{questions}"
+
+
 def _save_negative(console: Console, negative: Any, path: str) -> dict:
     """Save the negative network and print what the tutor taught it."""
     saved = save_model(negative, path)
@@ -4837,6 +4862,17 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-teach-answer", action="store_true",
                        help="a failed lesson learns only the correction, not the teacher's own model answer")
     group.add_argument("--dry-run", action="store_true", help="set and mark the exercises but train nothing and save nothing")
+    group = p.add_argument_group("the teacher's thinking (a thinking Ollama model: qwen3, deepseek-r1, ...)")
+    group.add_argument("--think", metavar="LEVEL",
+                       help="ask the marker to think while it marks: true | false | low | medium | high | default (the "
+                            "model's choice); every round shows what it thought (default: on with --learn-thinking, "
+                            "otherwise not asked)")
+    group.add_argument("--learn-thinking", action="store_true",
+                       help="teach the network the marker's thinking as thoughts that begin at the THINK sentinel - "
+                            "what `radixnet think` and a conversation that catches itself repeating think in")
+    group.add_argument("--no-think-questions", action="store_true",
+                       help="with --learn-thinking: do not teach the questions in the thinking as places where the "
+                            "network stops to think")
     group = p.add_argument_group("what a correction teaches")
     group.add_argument("--no-diff-corrections", action="store_true",
                        help="learn a correction as two whole sentences (the old way) instead of from its diff "

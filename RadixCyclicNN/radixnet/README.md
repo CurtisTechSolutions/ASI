@@ -59,7 +59,7 @@ does what.
 
 | module | what it is |
 |---|---|
-| `tutor.py` | automated English lessons: the tutor sets the exercise, the network completes it, the tutor marks it |
+| `tutor.py` | automated English lessons: the tutor sets the exercise, the network completes it, the tutor marks it (and, thinking, teaches how it reasoned) |
 | `recall.py` | what the network remembers of what it was shown — the recall tutor for speech and images |
 | `dialogue.py` | the model conversing with itself, with stutter detection and backtracking |
 | `chat.py` | the model in conversation with an LLM, and the LLM marking the conversation |

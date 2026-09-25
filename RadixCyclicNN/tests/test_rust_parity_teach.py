@@ -166,6 +166,38 @@ class TestRustTutorParity(unittest.TestCase):
         self.assertEqual(a["saved"]["path"], self.py_path)
         self.assertEqual(b["saved"]["path"], self.rs_path)
 
+    def test_both_tutors_learn_from_the_teachers_thinking_the_same_way(self):
+        """--learn-thinking: the marker asked to think, its thinking recorded and taught as the same thoughts."""
+        options = ("tutor", "--topic", "animals", "--rounds", 2, "--exercises", 2, "--mode", "beam",
+                   "--threshold", 9.5, "--neg-epochs", 1, "--pos-epochs", 1, "--learn-thinking")
+        a, b, py_seen, rs_seen = self.both(*options)
+        self.assertEqual(py_seen, rs_seen)  # the think field included: on, and only for the marking
+        marking = [body for body in py_seen if "marking sentence completions" in body.get("system", "")]
+        self.assertTrue(marking)
+        self.assertTrue(all(body.get("think") is True for body in marking))
+        self.assertTrue(all("think" not in body for body in py_seen if body not in marking))
+        self.same_run(a, b)
+        rounds = [r for r in b["records"] if r["kind"] == "round"]
+        self.assertEqual([(len(r["thinking"]), r["thoughts"], r["thought_questions"]) for r in rounds],
+                         [(1, 1, 2), (1, 1, 2)])
+        self.assertEqual(graph_of(self.py_path), graph_of(self.rs_path))
+
+    def test_both_tutors_show_the_thinking_and_leave_the_questions_out_alike(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--think", "high", "--dry-run")
+        a, b, py_seen, rs_seen = self.both(*options)
+        self.assertEqual(py_seen, rs_seen)
+        self.same_run(a, b)
+        self.assertEqual(b["records"][0]["thoughts"], 0)
+        self.assertEqual(len(b["records"][0]["thinking"]), 1)
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--learn-thinking", "--no-think-questions", "--neg-epochs", 1, "--pos-epochs", 1)
+        a, b, py_seen, rs_seen = self.both(*options)
+        self.assertEqual(py_seen, rs_seen)
+        self.same_run(a, b)
+        self.assertEqual((b["records"][0]["thoughts"], b["records"][0]["thought_questions"]), (1, 0))
+        self.assertEqual(graph_of(self.py_path), graph_of(self.rs_path))
+
     def test_lesson_by_lesson_and_whole_sentence_corrections_learn_the_same(self):
         options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 3, "--attempts", 2,
                    "--mode", "beam", "--threshold", 9.5, "--twonrl-per", "lesson", "--no-diff-corrections",
@@ -268,6 +300,19 @@ class TestRustTutorParity(unittest.TestCase):
         self.assertIn("returned no usable exercises", err["error"])
         err = rust("tutor", "--rounds", 0, model=self.rs_path, env=self.env, expect=1)
         self.assertIn("rounds", err["error"])
+
+    def test_neither_tutor_teaches_the_negative_network_to_think(self):
+        """--kind negative --learn-thinking: both refuse before a lesson - the negative network judges."""
+        folder = tempfile.mkdtemp(prefix="radixnet-rust-tutor-negative-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        options = ("--kind", "negative", "tutor", "--topic", "animals", "--rounds", 1, "--learn-thinking")
+        self.fake.requests.clear()
+        a = py(*options, model=os.path.join(folder, "py.json"), env=self.env, expect=1)
+        b = rust(*options, model=os.path.join(folder, "rs.json"), env=self.env, expect=1)
+        for err in (a, b):
+            self.assertIn("the negative network judges; it does not think", err["error"])
+        self.assertEqual(self.bodies(), [])  # neither asked the teacher anything
+        self.assertEqual(os.listdir(folder), [])  # nor saved a model
 
 
 class TestRustChatParity(unittest.TestCase):
@@ -478,6 +523,18 @@ class TestRustTeachServer(unittest.TestCase):
                 self.assertEqual((s1, s2), (status, status), (a, b))
                 if status == 400:
                     self.assertEqual(a["error"], b["error"])
+
+    def test_neither_server_teaches_the_negative_network_to_think(self):
+        for server in (self.python, self.rust):
+            status, doc, _ = server.post("/api/model/select", {"kind": "negative"})
+            self.assertEqual(status, 200, doc)
+            self.addCleanup(server.post, "/api/model/select", {"kind": "count"})
+        body = {"topic": "animals", "rounds": 1, "exercises": 2, "learn_thinking": True}
+        (s1, a), (s2, b), py_seen, rs_seen = self.both("POST", "/api/tutor/start", body)
+        self.assertEqual((s1, s2), (400, 400), (a, b))
+        self.assertEqual(a["error"], "the negative network judges; it does not think")
+        self.assertEqual(a["error"], b["error"])
+        self.assertEqual((py_seen, rs_seen), ([], []))
 
     def test_a_tutor_job_runs_and_its_history_is_kept(self):
         body = {"topic": "animals", "rounds": 1, "exercises": 2, "mode": "beam", "threshold": 9.5, "drills": 2,

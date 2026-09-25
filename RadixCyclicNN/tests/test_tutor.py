@@ -5,8 +5,9 @@ the English teacher: it answers exercise requests with JSON openings and model
 answers, marks completions by a simple rule (a sentence ending in "the mat" is
 correct English, anything else is an agreement mistake), explains why a
 sentence is wrong and writes more sentences with the same mistake, and returns
-plain lines for drill sentences.  Every request is recorded, and the answers
-can be replaced or made to fail.
+plain lines for drill sentences.  Asked to think while it marks, it thinks two
+questions aloud - in Ollama's own field, inline between <think> tags, or not at
+all.  Every request is recorded, and the answers can be replaced or made to fail.
 """
 
 import json
@@ -23,6 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import CountRewardNet, RadixNet  # noqa: E402
+from radixnet.graph import THINK  # noqa: E402
+from radixnet.thinking import think  # noqa: E402
 from radixnet.llm import LLMError  # noqa: E402
 from radixnet.ollama import OllamaClient, OllamaError  # noqa: E402
 from radixnet.search import PathResult  # noqa: E402
@@ -120,7 +123,22 @@ class _FakeHandler(BaseHTTPRequestHandler):
         if self.server.fail_with:
             self._json(self.server.fail_with, {"error": "boom"})
             return
-        self._json(200, {"model": body.get("model"), "response": self._answer(body), "done": True})
+        reply = {"model": body.get("model"), "response": self._answer(body), "done": True}
+        thought = self._thinking(body) if body.get("think") else ""
+        if thought and self.server.thinking == "inline":
+            reply["response"] = f"<think>{thought}</think>\n" + reply["response"]
+        elif thought and self.server.thinking == "field":
+            reply["thinking"] = thought
+        self._json(200, reply)
+
+    @staticmethod
+    def _thinking(body):
+        """What the fake teacher thinks before it marks: how many sentences, and two questions it asks itself."""
+        if "marking sentence completions" not in body.get("system", ""):
+            return ""
+        count = len(re.findall(r"^\[\d+\] ", body.get("prompt", ""), re.M))
+        return (f"I have {count} sentences to mark. Does every verb agree with its subject? Not always. "
+                f"Is each sentence finished? Mostly, so I mark them one by one.")
 
     def _answer(self, body):
         prompt, system = body.get("prompt", ""), body.get("system", "")
@@ -199,6 +217,7 @@ class FakeTeacher(ThreadingHTTPServer):
         self.grade_response = None
         self.plan_response = None
         self.why_response = None
+        self.thinking = "field"  # how a request asked to think is answered: "field", "inline" or "none"
 
     @property
     def url(self):
@@ -1276,6 +1295,91 @@ class TrainerTests(unittest.TestCase):
         self.assertEqual([r["kind"] for r in records], ["report"])
         self.assertEqual(self.fake.prompts("exercises"), [])
 
+    def marking(self):
+        """The bodies of the marking requests the fake teacher has seen."""
+        return [body for _m, _p, body in self.fake.requests if body and "marking sentence completions" in body.get("system", "")]
+
+    def test_the_marker_thinks_when_asked_and_every_round_says_what_it_thought(self):
+        trainer = TutorTrainer(ScriptedModel(" the mat", " fast"), self.client, self.config(think="high", learn=False))
+        record, _lessons = trainer.run_round(1)
+        self.assertTrue(self.marking())
+        self.assertTrue(all(body["think"] == "high" for body in self.marking()))
+        self.assertEqual(record["thinking"], [
+            "I have 2 sentences to mark. Does every verb agree with its subject? Not always. "
+            "Is each sentence finished? Mostly, so I mark them one by one."
+        ])
+        self.assertEqual((record["thoughts"], record["thought_questions"], record["thought_nodes"]), (0, 0, 0))
+        # only the marking is asked to think: the exercises are written as before
+        others = [body for _m, _p, body in self.fake.requests if body and body not in self.marking()]
+        self.assertTrue(others)
+        self.assertTrue(all("think" not in body for body in others))
+
+    def test_without_think_the_marker_is_asked_as_before(self):
+        trainer = TutorTrainer(ScriptedModel(" the mat"), self.client, self.config(learn=False))
+        record, _lessons = trainer.run_round(1)
+        self.assertTrue(all("think" not in body for _m, _p, body in self.fake.requests if body))
+        self.assertEqual((record["thinking"], record["thoughts"]), ([], 0))
+
+    def test_inline_thinking_is_read_and_the_marks_still_are(self):
+        self.fake.thinking = "inline"
+        trainer = TutorTrainer(ScriptedModel(" the mat", " fast"), self.client, self.config(think=True, learn=False))
+        record, lessons = trainer.run_round(1)
+        self.assertEqual(len(record["thinking"]), 1)
+        self.assertTrue(record["thinking"][0].startswith("I have 2 sentences to mark."))
+        self.assertEqual([lesson.grade.graded_by for lesson in lessons], ["ollama", "ollama"])
+        self.assertEqual([lesson.grade.passed for lesson in lessons], [True, False])
+
+    def test_a_marker_that_does_not_think_leaves_nothing_to_teach(self):
+        self.fake.thinking = "none"
+        model = trained_model(CountRewardNet)
+        trainer = TutorTrainer(model, self.client, self.config(learn_thinking=True, strength=1.0))
+        record, _lessons = trainer.run_round(1)
+        self.assertEqual((record["thinking"], record["thoughts"]), ([], 0))
+        self.assertEqual(model.graph.children[THINK], {})
+
+    def test_the_network_is_taught_the_teachers_thinking(self):
+        for cls in (CountRewardNet, RadixNet):
+            with self.subTest(kind=cls.__name__):
+                self.fake.requests.clear()
+                model = trained_model(cls)
+                graph = model.graph
+                self.assertEqual(graph.children[THINK], {})
+                trainer = TutorTrainer(model, self.client, self.config(learn_thinking=True))
+                record, _lessons = trainer.run_round(1)
+                # on by default once the thinking is being taught
+                self.assertTrue(all(body["think"] is True for body in self.marking()))
+                self.assertEqual(len(record["thinking"]), 1)
+                self.assertEqual((record["thoughts"], record["thought_questions"], record["thought_nodes"]), (1, 2, 2))
+                self.assertGreater(len(graph.children[THINK]), 0)  # it has thoughts to think with
+                self.assertGreater(len(graph.parents[THINK]), 0)  # and places where it stops to think
+                self.assertNotEqual(think(model, learn=False).text, "")
+
+    def test_the_questions_can_be_left_out(self):
+        model = trained_model(CountRewardNet)
+        trainer = TutorTrainer(model, self.client, self.config(learn_thinking=True, think_questions=False))
+        record, _lessons = trainer.run_round(1)
+        self.assertEqual((record["thoughts"], record["thought_questions"], record["thought_nodes"]), (1, 0, 0))
+        self.assertGreater(len(model.graph.children[THINK]), 0)
+        self.assertEqual(model.graph.parents[THINK], {})
+
+    def test_a_dry_run_shows_the_thinking_and_teaches_none_of_it(self):
+        model = trained_model(CountRewardNet)
+        trainer = TutorTrainer(model, self.client, self.config(learn_thinking=True, learn=False))
+        record, _lessons = trainer.run_round(1)
+        self.assertEqual(len(record["thinking"]), 1)
+        self.assertEqual(record["thoughts"], 0)
+        self.assertEqual(model.graph.children[THINK], {})
+
+    def test_a_thinking_level_that_is_not_one_is_refused(self):
+        with self.assertRaises(ValueError):
+            TutorConfig(think="loud").validate()
+        for value in (None, True, False, "low", "medium", "high", "default"):
+            TutorConfig(think=value).validate()
+        self.assertIsNone(TutorConfig().resolved_think)
+        self.assertIs(TutorConfig(learn_thinking=True).resolved_think, True)
+        self.assertIsNone(TutorConfig(think="default", learn_thinking=True).resolved_think)
+        self.assertIs(TutorConfig(think=False, learn_thinking=True).resolved_think, False)
+
     def test_count_model_learns_too(self):
         model = trained_model(CountRewardNet)
         trainer = TutorTrainer(model, self.client, self.config(threshold=9.5, strength=1.0, diff_corrections=False))
@@ -1363,6 +1467,39 @@ class ApiTests(unittest.TestCase):
         self.assertIn(first["grade"]["error"], (*ERROR_TYPES, "other"))
         self.assertEqual(body["report"]["lessons"], 2)
         self.assertIsNone(self.service.job_status())  # nothing was trained
+
+    def test_the_marker_thinks_in_a_dry_run_lesson(self):
+        status, body, _ = self.client.post("/api/tutor/lesson", {"topic": "animals", "exercises": 2, "think": True})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(body["thinking"]), 1)
+        self.assertIs(body["config"]["think"], True)
+        status, body, _ = self.client.post("/api/tutor/lesson", {"topic": "animals", "exercises": 2})
+        self.assertEqual((status, body["thinking"]), (200, []))
+        status, body, _ = self.client.post("/api/tutor/lesson", {"topic": "animals", "think": "loud"})
+        self.assertEqual(status, 400, body)
+
+    def test_a_run_teaches_the_teachers_thinking(self):
+        body = {"topic": "animals", "rounds": 1, "exercises": 2, "learn_thinking": True, **FAST}
+        status, body, _ = self.client.post("/api/tutor/start", body)
+        self.assertEqual(status, 202, body)
+        self.assertTrue(body["config"]["learn_thinking"])
+        job = wait_for_job(self.client)
+        self.assertEqual((job["state"], job["error"]), ("done", None))
+        status, history, _ = self.client.get("/api/tutor/history")
+        rounds = [r for r in history["history"] if r["kind"] == "round"]
+        self.assertEqual((rounds[0]["thoughts"], rounds[0]["thought_questions"]), (1, 2))
+        self.assertEqual(len(rounds[0]["thinking"]), 1)
+        self.assertGreater(len(self.service.model.graph.children[THINK]), 0)
+
+    def test_the_negative_network_is_not_taught_the_teachers_thinking(self):
+        status, body, _ = self.client.post("/api/model/select", {"kind": "negative"})
+        self.assertEqual(status, 200, body)
+        start = {"topic": "animals", "rounds": 1, "exercises": 2, "learn_thinking": True, **FAST}
+        status, body, _ = self.client.post("/api/tutor/start", start)
+        self.assertEqual(status, 400, body)
+        self.assertIn("does not think", body["error"])
+        self.assertIsNone(self.service.job_status())  # refused before a job or a teacher's call
+        self.assertEqual(self.fake.prompts("exercises"), [])
 
     def test_lesson_with_given_prefixes_skips_the_exercise_writer(self):
         status, body, _ = self.client.post(
@@ -1566,6 +1703,7 @@ class CliTests(unittest.TestCase):
         env = dict(os.environ, PYTHONWARNINGS="ignore", OLLAMA_HOST=self.fake.url, RADIXNET_TUTOR_MODEL="fake:latest")
         proc = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env, timeout=300)
         self.assertEqual(proc.returncode, expect, proc.stderr[-2000:])
+        self.stderr = proc.stderr
         return json.loads(proc.stdout) if proc.stdout.strip() else None
 
     def train(self):
@@ -1625,6 +1763,28 @@ class CliTests(unittest.TestCase):
         self.assertTrue(started[0]["brief"])
         self.assertIsNone(doc["plan"])  # the last batch was not asked for a plan of its own
         self.assertEqual(doc["config"]["batches"], 2)
+
+    def test_the_teachers_thinking_is_shown_and_taught(self):
+        self.train()
+        doc = self.run_cli("tutor", "--topic", "animals", "--rounds", "1", "--exercises", "2", "--think", "medium",
+                           "--dry-run")
+        record = doc["records"][0]
+        self.assertEqual((len(record["thinking"]), record["thoughts"]), (1, 0))
+        self.assertEqual(doc["config"]["think"], "medium")
+        doc = self.run_cli("tutor", "--topic", "animals", "--rounds", "1", "--exercises", "2", "--learn-thinking",
+                           "--neg-epochs", "1", "--pos-epochs", "1")
+        record = doc["records"][0]
+        self.assertEqual((record["thoughts"], record["thought_questions"], record["thought_nodes"]), (1, 2, 2))
+        self.assertTrue(doc["config"]["learn_thinking"])
+        doc = self.run_cli("tutor", "--topic", "animals", "--rounds", "1", "--exercises", "2", "--learn-thinking",
+                           "--no-think-questions", "--dry-run")
+        self.assertFalse(doc["config"]["think_questions"])
+        self.run_cli("tutor", "--topic", "animals", "--rounds", "1", "--think", "loud", expect=1)
+        # the negative network judges; it is never taught thoughts
+        self.model = os.path.join(self.dir, "negative.json")
+        self.run_cli("--kind", "negative", "tutor", "--topic", "animals", "--rounds", "1", "--learn-thinking", expect=1)
+        self.assertIn("does not think", self.stderr)
+        self.assertFalse(os.path.exists(self.model))
 
     def test_bad_options_and_unreachable_ollama(self):
         self.run_cli("tutor", "--topic", " ", expect=1)

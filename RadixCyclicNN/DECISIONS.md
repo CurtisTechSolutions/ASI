@@ -3185,10 +3185,16 @@ teaching the network where to question.
   decays it; a depth of 2 and one question per thought keep a thought from spending itself questioning.
 * All three ports carry it, record for record: the Go parity tests compare the rethinks' thoughts, the Rust ones
   the model files.
+* The tutor is the second source of thoughts (2026-09-25): a thinking marker reasons about the very sentences the
+  network wrote, so every round records that reasoning and, with `learn_thinking`, teaches it through the same
+  `think_on` - the network learns to question itself where its teacher did, about its own mistakes. The marker
+  is asked to think only when something reads the answer (the level given, else on while the thinking is
+  taught), because thinking costs it time; ChatGPT keeps its reasoning to itself, and a tutor run that would
+  teach the negative network to think is refused before a lesson is set.
 
 **Lives in** `radixnet/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
-`radixnet/dialogue.py::think_back`, `radixnet/ollama.py::thoughts_from_prompt`, `go/radixnet/thinking.go`,
-`rust/src/thinking.rs`
+`radixnet/dialogue.py::think_back`, `radixnet/ollama.py::thoughts_from_prompt`,
+`radixnet/tutor.py::TutorTrainer.teach_thinking`, `go/radixnet/thinking.go`, `rust/src/thinking.rs`
 
 ---
 

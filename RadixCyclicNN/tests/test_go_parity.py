@@ -679,6 +679,62 @@ class TestGoTutorParity(unittest.TestCase):
         for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
             self.assertLessEqual(abs(py_stats[key] - go_stats[key]), 1e-9, key)
 
+    def test_both_tutors_learn_from_the_teachers_thinking_the_same_way(self):
+        """--learn-thinking: the marker asked to think, its thinking recorded and taught as the same thoughts."""
+        options = ("tutor", "--topic", "animals", "--rounds", 2, "--exercises", 2, "--mode", "beam",
+                   "--threshold", 9.5, "--neg-epochs", 1, "--pos-epochs", 1, "--strength", 1.0, "--learn-thinking")
+        thinks = lambda: [body.get("think") for _m, _p, body in self.fake.requests if body]  # noqa: E731
+        a = py(*options, model=self.py_path, env=self.env)
+        py_calls, py_thinks = self.calls(), thinks()
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        self.assertEqual(py_calls, self.calls())
+        self.assertEqual(py_thinks, thinks())  # on, and only for the marking
+        self.assertIn(True, py_thinks)
+        self.assertIn(None, py_thinks)
+
+        py_rounds = [r for r in a["records"] if r["kind"] == "round"]
+        go_rounds = [r for r in b["records"] if r["kind"] == "round"]
+        for key in ("thinking", "thoughts", "thought_questions", "thought_nodes"):
+            self.assertEqual([r[key] for r in py_rounds], [r[key] for r in go_rounds], key)
+        self.assertEqual([(r["thoughts"], r["thought_questions"]) for r in go_rounds], [(1, 2), (1, 2)])
+        for key in ("think", "learn_thinking", "think_questions"):
+            self.assertEqual(a["config"][key], b["config"][key], key)
+
+        # the same thoughts in the same graph
+        py_doc, go_doc = load_json(self.py_path)["graph"], load_json(self.go_path)["graph"]
+        self.assertEqual(py_doc["nodes"]["labels"], go_doc["nodes"]["labels"])
+        self.assertEqual(py_doc["edges"]["src"], go_doc["edges"]["src"])
+        self.assertEqual(py_doc["edges"]["dst"], go_doc["edges"]["dst"])
+        self.assertEqual(py_doc["edges"]["count"], go_doc["edges"]["count"])
+        assert_close(self, py_doc["edges"]["reward"], go_doc["edges"]["reward"], 1e-9)
+        assert_close(self, py_doc["edges"]["w"], go_doc["edges"]["w"], 1e-9)
+
+    def test_both_tutors_show_a_thinking_level_the_same_way(self):
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--exercises", 2, "--mode", "beam",
+                   "--think", "high", "--dry-run")
+        a = py(*options, model=self.py_path, env=self.env)
+        py_bodies = [body for _m, _p, body in self.fake.requests if body]
+        self.fake.requests.clear()
+        b = go(*options, model=self.go_path, env=self.env)
+        go_bodies = [body for _m, _p, body in self.fake.requests if body]
+        self.assertEqual([body.get("think") for body in py_bodies], [body.get("think") for body in go_bodies])
+        self.assertIn("high", [body.get("think") for body in go_bodies])
+        self.assertEqual(a["records"][0]["thinking"], b["records"][0]["thinking"])
+        self.assertEqual((b["records"][0]["thoughts"], len(b["records"][0]["thinking"])), (0, 1))
+
+    def test_neither_tutor_teaches_the_negative_network_to_think(self):
+        """A negative network with --learn-thinking: both refuse before a lesson - it judges; it does not think."""
+        negative = os.path.join(TMP.name, "tutor_refusal.negative.json")
+        py("--kind", "negative", "--seed", 1, "train", "--data", GARBAGE, "--epochs", 1, model=negative)
+        options = ("tutor", "--topic", "animals", "--rounds", 1, "--learn-thinking")
+        self.fake.requests.clear()
+        a = py(*options, model=negative, env=self.env, expect=1)
+        b = go(*options, model=negative, env=self.env, expect=1)
+        for err in (a, b):
+            self.assertIn("the negative network judges; it does not think", err["error"])
+        self.assertEqual(self.calls(), [])  # neither asked the teacher anything
+
     def test_both_tutors_widen_a_mistake_the_same_way(self):
         """--blame --variants: the same question to the teacher, and the same family in the negative network."""
         py_negative = self.py_path.replace(".count.json", ".count.negative.json")
