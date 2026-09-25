@@ -3,8 +3,8 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
-Code, Agent, Images, Speech, Checkpoints, Model settings, Settings, Graph.
+Panels: Train, Predict, Generate, Talk, Converse, Chat, Think, Score, Words, 2NRL, Negative, Evolve, Ollama,
+Tutor, Code, Agent, Images, Speech, Checkpoints, Model settings, Settings, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
 
@@ -17,6 +17,19 @@ windows hold it. On that model every length field says *words* rather than
 vocabulary: the unit follows `units` in `/api/status`, because a number whose
 unit depends on the model is a number that will be read wrong.
 
+The Talk panel (`POST /v1/messages`, streamed; `src/sse.js` reads the events)
+is the model in today's format: type a line, and the reply arrives the way every
+language model's does now - its **thinking** first, line by line as the search
+takes each step (what it looked for and whether the graph knew it, how many
+paths it weighed, what the negative network vetoed and why, where it caught
+itself repeating and how it backed out, what it finally said at what cost), then
+the **text**, one node of the walk at a time, so a merged node shows up as a
+word and an unmerged one as a letter. A reply is what the Converse tab would say
+next after the line, and the conversation so far is heard on both sides. The
+same conversation is served to any client at `POST /v1/chat/completions`
+(OpenAI's dialect) and `POST /v1/messages` (Anthropic's); the last card shows
+the `curl`.
+
 The Converse panel (`POST /api/converse`) lets the model talk to itself in a
 chat view that reads newest first: a new turn is appended to the top and pushes
 the older ones down, so the latest reply is where the eye already is and nothing
@@ -27,21 +40,58 @@ the conversation's, keeps what it said once, backs up to where it would have
 said them again and explores other ways on ("Explore"), each turn saying what
 it noticed and whether it found one. With "Learn where it goes round" on (the
 default) what a rethink finds out is taught to the graph, so the model itself
-hands over there next time - which means a conversation changes the model. The
-duplicates it could not avoid come back flagged, and "Punish duplicates" marks
-them 👎 so "Train on ratings" runs the 2NRL negative phase on them.
+hands over there next time - which means a conversation changes the model. With
+"Think before backing up" on (the default) the voice thinks first: a thought
+from the THINK sentinel, questioning itself up to "Think depth" deep where the
+model has learned to, that hands over to BACK when it stops - and the 💭 line
+under the turn says what it thought. With "Stream" on (the default) the conversation arrives as it happens over
+`POST /api/converse/stream`: every turn the moment it is spoken, and above it
+the turn being spoken - the draft the voice caught itself on with what it backed
+out of struck through and the way on it found underlined - so the backtracking
+can be watched; a committed turn keeps that draft in its meta line.
+The duplicates it could not avoid come back
+flagged, and "Punish duplicates" marks them 👎 so "Train on ratings" runs the
+2NRL negative phase on them.
+
+The Think panel (`POST /api/think`) has the model think: one thought per press,
+the prediction search run from the THINK sentinel instead of START, so it is in
+the language of the thoughts the model was taught. "About" thinks at the node
+where a text ends and - with "Learn where it thinks" on - teaches the model to
+stop and think there. Wherever its own path crosses a node the model has learned
+to think at, the thought questions itself, and the questions are shown nested
+under it; each thought says what set it off, how it stopped, what it triggered
+and what it taught, with its path from `<think>` as chips. A model taught no
+thoughts says so, and points at the Ollama panel.
 
 The Chat panel (`POST /api/chat/start`) has an LLM converse with the model and
 mark every reply; its transcript reads newest first as well, it has the same
 "Avoid repeated words" and "Explore" settings, and a reply the model could only
 repeat is punished with the failures whatever the judge made of it.
 
+Every answer the Generate, Predict and Converse panels ask for goes through the
+guard (the negative network's veto); "Filter with the negative network" turns
+it off, and "Say why it vetoed" decides whether the report under the answer
+carries each veto's provenance (the rule, the reasons, the blamed fragments,
+opened with *why*) or only how many candidates were judged and vetoed
+(`provenance: false`). The Negative tab's Filter card has the same switch.
+
 The Ollama panel talks to a local Ollama server through the API
-(`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`).
+(`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`,
+`POST /api/ollama/correct`, `POST /api/ollama/think`).
 It writes a training corpus from a prompt (good or garbage style) that can be
 trained on, saved as an upload or held as 2NRL data, and it acts as an
 adversarial reviewer that rates samples from the model so the failed ones can
-be fed back through 2NRL. The Ollama URL and model default to the server's
+be fed back through 2NRL. The copy editor card: every sample
+(or pasted text) comes back written out correctly with as few characters
+changed as possible, shown as a diff, and with "Teach the negative network"
+only the struck-out and inserted characters are blamed there (the unchanged
+texts clear blame); the Negative tab's Automatic card runs the same editor on
+a loop with "Letter-level corrections" ticked. A thinking model (qwen3, deepseek-r1, gpt-oss, ...)
+thinks about a prompt in "Thinking from a prompt": the questions it wrote, the
+thinking behind each answer with the questions it asked itself marked, and the
+answers come back, and "Teach the thinking to the network" trains that thinking
+as thoughts - walks from the THINK sentinel, which the Think panel runs - with
+every question it asked itself a place where the network stops to think. The Ollama URL and model default to the server's
 settings (`ollama` in `/api/status`) and can be overridden per request.
 
 The Speech panel teaches the model by talking to it (`GET /api/speech`,
@@ -143,6 +193,9 @@ whichever model is loaded, and never saved with one.
   further apart (`../SPEC-SearchAndTraining.md` sections 1-2);
 * **how a run walks its texts** - the order, the curriculum, the rehearsal of
   the model's replay buffer and its size, and early stopping (sections 3-6);
+* **query backwards** - for a model trained backwards (below), Predict and
+  Generate turn the query around before it is sent and the answer back when it
+  comes (section 9);
 * how many settings this browser remembers, and a button that forgets them.
 
 Predict, Generate and Train show the same controls, and each is one setting
@@ -150,6 +203,17 @@ Predict, Generate and Train show the same controls, and each is one setting
 An action tab shows only what its mode reads - the filters for `sample`, the
 diversity for `beam` - sends a setting only when it is on, and refuses to send
 a value out of range, with the reason beside the field.
+
+**Training in reverse.** The Train tab's **Read every text backwards** sends
+`reverse` with the run, for every kind: the server reads every text - the typed
+ones and the selected files alike - from its last character (word, on a word
+model) to its first, so the model learns what comes *before* a text. Such a
+model is asked with **Query backwards** on: type the *end* of a text on
+Predict, and the answer comes back the right way round with what the model says
+came before it highlighted; on Generate the prefix becomes every text's ending.
+The turning is done here (`src/backwards.js`, in the model's units exactly as
+the servers turn a training text), and a thumbs up or down sends the model's
+own, backwards, text, since that is what feedback trains on.
 
 **Model settings** is the model's: what is saved in its file and changes when
 another model is loaded.
@@ -164,8 +228,13 @@ another model is loaded.
   apply). The sine model has no score function to set and says why; the
   negative network's blame function stays on the Negative tab beside the
   failures it weighs;
+* the **attention band** (`GET` / `POST /api/model/attention`): where inside a
+  gram a correction lands - on or off, the blur, the band drawn over one gram
+  with its units blurred as the band sees them, and a correction you type
+  previewed under both rules at the slider's blur before anything is applied
+  (`POST /api/model/attention/preview`);
 * the **encoder / decoder** (`GET /api/encoding`, `POST /api/encoding/preview`):
-  the unit, the n and the stride, the three sentinels, and a live preview that
+  the unit, the n and the stride, the four sentinels, and a live preview that
   encodes a text, decodes it back and walks it through the graph's own node
   labels, where a label longer than one gram is a radix chain the graph merged
   into one node.
@@ -188,12 +257,15 @@ The old `#network` link opens Model settings.
     vite.config.js              dev proxy + build output
     src/main.jsx                React root
     src/App.jsx                 header, status bar, tabbed panels
-    src/api.js                  fetch wrapper (JSON + {"error": ...} handling)
+    src/api.js                  fetch wrapper (JSON + {"error": ...} handling), and the JSON Lines reader of a streamed route
+    src/stream.js               a streamed conversation: the line parser, and the window one turn goes through (pure)
     src/util.js                 parsing / formatting helpers
     src/audio.js                microphone capture, Web Speech dictation, WAV encoding (Speech panel)
     src/styles.css              all styling (responsive; single column under 800 px)
     src/hooks/useJob.js         async job lifecycle (start, poll /api/job, stop)
     src/settings.js             the site-wide settings' rules: ranges, what a mode reads, request bodies (pure)
-    src/hooks/useSiteSettings.jsx     the settings several panels share, held once (search and training)
+    src/backwards.js            turning a query and an answer around for a model trained backwards (pure)
+    src/attention.js            the attention band read for display: the band over a gram, how sharply a unit is drawn (pure)
+    src/hooks/useSiteSettings.jsx     the settings several panels share, held once (search, training, backwards)
     src/hooks/useNetworkSettings.jsx  the traversal, one of them
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

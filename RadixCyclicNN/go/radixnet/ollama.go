@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -181,8 +182,29 @@ func (c *OllamaClient) Available() bool {
 	return err == nil
 }
 
-// Generate runs one non-streaming completion (POST /api/generate).
+// Generate runs one non-streaming completion (POST /api/generate): the answer alone.
 func (c *OllamaClient) Generate(prompt string, o LLMOptions) (string, error) {
+	got, err := c.Complete(prompt, o)
+	if err != nil {
+		return "", err
+	}
+	return got.Response, nil
+}
+
+// Completion is one answer with the model's thinking beside it ("" for a model that does not think).
+type Completion struct {
+	Response string `json:"response"`
+	Thinking string `json:"thinking"`
+}
+
+// Complete is one completion with the model's thinking beside its answer.
+//
+// o.Think asks a thinking model for its reasoning (Ollama's think field: true,
+// false or a level - "low", "medium", "high"; nil leaves the choice to the
+// model).  The reasoning comes back as Ollama's thinking field when the server
+// separates it, or is cut out of the answer when the model wrote it inline
+// between <think> tags (SplitThinking); it is "" for a model that does not think.
+func (c *OllamaClient) Complete(prompt string, o LLMOptions) (*Completion, error) {
 	model := strings.TrimSpace(o.Model)
 	if model == "" {
 		model = c.Model
@@ -197,20 +219,149 @@ func (c *OllamaClient) Generate(prompt string, o LLMOptions) (string, error) {
 	if o.Temperature > 0 {
 		body["options"] = map[string]any{"temperature": o.Temperature}
 	}
+	if o.Think != nil {
+		body["think"] = o.Think
+	}
 	raw, err := c.request("POST", "/api/generate", body, o.Timeout)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var doc struct {
 		Response *string `json:"response"`
+		Thinking *string `json:"thinking"`
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return "", ollamaErrorf("Ollama returned invalid JSON for /api/generate: %v", err)
+		return nil, ollamaErrorf("Ollama returned invalid JSON for /api/generate: %v", err)
 	}
 	if doc.Response == nil {
-		return "", ollamaErrorf("unexpected /api/generate response (no 'response' text)")
+		return nil, ollamaErrorf("unexpected /api/generate response (no 'response' text)")
 	}
-	return *doc.Response, nil
+	text, thinking := *doc.Response, ""
+	if doc.Thinking != nil {
+		thinking = *doc.Thinking
+	}
+	if strings.TrimSpace(thinking) == "" {
+		thinking, text = SplitThinking(text)
+	}
+	return &Completion{Response: text, Thinking: strings.TrimSpace(thinking)}, nil
+}
+
+// ThinkLevels are the reasoning levels a thinking model may be asked for, beside plain on / off.
+var ThinkLevels = []string{"low", "medium", "high"}
+
+// ThinkValue is Ollama's think field for a request: nil (not sent), a bool, or
+// one of ThinkLevels.  A string is read leniently - "true" / "on" / "yes" and
+// "false" / "off" / "no" are the two bools, a level is a level - so the flag can
+// come from a command line or a JSON body as it is.
+func ThinkValue(think any) (any, error) {
+	switch v := think.(type) {
+	case nil:
+		return nil, nil
+	case bool:
+		return v, nil
+	case float64: // a JSON number
+		return ThinkValue(strconv.FormatFloat(v, 'f', -1, 64))
+	case int:
+		return ThinkValue(strconv.Itoa(v))
+	}
+	text := strings.ToLower(strings.TrimSpace(fmt.Sprint(think)))
+	switch text {
+	case "", "none", "default":
+		return nil, nil
+	case "true", "on", "yes", "1":
+		return true, nil
+	case "false", "off", "no", "0":
+		return false, nil
+	}
+	for _, level := range ThinkLevels {
+		if text == level {
+			return level, nil
+		}
+	}
+	return nil, fmt.Errorf("think must be true, false or one of %s (got %q)", strings.Join(ThinkLevels, ", "), fmt.Sprint(think))
+}
+
+var thinkOpen = regexp.MustCompile(`(?i)<(think|thinking|reasoning)>`)
+
+// SplitThinking is (thinking, answer) of an answer that wrote its reasoning
+// inline between <think> tags.  The first tagged block is the thinking and
+// everything else the answer; a block left open is thinking to the end.  A text
+// without tags is all answer.
+func SplitThinking(text string) (string, string) {
+	match := thinkOpen.FindStringSubmatchIndex(text)
+	if match == nil {
+		return "", strings.TrimSpace(text)
+	}
+	tag := text[match[2]:match[3]]
+	rest := text[match[1]:]
+	close := regexp.MustCompile(`(?i)</` + regexp.QuoteMeta(tag) + `>`).FindStringIndex(rest)
+	if close == nil {
+		return strings.TrimSpace(rest), strings.TrimSpace(text[:match[0]])
+	}
+	thinking := strings.TrimSpace(rest[:close[0]])
+	answer := strings.TrimSpace(text[:match[0]] + rest[close[1]:])
+	return thinking, answer
+}
+
+const questionsSystem = "You write questions for a small language model to think about. Answer with exactly %d lines and nothing " +
+	"else: one short, concrete question per line, plain text, no numbering, no bullets, no quotes, no blank " +
+	"lines, no headings and no commentary. Every question must be about the topic requested and answerable " +
+	"in a sentence or two."
+
+const thinkSystem = "Think the question through before you answer, step by step, in short plain sentences - say what you " +
+	"know, what you are unsure of and ask yourself whether you are right - and then answer in one short " +
+	"sentence."
+
+// QuestionsFromPrompt asks the LLM for lines short questions about prompt - what the network will be taught to think about.
+func QuestionsFromPrompt(client LLMClient, prompt string, lines int, model string) ([]string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return nil, fmt.Errorf("prompt must not be empty")
+	}
+	if lines < 1 {
+		return nil, fmt.Errorf("lines must be >= 1")
+	}
+	user := fmt.Sprintf("Topic / instructions: %s\n\nWrite the %d questions now.", strings.TrimSpace(prompt), lines)
+	raw, err := client.Generate(user, LLMOptions{System: fmt.Sprintf(questionsSystem, lines), Model: model, Temperature: 0.9})
+	if err != nil {
+		return nil, err
+	}
+	return ParseLines(raw, lines), nil
+}
+
+// Thinking is one question the LLM thought about: the question, the thinking
+// behind its answer (one line; "" for a model that does not think) and the answer.
+type Thinking struct {
+	Question string `json:"question"`
+	Thinking string `json:"thinking"`
+	Answer   string `json:"answer"`
+}
+
+// ThoughtsFromPrompt is the LLM's thinking about prompt: lines questions about
+// it, and the thinking behind each answer.
+//
+// Two calls a question: QuestionsFromPrompt writes the questions and Complete
+// (think) answers each one with its reasoning.  The thinking and the answer are
+// each collapsed to one line; Thinking is "" for a model that does not think,
+// which the caller reports rather than trains on.  The thinking is what
+// Model.ThinkOn teaches the network as its own thoughts.
+func ThoughtsFromPrompt(client *OllamaClient, prompt string, lines int, model string, think any, temperature float64) ([]Thinking, error) {
+	questions, err := QuestionsFromPrompt(client, prompt, lines, model)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Thinking, 0, len(questions))
+	for _, question := range questions {
+		got, err := client.Complete(question, LLMOptions{System: thinkSystem, Model: model, Think: think, Temperature: temperature})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Thinking{
+			Question: question,
+			Thinking: strings.Join(strings.Fields(got.Thinking), " "),
+			Answer:   strings.Join(strings.Fields(got.Response), " "),
+		})
+	}
+	return out, nil
 }
 
 var linePrefix = regexp.MustCompile(`^\s*(?:[-*•]+|\(?\d+[.):]|\d+\s*-)\s*`)
@@ -246,6 +397,9 @@ func (c *OllamaClient) ChatMessage(messages []map[string]any, o LLMOptions, tool
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
+	}
+	if o.Think != nil {
+		body["think"] = o.Think
 	}
 	raw, err := c.request("POST", "/api/chat", body, o.Timeout)
 	if err != nil {

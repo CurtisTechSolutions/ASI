@@ -2,8 +2,8 @@
 
 A fake Ollama server (standard library) stands in for the real one: it answers
 ``/api/tags``, ``/api/generate`` (numbered lines for corpus prompts, JSON
-ratings for review prompts) and ``/api/chat``, records every request and can
-be switched into failure modes.
+ratings for review prompts, JSON corrections for copy-editing prompts) and
+``/api/chat``, records every request and can be switched into failure modes.
 """
 
 import json
@@ -22,16 +22,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet import RadixNet, ollama  # noqa: E402
+from radixnet.graph import THINK  # noqa: E402
 from radixnet.ollama import (  # noqa: E402
     OllamaClient,
     OllamaError,
     _loads_lenient,
+    _parse_corrections,
     _parse_reviews,
+    adversarial_correction,
     adversarial_review,
     corpus_from_prompt,
+    correct_texts,
     normalise_url,
     parse_lines,
     review_texts,
+    split_thinking,
+    think_value,
+    thoughts_from_prompt,
 )
 
 try:  # ``python -m unittest discover -s tests`` imports test modules as top-level modules
@@ -92,15 +99,48 @@ class _FakeHandler(BaseHTTPRequestHandler):
             self._raw(200, self.server.raw_response)
             return
         if self.path == "/api/generate":
-            self._json(200, {"model": body.get("model"), "response": self._generate(body), "done": True})
+            reply = {"model": body.get("model"), "response": self._generate(body), "done": True}
+            if body.get("think") and self.server.thinking == "field":
+                reply["thinking"] = self._thinking(body)
+            elif body.get("think") and self.server.thinking == "inline":
+                reply["response"] = f"<think>{self._thinking(body)}</think>\n" + reply["response"]
+            self._json(200, reply)
         elif self.path == "/api/chat":
-            self._json(200, {"model": body.get("model"), "message": {"role": "assistant", "content": "chat reply"}})
+            message = {"role": "assistant", "content": "chat reply"}
+            if body.get("think") and self.server.thinking == "field":
+                message["thinking"] = "a thought about the chat"
+            self._json(200, {"model": body.get("model"), "message": message})
         else:
             self._json(404, {"error": "not found"})
+
+    @staticmethod
+    def _thinking(body):
+        prompt = body.get("prompt", "")
+        return f"Let me think about {prompt} Is that right? Yes, it is."
 
     def _generate(self, body):
         prompt = body.get("prompt", "")
         system = body.get("system", "")
+        if body.get("format") == "json" and "Correct these" in prompt:  # a copy-editing request
+            if self.server.correction_response is not None:
+                return self.server.correction_response
+            corrections = []
+            for line in prompt.splitlines():
+                match = re.match(r"\[(\d+)\] (.*)", line)
+                if match:
+                    index, text = int(match.group(1)), match.group(2)
+                    corrected, reason = fake_copy_edit(text)
+                    corrections.append({"index": index, "correction": corrected, "reason": reason,
+                                        "note": "nothing" if reason == "none" else f"{reason} fixed"})
+            return json.dumps({"corrections": corrections})
+        if "one short, concrete question per line" in system:  # questions to think about
+            match = re.search(r"exactly (\d+) lines", system)
+            count = int(match.group(1)) if match else 3
+            match = re.search(r"instructions: (.*)", prompt)
+            topic = match.group(1).strip() if match else "unknown"
+            return "\n".join(f"{i + 1}. question {i + 1} about {topic}?" for i in range(count))
+        if system.startswith("Think the question through") or body.get("think"):
+            return f"The answer to {prompt}"
         if body.get("format") == "json":  # a review request
             if self.server.review_response is not None:
                 return self.server.review_response
@@ -126,6 +166,26 @@ class _FakeHandler(BaseHTTPRequestHandler):
         return "\n".join(lines)
 
 
+def fake_copy_edit(text):
+    """The fake editor's whole craft: ``howe`` -> ``how``, ``??`` -> ``?``, a comma after an opening ``Hi``.
+
+    Returns ``(corrected, reason)``; a text it has nothing to fix in comes back
+    unchanged with the reason ``"none"``, as the real editor is told to do.
+    """
+    corrected = text
+    reason = "none"
+    if "howe" in corrected:
+        corrected = corrected.replace("howe", "how")
+        reason = "spelling"
+    if "??" in corrected:
+        corrected = re.sub(r"\?{2,}", "?", corrected)
+        reason = "punctuation" if reason == "none" else reason
+    if corrected.startswith("Hi ") and not corrected.startswith("Hi, "):
+        corrected = "Hi, " + corrected[3:]
+        reason = "punctuation" if reason == "none" else reason
+    return corrected, reason
+
+
 class FakeOllama(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -135,6 +195,8 @@ class FakeOllama(ThreadingHTTPServer):
         self.fail_with = None
         self.raw_response = None
         self.review_response = None
+        self.correction_response = None
+        self.thinking = "field"  # how a thinking request is answered: "field", "inline" or "none"
 
     @property
     def url(self):
@@ -209,6 +271,63 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(client.chat([{"role": "user", "content": "hi"}]), "chat reply")
         self.assertEqual(self.fake.requests[-1][1], "/api/chat")
 
+    def test_thinking_comes_back_beside_the_answer(self):
+        client = OllamaClient(self.fake.url, "fake:latest")
+        got = client.complete("why is the sky blue?", think=True)
+        self.assertEqual(got["response"], "The answer to why is the sky blue?")
+        self.assertEqual(got["thinking"], "Let me think about why is the sky blue? Is that right? Yes, it is.")
+        self.assertIs(self.fake.requests[-1][2]["think"], True)
+        # a level goes out as Ollama takes it, and off goes out as false
+        client.complete("x", think="high")
+        self.assertEqual(self.fake.requests[-1][2]["think"], "high")
+        client.generate("x", think=False)
+        self.assertIs(self.fake.requests[-1][2]["think"], False)
+        client.generate("x")
+        self.assertNotIn("think", self.fake.requests[-1][2])
+        # a model that writes its thinking inline is read the same way
+        self.fake.thinking = "inline"
+        got = client.complete("why?", think=True)
+        self.assertEqual(got["thinking"], "Let me think about why? Is that right? Yes, it is.")
+        self.assertEqual(got["response"], "The answer to why?")
+        # and one that does not think at all thinks nothing
+        self.fake.thinking = "none"
+        got = client.complete("why?", think=True)
+        self.assertEqual((got["thinking"], got["response"]), ("", "The answer to why?"))
+        message = client.chat_message([{"role": "user", "content": "hi"}], think=True)
+        self.assertEqual(message["content"], "chat reply")
+        self.assertIs(self.fake.requests[-1][2]["think"], True)
+
+    def test_think_values_and_inline_thinking(self):
+        self.assertIsNone(think_value(None))
+        self.assertIsNone(think_value("default"))
+        self.assertIs(think_value(True), True)
+        self.assertIs(think_value("on"), True)
+        self.assertIs(think_value("false"), False)
+        self.assertEqual(think_value(" High "), "high")
+        with self.assertRaises(ValueError):
+            think_value("loud")
+        self.assertEqual(split_thinking("<think>hmm</think> the answer"), ("hmm", "the answer"))
+        self.assertEqual(split_thinking("before <THINKING>\nhmm\n</THINKING> after"), ("hmm", "before  after".replace("  ", " ") if False else "before  after"))
+        self.assertEqual(split_thinking("<think>open ended"), ("open ended", ""))
+        self.assertEqual(split_thinking("no tags"), ("", "no tags"))
+        self.assertEqual(split_thinking(""), ("", ""))
+
+    def test_thoughts_from_prompt(self):
+        client = OllamaClient(self.fake.url, "fake:latest")
+        thoughts = thoughts_from_prompt(client, "the sea", lines=3)
+        self.assertEqual([t["question"] for t in thoughts], [f"question {i} about the sea?" for i in (1, 2, 3)])
+        self.assertEqual(thoughts[0]["thinking"], "Let me think about question 1 about the sea? Is that right? Yes, it is.")
+        self.assertEqual(thoughts[0]["answer"], "The answer to question 1 about the sea?")
+        asked = [r for r in self.fake.requests if r[1] == "/api/generate"]
+        self.assertEqual(len(asked), 4)  # the questions, then one thought each
+        self.assertNotIn("think", asked[0][2])
+        self.assertTrue(all(r[2]["think"] is True for r in asked[1:]))
+        self.fake.thinking = "none"
+        thoughts = thoughts_from_prompt(client, "the sea", lines=2, think="low")
+        self.assertEqual([t["thinking"] for t in thoughts], ["", ""])
+        with self.assertRaises(ValueError):
+            thoughts_from_prompt(client, "", lines=2)
+
     def test_errors_are_ollama_errors(self):
         client = OllamaClient(self.fake.url, "fake:latest")
         self.fake.fail_with = 500
@@ -262,6 +381,28 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(_parse_reviews("garbage", 3), {})
         self.assertEqual(_parse_reviews('[{"rating": 7}]', 1), {0: {"rating": 7.0, "critique": "no critique given"}})
         self.assertEqual(_parse_reviews('{"rating": 2, "critique": "bad"}', 1), {0: {"rating": 2.0, "critique": "bad"}})
+
+    def test_parse_corrections(self):
+        raw = json.dumps({"corrections": [
+            {"index": 0, "correction": "Hi, how are you?", "reason": "Spelling", "note": "howe is not a word"},
+            {"index": 1, "corrected": " \"the cat sat\" ", "error": "none"},
+            {"index": 7, "correction": "out of range"},
+            {"index": "x", "correction": "by position", "reason": ""},
+            "a bare corrected line",
+            {"index": 3, "correction": 42},
+            {"index": 4, "note": "no correction at all"},
+        ]})
+        parsed = _parse_corrections(raw, 6)
+        self.assertEqual(parsed[0], {"correction": "Hi, how are you?", "reason": "spelling", "note": "howe is not a word"})
+        self.assertEqual(parsed[1], {"correction": "the cat sat", "reason": "none", "note": ""})  # quotes stripped
+        self.assertNotIn(7, parsed)  # out of range
+        self.assertEqual(parsed[3]["correction"], "by position")  # position used when the index is unusable
+        self.assertEqual(parsed[4]["correction"], "a bare corrected line")
+        self.assertNotIn(5, parsed)  # a number is not a correction
+        self.assertEqual(_parse_corrections("garbage", 3), {})
+        self.assertEqual(_parse_corrections('{"correction": "one", "reason": "typo"}', 1),
+                         {0: {"correction": "one", "reason": "typo", "note": ""}})
+        self.assertEqual(_parse_corrections('["a", "b"]', 2)[1]["correction"], "b")
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +487,83 @@ class CorpusAndReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             adversarial_review(None, self.client)
 
+    def test_correct_texts(self):
+        out = correct_texts(self.client, ["Hi howe are you??", "the cat sat on the mat", "   ", "howe now"])
+        self.assertEqual([c["index"] for c in out], [0, 1, 2, 3])
+        self.assertEqual([c["verdict"] for c in out], ["corrected", "unchanged", "uncorrected", "corrected"])
+        self.assertEqual(set(out[0]), {"index", "text", "correction", "verdict", "reason", "note", "changes",
+                                       "edits", "wrong_chars", "right_chars"})
+        first = out[0]
+        self.assertEqual(first["correction"], "Hi, how are you?")
+        self.assertEqual(first["reason"], "spelling")
+        # the diff, not the sentence: the comma the editor added, the e and the second ? it struck out
+        self.assertEqual([(c["op"], c["wrong"], c["right"]) for c in first["changes"]],
+                         [("insert", "", ","), ("delete", "e", ""), ("delete", "?", "")])
+        self.assertEqual([c["at"] for c in first["changes"]], [[2, 2], [6, 7], [15, 16]])
+        self.assertEqual([c["to"] for c in first["changes"]], [[2, 3], [7, 7], [15, 15]])
+        self.assertEqual((first["edits"], first["wrong_chars"], first["right_chars"]), (3, 2, 1))
+        self.assertEqual((out[1]["correction"], out[1]["reason"], out[1]["edits"]), ("the cat sat on the mat", "none", 0))
+        self.assertEqual((out[2]["correction"], out[2]["note"]), (None, "empty output"))
+        body = self.fake.requests[-1][2]
+        self.assertEqual(body["format"], "json")
+        self.assertIn("[0] Hi howe are you??", body["prompt"])
+        self.assertNotIn("[2]", body["prompt"])  # blank texts are not sent
+        self.assertIn("SMALLEST possible change", body["system"])
+        self.assertIn("spelling, punctuation", body["system"])  # the reason vocabulary is in the prompt
+        self.assertEqual(body["options"], {"temperature": 0.0})
+
+    def test_correct_context_and_reason_fallbacks(self):
+        correct_texts(self.client, ["Hi howe"], context="short greetings", model="other:7b")
+        body = self.fake.requests[-1][2]
+        self.assertIn("Context: short greetings", body["prompt"])
+        self.assertEqual(body["model"], "other:7b")
+        # an editor that names no reason: its note, else the shape of the diff
+        self.fake.correction_response = json.dumps({"corrections": [
+            {"index": 0, "correction": "Hi, how are you?", "reason": "", "note": ""},
+            {"index": 1, "correction": "the cat sat", "reason": "weird", "note": "it is cut off mid-sentence"},
+            {"index": 2, "correction": "The cat", "reason": "", "note": ""},
+        ]})
+        out = correct_texts(self.client, ["Hi howe are you??", "the cat sat on", "the cat"])
+        self.assertEqual([c["reason"] for c in out], ["spelling", "fragment", "capitalisation"])
+
+    def test_correct_batches_and_uncorrected(self):
+        texts = [f"line {i}" for i in range(45)]
+        out = correct_texts(self.client, texts, batch=20)
+        self.assertEqual(len(out), 45)
+        self.assertEqual(len([r for r in self.fake.requests if r[1] == "/api/generate"]), 3)
+        self.assertTrue(all(c["verdict"] == "unchanged" for c in out))
+        self.fake.correction_response = "I would rather not."
+        out = correct_texts(self.client, ["Hi howe", "fine"])
+        self.assertEqual([c["verdict"] for c in out], ["uncorrected", "uncorrected"])
+        self.assertTrue(all(c["correction"] is None for c in out))
+        self.assertEqual(out[0]["note"], "no correction returned")
+        with self.assertRaises(ValueError):
+            correct_texts(self.client, ["x"], batch=0)
+
+    def test_adversarial_correction_of_model_samples(self):
+        model = RadixNet(seed=1, backend="python")
+        model.train(["a good sentence about cats", "a good sentence about dogs"], **FAST)
+        result = adversarial_correction(model, self.client, count=3, max_length=40, seed=3)
+        self.assertEqual((result["source"], result["model"]), ("model", "fake:latest"))
+        self.assertEqual(len(result["texts"]), 3)
+        self.assertEqual(len(result["corrections"]), 3)
+        self.assertEqual(sorted(result["corrected"] + result["unchanged"] + result["uncorrected"]), sorted(result["texts"]))
+        with_prefix = adversarial_correction(model, self.client, count=2, prefix="a good", max_length=30)
+        self.assertTrue(all(t.startswith("a good") for t in with_prefix["texts"]))
+
+    def test_adversarial_correction_of_given_texts(self):
+        result = adversarial_correction(None, self.client, texts=["Hi howe are you??", "fine thanks", "howe??"])
+        self.assertEqual(result["source"], "given")
+        self.assertEqual(result["corrected"], ["Hi howe are you??", "howe??"])
+        self.assertEqual(result["unchanged"], ["fine thanks"])
+        self.assertEqual(result["uncorrected"], [])
+        # "howe??" -> "how?" is one change: the e and the ? are closer than a trigram, so they are one edit
+        self.assertEqual((result["edits"], result["wrong_chars"], result["right_chars"]), (3 + 1, 2 + 2, 1 + 0))
+        self.assertAlmostEqual(result["change_rate"], 2 / 3)
+        self.assertIsNone(adversarial_correction(None, self.client, texts=["   "])["change_rate"])
+        with self.assertRaises(ValueError):
+            adversarial_correction(None, self.client)
+
 
 # ---------------------------------------------------------------------------
 # API
@@ -402,6 +620,70 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(wait_job(self.client)["state"], "done")
         status, stats, _ = self.client.get("/api/status")
         self.assertEqual(stats["trained_texts"], 4)
+
+    def test_think(self):
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "the sea", "lines": 2})
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["count"], data["thinking"], data["think"], data["job"], data["upload"]), (2, 2, True, None, None))
+        self.assertEqual(data["thoughts"][1]["question"], "question 2 about the sea?")
+        self.assertTrue(data["thoughts"][1]["thinking"].startswith("Let me think about"))
+
+        body = {"prompt": "the sea", "lines": 3, "train": True, "think": "high", "save_as": "sea-thoughts.txt", **FAST}
+        status, data, _ = self.client.post("/api/ollama/think", body)
+        self.assertEqual(status, 202, data)
+        self.assertEqual(data["think"], "high")
+        self.assertEqual(data["job"]["type"], "train")
+        self.assertEqual(data["upload"]["name"], "sea-thoughts.txt")
+        self.assertEqual(data["upload"]["lines"], 3)
+        self.assertEqual(wait_job(self.client)["state"], "done")
+        graph = self.service.model.graph
+        self.assertGreater(len(graph.children[THINK]), 0)  # it has thoughts now
+        self.assertGreater(len(graph.parents[THINK]), 0)  # and knows where a thought questions itself
+        status, thought, _ = self.client.post("/api/think", {"learn": False})
+        self.assertEqual(status, 200, thought)
+        self.assertNotEqual(thought["text"], "")
+        # the thoughts are thoughts, not texts: nothing from START begins with them
+        status, samples, _ = self.client.post("/api/generate", {"count": 3, "mode": "beam", "guard": False})
+        self.assertEqual(status, 200, samples)
+        self.assertTrue(all(not s["text"].lower().startswith("let me think") for s in samples["samples"]))
+
+        body = {"prompt": "the sea", "lines": 1, "train": True, "with_answers": True, **FAST}
+        status, data, _ = self.client.post("/api/ollama/think", body)
+        self.assertEqual(status, 202, data)
+        self.assertEqual(wait_job(self.client)["state"], "done")
+        status, stats, _ = self.client.get("/api/status")
+        # 3 thoughts + their 6 questions, then 1 thought + its 2 questions + 1 answer
+        self.assertEqual(stats["trained_texts"], 3 + 6 + 1 + 2 + 1)
+
+    def test_think_errors(self):
+        status, data, _ = self.client.post("/api/ollama/think", {"lines": 3})
+        self.assertEqual(status, 400, data)
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x", "think": "loud"})
+        self.assertEqual(status, 400, data)
+        self.fake.thinking = "none"
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x", "lines": 1})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["thinking"], 0)
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x", "lines": 1, "train": True})
+        self.assertEqual(status, 502, data)
+        self.assertIn("no thinking", data["error"])
+        self.fake.thinking = "field"
+        self.fake.fail_with = 500
+        status, data, _ = self.client.post("/api/ollama/think", {"prompt": "x"})
+        self.assertEqual(status, 502, data)
+
+    def test_null_asks_for_thinking_and_default_leaves_it_to_the_model(self):
+        # a null field is a missing one, so null asks the model to think as leaving it out does; "default" leaves
+        # the choice to the model: no think field goes out with the answers, and none comes back
+        for value, sent in ((None, True), ("default", None)):
+            with self.subTest(think=value):
+                self.fake.requests.clear()
+                status, data, _ = self.client.post("/api/ollama/think", {"prompt": "the sea", "lines": 1, "think": value})
+                self.assertEqual(status, 200, data)
+                self.assertEqual(data["think"], sent)
+                answers = [body for _method, path, body in self.fake.requests if path == "/api/generate"][1:]
+                self.assertTrue(answers)
+                self.assertTrue(all(body.get("think") == sent for body in answers), answers)
 
     def test_corpus_errors(self):
         status, data, _ = self.client.post("/api/ollama/corpus", {"lines": 3})
@@ -468,6 +750,59 @@ class ApiTests(unittest.TestCase):
         status, data, _ = self.client.post("/api/ollama/review", {"texts": ["x"]})
         self.assertEqual(status, 502, data)
 
+    def test_correct_given_texts_and_blame(self):
+        body = {"texts": ["Hi howe are you??", "the cat sat on the mat"]}
+        status, data, _ = self.client.post("/api/ollama/correct", body)
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["source"], data["url"], data["model"]), ("given", self.fake.url, "fake:latest"))
+        self.assertEqual([c["verdict"] for c in data["corrections"]], ["corrected", "unchanged"])
+        self.assertEqual(data["corrections"][0]["correction"], "Hi, how are you?")
+        self.assertEqual(data["corrected"], ["Hi howe are you??"])
+        self.assertEqual(data["unchanged"], ["the cat sat on the mat"])
+        self.assertEqual((data["edits"], data["severity"], data["negative"]), (3, 1.0, None))
+
+        status, data, _ = self.client.post("/api/ollama/correct", {**body, "blame": True, "severity": 1.5})
+        self.assertEqual(status, 200, data)
+        negative = data["negative"]
+        self.assertEqual((negative["blamed"], negative["cleared"], negative["uncorrected"]), (1, 0, 0))
+        self.assertEqual(negative["reasons"], {"spelling": 1})
+        self.assertEqual(negative["lessons"][0]["correction"], "Hi, how are you?")
+        self.assertEqual(negative["severity_mean"], 1.5)
+        self.assertGreater(negative["edges"], 0)
+        # only the changed characters are known failures: the correction itself passes
+        status, judged, _ = self.client.post("/api/negative/judge", {"text": "Hi, how are you?"})
+        self.assertEqual(status, 200, judged)
+        self.assertEqual(judged["verdicts"][0]["verdict"], "pass")
+        status, judged, _ = self.client.post("/api/negative/judge", {"text": "Hi howe are you??"})
+        verdict = judged["verdicts"][0]
+        self.assertEqual(verdict["reasons"][0]["reason"], "spelling")
+        self.assertIn("howe", "".join(span["fragment"] for span in verdict["spans"]))
+        status, doc, _ = self.client.get("/api/negative")
+        self.assertEqual(doc["stats"]["sources"], {"correction": 1})
+
+    def test_correct_model_samples(self):
+        self.client.post("/api/train", {"texts": ["a good sentence about cats", "a good sentence about dogs"], **FAST})
+        wait_job(self.client)
+        status, data, _ = self.client.post("/api/ollama/correct", {"count": 3, "max_length": 40, "context": "cats"})
+        self.assertEqual(status, 200, data)
+        self.assertEqual(data["source"], "model")
+        self.assertEqual(len(data["corrections"]), 3)
+        self.assertIn("Context: cats", self.fake.requests[-1][2]["prompt"])
+        status, data, _ = self.client.post("/api/ollama/correct", {"count": 2, "prefix": "a good", "max_length": 30})
+        self.assertEqual(status, 200, data)
+        self.assertTrue(all(t.startswith("a good") for t in data["texts"]))
+
+    def test_correct_errors(self):
+        status, data, _ = self.client.post("/api/ollama/correct", {"count": 0})
+        self.assertEqual(status, 400, data)
+        status, data, _ = self.client.post("/api/ollama/correct", {"texts": ["x"], "severity": -1})
+        self.assertEqual(status, 400, data)
+        status, data, _ = self.client.post("/api/ollama/correct", {"texts": ["x"], "url": "   "})
+        self.assertEqual(status, 400, data)
+        self.fake.fail_with = 503
+        status, data, _ = self.client.post("/api/ollama/correct", {"texts": ["x"]})
+        self.assertEqual(status, 502, data)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -509,6 +844,24 @@ class CliTests(unittest.TestCase):
         self.assertEqual(len(doc["trained"]["epochs"]), 2)
         self.assertTrue(os.path.isfile(self.model))
 
+    def test_think_out_and_train(self):
+        out = os.path.join(self.dir, "thoughts.txt")
+        doc = self.run_cli("ollama", "think", "--prompt", "mountains", "--lines", "2", "--out", out)
+        self.assertEqual((doc["count"], doc["thinking"], doc["think"], doc["trained"]), (2, 2, True, None))
+        with open(out, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().splitlines(), [t["thinking"] for t in doc["thoughts"]])
+        doc = self.run_cli("ollama", "think", "--prompt", "mountains", "--lines", "2", "--train", "--epochs", "2",
+                           "--think", "medium")
+        self.assertEqual(doc["think"], "medium")
+        # every fake thought asks two questions, and the second of them follows a sentence the graph can place
+        self.assertEqual((doc["trained"]["thoughts"], doc["trained"]["questions"]), (2, 4))
+        self.assertEqual(doc["trained"]["taught"], 2)
+        self.assertTrue(os.path.isfile(self.model))
+        thought = self.run_cli("think", "--no-learn")
+        self.assertNotEqual(thought["text"], "")
+        self.assertEqual(thought["node_ids"][0], THINK)
+        self.run_cli("ollama", "think", "--prompt", "mountains", "--think", "loud", expect=1)
+
     def test_review_and_two_nrl(self):
         doc = self.run_cli("ollama", "review", "--text", "a good line", "--text", "zzz", "--threshold", "6")
         self.assertEqual(doc["source"], "given")
@@ -529,6 +882,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doc["two_nrl"]["good_texts"], 2)
         self.assertEqual(doc["two_nrl"]["stats"]["twonrl_runs"], 1)
         self.run_cli("ollama", "review", "--text", "good only", "--2nrl", expect=1)
+
+    def test_correct_and_blame(self):
+        doc = self.run_cli("ollama", "correct", "--text", "Hi howe are you??", "--text", "fine thanks")
+        self.assertEqual(doc["source"], "given")
+        self.assertEqual([c["verdict"] for c in doc["corrections"]], ["corrected", "unchanged"])
+        self.assertEqual(doc["corrections"][0]["correction"], "Hi, how are you?")
+        self.assertEqual((doc["corrected"], doc["unchanged"], doc["negative"]), (["Hi howe are you??"], ["fine thanks"], None))
+        # sampling needs a trained model
+        self.run_cli("ollama", "correct", "--count", "2", expect=1)
+        self.run_cli("train", "--data", os.path.join(ROOT, "data", "sample_corpus.txt"), "--epochs", "1",
+                     "--lr", "0.5", "--batch-size", "4")
+        doc = self.run_cli("ollama", "correct", "--count", "2", "--max-length", "30")
+        self.assertEqual(doc["source"], "model")
+        self.assertEqual(len(doc["corrections"]), 2)
+        data = os.path.join(self.dir, "wrong.txt")
+        with open(data, "w", encoding="utf-8") as fh:
+            fh.write("Hi howe are you??\nthe cat sat on the mat\n")
+        negative = os.path.join(self.dir, "model.negative.json")
+        doc = self.run_cli("ollama", "correct", "--data", data, "--blame", "--severity", "2")
+        self.assertEqual((doc["negative"]["blamed"], doc["negative"]["cleared"]), (1, 0))
+        self.assertEqual([r["reason"] for r in doc["negative"]["reasons"]], ["spelling"])  # the saved table
+        self.assertEqual(doc["negative"]["path"], negative)
+        self.assertTrue(os.path.isfile(negative))
+        self.assertEqual(doc["negative"]["stats"]["sources"], {"correction": 1})
+        self.assertEqual(doc["negative"]["lessons"][0]["severity"], 2.0)
+        verdict = self.run_cli("negative", "why", "--text", "Hi howe are you??")["verdicts"][0]
+        self.assertEqual(verdict["reasons"][0]["reason"], "spelling")
+        self.assertEqual(self.run_cli("negative", "why", "--text", "Hi, how are you?")["verdicts"][0]["verdict"], "pass")
 
 
 if __name__ == "__main__":

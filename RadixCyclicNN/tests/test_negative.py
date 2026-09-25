@@ -477,7 +477,7 @@ class TestApi(unittest.TestCase):
         self.blame()
         status, data, _ = self.client.post("/api/negative/settings", {"threshold": 2.5, "min_coverage": 0.1})
         self.assertEqual(status, 200, data)
-        self.assertEqual(data["settings"], {"threshold": 2.5, "min_coverage": 0.1})
+        self.assertEqual(data["settings"], {"threshold": 2.5, "min_coverage": 0.1, "provenance": True})
         status, data, _ = self.client.post("/api/negative/settings", {"clear_scale": 2.0})
         self.assertEqual(data["weights"]["clear_scale"], 2.0)
         status, data, _ = self.client.post("/api/negative/forget", {"reason": "repetition"})

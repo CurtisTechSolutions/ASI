@@ -329,6 +329,9 @@ pub struct TrainOptions {
     /// ([`crate::training`], `../../SPEC-SearchAndTraining.md`).  Plain
     /// training reads it; the feedback passes walk every text in corpus order.
     pub plan: crate::training::Plan,
+    /// The sentinel every text's walk begins at: `START`, or `THINK` to train
+    /// the texts as *thoughts* ([`crate::thinking`]).
+    pub origin: usize,
 }
 
 impl Default for TrainOptions {
@@ -340,6 +343,7 @@ impl Default for TrainOptions {
             phase: None,
             chunk_size: 0,
             plan: crate::training::Plan::default(),
+            origin: START,
         }
     }
 }
@@ -520,12 +524,14 @@ impl Model {
                 epochs: opts.epochs,
                 auto_compress: opts.auto_compress,
                 plan: opts.plan.clone(),
+                origin: opts.origin,
                 ..Default::default()
             };
             return self.radix_train(texts, &cfg, opts.phase.as_deref(), &mut |_| true);
         }
         if self.is_resonant() {
-            return self.resonant_train(
+            return self.resonant_train_from(
+                opts.origin,
                 texts,
                 opts.epochs,
                 opts.auto_compress,
@@ -704,10 +710,16 @@ impl Model {
         } else {
             opts.chunk_size
         };
+        if !crate::graph::is_origin(opts.origin) {
+            return Err(format!("a text begins at START or THINK, not at node {}", opts.origin));
+        }
+        let origin = opts.origin;
         let workers = self.workers();
         let mut skipped_short = 0;
         // a text too short to hold one gram of this encoding is skipped
         let enc = self.g.enc;
+        let read = crate::training::read(&enc, texts, &opts.plan);
+        let texts: &[String] = &read;
         let usable: Vec<&String> = texts
             .iter()
             .filter(|t| {
@@ -742,7 +754,9 @@ impl Model {
             let mut novel = vec![false; chunk.len()];
             {
                 let g = &self.g;
-                parallel_fill(&mut novel, workers, |i, slot| *slot = g.trace(&grams[i]).is_none());
+                parallel_fill(&mut novel, workers, |i, slot| {
+                    *slot = g.trace_from(origin, &grams[i]).is_none()
+                });
             }
             for (i, &is_novel) in novel.iter().enumerate() {
                 // a rehearsed text is not new: it was counted when it was first read
@@ -750,7 +764,7 @@ impl Model {
                     chars += enc.len(chunk[i]) as i64;
                 }
                 if is_novel {
-                    self.g.observe(&grams[i], false)?;
+                    self.g.observe_from(origin, &grams[i], false)?;
                 }
             }
         }
@@ -783,7 +797,9 @@ impl Model {
                     let g = &self.g;
                     let traversed = &traversed;
                     parallel_fill(&mut traced, workers, |i, slot| {
-                        let Some((tr, path)) = g.trace(&grams[i]) else { return };
+                        let Some((tr, path)) = g.trace_from(origin, &grams[i]) else {
+                            return;
+                        };
                         for t in &tr {
                             traversed[t.e].fetch_add(1, Ordering::Relaxed);
                         }
@@ -803,8 +819,8 @@ impl Model {
                     if traced[i].is_some() {
                         continue;
                     }
-                    self.g.observe(&grams[i], false)?;
-                    let Some((tr, path)) = self.g.trace(&grams[i]) else {
+                    self.g.observe_from(origin, &grams[i], false)?;
+                    let Some((tr, path)) = self.g.trace_from(origin, &grams[i]) else {
                         continue;
                     };
                     for t in &tr {
@@ -1046,6 +1062,21 @@ impl Model {
         (node, offset, lead)
     }
 
+    /// Where a walk begins: at the end of `prefix`, or - with no prefix - at
+    /// the `origin` sentinel.  `THINK` is a thought ([`crate::thinking`]): the
+    /// same search from the other sentinel, through the openings the model
+    /// learned for its thoughts rather than for its texts.  A prefix wins over
+    /// the origin, because a located prefix already says where the walk stands.
+    pub(crate) fn walk_start(&self, prefix: &str, origin: usize) -> Result<(usize, usize, String), String> {
+        if !crate::graph::is_origin(origin) {
+            return Err(format!("a walk begins at START or THINK, not at node {origin}"));
+        }
+        if prefix.is_empty() && origin != START {
+            return Ok((origin, 0, String::new()));
+        }
+        Ok(self.prefix_start(prefix))
+    }
+
     /// Continues `prefix`: the K most likely and the K least likely
     /// continuations in one beam search, or one stochastic walk.
     pub fn predict(&mut self, prefix: &str, o: &PredictOptions) -> Result<Prediction, String> {
@@ -1126,6 +1157,7 @@ impl Model {
                 top_p: tuning.filter.top_p,
                 min_p: tuning.filter.min_p,
                 diversity: tuning.diversity,
+                origin: tuning.origin,
             };
             return self.resonant_predict(prefix, &o, rng);
         }
@@ -1138,7 +1170,7 @@ impl Model {
         // lengths are counted in the encoding's units all the way through:
         // characters by default, words under a word encoding
         let enc = self.g.enc;
-        let (node, offset, lead) = self.prefix_start(prefix);
+        let (node, offset, lead) = self.walk_start(prefix, tuning.origin)?;
         let lead_len = enc.len(&lead);
         let want = length.saturating_sub(lead_len);
         let mut cap: Option<usize> = None;
@@ -1466,6 +1498,9 @@ pub struct PredictOptions {
     pub min_p: f64,
     /// How far the beam's K are spread apart (section 2; 0 = off).
     pub diversity: f64,
+    /// The sentinel an empty prefix starts the walk at: `START` (the default),
+    /// or `THINK` for a *thought* ([`crate::thinking`]).
+    pub origin: usize,
 }
 
 impl Default for PredictOptions {
@@ -1487,12 +1522,13 @@ impl Default for PredictOptions {
             top_p: 1.0,
             min_p: 0.0,
             diversity: 0.0,
+            origin: START,
         }
     }
 }
 
 impl PredictOptions {
-    /// The sampling filter and the diversity these options ask for.
+    /// The sampling filter, the diversity and the origin these options ask for.
     pub fn tuning(&self) -> SearchTuning {
         SearchTuning {
             filter: SamplingFilter {
@@ -1501,17 +1537,21 @@ impl PredictOptions {
                 min_p: self.min_p,
             },
             diversity: self.diversity,
+            origin: self.origin,
         }
     }
 }
 
-/// The search's two new dials: the filter a sampled step draws through and the
-/// diversity the beam picks its K with - both off by default
-/// (`../../SPEC-SearchAndTraining.md`).
+/// The search's dials beside the classic ones: the filter a sampled step draws
+/// through and the diversity the beam picks its K with - both off by default
+/// (`../../SPEC-SearchAndTraining.md`) - and the origin an empty prefix starts
+/// at (`START`, or `THINK` for a thought).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SearchTuning {
     pub filter: SamplingFilter,
     pub diversity: f64,
+    /// `START` (0, the default) or `THINK`.
+    pub origin: usize,
 }
 
 impl SearchTuning {
@@ -1557,6 +1597,7 @@ impl GenerateOptions {
                 min_p: self.min_p,
             },
             diversity: self.diversity,
+            origin: START,
         }
     }
 }

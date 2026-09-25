@@ -349,7 +349,8 @@ pub fn train(
     s.config.validate()?;
     match model.kind() {
         "radix" => model.radix_train(texts, &s.config, None, on_epoch),
-        "resonant" => model.resonant_train(
+        "resonant" => model.resonant_train_from(
+            s.config.origin,
             texts,
             s.config.epochs,
             s.config.auto_compress,
@@ -357,6 +358,9 @@ pub fn train(
             &s.config.plan,
             on_epoch,
         ),
+        "negative" if s.config.origin != crate::graph::START => {
+            Err("the negative network judges; it does not think".to_string())
+        }
         "negative" => {
             let o = crate::negative::BlameOptions {
                 reason: s.reason.clone(),
@@ -366,7 +370,10 @@ pub fn train(
                 epochs: s.config.epochs,
                 no_compress: !s.config.auto_compress,
             };
-            model.blame_with(texts, &o, on_epoch)
+            // blaming takes no plan, so the failures are read backwards here
+            let enc = model.g.enc;
+            let read = crate::training::read(&enc, texts, &s.config.plan);
+            model.blame_with(&read, &o, on_epoch)
         }
         _ => {
             let opts = crate::model::TrainOptions {
@@ -375,6 +382,7 @@ pub fn train(
                 chunk_size: s.chunk_size,
                 phase: None,
                 plan: s.config.plan.clone(),
+                origin: s.config.origin,
             };
             model.train_with(texts, &opts, on_epoch)
         }

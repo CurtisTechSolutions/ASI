@@ -43,6 +43,8 @@ const (
 	EndLabel   = "</s>"
 	// BackLabel is the third sentinel: where the graph has learned a walk goes round (Back).
 	BackLabel = "<back>"
+	// ThinkLabel is the fourth: where the graph has learned to stop and think, and where thoughts begin (Think).
+	ThinkLabel = "<think>"
 )
 
 // -- what a unit is --------------------------------------------------------------
@@ -422,6 +424,32 @@ func (e Encoding) HasUnitPrefix(text, prefix string) bool {
 		}
 	}
 	return text == prefix || strings.HasPrefix(text, prefix+" ")
+}
+
+// Reverse is the text read backwards, unit by unit: its last character first,
+// or its last word - what a run with Plan.Reverse trains on
+// (../../SPEC-SearchAndTraining.md §9).  Characters are reversed code point by
+// code point, cut exactly as Units cuts them, so reversing twice gives the
+// text back; a word encoding reverses the order of the words and writes them
+// with single spaces, the layout it keeps anyway, each word's letters in their
+// order.  Python's Encoding.reverse, character for character.
+func (e Encoding) Reverse(text string) string {
+	if e.Unit != Chars {
+		// words, sounds or acoustic units: the units in reverse order (a phonetic unit reads
+		// the text as sounds first, which Join does)
+		words := strings.Fields(e.Join(text))
+		for i, j := 0, len(words)-1; i < j; i, j = i+1, j-1 {
+			words[i], words[j] = words[j], words[i]
+		}
+		return strings.Join(words, " ")
+	}
+	u := charUnits(text)
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := u.Len() - 1; i >= 0; i-- {
+		b.WriteString(text[u.starts[i]:u.starts[i+1]])
+	}
+	return b.String()
 }
 
 // -- encoder -----------------------------------------------------------------------

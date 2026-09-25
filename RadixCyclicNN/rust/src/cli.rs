@@ -93,6 +93,7 @@ pub const SWITCHES: &[&str] = &[
     "allow-word-repeats",
     "blame",
     "browser",
+    "correct",
     "dry-run",
     "exact",
     "json",
@@ -114,6 +115,7 @@ pub const SWITCHES: &[&str] = &[
     "no-learn",
     "no-model",
     "no-network-isolation",
+    "no-provenance",
     "no-ratio",
     "no-replay",
     "no-solve",
@@ -123,7 +125,9 @@ pub const SWITCHES: &[&str] = &[
     "no-to-end",
     "no-waveform",
     "normalise",
+    "off",
     "offline",
+    "on",
     "pair",
     "parallel-parts",
     "play",
@@ -132,11 +136,13 @@ pub const SWITCHES: &[&str] = &[
     "raw",
     "read-reward",
     "resume",
+    "reverse",
     "reverse-schedule",
     "sample-first",
     "save",
     "seeded",
     "shared-token",
+    "stream",
     "strict",
     "to-end",
     "train",
@@ -294,10 +300,11 @@ impl Ctx {
 
 impl Ctx {
     /// The negative network guarding the output of `--model`, with the filter
-    /// settings of `--threshold`, `--min-coverage` and `--over-sample`; `None`
-    /// when `--no-guard` was given, when there is no negative network beside
-    /// the model, or when the one there has never been taught a failure and
-    /// so would veto nothing (Python's `open_guard`).
+    /// settings of `--threshold`, `--min-coverage` and `--over-sample` (and
+    /// `--no-provenance`: veto without saying why); `None` when `--no-guard`
+    /// was given, when there is no negative network beside the model, or when
+    /// the one there has never been taught a failure and so would veto
+    /// nothing (Python's `open_guard`).
     pub fn open_guard(&self) -> Result<Option<(Model, crate::duo::FilterConfig)>, String> {
         if self.args.on("no-guard") {
             return Ok(None);
@@ -314,6 +321,7 @@ impl Ctx {
             threshold: self.args.maybe_float("threshold")?,
             min_coverage: self.args.maybe_float("min-coverage")?,
             over_sample: self.args.usize("over-sample", 3)?,
+            provenance: !self.args.on("no-provenance"),
             ..Default::default()
         };
         if let Some(g) = negative.g.neg.as_ref() {
@@ -336,6 +344,16 @@ pub type Command = fn(&Ctx) -> Result<(), String>;
 pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("converse", crate::dialogue::cli, "the model converses with itself"),
     (
+        "think",
+        crate::thinking::cli,
+        "the model thinks: one thought from the THINK sentinel, questioning itself where it learned to",
+    ),
+    (
+        "talk",
+        crate::assistant::cli,
+        "talk to the model in today's format: messages in, a reply out, the thinking first, streamed",
+    ),
+    (
         "chat",
         crate::chat::cli,
         "an LLM converses with the model and marks every reply",
@@ -344,6 +362,11 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
         "correct",
         crate::correct::cli,
         "teach one correction: only what changed moves",
+    ),
+    (
+        "attention",
+        crate::attention::cli,
+        "the attention band: where inside a gram a correction's blame and credit land",
     ),
     (
         "evolve",
@@ -364,7 +387,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     (
         "ollama",
         crate::ollama::cli,
-        "a local Ollama LLM: models, a corpus from a prompt, the adversarial review",
+        "a local Ollama LLM: models, a corpus from a prompt, the adversarial review, thoughts",
     ),
     (
         "chatgpt",
@@ -429,7 +452,9 @@ pub fn read_named(args: &Args, flag: &str) -> Result<Vec<String>, String> {
     // a recording is heard as one text of acoustic units: one utterance, one text
     if crate::phonetic::is_audio_file(path) {
         let data = std::fs::read(path).map_err(|err| format!("cannot read {path}: {err}"))?;
-        return Ok(vec![crate::phonetic::hear_audio(&data).map_err(|err| format!("{path}: {err}"))?]);
+        return Ok(vec![
+            crate::phonetic::hear_audio(&data).map_err(|err| format!("{path}: {err}"))?
+        ]);
     }
     let unit = args.str("split", "lines");
     let page_lines = args.usize("page-lines", 0).unwrap_or(0);
@@ -591,6 +616,10 @@ mod tests {
         assert_eq!(args.get("plan"), Some("3"));
         let (_, args) = parse_args(&argv(&["tutor", "--plan", "5"])).unwrap();
         assert_eq!(args.get("plan"), Some("5"));
+        // --reverse is a switch: the flag after it keeps its own value
+        let (_, args) = parse_args(&argv(&["train", "--reverse", "--data", "corpus.txt"])).unwrap();
+        assert!(args.on("reverse"));
+        assert_eq!(args.get("data"), Some("corpus.txt"));
     }
 
     #[test]

@@ -47,7 +47,7 @@ from .beam import Prediction
 from . import diff
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder, Encoding
-from .graph import BACK, END, START, RadixCyclicGraph
+from .graph import BACK, END, ORIGINS, START, THINK, RadixCyclicGraph
 from .model import (
     MODEL_FORMAT_VERSION,
     GraphModel,
@@ -71,10 +71,11 @@ _MAX_LOG_PPL = 700.0
 
 
 def _walks(transitions: Sequence[tuple[int, int]]) -> list[list[tuple[int, int]]]:
-    """Cut a pass's transitions back into one walk per text: every text starts at START, nothing else does."""
+    """Cut a pass's transitions back into one walk per text: every text starts at START (a thought at THINK),
+    nothing else does."""
     walks: list[list[tuple[int, int]]] = []
     for step in transitions:
-        if step[0] == START or not walks:
+        if step[0] in ORIGINS or not walks:
             walks.append([])
         walks[-1].append(step)
     return walks
@@ -219,7 +220,8 @@ class CountRewardGraph(RadixCyclicGraph):
             return 0
         alive = self.edge_alive
         touched = 0
-        prev = START
+        first = transitions[0][0]
+        prev = first if first in ORIGINS else START  # the origin is the context of its own first step
         for index, (parent, edge) in enumerate(transitions):
             if index:
                 prev = transitions[index - 1][0]
@@ -596,8 +598,8 @@ class CountRewardGraph(RadixCyclicGraph):
         self._path_parents = None
         return True
 
-    def observe_sequence(self, trigrams, count: bool = True) -> list[tuple[int, int]]:
-        transitions = super().observe_sequence(trigrams, count)
+    def observe_sequence(self, trigrams, count: bool = True, origin: int = START) -> list[tuple[int, int]]:
+        transitions = super().observe_sequence(trigrams, count, origin)
         if count and transitions:
             self.record_traversals(transitions)
             self.recompute_weights()
@@ -619,6 +621,15 @@ class CountRewardGraph(RadixCyclicGraph):
             edge = self.children[p].get(child) if child is not None and child != BACK else None
             if edge is not None:
                 self.add_reward([edge], sign * amount)
+        self.recompute_weights()
+        return e
+
+    def observe_think(self, p: int, amount: float = 1.0) -> int:
+        """As :meth:`RadixCyclicGraph.observe_think`, learned the way this model learns everything: the
+        ``THINK`` edge is counted and rewarded, and the weight follows from that."""
+        e = super().observe_think(p, amount=0.0)  # no weight is nudged by hand here
+        self.record_traversals([(p, e)])
+        self.add_reward([e], amount)
         self.recompute_weights()
         return e
 
@@ -861,6 +872,7 @@ class CountRewardNet(GraphModel):
     """
 
     kind = "count"
+    takes_corrections = True
     format = COUNT_MODEL_FORMAT
     graph_class = CountRewardGraph
     """The graph this kind builds and loads; a kind over another alphabet names its own."""
@@ -930,13 +942,15 @@ class CountRewardNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         planned: bool = False,
+        origin: int = START,
     ) -> list[dict]:
         """``cfg.epochs`` passes over ``texts``: each traverses (``count``) and / or rewards (``reward``) every path.
 
         ``planned`` (plain training) walks them the way ``cfg`` says - the order,
         the curriculum, the rehearsal of the replay buffer and the early stop of
         ``../SPEC-SearchAndTraining.md``; the feedback passes walk every text in
-        corpus order, as they always have.
+        corpus order, as they always have.  ``origin`` is the sentinel every
+        walk begins at: START for texts, THINK for thoughts.
         """
         texts, skipped_short = self._clean_texts(texts)
         plan = self._plan(texts, cfg) if planned else None
@@ -952,7 +966,7 @@ class CountRewardNet(GraphModel):
             meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         # build the structure first (no counting) and compress it, so every pass - the first included - walks
         # the same transitions: steps inside a compressed node are deterministic and never counted
-        self._observe_grams(grams + [rehearsal[t] for t in rehearsed], False)
+        self._observe_grams(grams + [rehearsal[t] for t in rehearsed], False, origin)
         pending_merges = graph.compress() if cfg.auto_compress else 0
         outcome = None if not reward else reward > 0  # a rewarded path was judged correct, a penalised one wrong
         for j in range(cfg.epochs):
@@ -962,7 +976,7 @@ class CountRewardNet(GraphModel):
             else:
                 chosen, again = plan.epoch(j, meta_counter(meta, "epochs_total").bumped(1).value)
                 walked = [grams[i] for i in chosen] + [rehearsal[t] for t in again]
-            transitions = self._observe_grams(walked, count)
+            transitions = self._observe_grams(walked, count, origin)
             edges = [e for _, e in transitions]
             for walk in _walks(transitions):  # what each text did, in its own context
                 graph.record_path(walk, outcome, create=outcome is not None)
@@ -1021,17 +1035,20 @@ class CountRewardNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         phase: str | None = None,
+        origin: int = START,
         **overrides,
     ) -> list[dict]:
         """Count one traversal of every text's path per epoch (structure is built on demand, as in RadixNet).
 
         The loss is the mean ``-log P`` of the transitions after the pass;
         ``lr`` / ``act_lr`` / ``batch_size`` in the config are ignored.
+        ``origin=THINK`` trains the texts as thoughts (:mod:`radixnet.thinking`).
         """
         cfg = _resolve_config(config, overrides)
         return self._passes(
-            texts, cfg, count=True, reward=0.0, phase=phase, checkpoint_manager=checkpoint_manager,
+            self._read(texts, cfg), cfg, count=True, reward=0.0, phase=phase, checkpoint_manager=checkpoint_manager,
             progress=progress, stop_event=stop_event, planned=phase is None,  # a phase marks a feedback pass
+            origin=origin,
         )
 
     def reward(
@@ -1252,6 +1269,13 @@ class CountRewardNet(GraphModel):
 
         An edge both sentences walk over a changed span - the network wrote the
         right characters by another route - is rewarded, never penalised.
+
+        With the attention band on (:mod:`radixnet.attention`) a step is not
+        charged for the characters it wrote but for the ones its grams *see*,
+        each by how centrally: the penalty is ``strength * weight * charge``
+        and the fix earns ``strength * reward * (charge + (1 - charge) *
+        keep)``, and the judged-path verdicts go to the steps that saw a change
+        most sharply.  Off, every charge is 1 and this is the rule above.
         Returns what moved: ``{"edits", "changes", "penalised", "rewarded",
         "kept", "penalty", "reward", "loss", "wrong_chars", "right_chars"}``.
         """
@@ -1275,15 +1299,17 @@ class CountRewardNet(GraphModel):
         # both sentences join the structure before either is measured: observing one can split a node the
         # other's path runs through, and the split moves the very edge a penalty was meant for
         self._observe_grams([g for g in (wrong_grams, right_grams) if g], False)
-        penalties: dict[int, float] = {}
+        penalties: dict[int, float] = {}  # edge -> the largest charge any of its steps took
         rewards: dict[int, float] = {}
-        fixed: set[int] = set()
-        blamed_steps: list[tuple[int, int]] = []
-        taught_steps: list[tuple[int, int]] = []
+        fixed: dict[int, float] = {}
+        blamed_steps: list[tuple[int, int, float, bool]] = []
+        taught_steps: list[tuple[int, int, float, bool]] = []
         if wrong_grams and wrong_spans and base * weight > 0:
-            blamed_steps = self._steps_over(wrong_grams, len(wrong), wrong_spans)
-            for _prev, edge in blamed_steps:
-                penalties[edge] = -base * float(weight)
+            # the length is in the encoding's units, as the spans are: under a word encoding a sentence
+            # that stopped too early is an insertion at its word count, not at its character count
+            blamed_steps = self._charged_steps(wrong_grams, enc.length(wrong), wrong_spans)
+            for _prev, edge, charge, _focus in blamed_steps:
+                penalties[edge] = max(penalties.get(edge, 0.0), charge)
         if right_grams:
             transitions = graph.observe_sequence(right_grams, count)
             if count:
@@ -1291,27 +1317,38 @@ class CountRewardNet(GraphModel):
                 self.meta["trained_chars"] += self.encoding.length(right)
                 graph.record_path(transitions, None, create=False)  # the correction's own traffic
             if right_spans:
-                taught_steps = self._steps_over(right_grams, len(right), right_spans)
-                fixed = {edge for _prev, edge in taught_steps}
+                taught_steps = self._charged_steps(right_grams, enc.length(right), right_spans)
+                for _prev, edge, charge, _focus in taught_steps:
+                    fixed[edge] = max(fixed.get(edge, 0.0), charge)
             for _p, e in transitions:
-                amount = base * float(reward) * (1.0 if e in fixed else float(keep))
+                share = fixed.get(e, 0.0)
+                if share >= 1.0:
+                    factor = 1.0  # the whole fix
+                elif share > 0.0:
+                    factor = share + (1.0 - share) * float(keep)  # part of the fix, and what the rest keeps
+                else:
+                    factor = float(keep)  # the rest of the correction
+                amount = base * float(reward) * factor
                 if amount > 0:
                     rewards[e] = amount
             result["loss"] = self._mean_cost(transitions)
-        # one call per distinct amount: add_reward recomputes the weights, and a correction moves
-        # at most three of them (the penalty, the fix, and what the rest of the correction keeps)
-        blamed = [e for e in penalties if e not in rewards]  # the teacher wrote it too: it is not the mistake
-        if blamed:
-            penalty = -base * float(weight)
-            result["penalised"] = graph.add_reward(blamed, penalty)
-            result["penalty"] = -penalty * result["penalised"]
+        # one call per distinct amount: add_reward recomputes the weights, and without the band a correction
+        # moves at most three of them (the penalty, the fix, and what the rest of the correction keeps)
+        blamed = {e: -base * float(weight) * charge for e, charge in penalties.items() if e not in rewards}
+        for penalty, edges in _by_amount(blamed).items():  # the teacher wrote it too: it is not the mistake
+            touched = graph.add_reward(edges, penalty)
+            result["penalised"] += touched
+            result["penalty"] += -penalty * touched
         for amount, edges in _by_amount(rewards).items():
             touched = graph.add_reward(edges, amount)
             result["rewarded" if all(e in fixed for e in edges) else "kept"] += touched
             result["reward"] += amount * touched
-        # the counters follow the reward: what was blamed is a wrong path here, what was taught a right one
-        result["marked_incorrect"] = graph.mark_steps([s for s in blamed_steps if s[1] not in rewards], False)
-        result["marked_correct"] = graph.mark_steps(taught_steps, True)
+        # the counters follow the reward: what was blamed is a wrong path here, what was taught a right one -
+        # a count, so it goes to the steps that saw the change most sharply (every charged step, band off)
+        result["marked_incorrect"] = graph.mark_steps(
+            [(p, e) for p, e, _charge, focus in blamed_steps if focus and e not in rewards], False
+        )
+        result["marked_correct"] = graph.mark_steps([(p, e) for p, e, _charge, focus in taught_steps if focus], True)
         if result["penalised"] or result["rewarded"] or result["kept"]:
             self.meta["feedback_passes"] += 1
             self.meta["rewards_total"] += result["reward"]
@@ -1397,6 +1434,7 @@ class CountRewardNet(GraphModel):
             "units": self.encoding.units_name,
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
+            "attention_blur": g.attention.blur,
             "compression_ratio": g.compression_ratio(),
             "inverted": g.inverted,
             "backend": self.backend.name,

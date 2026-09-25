@@ -20,6 +20,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.
 
 from radixnet.countnet import CountRewardNet  # noqa: E402
 from radixnet.encoding import ACOUSTIC, UNIT_KINDS, Encoding, hear_audio, is_audio_file, parse_encoding  # noqa: E402
+from radixnet.graph import FIRST  # noqa: E402
 from radixnet.model import load_model  # noqa: E402
 
 try:
@@ -102,7 +103,7 @@ class TestTheAcousticUnit(unittest.TestCase):
         self.assertGreater(net.graph.num_trigrams(), 10)
         self.assertEqual(net.stats()["encoding"], "acoustic:3:1")
         self.assertEqual(net.stats()["units"], "units")
-        for label in net.graph.labels[3:]:
+        for label in net.graph.labels[FIRST:]:  # every real node: the sentinels come first
             if label:
                 self.assertEqual(label, " ".join(label.split()))
                 self.assertTrue(all(u.startswith("q") for u in label.split()), label)

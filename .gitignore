@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+
+# default output directories of the download tools in tools/
+gutenberg_books/
+wikipedia_dumps/
+wikipedia_text/
+wikipedia_articles/

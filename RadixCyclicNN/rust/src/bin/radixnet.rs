@@ -80,7 +80,9 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      rehearses R times as\n\
      many texts from the model's replay buffer; 0 = off), --replay-size N (the buffer's capacity; 0 drops it), \
      --patience N and\n\
-     --min-delta X (stop after N full epochs without the loss improving by X; 0 = off).  \
+     --min-delta X (stop after N full epochs without the loss improving by X; 0 = off), --reverse (read every \
+     text\n\
+     backwards - its last character, or word, first - so the model learns what comes before).  \
      speak: --count N walks from START (or --prefix), spoken as they go through the formant synthesizer; \
      --out FILE\n\
      writes a WAV (speech.wav), --play streams to a player (aplay, paplay, ffplay, play, afplay), --raw \
@@ -264,6 +266,7 @@ fn run() -> Result<(), String> {
                 top_p: tuning.filter.top_p,
                 min_p: tuning.filter.min_p,
                 diversity: tuning.diversity,
+                origin: radixnet::START,
             };
             let mut found = model.predict(&prefix, &opts)?;
             // the guard re-ranks what the search already offered: the best
@@ -370,7 +373,10 @@ fn run() -> Result<(), String> {
             let mut model = open(true)?;
             let max_length = args.int("max-length", 60)?;
             // acoustic units are spoken at their codebook's rate
-            let rate = radixnet::phonetic::output_rate(model.g.enc, args.usize("rate", phonetok::synth::RATE as usize)? as u32)?;
+            let rate = radixnet::phonetic::output_rate(
+                model.g.enc,
+                args.usize("rate", phonetok::synth::RATE as usize)? as u32,
+            )?;
             let opts = SpeakOptions {
                 prefix: args.str("prefix", ""),
                 count: args.usize("count", 1)?,
@@ -387,14 +393,18 @@ fn run() -> Result<(), String> {
             let raw = args.on("raw");
             let mut said: Vec<Json> = Vec::new();
             let mut record = |_i: usize, text: &str, spelled: &str| {
-                said.push(Json::obj(vec![("text", Json::str(text)), ("spelled", Json::str(spelled))]));
+                said.push(Json::obj(vec![
+                    ("text", Json::str(text)),
+                    ("spelled", Json::str(spelled)),
+                ]));
             };
             let mut total = 0usize;
             let sink: String;
             if play {
                 let Some(player) = phonetok::synth::find_player() else {
-                    return Err("no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw"
-                        .to_string());
+                    return Err(
+                        "no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw".to_string(),
+                    );
                 };
                 let mut child = std::process::Command::new(&player[0])
                     .args(&player[1..])
@@ -403,7 +413,9 @@ fn run() -> Result<(), String> {
                     .map_err(|e| format!("{}: {e}", player[0]))?;
                 {
                     let stdin = child.stdin.as_mut().ok_or("no stdin")?;
-                    stdin.write_all(&phonetok::synth::wav_header(opts.rate, None)).map_err(|e| e.to_string())?;
+                    stdin
+                        .write_all(&phonetok::synth::wav_header(opts.rate, None))
+                        .map_err(|e| e.to_string())?;
                     let mut emit_pcm = |chunk: &[u8]| {
                         // every chunk reaches the player as the walk makes it
                         if stdin.write_all(chunk).is_ok() {
@@ -829,6 +841,7 @@ fn run() -> Result<(), String> {
                         spans: args.usize("spans", 3)?,
                         learn: args.on("learn"),
                         reason: args.str("reason", "filtered"),
+                        provenance: !args.on("no-provenance"),
                     };
                     let given = read_texts(&args)?;
                     let mut pair = Filter::new(&mut positive, &mut negative, config)?;
@@ -1014,6 +1027,7 @@ fn search_tuning(args: &radixnet::cli::Args) -> Result<SearchTuning, String> {
             min_p: args.float("min-p", 0.0)?,
         },
         diversity: args.float("diversity", 0.0)?,
+        ..Default::default()
     };
     tuning.check()?;
     Ok(tuning)
@@ -1021,7 +1035,8 @@ fn search_tuning(args: &radixnet::cli::Args) -> Result<SearchTuning, String> {
 
 /// How a training run walks its texts (`--order`, `--curriculum`,
 /// `--replay`, `--replay-size`, `--patience`, `--min-delta`; the spec's
-/// sections 3-6), each off by default.
+/// sections 3-6) and whether it reads them backwards (`--reverse`, section 9),
+/// each off by default.
 fn plan_flags(args: &radixnet::cli::Args) -> Result<Plan, String> {
     let plan = Plan {
         order: args.str("order", "corpus"),
@@ -1033,6 +1048,7 @@ fn plan_flags(args: &radixnet::cli::Args) -> Result<Plan, String> {
         },
         patience: count_flag(args, "patience", 0)?,
         min_delta: args.float("min-delta", 0.0)?,
+        reverse: args.on("reverse"),
     };
     plan.check()?;
     Ok(plan)

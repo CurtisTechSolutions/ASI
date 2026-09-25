@@ -56,7 +56,7 @@ use std::time::Instant;
 use crate::counter::Counter;
 use crate::encoding::Encoding;
 use crate::fsum::fsum;
-use crate::graph::{Graph, GraphOptions, BACK, END, FIRST, START};
+use crate::graph::{Graph, GraphOptions, BACK, END, FIRST, START, THINK};
 use crate::hash::{map, Map};
 use crate::json::Json;
 use crate::metacog::{cycle_signature, MetaLayer, ABORT, ESCAPE, RIDE};
@@ -764,6 +764,30 @@ impl Graph {
         Ok(e)
     }
 
+    /// `observe_think` as this model learns everything - by counting: the
+    /// `THINK` edge is counted *without a phase* (an event is not a walk of this
+    /// model's search and cannot say which phase it was in) and rewarded.
+    pub(crate) fn resonant_observe_think(&mut self, p: usize, amount: f64) -> Result<usize, String> {
+        if p < FIRST || p >= self.labels.len() || !self.alive[p] {
+            return Err(format!("node {p} is not a real node to think at"));
+        }
+        if amount < 0.0 {
+            return Err(format!("amount must be >= 0, got {amount}"));
+        }
+        let e = match self.edge(p, THINK) {
+            Some(e) => e,
+            None => self.new_edge(p, THINK, 0, 0),
+        };
+        self.bump_node(THINK);
+        self.bump_edge(e);
+        self.add_traversals(1);
+        self.version.add(1);
+        self.record_phase(e, None, if amount != 0.0 { amount } else { 1.0 });
+        self.resonant_add_reward(&[e], amount);
+        self.resonant_recompute();
+        Ok(e)
+    }
+
     /// The opposite lesson: a walk at `p` faced a cycle and carried on, so its
     /// hand-over estimate is pushed back down.  `false` when `p` has no `BACK`
     /// edge to push on.
@@ -965,6 +989,8 @@ struct Pass<'a> {
     /// How plain training walks the texts (`../../SPEC-SearchAndTraining.md`);
     /// `None` for the feedback passes, which walk every text in corpus order.
     plan: Option<&'a crate::training::Plan>,
+    /// The sentinel every walk begins at: `START` for texts, `THINK` for thoughts.
+    origin: usize,
 }
 
 impl Model {
@@ -1010,6 +1036,7 @@ impl Model {
     /// cycle it had the option to close (`learn`).
     fn phase_walk_text(
         &mut self,
+        origin: usize,
         text: &str,
         learn: bool,
         count: bool,
@@ -1025,12 +1052,12 @@ impl Model {
                 edges: Vec::new(),
             });
         }
-        let (transitions, path) = match self.g.trace(&grams) {
+        let (transitions, path) = match self.g.trace_from(origin, &grams) {
             Some(traced) => traced,
             None => {
-                self.g.observe(&grams, false)?;
+                self.g.observe_from(origin, &grams, false)?;
                 self.g
-                    .trace(&grams)
+                    .trace_from(origin, &grams)
                     .ok_or_else(|| "internal error: observed sequence is not walkable".to_string())?
             }
         };
@@ -1165,11 +1192,11 @@ impl Model {
                 .map(|t| enc.encode(t))
                 .chain(rehearsed.iter().map(|t| enc.encode(t)))
                 .collect();
-            self.observe_all(&grams)?;
+            self.observe_all(o.origin, &grams)?;
             if o.auto_compress {
                 self.g.compress();
             }
-            self.observe_all(&grams)?;
+            self.observe_all(o.origin, &grams)?;
         }
         let mut records = Vec::with_capacity(o.epochs);
         for epoch in 1..=o.epochs {
@@ -1188,7 +1215,7 @@ impl Model {
                 None => cleaned.clone(),
             };
             for text in &walked {
-                let done = self.phase_walk_text(text, o.learn, o.count, o.reward, o.strength)?;
+                let done = self.phase_walk_text(o.origin, text, o.learn, o.count, o.reward, o.strength)?;
                 transitions += done.transitions;
                 cycles += done.cycles;
                 cost += done.cost * done.transitions as f64;
@@ -1260,14 +1287,14 @@ impl Model {
     }
 
     /// Registers encoded texts structurally, uncounted (Python's `_observe`).
-    fn observe_all(&mut self, grams: &[Vec<String>]) -> Result<(), String> {
+    fn observe_all(&mut self, origin: usize, grams: &[Vec<String>]) -> Result<(), String> {
         let before = self.g.structure_version;
         for gram in grams {
-            self.g.observe(gram, false)?;
+            self.g.observe_from(origin, gram, false)?;
         }
         if self.g.structure_version != before {
             for gram in grams {
-                self.g.observe(gram, false)?;
+                self.g.observe_from(origin, gram, false)?;
             }
         }
         Ok(())
@@ -1288,7 +1315,28 @@ impl Model {
         plan: &crate::training::Plan,
         on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
     ) -> Result<Vec<EpochRecord>, String> {
+        self.resonant_train_from(START, texts, epochs, auto_compress, phase, plan, on_epoch)
+    }
+
+    /// [`Model::resonant_train`] from either origin sentinel: `THINK` trains
+    /// the texts as thoughts ([`crate::thinking`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn resonant_train_from(
+        &mut self,
+        origin: usize,
+        texts: &[String],
+        epochs: usize,
+        auto_compress: bool,
+        phase: Option<&str>,
+        plan: &crate::training::Plan,
+        on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
+    ) -> Result<Vec<EpochRecord>, String> {
+        if !crate::graph::is_origin(origin) {
+            return Err(format!("a text begins at START or THINK, not at node {origin}"));
+        }
         let enc = self.g.enc;
+        let read = crate::training::read(&enc, texts, plan);
+        let texts: &[String] = &read;
         let cleaned: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
         let pass = Pass {
             epochs,
@@ -1300,6 +1348,7 @@ impl Model {
             learn: true,
             sharpen: 1.0,
             plan: phase.is_none().then_some(plan),
+            origin,
         };
         let records = self.phase_passes(texts, &pass, on_epoch)?;
         self.meta.epochs_total.add(records.len() as i64);
@@ -1349,6 +1398,7 @@ impl Model {
                 learn: true,
                 sharpen: sharpen(1.0 + sharpen_rate * strength),
                 plan: None,
+                origin: START,
             };
             return self.phase_passes(texts, &pass, on_epoch);
         };
@@ -1368,6 +1418,7 @@ impl Model {
                 learn: true,
                 sharpen: sharpen(1.0 + sharpen_rate * strength * weight),
                 plan: None,
+                origin: START,
             };
             let group_records = self.phase_passes(&group, &pass, &mut |_| true)?;
             let first = self.history.len() - group_records.len();
@@ -1526,7 +1577,7 @@ impl Model {
             if amount <= 0.0 {
                 continue;
             }
-            let done = self.phase_walk_text(text, false, false, 0.0, 0.0)?;
+            let done = self.phase_walk_text(START, text, false, false, 0.0, 0.0)?;
             if done.edges.is_empty() {
                 continue;
             }
@@ -1582,7 +1633,7 @@ impl Model {
         }
         let traversal = crate::penalty::resolve_traversal(&o.traversal)?;
         let costs = phase_traversal_costs(traversal, o.penalty_scale, o.merit_scale)?;
-        let (node, offset, lead) = self.prefix_start(prefix);
+        let (node, offset, lead) = self.walk_start(prefix, o.origin)?;
         let bucket = if prefix.is_empty() {
             0
         } else {
@@ -1797,6 +1848,7 @@ impl Model {
             top_p: o.top_p,
             min_p: o.min_p,
             diversity: o.diversity,
+            origin: START,
         };
         match mode.as_str() {
             "kbest" => {

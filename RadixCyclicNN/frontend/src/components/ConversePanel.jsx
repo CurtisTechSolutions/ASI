@@ -2,11 +2,14 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { applyEvent } from "../stream.js";
+import { THINK_DEPTH, thoughtNodes, thoughtsOf } from "../thinking.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
+import { ThoughtLine } from "./ThoughtView.jsx";
 
 /**
  * The model converses with itself. Two voices take turns; every reply is the
@@ -21,9 +24,21 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
  * counts as one of those while "Avoid repeated words" is on, though a voice
  * that catches itself repeating - its own words, or the conversation's - first
  * backs up to where it would have said them again and explores other ways on
- * ("Explore"), and says so. New turns are
- * appended to the top of
- * the conversation and push the older ones down, so nothing has to scroll.
+ * ("Explore"), and says so. With "Think before backing up" on, it first thinks:
+ * a thought from the THINK sentinel, questioning itself where the model has
+ * learned to ("Think depth"), that hands over to BACK when it stops - and the
+ * turn shows what it thought. New turns are appended to the top of the
+ * conversation and push the older ones down, so nothing has to scroll.
+ *
+ * With "Stream" on (the default) the conversation arrives as it happens
+ * (`POST /api/converse/stream`, JSON Lines): every turn the moment it is
+ * spoken, and above it the turn being spoken - the window a backtrack may
+ * still rewrite. The live bubble shows the draft the voice caught itself on,
+ * strikes through what it backed out of, underlines the way on it found, and
+ * a turn keeps its draft in the meta line once it is committed, so the
+ * backtracking can be seen in action and read back afterwards. A server
+ * without the stream route answers 404, and the panel falls back to the
+ * plain route.
  */
 /** What a turn's rethink record says in one line: what it caught itself doing, and how that turned out. */
 function rethinkSays(turn) {
@@ -35,6 +50,37 @@ function rethinkSays(turn) {
   if (r.found) return `${caught}: kept “${r.cut}”, found another way on in ${fmtInt(r.explored)} path(s)${learned}`;
   const ending = turn.repeat ? "said it anyway" : "took a lesser answer";
   return `${caught}: kept “${r.cut}”, weighed ${fmtInt(r.explored)} path(s), ${ending}${learned}`;
+}
+
+/** The turn being spoken, before it is committed: what the voice is doing right now (see `applyEvent`). */
+function LiveTurn({ live, speakers }) {
+  const side = live.index % 2 === 0 ? "a" : "b";
+  const speaker = live.speaker || speakers[live.index % 2];
+  const retracting = Boolean(live.caught);
+  return (
+    <li className={`turn ${side} live`} aria-live="polite">
+      <div className="speaker">
+        <b>{speaker}</b>
+        <span className="badge running">{retracting ? "thinking again" : "speaking"}</span>
+      </div>
+      <p className="bubble">
+        {live.draft ? (
+          <>
+            {live.kept}
+            {live.retracted ? <s className="retracted">{live.retracted}</s> : null}
+            {live.found ? <span className="found">{live.found}</span> : null}
+            {!live.found && retracting ? <span className="pending" /> : null}
+          </>
+        ) : (
+          <>
+            {live.from ? <span className="context">{live.from}</span> : null}
+            <span className="pending" />
+          </>
+        )}
+      </p>
+      <div className="meta">{live.note || "looking for what to say"}</div>
+    </li>
+  );
 }
 
 export default function ConversePanel({ status }) {
@@ -52,9 +98,14 @@ export default function ConversePanel({ status }) {
   const [avoidWordRepeats, setAvoidWordRepeats] = useStoredState("converse.avoidWordRepeats", true);
   const [explore, setExplore] = useStoredState("converse.explore", "3");
   const [learn, setLearn] = useStoredState("converse.learn", true);
+  const [streaming, setStreaming] = useStoredState("converse.stream", true);
+  const [think, setThink] = useStoredState("converse.think", true);
+  const [thinkDepth, setThinkDepth] = useStoredState("converse.thinkDepth", String(THINK_DEPTH));
   const [inMemory, setInMemory] = useState(null); // null until GET /api/model answers
   const [transcript, setTranscript] = useState(null);
+  const [live, setLive] = useState(null); // the turn being spoken, while a streamed conversation runs
   const [guard, setGuard] = useStoredState("converse.guard", true);
+  const [provenance, setProvenance] = useStoredState("converse.provenance", true);
   const [guarded, setGuarded] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -91,26 +142,63 @@ export default function ConversePanel({ status }) {
     setLoading(true);
     setError(null);
     setNotice(null);
+    setLive(null);
     const history = continuing && transcript ? transcript.map((t) => t.text) : [];
+    const body = {
+      turns: parseInteger(turns, 6),
+      mode,
+      max_length: parseInteger(maxLength, 60),
+      context: parseInteger(context, 12),
+      temperature: parseNumber(temperature, 1),
+      k: parseInteger(k, 5),
+      speakers,
+      guard,
+      provenance,
+      avoid_word_repeats: avoidWordRepeats,
+      explore: parseInteger(explore, 3),
+      learn,
+      think,
+      think_depth: Math.max(0, parseInteger(thinkDepth, THINK_DEPTH)),
+      ...(partner ? { partner } : {}),
+      ...(history.length ? { history } : opening.trim() ? { opening } : {}),
+    };
     try {
-      const data = await api.converse({
-        turns: parseInteger(turns, 6),
-        mode,
-        max_length: parseInteger(maxLength, 60),
-        context: parseInteger(context, 12),
-        temperature: parseNumber(temperature, 1),
-        k: parseInteger(k, 5),
-        speakers,
-        guard,
-        avoid_word_repeats: avoidWordRepeats,
-        explore: parseInteger(explore, 3),
-        learn,
-        ...(partner ? { partner } : {}),
-        ...(history.length ? { history } : opening.trim() ? { opening } : {}),
-      });
-      const fresh = asArray(data && data.turns);
+      let data;
+      let fresh;
+      if (streaming) {
+        // the conversation as it happens: turns are committed the moment they are spoken, and the turn being
+        // spoken - the window a backtrack may still rewrite - is shown live above them
+        let window = null;
+        const spoken = [];
+        const onEvent = (event) => {
+          if (event.event === "turn") {
+            // a turn keeps the draft it caught itself on, so the backtracking can be read back afterwards
+            const turn = window && window.draft ? { ...event.turn, draft: window.draft, kept: window.kept } : event.turn;
+            spoken.push(turn);
+            window = null;
+            setLive(null);
+            setTranscript((prev) => [...asArray(prev), turn]);
+            return;
+          }
+          window = applyEvent(window, event);
+          setLive(window);
+        };
+        if (!history.length) setTranscript([]);
+        try {
+          data = await api.converseStream(body, onEvent);
+        } catch (err) {
+          if (!(err.status === 404 || err.status === 405) || spoken.length) throw err;
+          // an older server without the stream route: the same conversation, all at once
+          data = await api.converse(body);
+          setTranscript((prev) => (history.length ? [...asArray(prev), ...asArray(data.turns)] : asArray(data.turns)));
+        }
+        fresh = spoken.length ? spoken : asArray(data && data.turns);
+      } else {
+        data = await api.converse(body);
+        fresh = asArray(data && data.turns);
+        setTranscript((prev) => (history.length ? [...asArray(prev), ...fresh] : fresh));
+      }
       setGuarded((data && data.guard) || null);
-      setTranscript((prev) => (history.length ? [...asArray(prev), ...fresh] : fresh));
       // the duplicates the search could not avoid: thumbs down, so "Train on ratings" punishes them
       const duplicates = Array.isArray(data && data.repeats)
         ? data.repeats
@@ -118,6 +206,14 @@ export default function ConversePanel({ status }) {
       const punished = punishRepeats ? punish(duplicates) : 0;
       const notes = [];
       if (!fresh.length && history.length) notes.push("The model had nothing more to say.");
+      const thought = thoughtsOf(fresh).length;
+      if (thought) {
+        const at = thoughtNodes(fresh).length;
+        notes.push(
+          `It thought ${thought === 1 ? "once" : `${fmtInt(thought)} times`} before backing up` +
+            (at ? `, and learned to stop and think at ${fmtInt(at)} node${at === 1 ? "" : "s"}.` : "."),
+        );
+      }
       if (punished) {
         notes.push(
           `${punished} duplicate${punished === 1 ? "" : "s"} the model could not avoid:` +
@@ -128,6 +224,7 @@ export default function ConversePanel({ status }) {
     } catch (err) {
       setError(err.message);
     } finally {
+      setLive(null);
       setLoading(false);
     }
   }
@@ -153,7 +250,8 @@ export default function ConversePanel({ status }) {
           last words of the previous line (the <b>context</b>) and continuing them to the end of a text.{" "}
           <b>beam</b> speaks the most likely continuation the conversation has not heard yet; <b>sample</b> draws a
           stochastic walk. When nothing follows, the context loses a word at a time and finally the voice changes
-          the subject with a fresh text.
+          the subject with a fresh text. A voice that catches itself repeating backs up and looks for another way
+          on; with <b>Think before backing up</b> it thinks first, and the turn shows what it thought (💭).
         </p>
         <TextField
           label="Opening line"
@@ -188,6 +286,15 @@ export default function ConversePanel({ status }) {
             disabled={!avoidWordRepeats}
           />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min={0} disabled={mode !== "sample"} />
+          <NumberField
+            label="Think depth"
+            hint="how deep a thought may question itself (0 = never)"
+            value={thinkDepth}
+            onChange={setThinkDepth}
+            min={0}
+            step={1}
+            disabled={!think}
+          />
         </div>
         <div className="row">
           <TextField label="First voice" value={speakerA} onChange={setSpeakerA} placeholder="A" />
@@ -207,6 +314,13 @@ export default function ConversePanel({ status }) {
           onChange={setGuard}
         />
         <CheckField
+          label="Say why it vetoed"
+          hint="the provenance of each veto: the rule, the reasons and the blamed fragments; off, the guard reports how many it stopped"
+          checked={provenance}
+          onChange={setProvenance}
+          disabled={!guard}
+        />
+        <CheckField
           label="Avoid repeated words"
           hint="skip a reply that says the same word or phrase twice in a row (“say morning morning”)"
           checked={avoidWordRepeats}
@@ -221,10 +335,24 @@ export default function ConversePanel({ status }) {
           disabled={loading || !explore || explore === "0"}
         />
         <CheckField
+          label="Think before backing up"
+          hint="a voice that caught itself repeating thinks first - a thought from the THINK sentinel that hands over to BACK when it stops"
+          checked={think}
+          onChange={setThink}
+          disabled={loading || !explore || explore === "0"}
+        />
+        <CheckField
           label="Punish duplicates"
           hint="the repeats the model could not avoid are marked 👎 for the 2NRL negative phase"
           checked={punishRepeats}
           onChange={setPunishRepeats}
+          disabled={loading}
+        />
+        <CheckField
+          label="Stream"
+          hint="show the conversation as it happens: each turn the moment it is spoken, and above it the turn being spoken - the draft it caught itself on, what it backed out of, the way on it found"
+          checked={streaming}
+          onChange={setStreaming}
           disabled={loading}
         />
         <div className="actions">
@@ -240,6 +368,7 @@ export default function ConversePanel({ status }) {
             disabled={loading || !spoken.length}
             onClick={() => {
               setTranscript(null);
+              setLive(null);
               setNotice(null);
             }}
           >
@@ -257,12 +386,13 @@ export default function ConversePanel({ status }) {
         ) : null}
         {notice ? <p className="muted">{notice}</p> : null}
         <GuardNotice guard={guarded} what="replies" />
-        {transcript === null ? (
+        {transcript === null && !live ? (
           <p className="muted">Press Start to let the model talk to itself.</p>
-        ) : spoken.length === 0 ? (
+        ) : spoken.length === 0 && !live && !loading ? (
           <p className="muted">The model had nothing to say (train it first).</p>
         ) : (
           <ol className="dialogue" aria-label="conversation" reversed>
+            {live ? <LiveTurn live={live} speakers={speakers} /> : null}
             {newestFirst.map((t, i) => {
               const position = spoken.length - i; // where the turn stands in the conversation, counted from its start
               const side = t.index % 2 === 0 ? "a" : "b";
@@ -302,6 +432,15 @@ export default function ConversePanel({ status }) {
                     {t.context ? <> · picked up “{t.context}”</> : null}
                     {t.skipped ? <> · skipped {fmtInt(t.skipped)}</> : null}
                     {t.rethink ? <> · {rethinkSays(t)}</> : null}
+                    {t.draft ? (
+                      <>
+                        {" · "}
+                        <span className="draft" title="what it was about to say, and what it backed out of">
+                          was about to say “{t.kept}
+                          {t.draft.length > (t.kept || "").length ? <s>{t.draft.slice((t.kept || "").length)}</s> : null}”
+                        </span>
+                      </>
+                    ) : null}
                     <RateButtons
                       text={t.text}
                       rating={rating}
@@ -310,6 +449,7 @@ export default function ConversePanel({ status }) {
                       label={`turn ${position}`}
                     />
                   </div>
+                  <ThoughtLine thought={t.rethink ? t.rethink.thought : null} />
                 </li>
               );
             })}

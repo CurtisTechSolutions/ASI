@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,16 +20,23 @@ var criticCorpus = []string{
 
 var reviewLine = regexp.MustCompile(`^\[(\d+)\] (.*)$`)
 
-// fakeReviewer answers the review and corpus prompts: anything with "good" in
-// it passes, everything else fails for repeating itself.
+// fakeReviewer answers the review, correction and corpus prompts: anything
+// with "good" in it passes, everything else fails for repeating itself; as a
+// copy editor it fixes howe, doubled question marks and an opening Hi without
+// its comma (the same craft as the Python tests' fake).  It also writes the
+// questions a thinking request asks for and thinks about each one, the way
+// `thinking` says: "field" (Ollama's thinking field), "inline" (<think> tags in
+// the answer) or "none" (a model that does not think).
 type fakeReviewer struct {
-	server  *httptest.Server
-	prompts []string
+	server   *httptest.Server
+	prompts  []string
+	bodies   []map[string]any
+	thinking string
 }
 
 func newFakeReviewer(t *testing.T) *fakeReviewer {
 	t.Helper()
-	fake := &fakeReviewer{}
+	fake := &fakeReviewer{thinking: "field"}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
@@ -40,13 +48,94 @@ func newFakeReviewer(t *testing.T) *fakeReviewer {
 		prompt, _ := body["prompt"].(string)
 		system, _ := body["system"].(string)
 		fake.prompts = append(fake.prompts, prompt)
-		json.NewEncoder(w).Encode(map[string]any{"response": fake.answer(system, prompt)})
+		fake.bodies = append(fake.bodies, body)
+		think, asked := body["think"]
+		asked = asked && think != nil && think != false
+		reply := map[string]any{"response": fake.answer(system, prompt, asked)}
+		if asked && fake.thinking != "none" {
+			thinking := fmt.Sprintf("Let me think about %s Is that right? Yes, it is.", prompt)
+			if fake.thinking == "inline" {
+				reply["response"] = "<think>" + thinking + "</think>\n" + reply["response"].(string)
+			} else {
+				reply["thinking"] = thinking
+			}
+		}
+		json.NewEncoder(w).Encode(reply)
 	}))
 	t.Cleanup(fake.server.Close)
 	return fake
 }
 
-func (f *fakeReviewer) answer(system, prompt string) string {
+// fakeCopyEdit is the fake editor's whole craft; a text with nothing to fix
+// comes back unchanged with the reason "none".
+func fakeCopyEdit(text string) (string, string) {
+	corrected, reason := text, "none"
+	if strings.Contains(corrected, "howe") {
+		corrected, reason = strings.ReplaceAll(corrected, "howe", "how"), "spelling"
+	}
+	for strings.Contains(corrected, "??") {
+		corrected = strings.ReplaceAll(corrected, "??", "?")
+		if reason == "none" {
+			reason = "punctuation"
+		}
+	}
+	if strings.HasPrefix(corrected, "Hi ") && !strings.HasPrefix(corrected, "Hi, ") {
+		corrected = "Hi, " + corrected[3:]
+		if reason == "none" {
+			reason = "punctuation"
+		}
+	}
+	return corrected, reason
+}
+
+var (
+	questionCount = regexp.MustCompile(`exactly (\d+) lines`)
+	questionTopic = regexp.MustCompile(`instructions: (.*)`)
+)
+
+func (f *fakeReviewer) answer(system, prompt string, think bool) string {
+	if strings.Contains(prompt, "Correct these") { // a copy-editing request
+		type entry struct {
+			Index      int    `json:"index"`
+			Correction string `json:"correction"`
+			Reason     string `json:"reason"`
+			Note       string `json:"note"`
+		}
+		out := []entry{}
+		for _, line := range strings.Split(prompt, "\n") {
+			match := reviewLine.FindStringSubmatch(line)
+			if match == nil {
+				continue
+			}
+			index, _ := strconv.Atoi(match[1])
+			corrected, reason := fakeCopyEdit(match[2])
+			note := "nothing"
+			if reason != "none" {
+				note = reason + " fixed"
+			}
+			out = append(out, entry{index, corrected, reason, note})
+		}
+		raw, _ := json.Marshal(map[string]any{"corrections": out})
+		return string(raw)
+	}
+	if strings.Contains(system, "one short, concrete question per line") { // questions to think about
+		count := 3
+		if m := questionCount.FindStringSubmatch(system); m != nil {
+			count, _ = strconv.Atoi(m[1])
+		}
+		topic := "unknown"
+		if m := questionTopic.FindStringSubmatch(prompt); m != nil {
+			topic = strings.TrimSpace(m[1])
+		}
+		lines := make([]string, 0, count)
+		for i := 1; i <= count; i++ {
+			lines = append(lines, fmt.Sprintf("%d. question %d about %s?", i, i, topic))
+		}
+		return strings.Join(lines, "\n")
+	}
+	if strings.HasPrefix(system, "Think the question through") || think {
+		return "The answer to " + prompt
+	}
 	if strings.Contains(system, "adversarial reviewer") {
 		type entry struct {
 			Index    int     `json:"index"`
@@ -321,11 +410,145 @@ func TestTheNewRoutesAreDocumented(t *testing.T) {
 	raw, _ := json.Marshal(doc)
 	for _, path := range []string{
 		"/api/negative/auto", "/api/negative/auto/history", "/api/ollama/models",
-		"/api/ollama/corpus", "/api/ollama/review",
+		"/api/ollama/corpus", "/api/ollama/review", "/api/ollama/correct", "/api/ollama/think", "/api/think",
 	} {
 		if !strings.Contains(string(raw), path) {
 			t.Errorf("%s is not in the endpoint index", path)
 		}
 	}
 	_ = os.Getenv
+}
+
+func TestOllamaCorrectGivenTexts(t *testing.T) {
+	e, fake := criticEnv(t)
+	status, doc := e.post("/api/ollama/correct", map[string]any{
+		"texts": []string{"Hi howe are you??", "good sentences about the cat", "   "}, "context": "greetings",
+	})
+	if status != 200 {
+		t.Fatalf("status %d %+v", status, doc)
+	}
+	hasKeys(t, doc, "source", "model", "texts", "corrections", "corrected", "unchanged", "uncorrected", "edits",
+		"wrong_chars", "right_chars", "change_rate", "url", "severity", "negative")
+	if doc["source"] != "given" || doc["negative"] != nil || toFloat(doc["severity"]) != 1 {
+		t.Fatalf("given texts, nothing taught, the default severity: %+v", doc)
+	}
+	corrections := doc["corrections"].([]any)
+	verdicts := []string{}
+	for _, row := range corrections {
+		verdicts = append(verdicts, row.(map[string]any)["verdict"].(string))
+	}
+	if strings.Join(verdicts, ",") != "corrected,unchanged,uncorrected" {
+		t.Fatalf("verdicts: %v", verdicts)
+	}
+	first := corrections[0].(map[string]any)
+	if first["correction"] != "Hi, how are you?" || first["reason"] != "spelling" || first["note"] != "spelling fixed" {
+		t.Fatalf("the editor's answer: %+v", first)
+	}
+	hasKeys(t, first, "index", "text", "correction", "verdict", "reason", "note", "changes", "edits", "wrong_chars", "right_chars")
+	change := first["changes"].([]any)[0].(map[string]any)
+	hasKeys(t, change, "op", "wrong", "right", "at", "to")
+	if len(doc["corrected"].([]any)) != 1 || len(doc["unchanged"].([]any)) != 1 || len(doc["uncorrected"].([]any)) != 1 {
+		t.Fatalf("the split: %+v", doc)
+	}
+	if toFloat(doc["change_rate"]) != 0.5 {
+		t.Fatalf("one of the two answered texts was changed: %v", doc["change_rate"])
+	}
+	want := "Context: greetings\n\nCorrect these 2 texts:\n[0] Hi howe are you??\n[1] good sentences about the cat\n\nReturn the JSON now."
+	if len(fake.prompts) != 1 || fake.prompts[0] != want {
+		t.Fatalf("the editor's prompt: %q", fake.prompts)
+	}
+	if status, _ := e.post("/api/ollama/correct", map[string]any{"text": "x", "severity": -1}); status != 400 {
+		t.Fatalf("a negative severity is a 400: %d", status)
+	}
+}
+
+func TestOllamaCorrectSamplesFromTheModel(t *testing.T) {
+	e, _ := criticEnv(t)
+	status, doc := e.post("/api/ollama/correct", map[string]any{"count": 3, "max_length": 24})
+	if status != 200 {
+		t.Fatalf("status %d %+v", status, doc)
+	}
+	if doc["source"] != "model" || len(doc["texts"].([]any)) != 3 || len(doc["corrections"].([]any)) != 3 {
+		t.Fatalf("three samples corrected: %+v", doc)
+	}
+}
+
+func TestOllamaCorrectCanBlame(t *testing.T) {
+	e, _ := criticEnv(t)
+	status, doc := e.post("/api/ollama/correct", map[string]any{
+		"texts": []string{"Hi howe are you??", "good sentences about the cat"}, "blame": true, "severity": 1.5,
+	})
+	if status != 200 {
+		t.Fatalf("status %d %+v", status, doc)
+	}
+	negative, _ := doc["negative"].(map[string]any)
+	if negative == nil {
+		t.Fatal("expected the negative network to be taught")
+	}
+	hasKeys(t, negative, "blamed", "cleared", "unmatched", "edges", "edits", "uncorrected", "reasons", "lessons",
+		"severity_mean", "stats", "reason_table")
+	if toFloat(negative["blamed"]) != 1 || toFloat(negative["severity_mean"]) != 1.5 || toFloat(negative["edits"]) == 0 {
+		t.Fatalf("one text blamed at the asked severity, by its diff: %+v", negative)
+	}
+	if lessons := negative["lessons"].([]any); len(lessons) != 1 || lessons[0].(map[string]any)["correction"] != "Hi, how are you?" {
+		t.Fatalf("the lesson carries the correction: %+v", negative["lessons"])
+	}
+	if table := negative["reason_table"].([]any); len(table) != 1 || table[0].(map[string]any)["reason"] != "spelling" {
+		t.Fatalf("under the editor's word: %+v", negative["reason_table"])
+	}
+	status, tab := e.get("/api/negative")
+	if status != 200 {
+		t.Fatalf("negative: %d", status)
+	}
+	if failures := toFloat(tab["stats"].(map[string]any)["failures_total"]); failures != 1 {
+		t.Errorf("the tab must see it: %v", failures)
+	}
+	status, judged := e.post("/api/negative/judge", map[string]any{"texts": []string{"Hi, how are you?", "Hi howe are you??"}})
+	if status != 200 {
+		t.Fatalf("judge: %d", status)
+	}
+	verdicts := judged["verdicts"].([]any)
+	if verdicts[0].(map[string]any)["verdict"] != "pass" {
+		t.Fatalf("the correction is clean: %+v", verdicts[0])
+	}
+	if reasons := verdicts[1].(map[string]any)["reasons"].([]any); len(reasons) == 0 || reasons[0].(map[string]any)["reason"] != "spelling" {
+		t.Fatalf("the mistake is known: %+v", verdicts[1])
+	}
+}
+
+func TestNegativeAutoCanCorrect(t *testing.T) {
+	e, fake := criticEnv(t)
+	status, doc := e.post("/api/negative/auto", map[string]any{"rounds": 1, "count": 3, "max_length": 24, "correct": true, "severity": 2})
+	if status != 202 {
+		t.Fatalf("start: %d %+v", status, doc)
+	}
+	config := doc["config"].(map[string]any)
+	if config["correct"] != true || toFloat(config["severity"]) != 2 {
+		t.Fatalf("the config echoes the editor's settings: %+v", config)
+	}
+	e.waitForJob()
+	status, history := e.get("/api/negative/auto/history")
+	if status != 200 {
+		t.Fatalf("history: %d", status)
+	}
+	records := history["history"].([]any)
+	if len(records) != 2 {
+		t.Fatalf("one round and one report: %+v", records)
+	}
+	round := records[0].(map[string]any)
+	if round["mode"] != "correct" || toFloat(round["severity"]) != 2 || toFloat(round["texts"]) != 3 {
+		t.Fatalf("a correcting round: %+v", round)
+	}
+	hasKeys(t, round, "corrections", "change_rate", "corrected", "unchanged", "uncorrected", "edits", "wrong_chars")
+	if toFloat(round["corrected"])+toFloat(round["unchanged"])+toFloat(round["uncorrected"]) != 3 {
+		t.Fatalf("every text has a verdict: %+v", round)
+	}
+	report := records[1].(map[string]any)
+	hasKeys(t, report, "corrected", "unchanged", "uncorrected", "edits", "change_rate", "change_trend")
+	if len(fake.prompts) != 1 || !strings.HasPrefix(fake.prompts[0], "Correct these 3 texts:") {
+		t.Fatalf("the editor was asked once: %q", fake.prompts)
+	}
+	if status, _ := e.post("/api/negative/auto", map[string]any{"correct": true, "severity": -1}); status != 400 {
+		t.Fatalf("a negative severity is a 400: %d", status)
+	}
 }

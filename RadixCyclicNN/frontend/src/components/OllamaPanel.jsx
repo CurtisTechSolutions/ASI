@@ -4,6 +4,7 @@ import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import {
   asArray,
+  countingKind,
   fmtBytes,
   fmtInt,
   fmtNum,
@@ -14,6 +15,7 @@ import {
   splitLines,
   yesNo,
 } from "../util.js";
+import { THINK_LEVELS, ollamaThinkRequest, questionRuns, questionsIn, thinkLevelSays } from "../thinking.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import UploadPicker from "./UploadPicker.jsx";
@@ -170,8 +172,9 @@ function ConnectionCard({ defaults, url, setUrl, model, setModel }) {
         </div>
       </div>
       <p className="muted">
-        A local Ollama server writes training corpora from a prompt and acts as an adversarial reviewer of the model's
-        samples. Every Ollama call can take a minute or two.
+        A local Ollama server writes training corpora from a prompt, acts as an adversarial reviewer of the model's
+        samples, and - a thinking model - thinks about a prompt so the network can be taught its thinking as
+        thoughts. Every Ollama call can take a minute or two.
       </p>
       <div className="row">
         {/* An override: blank asks the Ollama the server itself talks to (the summary below names it). */}
@@ -862,11 +865,560 @@ function ReviewResultCard({ review, status, heldBad, heldGood, onClearBad, onCle
   );
 }
 
+/** The epochs of a training job, as the corpus and thinking cards show them. */
+function EpochTable({ history }) {
+  const rows = history.slice(-MAX_ROWS);
+  if (rows.length === 0) return null;
+  return (
+    <>
+      {history.length > MAX_ROWS ? (
+        <p className="muted">
+          Showing the last {MAX_ROWS} of {history.length} epochs.
+        </p>
+      ) : null}
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>epoch</th>
+              <th>loss</th>
+              <th>perplexity</th>
+              <th>nodes</th>
+              <th>compression</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i}>
+                <td>{fmtInt(r && r.epoch)}</td>
+                <td>{fmtNum(r && r.loss, 4)}</td>
+                <td>{fmtNum(r && r.perplexity, 3)}</td>
+                <td>{fmtInt(r && r.nodes)}</td>
+                <td>{fmtNum(r && r.compression_ratio, 2)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+/** A thinking model's thinking, with the questions it asked itself marked: where the network will learn to stop and think. */
+function Thinking({ text }) {
+  return (
+    <p className="thinking-text">
+      {questionRuns(text).map((run, i) =>
+        run.question ? (
+          <mark key={i} title="a question it asked itself: taught, the network stops to think here">
+            {run.text}
+          </mark>
+        ) : (
+          <span key={i}>{run.text}</span>
+        ),
+      )}
+    </p>
+  );
+}
+
+/**
+ * A thinking model thinks about a prompt (POST /api/ollama/think): it writes questions about it and thinks each
+ * one through, and its thinking comes back beside the answers. With "Teach the thinking to the network" on the
+ * same request starts a train job that teaches the thinking as thoughts - walks that begin at the THINK
+ * sentinel - and every question it asked itself as a place where the network stops to think.
+ */
+function ThinkingCards({ overrides, status }) {
+  const [prompt, setPrompt] = useStoredState("ollama.think.prompt", "");
+  const [lines, setLines] = useStoredState("ollama.think.lines", "5");
+  const [level, setLevel] = useStoredState("ollama.think.level", "true");
+  const [temperature, setTemperature] = useStoredState("ollama.think.temperature", "0.7");
+  const [teach, setTeach] = useStoredState("ollama.think.teach", false);
+  const [epochs, setEpochs] = useStoredState("ollama.think.epochs", "5");
+  const [lr, setLr] = useStoredState("ollama.think.lr", "0.05");
+  const [batchSize, setBatchSize] = useStoredState("ollama.think.batchSize", "256");
+  const [questions, setQuestions] = useStoredState("ollama.think.questions", true);
+  const [withAnswers, setWithAnswers] = useStoredState("ollama.think.withAnswers", false);
+  const [saveAs, setSaveAs] = useStoredState("ollama.think.saveAs", "");
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [trainSeen, setTrainSeen] = useState(false);
+  const train = useJob("train");
+  const counting = countingKind(status);
+  const negative = status && status.kind === "negative";
+  const otherJobRunning = jobIsRunning(status) && !train.running;
+
+  // The hook adopts the server's last train job on mount; only show it once it is ours or running.
+  useEffect(() => {
+    if (train.running) setTrainSeen(true);
+  }, [train.running]);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (prompt.trim() === "") {
+      setError("Enter a prompt: what the model should think about.");
+      return;
+    }
+    const body = ollamaThinkRequest(
+      {
+        prompt,
+        lines,
+        think: level,
+        temperature,
+        train: teach,
+        epochs,
+        questions,
+        withAnswers,
+        saveAs,
+        ...(counting ? {} : { lr, batchSize }),
+      },
+      overrides,
+    );
+    setLoading(true);
+    setError(null);
+    try {
+      if (body.train) {
+        setTrainSeen(true);
+        // the job starts on the same request: its answer carries the thoughts and the job
+        await train.start(async () => {
+          const data = await api.ollamaThink(body);
+          setResult(data && typeof data === "object" ? data : {});
+          return data;
+        });
+      } else {
+        const data = await api.ollamaThink(body);
+        setResult(data && typeof data === "object" ? data : {});
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const entries = asArray(result && result.thoughts).filter((t) => t && typeof t === "object");
+  const withThinking = entries.filter((t) => typeof t.thinking === "string" && t.thinking.trim() !== "");
+  const asked = withThinking.reduce((n, t) => n + questionsIn(t.thinking).length, 0);
+  const upload = result && result.upload && typeof result.upload === "object" ? result.upload : null;
+  const history = asArray(train.job && train.job.history);
+  const busy = loading || train.busy;
+
+  return (
+    <>
+      <form className="card" onSubmit={handleSubmit}>
+        <h2>Thinking from a prompt</h2>
+        <p className="muted">
+          A thinking model (qwen3, deepseek-r1, gpt-oss, …) writes questions about the prompt and thinks each one
+          through. Taught to the network, its thinking becomes the network&apos;s own thoughts - walks from the THINK
+          sentinel, which the <a href="#think">Think</a> tab runs - and every question it asked itself a place where
+          the network stops to think.
+        </p>
+        <TextArea
+          label="Prompt"
+          hint="what to think about"
+          value={prompt}
+          onChange={setPrompt}
+          rows={4}
+          disabled={busy}
+          placeholder="Why the sea is salty, and why the sky is blue."
+        />
+        <div className="row">
+          <NumberField label="Questions" hint="to think about" value={lines} onChange={setLines} min={1} step={1} disabled={busy} />
+          <SelectField label="Think" hint="how hard" value={level} onChange={setLevel} options={THINK_LEVELS} disabled={busy} />
+          <NumberField label="Temperature" value={temperature} onChange={setTemperature} min={0} disabled={busy} />
+        </div>
+        <TextField
+          label="Save the thinking as"
+          hint="optional upload name, one thought per line"
+          value={saveAs}
+          onChange={setSaveAs}
+          placeholder="sea-thoughts.txt"
+          disabled={busy}
+        />
+        <CheckField
+          label="Teach the thinking to the network"
+          hint="a train job: the thinking as thoughts that begin at the THINK sentinel (this changes the model)"
+          checked={teach}
+          onChange={setTeach}
+          disabled={busy || negative}
+        />
+        {teach ? (
+          <>
+            <div className="row">
+              <NumberField label="Epochs" value={epochs} onChange={setEpochs} min={0} step={1} disabled={busy} />
+              {counting ? null : (
+                <>
+                  <NumberField label="Learning rate" value={lr} onChange={setLr} min={0} disabled={busy} />
+                  <NumberField label="Batch size" value={batchSize} onChange={setBatchSize} min={1} step={1} disabled={busy} />
+                </>
+              )}
+            </div>
+            <CheckField
+              label="Learn where it questions itself"
+              hint="every question in the thinking marks a node where the network stops to think, and becomes a thought of its own"
+              checked={questions}
+              onChange={setQuestions}
+              disabled={busy}
+            />
+            <CheckField
+              label="Train the answers as texts too"
+              hint="the answers go in from START, like any corpus"
+              checked={withAnswers}
+              onChange={setWithAnswers}
+              disabled={busy}
+            />
+          </>
+        ) : null}
+        {negative ? <p className="muted">The negative network judges; it does not think. Select another kind to teach thoughts.</p> : null}
+        <div className="actions">
+          <button type="submit" className="primary" disabled={busy || (teach && (train.running || otherJobRunning))}>
+            {loading ? "Thinking…" : teach ? "Think and teach" : "Think"}
+          </button>
+          <button type="button" className="danger" disabled={!train.running} onClick={() => train.stop()}>
+            Stop
+          </button>
+          {loading ? <span className="muted note">{SLOW_NOTE}</span> : null}
+        </div>
+        {teach && otherJobRunning ? <p className="muted">Another job is running; wait for it to finish.</p> : null}
+        <Alert message={error} onDismiss={() => setError(null)} />
+        <Alert message={train.error} onDismiss={train.clearError} />
+      </form>
+
+      <div className="card">
+        <h2>What it thought</h2>
+        {!result ? (
+          <p className="muted">
+            Give a thinking model a prompt and press Think: the questions it wrote, the thinking behind each answer
+            (the questions it asked itself marked) and the answers come back here.
+          </p>
+        ) : (
+          <>
+            <p className="muted">
+              {fmtInt(entries.length)} question{entries.length === 1 ? "" : "s"} · {fmtInt(withThinking.length)} with
+              thinking · {fmtInt(asked)} question{asked === 1 ? "" : "s"} it asked itself · model{" "}
+              {String(result.model ?? "–")} · think {thinkLevelSays(result.think)}
+            </p>
+            {entries.length > 0 && withThinking.length === 0 ? (
+              <Alert
+                kind="info"
+                message="The model answered without thinking: use a thinking model (qwen3, deepseek-r1, gpt-oss, …) on an Ollama that separates its thinking, with Think on."
+              />
+            ) : null}
+            <ol className="thinking-list">
+              {entries.map((t, i) => (
+                <li key={i}>
+                  <p className="question">
+                    <b>{String(t.question ?? "")}</b>
+                  </p>
+                  {t.thinking ? <Thinking text={t.thinking} /> : <p className="muted">(no thinking: the model did not think)</p>}
+                  <p className="muted answer">answer: {t.answer ? String(t.answer) : "–"}</p>
+                </li>
+              ))}
+            </ol>
+            {upload ? (
+              <Alert
+                kind="ok"
+                message={`Saved ${String(upload.name ?? saveAs)}: ${fmtInt(upload.lines)} line(s), ${fmtBytes(upload.bytes)}. It is now selectable in the file pickers.`}
+              />
+            ) : null}
+          </>
+        )}
+        {trainSeen ? (
+          <>
+            <h3>Teaching job</h3>
+            <JobStatus job={train.job} emptyText="No teaching job yet." />
+            <EpochTable history={history} />
+            {train.running && history.length === 0 ? <p className="muted">Waiting for the first epoch…</p> : null}
+            {train.job && train.job.state === "done" ? (
+              <p className="muted">
+                Taught. The <a href="#think">Think</a> tab now thinks in these thoughts, and a conversation that
+                catches itself repeating thinks in them before it backs up.
+              </p>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
+/** Verdict of one correction entry, always one of the three the API uses. */
+function correctionVerdictOf(entry) {
+  const v = entry && entry.verdict;
+  return v === "corrected" || v === "unchanged" || v === "uncorrected" ? v : "uncorrected";
+}
+
+/** The changes of one correction as the API sends them: {op, wrong, right, at: [a0, a1], to: [b0, b1]}. */
+function changesOf(entry) {
+  return asArray(entry && entry.changes).filter(
+    (c) => c && typeof c === "object" && Array.isArray(c.at) && Array.isArray(c.to),
+  );
+}
+
+/**
+ * One side of a correction with its changed characters marked: the model's
+ * text with what the editor struck out (`side="wrong"`, `<del>`), or the
+ * correction with what the editor wrote instead (`side="right"`, `<ins>`).
+ * A change that leaves nothing on this side (an inserted comma on the wrong
+ * side, a deleted letter on the right side) is shown as a caret at the spot,
+ * so the position of the mistake is visible even when its characters are not.
+ */
+function MarkedText({ text, changes, side }) {
+  const value = String(text ?? "");
+  const key = side === "wrong" ? "at" : "to";
+  const parts = [];
+  let cursor = 0;
+  changes.forEach((change, i) => {
+    const [start, end] = change[key].map((n) => Math.max(0, Math.min(value.length, parseInteger(n, 0))));
+    if (start < cursor) return; // overlapping or unsorted: skip rather than mis-mark
+    if (start > cursor) parts.push(<span key={`eq${i}`}>{value.slice(cursor, start)}</span>);
+    if (end > start) {
+      const changed = value.slice(start, end);
+      parts.push(side === "wrong" ? <del key={`c${i}`}>{changed}</del> : <ins key={`c${i}`}>{changed}</ins>);
+    } else {
+      parts.push(
+        <span key={`c${i}`} className="gap" title={side === "wrong" ? "the editor added something here" : "the editor removed something here"}>
+          ^
+        </span>,
+      );
+    }
+    cursor = end;
+  });
+  if (cursor < value.length) parts.push(<span key="tail">{value.slice(cursor)}</span>);
+  return <span className="diff">{parts}</span>;
+}
+
+/** Have Ollama copy-edit samples from the model, or pasted texts (POST /api/ollama/correct). */
+function CorrectCard({ overrides, onResult }) {
+  const [count, setCount] = useStoredState("ollama.correct.count", "8");
+  const [prefix, setPrefix] = useStoredState("ollama.correct.prefix", "");
+  const [maxLength, setMaxLength] = useStoredState("ollama.correct.maxLength", "60");
+  const [temperature, setTemperature] = useStoredState("ollama.correct.temperature", "1.0");
+  const [severity, setSeverity] = useStoredState("ollama.correct.severity", "1");
+  const [texts, setTexts] = useStoredState("ollama.correct.texts", "");
+  const [context, setContext] = useStoredState("ollama.correct.context", "");
+  const [blame, setBlame] = useStoredState("ollama.correct.blame", false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const given = splitLines(texts);
+  const usingGiven = given.length > 0;
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const body = { ...overrides, blame, severity: Math.max(0, parseNumber(severity, 1)) };
+      if (usingGiven) {
+        body.texts = given;
+      } else {
+        body.count = Math.max(1, parseInteger(count, 8));
+        body.prefix = prefix;
+        body.max_length = Math.max(1, parseInteger(maxLength, 60));
+        body.temperature = parseNumber(temperature, 1);
+      }
+      if (context.trim() !== "") body.context = context.trim();
+      const data = await api.ollamaCorrect(body);
+      onResult(data && typeof data === "object" ? data : {});
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <form className="card" onSubmit={handleSubmit}>
+      <h2>Letter-level correction</h2>
+      <p className="muted">
+        Ollama plays the copy editor: each sample from the model comes back written out correctly with as few
+        characters changed as possible, and the diff between the two is the lesson. "Hi howe are you??" corrected to
+        "Hi, how are you?" blames the <code>e</code> and the second <code>?</code> in the negative network, not the
+        sentence; a text handed back unchanged clears blame. Paste texts below to correct those instead of sampling.
+      </p>
+      <div className="row">
+        <NumberField
+          label="Samples"
+          hint="from the model"
+          value={count}
+          onChange={setCount}
+          min={1}
+          step={1}
+          disabled={loading || usingGiven}
+        />
+        <NumberField
+          label="Max length"
+          value={maxLength}
+          onChange={setMaxLength}
+          min={1}
+          step={1}
+          disabled={loading || usingGiven}
+        />
+      </div>
+      <div className="row">
+        <NumberField
+          label="Temperature"
+          value={temperature}
+          onChange={setTemperature}
+          min={0.01}
+          disabled={loading || usingGiven}
+        />
+        <NumberField
+          label="Severity"
+          hint="blame per corrected text"
+          value={severity}
+          onChange={setSeverity}
+          min={0}
+          disabled={loading || !blame}
+        />
+      </div>
+      <TextField
+        label="Prefix"
+        hint="optional; samples continue it"
+        value={prefix}
+        onChange={setPrefix}
+        placeholder="the quick br"
+        disabled={loading || usingGiven}
+      />
+      <TextArea
+        label="Texts to correct"
+        hint="optional, one per line; replaces sampling"
+        value={texts}
+        onChange={setTexts}
+        rows={5}
+        disabled={loading}
+        placeholder={"Hi howe are you??\nthe cat sat on the mat"}
+      />
+      {usingGiven ? (
+        <p className="muted">
+          {fmtInt(given.length)} given text{given.length === 1 ? "" : "s"} will be corrected; the sampling settings are
+          ignored.
+        </p>
+      ) : null}
+      <TextField
+        label="Context for the editor"
+        hint="optional"
+        value={context}
+        onChange={setContext}
+        placeholder="The model is trained on short English sentences about the weather."
+        disabled={loading}
+      />
+      <CheckField
+        label="Teach the negative network (only the characters the editor changed are blamed; unchanged texts clear)"
+        checked={blame}
+        onChange={setBlame}
+        disabled={loading}
+      />
+      <div className="actions">
+        <button type="submit" className="primary" disabled={loading}>
+          {loading ? "Correcting…" : "Correct"}
+        </button>
+        {loading ? <span className="muted note">{SLOW_NOTE}</span> : null}
+      </div>
+      <Alert message={error} onDismiss={() => setError(null)} />
+    </form>
+  );
+}
+
+/** The corrections as a diff table: what the editor struck out, what it wrote, and why. */
+function CorrectResultCard({ result }) {
+  const entries = result ? asArray(result.corrections).filter((c) => c && typeof c === "object") : [];
+  const corrected = entries.filter((c) => correctionVerdictOf(c) === "corrected").length;
+  const unchanged = entries.filter((c) => correctionVerdictOf(c) === "unchanged").length;
+  const uncorrected = entries.length - corrected - unchanged;
+  const changeRate =
+    result && typeof result.change_rate === "number" && Number.isFinite(result.change_rate)
+      ? `${Math.round(result.change_rate * 100)}%`
+      : "–";
+  return (
+    <div className="card">
+      <h2>Corrections</h2>
+      {!result ? (
+        <p className="muted">Press Correct to have Ollama copy-edit samples from the model, or the texts you paste.</p>
+      ) : entries.length === 0 ? (
+        <p className="muted">No corrections were returned.</p>
+      ) : (
+        <>
+          <div className="chips">
+            <span className="stat">
+              change rate <b>{changeRate}</b>
+            </span>
+            <span className="stat">
+              corrected <b>{fmtInt(corrected)}</b> · unchanged <b>{fmtInt(unchanged)}</b> · uncorrected{" "}
+              <b>{fmtInt(uncorrected)}</b>
+            </span>
+            <span className="stat">
+              changes <b>{fmtInt(result.edits)}</b> · wrong characters <b>{fmtInt(result.wrong_chars)}</b>
+            </span>
+            <span className="stat">
+              source <b>{String(result.source ?? "–")}</b>
+            </span>
+            <span className="stat">
+              model <b>{String(result.model ?? "–")}</b>
+            </span>
+            {result.negative ? (
+              <span className="stat" title="what the editor taught the negative network (see the Negative tab)">
+                blamed <b>{fmtInt(result.negative.blamed)}</b> · cleared <b>{fmtInt(result.negative.cleared)}</b> ·{" "}
+                {Object.entries(result.negative.reasons || {})
+                  .map(([name, n]) => `${name}×${n}`)
+                  .join(", ") || "–"}
+              </span>
+            ) : null}
+          </div>
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>verdict</th>
+                  <th>text</th>
+                  <th>correction</th>
+                  <th>reason</th>
+                  <th>note</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((c, i) => {
+                  const verdict = correctionVerdictOf(c);
+                  const changes = changesOf(c);
+                  return (
+                    <tr key={i}>
+                      <td>{i + 1}</td>
+                      <td>
+                        <span className={`badge ${verdict}`}>{verdict}</span>
+                      </td>
+                      <td className="wrap">
+                        <MarkedText text={c.text} changes={changes} side="wrong" />
+                      </td>
+                      <td className="wrap">
+                        {typeof c.correction === "string" ? (
+                          <MarkedText text={c.correction} changes={changes} side="right" />
+                        ) : (
+                          <span className="muted">–</span>
+                        )}
+                      </td>
+                      <td>{String(c.reason || "–")}</td>
+                      <td className="wrap muted">{String(c.note ?? "")}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /**
  * Ollama tab: connection (URL + model), a corpus written from a prompt with
- * train / save / hold-for-2NRL actions, and an adversarial review whose failed
- * and passed texts can be applied as a 2NRL run. The URL, model and held lines
- * are shared by the cards; each card keeps its own form state.
+ * train / save / hold-for-2NRL actions, an adversarial review whose failed
+ * and passed texts can be applied as a 2NRL run, a letter-level correction
+ * whose diff can teach the negative network, and a thinking model's thinking
+ * taught to the network as thoughts. The URL, model and held lines are shared
+ * by the cards; each card keeps its own form state.
  */
 export default function OllamaPanel({ status }) {
   const defaults = ollamaDefaults(status);
@@ -875,6 +1427,7 @@ export default function OllamaPanel({ status }) {
   const [model, setModel] = useStoredState("ollama.model", "");
   const [corpus, setCorpus] = useState(null);
   const [review, setReview] = useState(null);
+  const [correction, setCorrection] = useState(null);
   const [heldBad, setHeldBad] = useState([]);
   const [heldGood, setHeldGood] = useState([]);
 
@@ -905,6 +1458,9 @@ export default function OllamaPanel({ status }) {
         onClearBad={clearBad}
         onClearGood={clearGood}
       />
+      <CorrectCard overrides={overrides} onResult={setCorrection} />
+      <CorrectResultCard result={correction} />
+      <ThinkingCards overrides={overrides} status={status} />
     </>
   );
 }

@@ -160,3 +160,141 @@ func TestPlannedTrainingKeepsABufferAndStops(t *testing.T) {
 		t.Fatal("the buffer is not in the document")
 	}
 }
+
+// Reverse reads a text unit by unit from its end: code points for characters,
+// whole words (written with single spaces) for words - Python's
+// Encoding.reverse, character for character.
+func TestReverseReadsTheUnitsBackwards(t *testing.T) {
+	chars, words := DefaultEncoding(), Encoding{Unit: Words, N: 2, Stride: 1}
+	for _, c := range []struct {
+		enc        Encoding
+		text, want string
+	}{
+		{chars, "héllo wörld", "dlröw olléh"},
+		{chars, "the cat\n", "\ntac eht"},
+		{chars, "", ""},
+		{words, "  the  cat\tsat\n", "sat cat the"},
+		{words, "one", "one"},
+		{words, " \t ", ""},
+	} {
+		if got := c.enc.Reverse(c.text); got != c.want {
+			t.Errorf("%v.Reverse(%q) = %q, want %q", c.enc, c.text, got, c.want)
+		}
+	}
+	// a combining accent stays a code point of its own, so twice is the text again
+	if text := "café au lait"; chars.Reverse(chars.Reverse(text)) != text {
+		t.Error("reversing characters twice is not the text")
+	}
+}
+
+// reversedDoc is a model's document with the clock taken out: what two runs
+// that read the same texts must agree on byte for byte.
+func reversedDoc(t *testing.T, m *Model) string {
+	t.Helper()
+	doc := m.ToDoc()
+	doc.SavedAt = ""
+	delete(doc.Meta, "created")
+	for _, r := range doc.History {
+		delete(r, "seconds")
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// A run with Plan.Reverse is a run over the reversed texts - on every entry
+// point, the streaming one included, and on the negative network, whose
+// training is blaming.
+func TestReverseTrainsOnTheReversedTexts(t *testing.T) {
+	texts := corpus(t)[:30]
+	for _, enc := range []Encoding{DefaultEncoding(), {Unit: Words, N: 2, Stride: 1}} {
+		reversed := make([]string, len(texts))
+		for i, text := range texts {
+			reversed[i] = enc.Reverse(text)
+		}
+		for _, negative := range []bool{false, true} {
+			fresh := func() *Model {
+				var m *Model
+				var err error
+				if negative {
+					o := DefaultNegativeOptions()
+					o.Encoding = enc
+					m, err = NewNegativeModel(3, o)
+				} else {
+					o := DefaultGraphOptions()
+					o.Encoding = enc
+					m, err = NewModel(3, o)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				m.Exact = true
+				return m
+			}
+			opts := DefaultTrainOptions()
+			opts.Epochs = 2
+			forward := fresh()
+			if _, err := forward.Train(texts, opts); err != nil {
+				t.Fatal(err)
+			}
+			// each entry point with Reverse against the same entry point over the
+			// reversed texts: the streaming one, in two parts that stream side by
+			// side, counts its chunks and parts in its records
+			train := func(m *Model, in []string, o TrainOptions) *Model {
+				if _, err := m.Train(in, o); err != nil {
+					t.Fatal(err)
+				}
+				return m
+			}
+			stream := func(m *Model, in []string, o TrainOptions) *Model {
+				o.ParallelParts = true
+				if _, err := m.TrainSource(MultiSource{SliceSource(in[:12]), SliceSource(in[12:])}, o); err != nil {
+					t.Fatal(err)
+				}
+				return m
+			}
+			backwards := opts
+			backwards.Plan.Reverse = true
+			for name, run := range map[string]func(*Model, []string, TrainOptions) *Model{"Train": train, "TrainSource": stream} {
+				want := reversedDoc(t, run(fresh(), reversed, opts))
+				if want == reversedDoc(t, forward) {
+					t.Fatalf("%v (negative %v): the reversed texts built the forward model", enc, negative)
+				}
+				if got := reversedDoc(t, run(fresh(), texts, backwards)); got != want {
+					t.Errorf("%v (negative %v): %s with Reverse is not training on the reversed texts", enc, negative, name)
+				}
+			}
+		}
+	}
+}
+
+// A reversed source keeps its parts: every archive entry or file still
+// streams on its own, and each part's texts come out reversed.
+func TestReversedSourceKeepsItsParts(t *testing.T) {
+	src := ReversedSource(MultiSource{SliceSource{"abc", "de"}, SliceSource{"xyz"}}, DefaultEncoding())
+	if _, ok := src.(PartSource); !ok {
+		t.Fatal("a reversed source lost its parts")
+	}
+	parts, err := openParts(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parts.Close()
+	var got [][]string
+	for i := 0; i < parts.Len(); i++ {
+		var texts []string
+		if err := parts.Each(i, func(s string) error { texts = append(texts, s); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, texts)
+	}
+	if want := [][]string{{"cba", "ed"}, {"zyx"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("parts: %v, want %v", got, want)
+	}
+	all, err := CollectTexts(src)
+	if err != nil || !reflect.DeepEqual(all, []string{"cba", "ed", "zyx"}) {
+		t.Fatalf("collected %v (%v)", all, err)
+	}
+}

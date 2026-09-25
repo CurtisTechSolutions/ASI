@@ -12,6 +12,44 @@ var DefaultSpeakers = []string{"A", "B"}
 // (0 turns the exploring off).
 const Explore = 3
 
+// A Stream is where a conversation streams what it is doing, one event at a
+// time, as it happens (Python's radixnet.dialogue.StreamFn).
+//
+// Every event carries "event" (its kind), "index" and "speaker" (whose turn
+// it is).  The committed layer is "turn" ("turn": the *Turn) - a turn is
+// spoken once and never taken back, so the turn events are the answer.  The
+// window between two turns is what a backtrack may still rewrite: "look"
+// ("from": the context it continues, "" for a fresh text from START), "draft"
+// ("text", "cost": what it was about to say before it caught itself),
+// "caught" ("kind", "noticed", "cut": what it keeps, "" when it cannot back
+// up), "backtrack" ("step", "cut", "wider"), "found" ("text", "cost",
+// "explored") or "stuck" ("explored": nothing new from any cut).  Streaming
+// changes nothing about what is said.
+type Stream func(map[string]any)
+
+// StreamEvents is every kind of event a streamed conversation emits, in the
+// order a turn goes through them.
+var StreamEvents = []string{"look", "draft", "caught", "backtrack", "found", "stuck", "turn"}
+
+// tagged is stream with the turn's index and speaker written into every event.
+func tagged(stream Stream, index int, speaker string) Stream {
+	if stream == nil {
+		return nil
+	}
+	return func(event map[string]any) {
+		event["index"], event["speaker"] = index, speaker
+		stream(event)
+	}
+}
+
+// spoken is the committed layer of the stream: a turn that has been spoken,
+// and will not be taken back.
+func spoken(stream Stream, t *Turn) {
+	if stream != nil {
+		stream(map[string]any{"event": "turn", "index": t.Index, "speaker": t.Speaker, "turn": t})
+	}
+}
+
 // Rethink is a voice catching itself repeating, and what it did about it.
 //
 // The metacognition of a turn.  Kind is what it caught: "stutter" - its own
@@ -30,6 +68,8 @@ type Rethink struct {
 	Found    bool   `json:"found"`
 	// Taught is the node it taught to hand over here in future (TeachBack), or -1 when it taught nothing.
 	Taught int `json:"taught"`
+	// Thought is what it thought before backing up (ThinkBack, thinking.go), or nil when it did not think.
+	Thought *Thought `json:"thought"`
 }
 
 // Turn is one utterance of a conversation.
@@ -265,18 +305,29 @@ type ConverseOptions struct {
 	// Learn teaches the model what each rethink found out (TeachBack), so the graph itself learns where it
 	// goes round.  A conversation with this on changes the model.
 	Learn bool
+	// Think has a voice that caught itself repeating think before it backs up (ThinkBack): the thought is
+	// walked from Think, questions itself up to ThinkDepth deep where the model has learned to, and hands
+	// over to Back when it stops.
+	Think      bool
+	ThinkDepth int
 	// Veto is what a voice may not say: true for a candidate the speaker must
 	// not speak.  The conversation knows nothing about why - Filter.Converse
 	// passes its own judgement in (the negative network guarding the positive
 	// one), and a candidate it refuses is skipped exactly like one that had
 	// been said before, except that it may not even be the fallback.
 	Veto func(string) bool
+	// Stream is where the conversation is streamed as it happens: a "turn"
+	// event for every turn spoken, the opening included, and between them what
+	// each voice does before it commits (see Stream).  The turns returned are
+	// exactly the ones streamed.
+	Stream Stream
 }
 
 // DefaultConverseOptions mirror the Python defaults.
 func DefaultConverseOptions() ConverseOptions {
 	return ConverseOptions{Turns: 6, Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1.0, K: 5,
-		Speakers: DefaultSpeakers, AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true}
+		Speakers: DefaultSpeakers, AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true,
+		Think: true, ThinkDepth: ThinkDepth}
 }
 
 func shorter(context string) string {
@@ -337,9 +388,22 @@ func (m *Model) offer(context, mode string, count, beam, maxLength int, stepPena
 // From then on the search itself hands over at that node (Onward), wherever it
 // is walking: the trait is the model's, not the conversation's.
 func (m *Model) TeachBack(text string, at int, found *PathResult, amount float64) int {
+	node, went, instead := m.backing(text, at, found)
+	if node < 0 {
+		return -1 // nothing of its own to mark: the repeat started where the graph could not place it
+	}
+	if _, err := m.G.ObserveBack(node, went, instead, amount); err != nil {
+		return -1
+	}
+	return node
+}
+
+// backing is where a rethink backs up to, and what it teaches: (node, went,
+// instead), node -1 when the graph cannot place it (went / instead -1 when not known).
+func (m *Model) backing(text string, at int, found *PathResult) (int, int, int) {
 	node, _, lead := m.prefixStart(text[:at])
 	if node < First || lead != "" || !m.G.Alive[node] {
-		return -1 // nothing of its own to mark: the repeat started where the graph could not place it
+		return -1, -1, -1
 	}
 	word := text[at:]
 	if i := strings.IndexByte(word, ' '); i >= 0 {
@@ -357,10 +421,50 @@ func (m *Model) TeachBack(text string, at int, found *PathResult, amount float64
 			instead = found.NodeIDs[1]
 		}
 	}
-	if _, err := m.G.ObserveBack(node, went, instead, amount); err != nil {
-		return -1
+	return node, went, instead
+}
+
+// ThinkBack has a voice that caught itself repeating *think* before it backs up (Model.Think).
+//
+// The event is the rethink itself (kind: "stutter" or "repeat"), the node it
+// thinks at is the one it backed up to, and when the thought stops it hands
+// over to Back - the lesson TeachBack used to write directly: the node hands
+// over, the step it was about to loop through gets dearer, the step it took
+// instead cheaper.  With o.Learn off the voice still thinks, and teaches
+// nothing.  nil when the graph cannot place the repeat: nothing of its own to
+// think at.  The search settings are o's; the thought questions itself up to
+// o.ThinkDepth deep.
+func (m *Model) ThinkBack(text string, at int, found *PathResult, kind string, o BacktrackOptions) (*Thought, error) {
+	node, went, instead := m.backing(text, at, found)
+	if node < 0 {
+		return nil, nil
 	}
-	return node
+	t := DefaultThinkOptions()
+	t.At, t.About, t.Trigger, t.Went, t.Instead = node, text, kind, went, instead
+	t.Mode, t.K, t.Beam, t.MaxLength = o.Mode, o.K, o.Beam, o.MaxLength
+	t.StepPenalty, t.Temperature, t.RNG = o.StepPenalty, o.Temperature, o.RNG
+	t.MaxDepth, t.Learn = o.ThinkDepth, o.Learn
+	return m.Think(t)
+}
+
+// teach is what a rethink teaches: a thought that hands over to Back when it stops (o.Think), else Back
+// directly (o.Learn).  Returns the node taught to hand over, or -1.
+func (m *Model) teach(text string, at int, found *PathResult, record *Rethink, o BacktrackOptions) (int, error) {
+	if o.Think {
+		thought, err := m.ThinkBack(text, at, found, record.Kind, o)
+		if err != nil {
+			return -1, err
+		}
+		record.Thought = thought
+		if thought == nil {
+			return -1, nil
+		}
+		return thought.HandedOver, nil
+	}
+	if o.Learn {
+		return m.TeachBack(text, at, found, 1.0), nil
+	}
+	return -1, nil
 }
 
 // BacktrackOptions configure Backtrack.
@@ -383,7 +487,13 @@ type BacktrackOptions struct {
 	// Learn teaches the model what the rethink found out (TeachBack), so the graph itself learns where it
 	// goes round.  A conversation with this on changes the model.
 	Learn bool
-	Veto  func(string) bool
+	// Think has the voice think before it backs up (ThinkBack), ThinkDepth deep (see ConverseOptions.Think).
+	Think      bool
+	ThinkDepth int
+	Veto       func(string) bool
+	// Stream watches the backing up happen: "caught" the moment it notices, "backtrack" for every step
+	// back, then "found" or "stuck" (see Stream).  It changes nothing about what is found.
+	Stream Stream
 }
 
 // Backtrack has a voice that caught itself repeating go back to where it would
@@ -424,6 +534,15 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 		}
 	}
 	record := &Rethink{Kind: kind, Noticed: noticed, Taught: -1}
+	if noticed != "" && o.Stream != nil {
+		// what it will keep - "" when there is no backing up from here: nowhere to cut, the exploring off, the
+		// repeat inside the words it picked up, or nothing of its own before it
+		kept := ""
+		if at >= 0 && o.Explore > 0 && len(text[:at]) >= len(o.Keep) && strings.TrimSpace(text[:at]) != "" {
+			kept = text[:at]
+		}
+		o.Stream(map[string]any{"event": "caught", "kind": kind, "noticed": noticed, "cut": kept})
+	}
 	if noticed == "" || at < 0 || o.Explore <= 0 {
 		return nil, record, nil
 	}
@@ -437,6 +556,9 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 		}
 		record.Cut, record.Steps = cut, step+1
 		wider := o.K * (step + 2) // the further back it goes, the wider it looks
+		if o.Stream != nil {
+			o.Stream(map[string]any{"event": "backtrack", "step": step + 1, "cut": cut, "wider": wider})
+		}
 		cands, err := m.offer(cut, o.Mode, wider, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
 		if err != nil {
 			return nil, record, err
@@ -451,8 +573,13 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 				continue
 			}
 			record.Found = true
-			if o.Learn {
-				record.Taught = m.TeachBack(text, at, cand, 1.0)
+			taught, err := m.teach(text, at, cand, record, o)
+			if err != nil {
+				return nil, record, err
+			}
+			record.Taught = taught
+			if o.Stream != nil {
+				o.Stream(map[string]any{"event": "found", "text": cand.FullText, "cost": cand.Cost, "explored": record.Explored})
 			}
 			return cand, record, nil
 		}
@@ -465,8 +592,14 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 		}
 		cut = shorter
 	}
-	if o.Learn {
-		record.Taught = m.TeachBack(text, at, nil, 1.0) // it goes round here even if it found no way out
+	// it goes round here even if it found no way out
+	taught, err := m.teach(text, at, nil, record, o)
+	if err != nil {
+		return nil, record, err
+	}
+	record.Taught = taught
+	if o.Stream != nil && record.Steps > 0 {
+		o.Stream(map[string]any{"event": "stuck", "explored": record.Explored})
 	}
 	return nil, record, nil
 }
@@ -564,6 +697,7 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 		result = append(result, &Turn{Index: index, Speaker: speakers[index%len(speakers)], Text: opening, Reply: opening,
 			Cost: cost, Probability: (&PathResult{Cost: cost}).Probability(), ReachedEnd: true, Fresh: true, Given: true,
 			Candidates: 1, Labels: []string{}, NodeIDs: []int{}, StepCosts: []float64{}})
+		spoken(opts.Stream, result[len(result)-1])
 		saidList = append(saidList, opening)
 		index++
 	}
@@ -574,30 +708,32 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 		if len(saidList) > 0 {
 			previous = saidList[len(saidList)-1]
 		}
-		spoken, err := voice.Reply(previous, ReplyOptions{
+		said, err := voice.Reply(previous, ReplyOptions{
 			Heard: heard, Index: index, Speaker: speakers[index%len(speakers)], Mode: mode,
 			MaxLength: opts.MaxLength, Context: opts.Context, Temperature: opts.Temperature, K: opts.K,
 			Beam: opts.Beam, StepPenalty: opts.StepPenalty, RNG: rng, AvoidRepeats: opts.AvoidRepeats,
-			AvoidWordRepeats: opts.AvoidWordRepeats, Explore: opts.Explore, Learn: opts.Learn, Veto: opts.Veto,
+			AvoidWordRepeats: opts.AvoidWordRepeats, Explore: opts.Explore, Learn: opts.Learn,
+			Think: opts.Think, ThinkDepth: opts.ThinkDepth, Veto: opts.Veto, Stream: opts.Stream,
 		})
 		if err != nil {
 			return nil, err
 		}
-		if spoken == nil {
+		if said == nil {
 			break
 		}
-		if spoken.Repeat && repeated[Normalize(spoken.Text)] {
+		if said.Repeat && repeated[Normalize(said.Text)] {
 			break // the voice can only say a duplicate it has already repeated: the conversation is over
 		}
-		result = append(result, spoken)
-		saidList = append(saidList, spoken.Text)
+		result = append(result, said)
+		spoken(opts.Stream, said)
+		saidList = append(saidList, said.Text)
 		reply := ""
-		if spoken.Context != "" {
-			reply = spoken.Reply
+		if said.Context != "" {
+			reply = said.Reply
 		}
-		heard.Remember(spoken.Text, reply)
-		if spoken.Repeat {
-			repeated[Normalize(spoken.Text)] = true
+		heard.Remember(said.Text, reply)
+		if said.Repeat {
+			repeated[Normalize(said.Text)] = true
 		}
 		index++
 	}
@@ -626,14 +762,28 @@ type ReplyOptions struct {
 	Explore int
 	// Learn teaches the model what each rethink found out (see ConverseOptions.Learn).
 	Learn bool
+	// Think has a reply that caught itself repeating think before it backs up, ThinkDepth deep (see
+	// ConverseOptions.Think).
+	Think      bool
+	ThinkDepth int
 	// Veto is what the speaker may not say (see ConverseOptions.Veto).
 	Veto func(string) bool
+	// Trace hears every step of Reply as it is taken, with the events Python's dialogue.Trace sends -
+	// "context" (context, usable), "candidates" (context, offered, mode), "pick" (skipped, vetoed, repeat,
+	// spoken, caught), "rethink" (kind_of, noticed, cut, steps, explored, found, taught) and "fresh".  It is
+	// how the assistant format streams the thinking (assistant.go); without one a reply is what it always was.
+	Trace func(event map[string]any)
+	// Stream watches the turn being found (see Stream): "look" for every context it continues (and "" for
+	// a fresh text), then - when a candidate is caught repeating - "draft" and what Backtrack does about
+	// it.  The turn itself is not this function's event: it is the caller's to speak (Converse streams it
+	// as "turn"), since a reply may still be refused for repeating a duplicate already repeated.
+	Stream Stream
 }
 
 // DefaultReplyOptions mirror the Python defaults.
 func DefaultReplyOptions() ReplyOptions {
 	return ReplyOptions{Speaker: "B", Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1, K: 5,
-		AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true}
+		AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true, Think: true, ThinkDepth: ThinkDepth}
 }
 
 // Reply is what this model says next after previous - one turn, or nil when it
@@ -675,39 +825,76 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 	if mode == "sample" {
 		draws = o.K
 	}
+	notice := func(kind string, fields map[string]any) {
+		if o.Trace == nil {
+			return
+		}
+		event := map[string]any{"kind": kind}
+		for k, v := range fields {
+			event[k] = v
+		}
+		o.Trace(event)
+	}
+	watch := tagged(o.Stream, o.Index, speaker)
 	// A candidate rejected for repeating - its own words, or the conversation's - is worth backing out of:
 	// keep what it said up to the repetition and look for another way on, once per turn.
 	thinkAgain := func(p picked, keep string) (*PathResult, bool, error) {
 		if p.caught == nil || o.Explore <= 0 || rethought != nil {
 			return p.spoken, p.repeat, nil
 		}
+		if watch != nil {
+			watch(map[string]any{"event": "draft", "text": p.caught.FullText, "cost": p.caught.Cost})
+		}
 		found, record, err := m.Backtrack(p.caught.FullText, BacktrackOptions{
 			Keep: keep, Added: p.caught.Text, Heard: heard, Explore: o.Explore, Mode: mode, K: o.K, Beam: o.Beam,
 			MaxLength: o.MaxLength, StepPenalty: o.StepPenalty, Temperature: o.Temperature, RNG: o.RNG,
-			AvoidRepeats: o.AvoidRepeats, AvoidWordRepeats: o.AvoidWordRepeats, Learn: o.Learn, Veto: o.Veto,
+			AvoidRepeats: o.AvoidRepeats, AvoidWordRepeats: o.AvoidWordRepeats, Learn: o.Learn,
+			Think: o.Think, ThinkDepth: o.ThinkDepth, Veto: o.Veto, Stream: watch,
 		})
 		if err != nil {
 			return nil, false, err
 		}
 		rethought = record
 		offered += record.Explored
+		notice("rethink", map[string]any{"kind_of": record.Kind, "noticed": record.Noticed, "cut": record.Cut,
+			"steps": record.Steps, "explored": record.Explored, "found": record.Found, "taught": record.Taught})
 		if found != nil {
 			return found, false, nil
 		}
 		return p.spoken, p.repeat, nil
 	}
+	// One look through what from offers: the candidates, the pick, and the rethink it may call for.
+	look := func(from string) (*PathResult, bool, error) {
+		cands, err := m.candidates(from, mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
+		if err != nil {
+			return nil, false, err
+		}
+		offered += len(cands)
+		notice("candidates", map[string]any{"context": from, "offered": len(cands), "mode": mode})
+		p := pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
+		skipped += p.skipped
+		vetoed += p.vetoed
+		var spokenText, caughtText any
+		if p.spoken != nil {
+			spokenText = p.spoken.FullText
+		}
+		if p.caught != nil {
+			caughtText = p.caught.FullText
+		}
+		notice("pick", map[string]any{"skipped": p.skipped, "vetoed": p.vetoed, "repeat": p.repeat,
+			"spoken": spokenText, "caught": caughtText})
+		return thinkAgain(p, from)
+	}
 	for ctx != "" {
-		if m.usable(ctx) {
+		known := m.usable(ctx)
+		notice("context", map[string]any{"context": ctx, "usable": known})
+		if known {
+			if watch != nil {
+				watch(map[string]any{"event": "look", "from": ctx})
+			}
 			for d := 0; d < draws; d++ {
-				cands, err := m.candidates(ctx, mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
-				if err != nil {
-					return nil, err
-				}
-				offered += len(cands)
-				p := pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
-				skipped += p.skipped
-				vetoed += p.vetoed
-				if spoken, repeat, err = thinkAgain(p, ctx); err != nil {
+				var err error
+				if spoken, repeat, err = look(ctx); err != nil {
 					return nil, err
 				}
 				if spoken != nil && !repeat {
@@ -722,18 +909,15 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 	}
 	if spoken == nil || repeat {
 		// nothing (new) follows the previous line: change the subject with a fresh text
+		notice("fresh", nil)
 		var freshPick *PathResult
 		freshRepeat := false
+		if watch != nil {
+			watch(map[string]any{"event": "look", "from": ""})
+		}
 		for d := 0; d < draws; d++ {
-			cands, err := m.candidates("", mode, o.K, o.Beam, o.MaxLength, o.StepPenalty, o.Temperature, o.RNG)
-			if err != nil {
-				return nil, err
-			}
-			offered += len(cands)
-			p := pick(cands, heard, o.AvoidRepeats, o.Veto, o.AvoidWordRepeats)
-			skipped += p.skipped
-			vetoed += p.vetoed
-			if freshPick, freshRepeat, err = thinkAgain(p, ""); err != nil {
+			var err error
+			if freshPick, freshRepeat, err = look(""); err != nil {
 				return nil, err
 			}
 			if freshPick != nil && !freshRepeat {

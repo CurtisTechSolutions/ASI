@@ -34,6 +34,7 @@ from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
+from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS
 from .encoding import CHARS, WINDOW, WORDS, Encoding, hear_audio, is_audio_file, parse_encoding, word_rows
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
@@ -201,6 +202,18 @@ class Console:
     def emit(self, doc: Any) -> None:
         """The one JSON document of ``--json`` mode."""
         print(json.dumps(doc, indent=2, ensure_ascii=False, default=str), file=self.stdout, flush=True)
+
+    def line(self, doc: Any) -> None:
+        """One compact JSON object on its own line of stdout: the JSON Lines a streamed command writes."""
+        print(json.dumps(doc, ensure_ascii=False, default=str), file=self.stdout, flush=True)
+
+    def dim(self, text: str) -> None:
+        """A line that belongs to the window rather than the answer: dimmed on a terminal, plain elsewhere."""
+        if self.json_mode:
+            return
+        if self.stdout.isatty():
+            text = f"\x1b[2m{text}\x1b[0m"
+        print(text, file=self.stdout, flush=True)
 
 
 # --------------------------------------------------------------------------
@@ -777,7 +790,7 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
         auto_compress=not args.no_compress, checkpoint_every=every,
         lr_schedule=args.lr_schedule, act_lr_schedule=args.act_lr_schedule, reverse_schedule=args.reverse_schedule,
         order=args.order, curriculum=args.curriculum, replay=args.replay, replay_size=args.replay_size,
-        patience=args.patience, min_delta=args.min_delta,
+        patience=args.patience, min_delta=args.min_delta, reverse=args.reverse,
     )
     try:
         config.validate()
@@ -796,7 +809,8 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
     console.pairs([
         ("model", origin.describe()),
         ("backend", backend_label(model)),
-        ("data", f"{len(texts)} texts, {chars} chars from {', '.join(args.data)}"),
+        ("data", f"{len(texts)} texts, {chars} chars from {', '.join(args.data)}"
+                 + (", every text read backwards" if config.reverse else "")),
         ("config", f"epochs={config.epochs} lr={config.lr} act_lr={config.act_lr} batch={config.batch_size} "
                    f"compress={'yes' if config.auto_compress else 'no'}" + schedule_note),
         ("checkpoints", f"{manager.directory} every {every} epoch(s), keep {manager.keep}" if manager else "off"),
@@ -904,7 +918,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
             bottom=[{**r.to_dict(), "probability": path_probability(r)} for r in result.bottom],
         )
     if guard is not None:
-        _print_vetoes(console, guard["verdicts"], "continuations")
+        _print_vetoes(console, guard, "continuations")
     doc["guard"] = guard
     return doc
 
@@ -935,7 +949,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         console.say()
         console.table(("#", "spelled"), [[i + 1, quote(clip(s, 100))] for i, s in spelled.items()])
     if guard is not None:
-        _print_vetoes(console, guard["verdicts"])
+        _print_vetoes(console, guard)
     return {
         "samples": [{**r.to_dict(), "probability": path_probability(r), **({"spelled": spelled[i]} if i in spelled else {})}
                     for i, r in enumerate(results)],
@@ -1017,7 +1031,152 @@ def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
             "count": len(said), "encoding": str(model.encoding)}
 
 
-def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
+def cmd_think(args: argparse.Namespace, console: Console) -> dict:
+    """The model thinks: one thought from the THINK sentinel, questioning itself where it has learned to."""
+    from .thinking import think
+
+    model, origin = open_model(args, console, required=True)
+    try:
+        thought = think(
+            model, about=args.about or "", mode=args.mode, k=args.k, beam=args.beam, max_length=args.max_length,
+            step_penalty=args.step_penalty, temperature=args.temperature, seed=args.seed, max_depth=args.depth,
+            max_questions=args.questions, learn=not args.no_learn,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+    graph = model.graph
+    console.pairs([
+        ("model", origin.describe()),
+        ("about", quote(args.about) if args.about else "(nothing in particular)"),
+        ("at", quote(graph.text_of(graph.labels[thought.at])) if thought.at >= 0 else "-"),
+        ("thoughts known", _thought_openings(model)),
+    ])
+    console.say()
+    _say_thought(console, thought, 0)
+    if thought.stopped == "nothing" and not thought.text:
+        console.say()
+        console.say(f"(it has no thoughts to think with yet: `{PROG} ollama think --prompt TOPIC --train` teaches it some)")
+    learned = []
+    if thought.taught >= 0:
+        learned.append(f"to stop and think at {quote(graph.text_of(graph.labels[thought.taught]))}")
+    if thought.handed_over >= 0:
+        learned.append(f"to hand over at {quote(graph.text_of(graph.labels[thought.handed_over]))}")
+    saved = None
+    if learned and args.save:
+        saved = save_model(model, args.out or args.model)
+        console.say()
+        console.say(f"saved {saved['path']} ({saved['bytes']} bytes)")
+    elif learned:
+        console.say()
+        console.say(f"it learned {' and '.join(learned)}; --save writes that into the model")
+    return {"kind": model.kind, **thought.to_dict(), "saved": saved}
+
+
+def _thought_openings(model: GraphModel) -> int:
+    """How many ways the model knows to begin a thought: THINK's out-edges."""
+    from .graph import THINK
+
+    return len(model.graph.children[THINK])
+
+
+def _say_thought(console: Console, thought: Any, depth: int) -> None:
+    """A thought and its questions, indented one level per depth."""
+    pad = "    " * depth
+    console.say(f"{pad}{summarize_thought(thought)}")
+    for question in thought.questions:
+        _say_thought(console, question, depth + 1)
+
+
+def summarize_thought(thought: Any) -> str:
+    from .thinking import summarize
+
+    return summarize(thought)
+
+
+def _say_turn(console: Console, turn: dict) -> None:
+    """One spoken turn of a conversation, as the transcript prints it: the line, its numbers and flags, and
+    what the voice noticed about a repeat of its own."""
+    flags = [f for f, on in (("given", turn["given"]), ("new topic", turn["fresh"] and not turn["given"]),
+                             ("repeat", turn["repeat"]), ("repeats itself", turn["stutter"])) if on]
+    if turn["vetoed"]:
+        flags.append(f"{turn['vetoed']} vetoed")
+    console.say(f"{turn['speaker']}: {turn['text']}")
+    detail = f"    cost {fmt(turn['cost'])}  p {fmt(turn['probability'])}"
+    if turn["context"]:
+        detail += f"  picked up {quote(turn['context'])}"
+    if flags:
+        detail += f"  [{', '.join(flags)}]"
+    console.say(detail)
+    r = turn["rethink"]
+    if r is not None:
+        caught = "saying {} twice" if r["kind"] == "stutter" else "repeating {}"
+        thought = f"    caught itself {caught.format(quote(r['noticed']))}"
+        if not r["steps"]:
+            thought += "; the words it picked up, not its own"
+        elif r["found"]:
+            thought += f"; kept {quote(r['cut'])} and found another way on in {r['explored']} path(s)"
+        else:
+            ending = "said it anyway" if turn["repeat"] else "took a lesser answer"
+            thought += f"; kept {quote(r['cut'])}, weighed {r['explored']} path(s), {ending}"
+        console.say(thought)
+        if r.get("thought") is not None:
+            from .thinking import Thought
+
+            console.say(f"    {summarize_thought(Thought.from_dict(r['thought']))}")
+
+
+class ConversePrinter:
+    """The ``stream`` of ``converse --stream``: the conversation as it happens.
+
+    A ``turn`` is printed the way the transcript always was (:func:`_say_turn`)
+    the moment it is spoken.  The window between two turns - what the voice
+    does before it commits: the context it continues, the draft it caught
+    itself on, where it backed up to, what it found - is printed as it
+    happens too, indented and dimmed on a terminal, so the answer stands apart
+    from the thinking that may still be rewritten.  With ``--json`` every
+    event is one JSON line on stdout instead (:data:`radixnet.dialogue.StreamFn`).
+    """
+
+    __slots__ = ("console", "looking", "count")
+
+    def __init__(self, console: Console) -> None:
+        self.console = console
+        self.looking: str | None = None  # the context the current turn last continued
+        self.count = 0  # events seen
+
+    def __call__(self, event: dict) -> None:
+        self.count += 1
+        console = self.console
+        if console.json_mode:
+            console.line(event)
+            return
+        kind = event["event"]
+        if kind == "turn":
+            self.looking = None
+            _say_turn(console, event["turn"])
+        elif kind == "look":
+            if self.looking is not None:  # the first look of a turn is the context the turn will say it picked up
+                tried = f"tries {quote(event['from'])}" if event["from"] else "changes the subject"
+                console.dim(f"    nothing new follows {quote(self.looking)}; {tried}")
+            self.looking = event["from"]
+        elif kind == "draft":
+            console.dim(f"    was about to say {quote(event['text'])}")
+        elif kind == "caught":
+            caught = "saying {} twice" if event["kind"] == "stutter" else "repeating {}"
+            line = f"    caught itself {caught.format(quote(event['noticed']))}"
+            if not event["cut"]:
+                line += "; the words it picked up, not its own"
+            console.dim(line)
+        elif kind == "backtrack":
+            console.dim(f"    backs up to {quote(event['cut'])} and weighs up to {event['wider']} paths "
+                        f"(step {event['step']})")
+        elif kind == "found":
+            console.dim(f"    found another way on: {quote(event['text'])} ({event['explored']} path(s) weighed)")
+        elif kind == "stuck":
+            console.dim(f"    nothing new in {event['explored']} path(s)")
+
+
+def cmd_converse(args: argparse.Namespace, console: Console) -> dict | None:
     model, _ = open_model(args, console, required=True)
     partner = None
     if args.partner:
@@ -1026,11 +1185,15 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         partner = load_model(args.partner, backend=args.backend, device=args.device)
     speakers = [name.strip() for name in args.speakers.split(",") if name.strip()] or list(DEFAULT_SPEAKERS)
     pair = open_guard(args, console, model)
+    # --stream: the conversation is printed as it happens - each turn the moment it is spoken, and before it
+    # what the voice does: the context it continues, a draft it catches itself on, where it backs up to
+    streaming = ConversePrinter(console) if args.stream else None
     options = dict(
         mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
-        explore=args.explore, learn=not args.no_learn,
+        explore=args.explore, learn=not args.no_learn, think=not args.no_think, think_depth=args.think_depth,
+        stream=streaming,
     )
     guard: dict | None = None
     if pair is None:
@@ -1040,51 +1203,40 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         outcome = pair.converse(args.opening, args.turns, **options)
         turns = outcome["turns"]
         guard = _guard_doc(pair, outcome["verdicts"], refusals=outcome["vetoed"])
-    for turn in turns:
-        flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given),
-                                 ("repeat", turn.repeat), ("repeats itself", turn.stutter)) if on]
-        if turn.vetoed:
-            flags.append(f"{turn.vetoed} vetoed")
-        console.say(f"{turn.speaker}: {turn.text}")
-        detail = f"    cost {fmt(turn.cost)}  p {fmt(turn.probability)}"
-        if turn.context:
-            detail += f"  picked up {quote(turn.context)}"
-        if flags:
-            detail += f"  [{', '.join(flags)}]"
-        console.say(detail)
-        if turn.rethink is not None:
-            r = turn.rethink
-            caught = "saying {} twice" if r.kind == "stutter" else "repeating {}"
-            thought = f"    caught itself {caught.format(quote(r.noticed))}"
-            if not r.steps:
-                thought += "; the words it picked up, not its own"
-            elif r.found:
-                thought += f"; kept {quote(r.cut)} and found another way on in {r.explored} path(s)"
-            else:
-                ending = "said it anyway" if turn.repeat else "took a lesser answer"
-                thought += f"; kept {quote(r.cut)}, weighed {r.explored} path(s), {ending}"
-            console.say(thought)
+    if streaming is None:
+        for turn in turns:
+            _say_turn(console, turn.to_dict())
     if not turns:
         console.say("(nothing to say: train the model first)")
     if guard is not None:
-        _print_vetoes(console, guard["verdicts"], "replies")
+        _print_vetoes(console, guard, "replies")
     said_twice = dialogue_repeats(turns)
     if said_twice:
         console.say(f"{len(said_twice)} utterance(s) the model could only repeat - punish them (2NRL negative phase):")
         console.say("    radixnet feedback " + " ".join(f"--bad-text {quote(t)}" for t in said_twice))
     taught = sorted({t.rethink.taught for t in turns if t.rethink is not None and t.rethink.taught >= 0})
+    thought_at = sorted({
+        t.rethink.thought.taught for t in turns
+        if t.rethink is not None and t.rethink.thought is not None and t.rethink.thought.taught >= 0
+    })
     saved = None
-    if taught and args.save:
+    if (taught or thought_at) and args.save:
         saved = save_model(model, args.out or args.model)
-    elif taught:
-        console.say(f"it learned to hand over at {len(taught)} node(s); --save writes that into the model")
-    return {
+    elif taught or thought_at:
+        learned = []
+        if taught:
+            learned.append(f"to hand over at {len(taught)} node(s)")
+        if thought_at:
+            learned.append(f"to stop and think at {len(thought_at)} node(s)")
+        console.say(f"it learned {' and '.join(learned)}; --save writes that into the model")
+    doc = {
         "guard": guard,
         "turns": [t.to_dict() for t in turns],
         "count": len(turns),
         "speakers": speakers,
         "mode": args.mode,
         "opening": args.opening,
+        "thought_at": thought_at,
         "kind": model.kind,
         "partner_kind": partner.kind if partner is not None else None,
         "repeats": said_twice,
@@ -1092,6 +1244,173 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         **({"saved": saved} if saved is not None else {}),
         "transcript": transcript(turns),
     }
+    if streaming is not None and console.json_mode:
+        # JSON Lines: the events went out as they happened, and the usual document is the last line
+        console.line({"event": "done", **doc})
+        return None
+    return doc
+
+
+def _talk_body(args: argparse.Namespace, dialect: str, history: list[dict], said: str) -> dict:
+    """A request in ``dialect``'s shape from the ``talk`` flags: the conversation so far, then what was just said."""
+    from .assistant import ANTHROPIC
+
+    messages = [*history, {"role": "user", "content": said}]
+    body: dict[str, Any] = {
+        "messages": messages, "max_tokens": args.max_tokens, "temperature": args.temperature, "mode": args.mode,
+        "context": args.context, "k": args.k, "step_penalty": args.step_penalty, "explore": args.explore,
+        "avoid_repeats": not args.allow_repeats, "avoid_word_repeats": not args.allow_word_repeats,
+        "learn": not args.no_learn, "guard": not args.no_guard,
+    }
+    if args.beam:
+        body["beam"] = args.beam
+    if args.seed is not None:
+        body["seed"] = args.seed
+    if dialect == ANTHROPIC:
+        if args.system:
+            body["system"] = args.system
+        if args.stop:
+            body["stop_sequences"] = list(args.stop)
+        body["thinking"] = {"type": "disabled" if args.no_thinking else "enabled"}
+        body["tools"] = [{"name": name, "input_schema": {"type": "object"}} for name in args.tool or []]
+    else:
+        if args.system:
+            messages.insert(0, {"role": "system", "content": args.system})
+        if args.stop:
+            body["stop"] = list(args.stop)
+        if args.n > 1:
+            body["n"] = args.n
+        body["thinking"] = not args.no_thinking
+        body["tools"] = [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}} for name in args.tool or []]
+    if not body["tools"]:
+        del body["tools"]
+    return body
+
+
+def cmd_talk(args: argparse.Namespace, console: Console) -> dict:
+    """Talk to the model in today's format: messages in, a reply out - the thinking first, then the text, streamed.
+
+    One reply per ``--message`` (or per line typed at the prompt), the
+    conversation carried on from one to the next; ``--request FILE`` sends a
+    request body written in the dialect's own shape.  Under ``--json`` the
+    document printed is the dialect's own answer - what the ``/v1`` route of
+    the server would return - so the same request can be checked against
+    every server (:mod:`radixnet.assistant`).
+    """
+    from .assistant import ANTHROPIC, OPENAI, AskError, parse_request, respond, to_format
+
+    dialect = args.format
+    model, origin = open_model(args, console, required=True)
+    pair = open_guard(args, console, model)
+    if args.request:
+        try:
+            with open(args.request, encoding="utf-8") as fh:
+                request = json.load(fh)
+        except (OSError, ValueError) as exc:
+            raise CliError(f"cannot read the request {args.request}: {exc}") from exc
+        if not isinstance(request, dict):
+            raise CliError(f"{args.request} must hold a JSON object: a request in the {dialect} shape")
+    taught: set[int] = set()
+    exchanges: list[dict] = []
+    out = console.stdout
+
+    def show(event: dict, state: dict) -> None:
+        """Print the reply as it arrives: the thinking line by line, the text chunk by chunk."""
+        if console.json_mode:
+            return
+        kind = event["type"]
+        if kind == "start":
+            if event["index"]:
+                console.say(f"--- choice {event['index'] + 1} ---")
+            state["text"] = False
+        elif kind == "thinking":
+            console.say("  · " + event["text"].lstrip("\n"))
+        elif kind == "text":
+            if not state["text"]:
+                out.write("model: ")
+                state["text"] = True
+            out.write(event["text"])
+            out.flush()
+        elif kind == "tool_use":
+            if state["text"]:
+                out.write("\n")
+                state["text"] = False
+            console.say(f"tool call: {event['name']} {json.dumps(event['input'], ensure_ascii=False, sort_keys=True)}")
+        elif kind == "done":
+            if state["text"]:
+                out.write("\n")
+                out.flush()
+            elif not event.get("turn"):
+                console.say("model: (nothing to say)")
+            units = model.encoding.units_name
+            said = event["output_units"] - event["thinking_units"]
+            console.say(f"    [{event['stop_reason']}; {said} {units} said, {event['thinking_units']} thought]")
+
+    def one(body: dict) -> dict:
+        try:
+            ask = parse_request(body, dialect)
+        except AskError as exc:
+            raise CliError(f"bad request: {exc.message}") from exc
+        state: dict = {"text": False}
+        try:
+            reply = respond(model, ask, pair=pair if ask.guard else None, on_event=lambda e: show(e, state))
+        except (TypeError, ValueError) as exc:
+            raise CliError(str(exc)) from exc
+        for choice in reply.choices:
+            turn = choice.turn or {}
+            rethink = turn.get("rethink") or {}
+            if rethink.get("taught", -1) >= 0:
+                taught.add(rethink["taught"])
+        doc = to_format(reply, dialect)
+        exchanges.append(doc)
+        return doc
+
+    def spoken_text(doc: dict) -> str:
+        """The reply's text, to carry the conversation on with."""
+        if dialect == ANTHROPIC:
+            return "".join(b.get("text", "") for b in doc.get("content", []) if b.get("type") == "text")
+        message = doc["choices"][0]["message"] if doc.get("choices") else {}
+        return message.get("content") or ""
+
+    history: list[dict] = []
+    if args.request:
+        doc = one(request)
+    elif args.message:
+        for said in args.message:
+            console.say(f"you: {said}")
+            doc = one(_talk_body(args, dialect, history, said))
+            history.append({"role": "user", "content": said})
+            history.append({"role": "assistant", "content": spoken_text(doc)})
+    else:
+        interactive = sys.stdin.isatty() and not console.json_mode
+        if interactive:
+            console.say(f"talking to {origin.describe()} ({dialect} format); an empty line or Ctrl-D ends it")
+        doc = None
+        while True:
+            if interactive:
+                out.write("you> ")
+                out.flush()
+            line = sys.stdin.readline()
+            if not line or not line.strip():
+                break
+            said = line.rstrip("\n")
+            if not interactive:
+                console.say(f"you: {said}")
+            doc = one(_talk_body(args, dialect, history, said))
+            history.append({"role": "user", "content": said})
+            history.append({"role": "assistant", "content": spoken_text(doc)})
+        if doc is None:
+            raise CliError("nothing was said: give --message TEXT, --request FILE, or type a line")
+    saved = None
+    if taught and args.save:
+        saved = save_model(model, args.out or args.model)
+        console.say(f"saved {saved['path']} (it learned to hand over at {len(taught)} node(s))")
+    elif taught:
+        console.say(f"it learned to hand over at {len(taught)} node(s); --save writes that into the model")
+    if len(exchanges) == 1:
+        return {**doc, **({"saved": saved} if saved is not None else {})}
+    return {"format": dialect, "exchanges": exchanges, "taught": sorted(taught),
+            **({"saved": saved} if saved is not None else {})}
 
 
 def cmd_score(args: argparse.Namespace, console: Console) -> dict:
@@ -1917,6 +2236,65 @@ def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def cmd_attention(args: argparse.Namespace, console: Console) -> dict:
+    """The attention band: show it, switch it, or show where one correction would land through it."""
+    if args.off and args.blur is not None:
+        raise CliError("--off and --blur contradict each other: a blur switches the band on")
+    if (args.wrong is None) != (args.right is None):
+        raise CliError("a preview needs both --wrong (what the network wrote) and --right (what it should say)")
+    model, origin = open_model(args, console, required=True)
+    changes: dict = {}
+    saved = None
+    if args.on or args.off or args.blur is not None:
+        try:
+            model.configure_attention(on=True if args.on else False if args.off else None, blur=args.blur)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        changes = {"on": model.graph.attention.on, "blur": model.graph.attention.blur}
+        if not args.dry_run:
+            saved = save_model(model, args.out or args.model)
+    config = model.attention_config()
+    band = model.graph.attention
+    unit = "word" if config["unit"] == WORDS else "character"
+    console.pairs([
+        ("model", origin.describe()),
+        ("band", band.describe()),
+        ("over one gram", " ".join(fmt(w) for w in config["weights"]) if config["weights"] else
+                          f"- (off: each changed {unit} is charged to the step that wrote it)"),
+        ("gram", f"{config['ngram']} {unit}s, stride {config['stride']}"),
+        ("applies", "yes: this kind learns from corrections" if config["applies"] else
+                    f"no: the {kind_label(model)} model is never corrected"),
+        ("changed", ", ".join(f"{k}={fmt(v)}" for k, v in changes.items()) if changes else "nothing"),
+        ("saved", saved["path"] if saved else ("- (dry run)" if changes and args.dry_run else "-")),
+    ])
+    preview = None
+    if args.wrong is not None:
+        preview = model.attention_preview(args.wrong, args.right)
+        _print_changes(console, preview["changes"])
+        for side, title in (("wrong", "the network wrote"), ("right", "the teacher wrote")):
+            _print_attention_side(console, preview[side], title, preview["blur"])
+    return {"model": origin.to_dict(), "attention": config, "changed": changes, "saved": saved, "preview": preview}
+
+
+def _print_attention_side(console: Console, side: dict, title: str, blur: float) -> None:
+    """The grams of one side of a correction that either rule charges: the writer's mark beside the band's share."""
+    rows = [
+        [g, quote(gram), "1" if writes else "-", fmt(charge) if charge else "-", "*" if focus and charge else ""]
+        for g, (gram, writes, charge, focus) in enumerate(
+            zip(side["grams"], side["writer"], side["charges"], side["focus"])
+        )
+        if writes or charge
+    ]
+    if side["end"]:
+        rows.append(["end", "(after the last unit)", "1", "1", "*"])
+    console.say()
+    console.say(f"{title}: {quote(side['text'])}")
+    if not rows:
+        console.say("  nothing in it changed")
+        return
+    console.table(["gram", "text", "writer (off)", f"band (blur {fmt(blur)})", "focus"], rows)
+
+
 def _print_changes(console: Console, changes: list[dict]) -> None:
     if not changes:
         console.say("the two sentences are the same: nothing to teach")
@@ -2033,6 +2411,9 @@ def add_guard_flags(p: argparse.ArgumentParser) -> None:
                        help="share of a text that must be known failure before any rule may veto it")
     group.add_argument("--over-sample", type=pos_int, metavar="N", default=3,
                        help="generate: candidates drawn per wanted text, so the guard has something to choose from")
+    group.add_argument("--no-provenance", action="store_true",
+                       help="veto without saying why: report how many candidates the guard stopped, not which "
+                            "nor the rule, the reasons and the fragments behind each")
 
 
 def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel) -> Any:
@@ -2059,6 +2440,7 @@ def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel)
     pair = NegativeFilter(positive, negative, FilterConfig(
         threshold=getattr(args, "threshold", None), min_coverage=getattr(args, "min_coverage", None),
         over_sample=getattr(args, "over_sample", None) or 3,
+        provenance=not getattr(args, "no_provenance", False),
     ))
     if not pair.ready:
         return None
@@ -2067,10 +2449,14 @@ def open_guard(args: argparse.Namespace, console: Console, positive: GraphModel)
     return pair
 
 
-def _print_vetoes(console: Console, verdicts: list[dict], what: str = "candidates") -> None:
-    """The guard's work: what it let through, what it stopped and why."""
-    rejected = [v for v in verdicts if v["decision"] == "reject"]
+def _print_vetoes(console: Console, guard: dict, what: str = "candidates") -> None:
+    """The guard's work: what it let through, what it stopped and - with provenance - why."""
     console.say()
+    if not guard.get("provenance", True):
+        console.say(f"guard: {guard['judged'] - guard['vetoed']} of {guard['judged']} {what} passed the negative network")
+        return
+    verdicts = guard["verdicts"]
+    rejected = [v for v in verdicts if v["decision"] == "reject"]
     console.say(f"guard: {len(verdicts) - len(rejected)} of {len(verdicts)} {what} passed the negative network")
     if rejected:
         console.table(
@@ -2081,8 +2467,22 @@ def _print_vetoes(console: Console, verdicts: list[dict], what: str = "candidate
 
 
 def _guard_doc(pair: Any, verdicts: list[dict], **extra: Any) -> dict:
-    """The guard's report for ``--json``: every veto, with the reason and the fragment behind it."""
+    """The guard's report for ``--json``: every veto, with the reason and the fragment behind it.
+
+    With ``--no-provenance`` it is the counts alone: how many were judged and
+    how many vetoed, neither listed.
+    """
     rejected = [v for v in verdicts if v["decision"] == "reject"]
+    if not pair.config.provenance:
+        return {
+            "on": True,
+            "provenance": False,
+            "judged": len(verdicts),
+            "vetoed": len(rejected),
+            "negative": pair.negative.stats(),
+            "config": pair.describe()["config"],
+            **extra,
+        }
     return {
         "on": True,
         "vetoed": len(rejected),
@@ -2216,6 +2616,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
     config = FilterConfig(
         threshold=args.threshold, min_coverage=args.min_coverage, ratio=None if args.no_ratio else args.ratio,
         peak=args.peak, over_sample=args.over_sample, strict=args.strict, spans=args.spans, learn=args.learn,
+        provenance=not args.no_provenance,
     )
     pair = NegativeFilter(positive, negative, config)
     given = list(args.text or [])
@@ -2231,6 +2632,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
         ("peak", "off" if config.peak is None else f">= {fmt(config.peak)} blame on one fragment"),
         ("strict", config.strict),
         ("learn", config.learn),
+        ("provenance", config.provenance),
     ])
     if given:
         outcome = pair.filter(given)
@@ -2246,14 +2648,20 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
         )
         doc.pop("results")  # the walks behind the texts; the document carries the texts
     console.say()
-    console.table(
-        ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
-        [
-            [v["decision"], v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
-             v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))]
-            for v in doc["verdicts"]
-        ],
-    )
+    if config.provenance:
+        console.table(
+            ("decision", "rule", "risk", "peak", "ratio", "reason", "text"),
+            [
+                [v["decision"], v["rule"] or "-", v["risk"], v["peak"], v["ratio"],
+                 v["reasons"][0]["reason"] if v["reasons"] else "-", quote(clip(v["text"], 46))]
+                for v in doc["verdicts"]
+            ],
+        )
+    else:  # the decisions alone: what was kept and what was vetoed, not why
+        console.table(
+            ("decision", "rule", "text"),
+            [[v["decision"], v["rule"] or "-", quote(clip(v["text"], 60))] for v in doc["verdicts"]],
+        )
     console.say()
     returned = doc.get("texts") or []
     console.say(
@@ -2264,7 +2672,7 @@ def cmd_negative_filter(args: argparse.Namespace, console: Console) -> dict:
     for text in returned:
         console.say(f"  {quote(text)}")
     for verdict in doc["rejected"]:
-        console.say(f"  vetoed: {quote(clip(verdict['text'], 60))} - {verdict['why']}")
+        console.say(f"  vetoed: {quote(clip(verdict['text'], 60))}" + (f" - {verdict['why']}" if "why" in verdict else ""))
     if config.learn:
         saved = save_model(negative, negative_path(args))
         console.say(f"saved {saved['path']} ({saved['bytes']} bytes)")
@@ -2289,6 +2697,7 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
         temperature=args.temperature, threshold=args.threshold, context=args.context or "",
         provider=args.provider, reviewer_model=args.reviewer_model or "",
         clear_passes=not args.no_clear, epochs=args.epochs, seed=effective_seed(args),
+        correct=bool(args.correct), severity=args.severity,
     )
     try:
         config.validate()
@@ -2304,10 +2713,11 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
     console.pairs([
         ("model", origin.describe()),
         ("negative network", neg_origin.describe()),
-        ("reviewer", f"{config.provider}: {client.model} at {client.url}"),
+        ("reviewer" if not config.correct else "editor", f"{config.provider}: {client.model} at {client.url}"),
         ("rounds", "until stopped (Ctrl-C)" if not config.rounds else config.rounds),
         ("per round", f"{config.count} text(s), {config.max_length} chars, temperature {config.temperature:g}"),
-        ("pass mark", f"{config.threshold:g}/10"),
+        ("pass mark", f"{config.threshold:g}/10") if not config.correct
+        else ("lesson", f"letter-level corrections, {config.severity:g} blame per corrected text"),
         ("context", clip(config.context, 60) if config.context else "-"),
         ("passes clear", not args.no_clear),
         ("output", out),
@@ -2319,10 +2729,21 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
     def show(record: dict) -> None:
         if record.get("kind") != "round":
             return
+        reasons = ", ".join(f"{k} x{v}" for k, v in (record["reasons"] or {}).items()) or "-"
+        if config.correct:
+            rows.append([
+                record["round"], record["texts"], record["corrected"], record["unchanged"], record["edits"],
+                record["blamed"], record["cleared"], record["edges"], reasons,
+            ])
+            console.note(
+                f"round {record['round']}: {record['corrected']}/{record['texts']} corrected "
+                f"({record['edits']} change(s)), blamed {record['blamed']} over {record['edges']} edge(s), "
+                f"cleared {record['cleared']}"
+            )
+            return
         rows.append([
             record["round"], record["texts"], record["passed"], record["failed"],
-            fmt(record["mean_rating"]), record["blamed"], record["cleared"], record["edges"],
-            ", ".join(f"{k} x{v}" for k, v in (record["reasons"] or {}).items()) or "-",
+            fmt(record["mean_rating"]), record["blamed"], record["cleared"], record["edges"], reasons,
         ])
         console.note(
             f"round {record['round']}: {record['failed']}/{record['texts']} failed, "
@@ -2333,16 +2754,29 @@ def cmd_negative_auto(args: argparse.Namespace, console: Console) -> dict:
     records, interrupted = run_interruptible(
         lambda: critic.run(progress=show, stop_event=stop), stop, console, "round",
     )
-    console.table(
-        ("round", "texts", "passed", "failed", "mean mark", "blamed", "cleared", "edges", "reasons"), rows,
-    )
+    if config.correct:
+        console.table(
+            ("round", "texts", "corrected", "unchanged", "changes", "blamed", "cleared", "edges", "reasons"), rows,
+        )
+    else:
+        console.table(
+            ("round", "texts", "passed", "failed", "mean mark", "blamed", "cleared", "edges", "reasons"), rows,
+        )
     card = records[-1] if records and records[-1].get("kind") == "report" else {}
     console.say()
-    console.say(
-        f"{card.get('rounds', 0)} round(s): reviewed {card.get('reviewed', 0)}, blamed {card.get('blamed', 0)}, "
-        f"cleared {card.get('cleared', 0)}; mean mark {fmt(card.get('mean_rating'))}/10"
-        + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
-    )
+    if config.correct:
+        console.say(
+            f"{card.get('rounds', 0)} round(s): corrected {card.get('corrected', 0)} of {card.get('reviewed', 0)} "
+            f"({card.get('edits', 0)} change(s)), blamed {card.get('blamed', 0)}, cleared {card.get('cleared', 0)}; "
+            f"change rate {fmt(card.get('change_rate'))}"
+            + (f", trend {card['change_trend']:+.2f}" if isinstance(card.get("change_trend"), float) else "")
+        )
+    else:
+        console.say(
+            f"{card.get('rounds', 0)} round(s): reviewed {card.get('reviewed', 0)}, blamed {card.get('blamed', 0)}, "
+            f"cleared {card.get('cleared', 0)}; mean mark {fmt(card.get('mean_rating'))}/10"
+            + (f", trend {card['trend']:+.2f}" if isinstance(card.get("trend"), float) else "")
+        )
     return {
         "config": config.to_dict(), "url": client.url, "reviewer": client.model,
         "records": records, "report": card, "interrupted": interrupted,
@@ -2655,6 +3089,7 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
            ("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
                        f"{stats['feedback_passes']} feedback pass(es)")]
           if model.kind == "resonant" else []),
+        *([("attention", model.graph.attention.describe(model.encoding.n))] if model.takes_corrections else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -3346,6 +3781,173 @@ def cmd_ollama_corpus(args: argparse.Namespace, console: Console) -> dict:
     return doc
 
 
+def cmd_ollama_correct(args: argparse.Namespace, console: Console) -> dict:
+    """The LLM copy-edits the network's samples (or given texts); the diff is what the negative network learns."""
+    from .ollama import OllamaError, adversarial_correction
+
+    client = _ollama_client(args)
+    texts: list[str] | None = None
+    if args.text:
+        texts = list(args.text)
+    elif args.data:
+        texts = read_texts([args.data], what="correctable")
+    model = origin = None
+    if texts is None:
+        model, origin = open_model(args, console, required=True)
+    if texts is not None:
+        source = f"{len(texts)} given texts"
+    else:
+        source = f"{args.count} samples from {origin.describe()}" + (f" continuing {quote(args.prefix)}" if args.prefix else "")
+    console.pairs([("ollama", f"{client.model} at {client.url}"), ("source", source)])
+    try:
+        result = adversarial_correction(
+            model, client, count=args.count, prefix=args.prefix, max_length=args.max_length,
+            temperature=args.temperature, texts=texts, context=args.context, ollama_model=client.model,
+            seed=args.seed,
+        )
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    console.say()
+    rows = [
+        [
+            c["verdict"], quote(clip(c["text"], 40)),
+            quote(clip(c["correction"], 40)) if c["correction"] is not None else "-",
+            c["reason"] or "-", _changes_of(c["changes"]),
+        ]
+        for c in result["corrections"]
+    ]
+    console.table(("verdict", "text", "correction", "reason", "changes"), rows)
+    console.say()
+    console.say(
+        f"{len(result['corrections'])} texts: {len(result['corrected'])} corrected ({result['edits']} change(s), "
+        f"{result['wrong_chars']} wrong character(s)), {len(result['unchanged'])} unchanged, "
+        f"{len(result['uncorrected'])} uncorrected; change rate {fmt(result['change_rate'])}"
+    )
+    doc: dict[str, Any] = dict(result)
+    doc["negative"] = None
+    if args.blame:
+        from . import blame
+
+        negative, neg_origin = open_negative(args, console, required=False)
+        console.say()
+        console.pairs([
+            ("negative model", neg_origin.describe()),
+            ("blaming", f"the changed characters of {len(result['corrected'])} corrected texts"),
+            ("severity", args.severity),
+        ])
+        report = blame.teach_corrections(negative, result, severity=args.severity, source="correction")
+        console.say(
+            f"blamed {report['blamed']} texts over {report['edges']} edges ({report['edits']} changed unit(s)), "
+            f"cleared {report['cleared']} of {report['passed']} unchanged"
+        )
+        doc["negative"] = {
+            "blamed": report["blamed"], "cleared": report["cleared"], "edges": report["edges"],
+            "edits": report["edits"], "reasons": report["reasons"], "lessons": report["faults"],
+            **_save_negative(console, negative, negative_path(args)),
+        }
+    return doc
+
+
+def cmd_ollama_think(args: argparse.Namespace, console: Console) -> dict:
+    """Ollama thinks about a prompt, and the network is taught its thinking as thoughts of its own."""
+    from .ollama import OllamaError, think_value, thoughts_from_prompt
+    from .thinking import think_on
+
+    client = _ollama_client(args)
+    try:
+        think = think_value(args.think)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    console.pairs([
+        ("ollama", f"{client.model} at {client.url}"),
+        ("prompt", quote(clip(args.prompt, 60))),
+        ("questions", args.lines),
+        ("think", "the model's choice" if think is None else think),
+    ])
+    try:
+        thoughts = thoughts_from_prompt(
+            client, args.prompt, lines=args.lines, model=client.model, think=think, temperature=args.temperature,
+        )
+    except OllamaError as exc:
+        raise CliError(str(exc)) from exc
+    if not thoughts:
+        raise CliError(f"Ollama model {client.model!r} wrote no questions to think about")
+    thinking = [t["thinking"] for t in thoughts if t["thinking"]]
+    console.say()
+    for i, entry in enumerate(thoughts, 1):
+        console.say(f"{i:3d}  {entry['question']}")
+        console.say(f"     thinking: {clip(entry['thinking'], 200) if entry['thinking'] else '(none: the model did not think)'}")
+        console.say(f"     answer:   {clip(entry['answer'], 200)}")
+    doc: dict[str, Any] = {
+        "url": client.url, "model": client.model, "prompt": args.prompt, "think": think, "count": len(thoughts),
+        "thinking": len(thinking), "thoughts": thoughts, "out": None, "trained": None,
+    }
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(thinking) + ("\n" if thinking else ""))
+        console.say()
+        console.say(f"wrote {len(thinking)} thought(s) to {args.out}")
+        doc["out"] = args.out
+    if args.train:
+        if not thinking:
+            raise CliError(
+                f"Ollama model {client.model!r} returned no thinking to train on: use a thinking model "
+                "(qwen3, deepseek-r1, gpt-oss, ...) on an Ollama that separates it, or --think true"
+            )
+        model, origin = open_model(args, console, required=False)
+        if model.kind == "negative":
+            raise CliError("the negative network judges; it does not think (--kind negative cannot be taught thoughts)")
+        target = args.model_out or args.model
+        console.say()
+        console.pairs([
+            ("model", origin.describe()),
+            ("backend", backend_label(model)),
+            ("training", f"thoughts={len(thinking)} epochs={args.epochs} lr={args.lr} batch={args.batch_size}"
+                         + (" +answers" if args.with_answers else "")),
+            ("output", target),
+        ])
+        console.say()
+        printer = EpochPrinter(console)
+        stop = threading.Event()
+
+        def run() -> dict:
+            learned = think_on(
+                model, thinking, questions=not args.no_questions, epochs=args.epochs, lr=args.lr,
+                batch_size=args.batch_size, progress=printer, stop_event=stop,
+            )
+            if args.with_answers and not stop.is_set():
+                answers = [t["answer"] for t in thoughts if t["answer"]]
+                if answers:
+                    learned["answers"] = model.train(
+                        answers, epochs=args.epochs, lr=args.lr, batch_size=args.batch_size, progress=printer,
+                        stop_event=stop,
+                    )
+            return learned
+
+        learned, interrupted = run_interruptible(run, stop, console, "epoch")
+        saved = _finish_training(console, model, target, interrupted, printer, "epoch")
+        learned = learned or {}
+        console.say(
+            f"taught {learned.get('thoughts', 0)} thought(s) and {learned.get('questions', 0)} question(s) "
+            f"it asked itself; it now stops to think at {learned.get('taught', 0)} more node(s)"
+        )
+        doc["trained"] = {
+            "model": origin.to_dict(), "out": target, "thoughts": learned.get("thoughts", 0),
+            "questions": learned.get("questions", 0), "taught": learned.get("taught", 0),
+            "epochs": learned.get("epochs", []), "answers": len(learned.get("answers", []) or []),
+            "interrupted": interrupted, "saved": saved, "stats": model.stats(),
+        }
+    return doc
+
+
+def _changes_of(changes: list[dict], limit: int = 4) -> str:
+    """``"e" -> "", "??" -> "?"`` - the edits of one correction, for a table cell."""
+    parts = [f"{quote(e['wrong'])} -> {quote(e['right'])}" for e in changes[:limit]]
+    if len(changes) > limit:
+        parts.append(f"+{len(changes) - limit}")
+    return ", ".join(parts) or "-"
+
+
 def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
     from .ollama import OllamaError, adversarial_review
 
@@ -3395,7 +3997,7 @@ def cmd_ollama_review(args: argparse.Namespace, console: Console) -> dict:
         )
         doc["negative"] = {
             "blamed": report["blamed"], "cleared": report["cleared"], "edges": report["edges"],
-            "reasons": report["reasons"], "lessons": report["lessons"],
+            "reasons": report["reasons"], "lessons": report["faults"],
             **_save_negative(console, negative, negative_path(args)),
         }
     if args.apply_two_nrl:
@@ -3874,6 +4476,7 @@ def build_parser() -> argparse.ArgumentParser:
             f"  {PROG} predict --prefix 'the quick brown' --length 20\n"
             f"  {PROG} 2nrl --bad data/sample_garbage.txt --good data/sample_corpus.txt\n"
             f"  {PROG} evolve --data data/sample_corpus.txt --generations 0   # Ctrl-C stops and saves\n"
+            f"  {PROG} talk --message 'tell me about the cat'   # today's format: thinking, then the reply\n"
             f"  {PROG} --json info\n"
             f"  {PROG} serve --port 8000\n"
             "\nglobal options go before the command (they are accepted after it as well)."
@@ -3902,6 +4505,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "every text file inside it; a .wav recording is heard as one text of acoustic units "
                         "(--encoding acoustic:3:1)")
     p.add_argument("--whole-file", action="store_true", help="treat each file as a single text")
+    p.add_argument("--reverse", action="store_true",
+                   help="read every text backwards, in the model's units (its last character, or word, first), so the "
+                        "model learns what comes before; with --whole-file a file is read from its end to its start")
     p.add_argument("--epochs", type=nonneg_int, default=TrainConfig.epochs, help="training epochs")
     p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="learning rate for edge weights and node states")
     p.add_argument("--act-lr", type=nonneg_float, default=TrainConfig.act_lr,
@@ -4016,10 +4622,85 @@ def build_parser() -> argparse.ArgumentParser:
                         "(0 = not at all)")
     p.add_argument("--no-learn", action="store_true",
                    help="do not teach the graph where it goes round (leave the model exactly as it was)")
+    p.add_argument("--no-think", action="store_true",
+                   help="do not think before backing out of a repeat (teach BACK directly, as before the THINK sentinel)")
+    p.add_argument("--think-depth", type=nonneg_int, default=THINK_DEPTH, metavar="N",
+                   help="how deep a thought may question itself (0: never)")
+    p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
+    p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
+    p.add_argument("--stream", action="store_true",
+                   help="print the conversation as it happens: each turn the moment it is spoken, and before it "
+                        "what the voice does - the context it continues, the draft it caught itself on, where it "
+                        "backed up to, what it found (with --json: one JSON object per line, the usual document "
+                        "last, as {\"event\": \"done\", ...})")
+    add_guard_flags(p)
+    p.set_defaults(handler=cmd_converse)
+
+    # think ------------------------------------------------------------------
+    p = command(
+        "think", "the model thinks: one thought from the THINK sentinel, questioning itself where it learned to",
+        "A thought is the prediction search run from the THINK sentinel instead of START, in the language of\n"
+        "the thoughts the model was taught (`ollama think --train`).  --about TEXT thinks at the node where\n"
+        "that text ends and teaches the model to stop and think there; along its own path, wherever the model\n"
+        "has learned to think, the thought questions itself (--depth deep).  When it stops it says what it\n"
+        "triggered: a thought asked for ends, a thought a conversation had hands over to BACK.",
+    )
+    p.add_argument("--about", default="", metavar="TEXT", help="think at the node where this text ends (default: nowhere in particular)")
+    p.add_argument("--mode", choices=("beam", "sample"), default="beam", help="the most likely thought, or a drawn one")
+    p.add_argument("--k", type=pos_int, default=5, help="thoughts weighed (beam: the K most likely; a question must say something new)")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * k, 16))")
+    p.add_argument("--max-length", type=nonneg_int, default=THINK_LENGTH, help="characters a thought may run to")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
+    p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam: extra cost per edge")
+    p.add_argument("--depth", type=nonneg_int, default=THINK_DEPTH, metavar="N",
+                   help="how deep a thought may question itself (0: never)")
+    p.add_argument("--questions", type=nonneg_int, default=THINK_QUESTIONS, metavar="N",
+                   help="questions one thought may ask itself")
+    p.add_argument("--no-learn", action="store_true",
+                   help="do not teach the graph where it stopped to think (leave the model exactly as it was)")
+    p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
+    p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
+    p.set_defaults(handler=cmd_think)
+
+    # talk -------------------------------------------------------------------
+    p = command(
+        "talk", "talk to the model in today's format: messages in, a reply out, the thinking first, streamed",
+        "The model answers the way every language model is talked to now: a conversation of messages goes in,\n"
+        "an assistant message comes back - its thinking first (the search's own trace: what it looked for, what\n"
+        "the negative network vetoed and why, where it caught itself repeating), then the text, streamed chunk by\n"
+        "chunk as the walk is decoded.  A reply is what `converse` would say next after the last message, so it is\n"
+        "a real walk of the graph.  --format picks the dialect the answer is rendered in (and --request read in):\n"
+        "OpenAI's Chat Completions or Anthropic's Messages, the same shapes `serve` answers at /v1/chat/completions\n"
+        "and /v1/messages.  Without --message or --request, lines typed at the prompt are the conversation.",
+    )
+    p.add_argument("--message", action="append", metavar="TEXT",
+                   help="what to say (repeat for several turns of one conversation)")
+    p.add_argument("--system", metavar="TEXT", help="a system prompt (accepted, and not read: the network cannot follow instructions)")
+    p.add_argument("--request", metavar="FILE", help="a JSON request body in the --format shape, sent as it is")
+    p.add_argument("--format", choices=("openai", "anthropic"), default="openai",
+                   help="the dialect of the answer (and of --request): openai = Chat Completions, anthropic = Messages")
+    p.add_argument("--max-tokens", type=pos_int, default=60, metavar="N",
+                   help="units (characters, or words on a word model) the reply may add to the context it picks up")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature")
+    p.add_argument("--stop", action="append", metavar="SEQ", help="a stop sequence: the reply is cut before it (repeatable)")
+    p.add_argument("--n", type=pos_int, default=1, help="openai: how many alternative replies, each unheard by the last")
+    p.add_argument("--tool", action="append", metavar="NAME",
+                   help="offer a tool by name: a <tool> call the reply writes to it comes back as a tool call (repeatable)")
+    p.add_argument("--no-thinking", action="store_true", help="leave the thinking out of the answer")
+    p.add_argument("--mode", choices=("beam", "sample"), default="beam", help="how a reply is found")
+    p.add_argument("--context", type=nonneg_int, default=12, help="characters of the last message a reply picks up")
+    p.add_argument("--k", type=pos_int, default=5, help="candidates considered per reply")
+    p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * k, 16))")
+    p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam: extra cost per edge")
+    p.add_argument("--allow-repeats", action="store_true", help="do not skip replies the conversation already heard")
+    p.add_argument("--allow-word-repeats", action="store_true", help="do not skip a reply that repeats its own words")
+    p.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
+                   help="times a reply that caught itself repeating may back up and look for another way on")
+    p.add_argument("--no-learn", action="store_true", help="do not teach the graph where it goes round")
     p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
     p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
     add_guard_flags(p)
-    p.set_defaults(handler=cmd_converse)
+    p.set_defaults(handler=cmd_talk)
 
     # chat -------------------------------------------------------------------
     p = command(
@@ -4387,6 +5068,34 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_correct)
+
+    # attention ------------------------------------------------------------
+    p = command(
+        "attention", "the attention band: where inside a gram a correction's blame and credit land",
+        "Read a gram the way an eye reads a line: sharp at its centre, blurred towards its first and last\n"
+        "unit.  With the band on, every unit a correction changes hands out one charge, shared among the grams\n"
+        "that see it by how centrally each sees it: the gram with the change at its centre takes the most, the\n"
+        "grams that only glimpse it at an edge take less, and the verdict goes to the centre.  Off (the\n"
+        "default), each changed unit is charged in full to the step that wrote it.  --blur is how blurred the\n"
+        "ends are: the band is 1 at the centre and 1 - blur at both ends (0 = every position seen alike, 1 =\n"
+        "the ends see nothing).  A judgement of a whole text - a thumbs up, a thumbs down, a training pass -\n"
+        "marks every unit alike, and no band changes it.  The count and negative models take a band.\n"
+        "Without options the band is shown; --on / --blur / --off change it and save the model; --wrong and\n"
+        "--right show where one correction would land, gram by gram, under both rules.",
+    )
+    state = p.add_mutually_exclusive_group()
+    state.add_argument("--on", action="store_true",
+                       help="switch the band on (at --blur, else the blur it had, else 0.5)")
+    state.add_argument("--off", action="store_true",
+                       help="switch the band off: each changed unit is charged to the step that wrote it")
+    p.add_argument("--blur", type=float, metavar="X",
+                   help="how blurred the ends of a gram are, 0..1: the band is 1 at the centre and 1 - X at both "
+                        "ends (switches the band on)")
+    p.add_argument("--wrong", metavar="TEXT", help="preview a correction: what the network wrote")
+    p.add_argument("--right", metavar="TEXT", help="preview a correction: what it should have written")
+    p.add_argument("--dry-run", action="store_true", help="change the band in memory only; nothing is saved")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_attention)
     # negative -------------------------------------------------------------
     p = command(
         "negative", "the negative network: failures, why they failed, and the filter",
@@ -4480,6 +5189,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--spans", type=nonneg_int, default=3, help="blamed fragments per verdict")
     a.add_argument("--learn", action="store_true",
                    help="blame what the filter rejects (off by default: the tutor supplies the negatives)")
+    a.add_argument("--no-provenance", action="store_true",
+                   help="report the decisions alone: no risk, no reasons, no blamed fragments behind a veto")
     _add_negative_option(a, top_level=False)
     a.set_defaults(handler=cmd_negative_filter)
 
@@ -4491,8 +5202,10 @@ def build_parser() -> argparse.ArgumentParser:
                     "below the pass mark blames the negative network - the critique picks the reason, the mark\n"
                     "sets the severity - while the texts it passed take blame off what they share with known\n"
                     "failures.  Then it goes round again.  --rounds 0 keeps going until Ctrl-C, which finishes\n"
-                    "the round it is in and saves.  The positive model is only read from: nothing here trains,\n"
-                    "rewards or inverts it.",
+                    "the round it is in and saves.  With --correct the LLM is a copy editor instead of a critic:\n"
+                    "it writes each text out correctly changing as little as it can, and only the characters it\n"
+                    "changed are blamed.  The positive model is only read from: nothing here trains, rewards or\n"
+                    "inverts it.",
         formatter_class=_HelpFormatter,
     )
     a.add_argument("--rounds", type=nonneg_int, default=3, help="rounds to run (0: until Ctrl-C)")
@@ -4512,6 +5225,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--epochs", type=nonneg_int, default=1, help="blame epochs per round")
     a.add_argument("--no-clear", action="store_true",
                    help="do not let the texts it passed take blame off what they share")
+    a.add_argument("--correct", action="store_true",
+                   help="ask for letter-level corrections instead of marks: the LLM writes each text out correctly "
+                        "changing as little as it can, and only the characters it changed are blamed (the texts it "
+                        "handed back unchanged clear blame); no pass mark applies")
+    a.add_argument("--severity", type=nonneg_float, default=1.0, metavar="BLAME",
+                   help="blame per corrected text with --correct (1 = one ordinary failure)")
     a.add_argument("--out", metavar="PATH", help="where to save the negative network (default: --negative)")
     _add_negative_option(a, top_level=False)
     a.set_defaults(handler=cmd_negative_auto)
@@ -4925,11 +5644,13 @@ def build_parser() -> argparse.ArgumentParser:
     from .ollama import DEFAULT_MODEL as ollama_default_model, DEFAULT_URL as ollama_default_url
 
     p = command(
-        "ollama", "hook the network into a local Ollama LLM: corpus from a prompt, adversarial review",
+        "ollama", "hook the network into a local Ollama LLM: corpus from a prompt, adversarial review, correction, thoughts",
         "Talk to an Ollama server (https://ollama.com).  `corpus` turns a prompt into training lines, correct\n"
         "or deliberately garbage (the two halves of 2NRL), and can train on them; `review` lets the LLM\n"
         "adversarially rate the network's own samples (or given texts) from 0 to 10 and, with --2nrl,\n"
-        "feeds the failed ones back as garbage and the passed ones as correct data.\n"
+        "feeds the failed ones back as garbage and the passed ones as correct data; `correct` lets it write\n"
+        "the samples out correctly, letter by letter, and with --blame the diff teaches the negative network;\n"
+        "`think` has a thinking model think about a prompt and teaches the network its thinking as thoughts.\n"
         f"Usage: {PROG} [global options] ollama [--url URL] [--ollama-model NAME] <action> [options]",
     )
     p.add_argument("--url", metavar="URL", help=f"Ollama base URL (default: $OLLAMA_HOST or {ollama_default_url})")
@@ -4963,6 +5684,31 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(handler=cmd_ollama_corpus)
 
     a = actions.add_parser(
+        "think", help="have a thinking model think about a prompt, and teach the network its thinking as thoughts",
+        description="Ask the LLM for --lines short questions about --prompt, then for its thinking on each (Ollama's\n"
+                    "`think`: a thinking model such as qwen3, deepseek-r1 or gpt-oss returns its reasoning beside the\n"
+                    "answer; older models that write it between <think> tags are read too).  --train teaches the\n"
+                    "network the thinking as thoughts of its own - texts that begin at the THINK sentinel - and,\n"
+                    "wherever a thought questions itself, where to stop and think; --out writes the thoughts to a file.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--prompt", required=True, metavar="TEXT", help="what the questions should be about")
+    a.add_argument("--lines", type=pos_int, default=5, help="questions to ask for (one thought each)")
+    a.add_argument("--think", default="true", metavar="LEVEL",
+                   help="Ollama's think switch: true, false, or a level (low, medium, high); 'default' leaves it to the model")
+    a.add_argument("--temperature", type=nonneg_float, default=0.7, help="sampling temperature of the thinking")
+    a.add_argument("--out", metavar="FILE", help="also write the thoughts to FILE (one per line)")
+    a.add_argument("--train", action="store_true", help="teach the model the thoughts and save it")
+    a.add_argument("--with-answers", action="store_true", help="with --train, also train on the answers as ordinary texts")
+    a.add_argument("--no-questions", action="store_true",
+                   help="with --train, do not teach where a thought questions itself")
+    a.add_argument("--epochs", type=nonneg_int, default=10, help="training epochs with --train")
+    a.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate with --train")
+    a.add_argument("--batch-size", type=pos_int, default=4, help="transitions per backend step with --train")
+    a.add_argument("--model-out", metavar="PATH", help="where to save the trained model (default: --model)")
+    a.set_defaults(handler=cmd_ollama_think)
+
+    a = actions.add_parser(
         "review", help="adversarial LLM review / rating of the network's output",
         description="The LLM plays the harsh critic: every sample the network generates (or every given text)\n"
                     "gets a rating from 0 to 10, a pass/fail verdict against --threshold and a one-sentence\n"
@@ -4989,6 +5735,32 @@ def build_parser() -> argparse.ArgumentParser:
     _add_two_nrl_options(a, neg_epochs=3, pos_epochs=3, batch_size=4)
     a.add_argument("--out", metavar="PATH", help="where to save the model after --2nrl (default: --model)")
     a.set_defaults(handler=cmd_ollama_review)
+
+    a = actions.add_parser(
+        "correct", help="letter-level LLM correction of the network's output; the diff teaches the negative network",
+        description="The LLM plays the copy editor: every sample the network generates (or every given text) is\n"
+                    "written out correctly with as few characters changed as possible, and the diff between the\n"
+                    "two says which characters were the mistake - \"Hi howe are you??\" against \"Hi, how are\n"
+                    "you?\" is the e and the second ?, not the sentence.  With --blame only those characters are\n"
+                    "blamed in the negative network (the editor's word for the mistake is the reason) and the texts\n"
+                    "it handed back unchanged clear blame.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("--count", type=pos_int, default=8, help="samples to draw from the model")
+    a.add_argument("--prefix", default="", metavar="TEXT", help="continue this prefix instead of generating from scratch")
+    a.add_argument("--max-length", type=nonneg_int, default=60, help="characters per sample")
+    a.add_argument("--temperature", type=nonneg_float, default=1.0, help="sampling temperature")
+    a.add_argument("--text", action="append", metavar="TEXT", help="correct this text instead of sampling (repeatable)")
+    a.add_argument("--data", metavar="FILE", help="correct the texts of FILE (one per line) instead of sampling")
+    a.add_argument("--context", metavar="TEXT", help="extra context for the editor (e.g. what the model was trained on)")
+    a.add_argument("--blame", action="store_true",
+                   help="teach the negative network: blame only the characters the editor changed, under its reason, "
+                        "and let the unchanged texts clear blame")
+    a.add_argument("--severity", type=nonneg_float, default=1.0, metavar="BLAME",
+                   help="blame per corrected text with --blame (1 = one ordinary failure)")
+    a.add_argument("--negative", metavar="PATH",
+                   help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
+    a.set_defaults(handler=cmd_ollama_correct)
 
     # serve ----------------------------------------------------------------
     p = command(

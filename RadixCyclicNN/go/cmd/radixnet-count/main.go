@@ -290,11 +290,14 @@ commands:
   checkpoints list a checkpoint directory, or restore one (--restore NAME | latest)
   bench      how fast this build counts and predicts
   weights    show or change the dual frequency weight function
+  attention  the attention band: where inside a gram a correction's blame and credit land (--blur, --off, --wrong/--right)
   info       statistics and the training history tail
   converse   the model talks to itself
+  think      the model thinks: one thought from the THINK sentinel, questioning itself where it learned to
+  talk       talk to the model in today's format: messages in, a reply out, the thinking first, streamed
   chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
-  ollama     a corpus written to order, and the adversarial review (models | corpus | review)
+  ollama     a corpus written to order, the adversarial review, the copy editor and a thinking model's thoughts (models | corpus | review | correct | think)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   mcp        speak MCP on stdin / stdout: the tools and the network itself, for any MCP client
@@ -394,10 +397,16 @@ func main() {
 		cmdInvert(rest)
 	case "weights":
 		cmdWeights(rest)
+	case "attention":
+		cmdAttention(rest)
 	case "info":
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "think":
+		cmdThink(rest)
+	case "talk":
+		cmdTalk(rest)
 	case "chat":
 		cmdChat(rest)
 	case "ollama":
@@ -492,7 +501,11 @@ func cmdTrain(args []string) {
 		pool = fmt.Sprintf("%d goroutines", workers)
 	}
 	before := m.MetaInt("trained_texts")
-	say("training from %s (%s, chunks of %d texts): %s, %s counting, %s, %d epoch(s), %s", strings.Join(data, ", "), *unit, *chunk, pool, m.Counting(), m.Encoding().Describe(), *epochs, memory)
+	split := *unit
+	if trainPlan.Reverse {
+		split += ", every text read backwards"
+	}
+	say("training from %s (%s, chunks of %d texts): %s, %s counting, %s, %d epoch(s), %s", strings.Join(data, ", "), split, *chunk, pool, m.Counting(), m.Encoding().Describe(), *epochs, memory)
 	say("%5s %9s %10s %7s %7s %8s %6s %6s %11s %6s %8s", "epoch", "loss", "ppl", "nodes", "edges", "trigrams", "ratio", "merges", "transitions", "chunks", "seconds")
 	opts := radixnet.DefaultTrainOptions()
 	opts.Epochs = *epochs
@@ -590,7 +603,8 @@ func checkedFilter(topK int, topP, minP float64) radixnet.SamplingFilter {
 }
 
 // planFlags adds how a training run walks its texts
-// (../../../SPEC-SearchAndTraining.md §3-6), each off by default.
+// (../../../SPEC-SearchAndTraining.md §3-6) and whether it reads them
+// backwards (§9), each off by default.
 func planFlags(fs *flag.FlagSet) func() radixnet.Plan {
 	order := fs.String("order", "corpus", "how every epoch walks the texts: corpus | shortest-first | longest-first | shuffle")
 	curriculum := fs.Float64("curriculum", 1, "the first epoch walks the first C of the ordered texts, the last all of them (1 = off)")
@@ -598,11 +612,12 @@ func planFlags(fs *flag.FlagSet) func() radixnet.Plan {
 	replaySize := fs.Int("replay-size", 0, "keep a replay buffer of N texts, a uniform sample of everything trained on, saved with the model (0 drops it; left out: the model's buffer as it is)")
 	patience := fs.Int("patience", 0, "stop after N full epochs without the loss improving by --min-delta (0 = off)")
 	minDelta := fs.Float64("min-delta", 0, "how much the loss must fall below its best to count as an improvement")
+	reverse := fs.Bool("reverse", false, "read every text backwards, in the model's units (its last character, or word, first), so the model learns what comes before; with --split file a file is read from its end to its start")
 	return func() radixnet.Plan {
 		if !(*curriculum > 0 && *curriculum <= 1) {
 			fail("--curriculum must lie in (0, 1], got %v", *curriculum)
 		}
-		p := radixnet.Plan{Order: *order, Curriculum: *curriculum, Replay: *replay, Patience: *patience, MinDelta: *minDelta}
+		p := radixnet.Plan{Order: *order, Curriculum: *curriculum, Replay: *replay, Patience: *patience, MinDelta: *minDelta, Reverse: *reverse}
 		// only a size that was given changes the buffer; a negative one is an error, as everywhere
 		fs.Visit(func(f *flag.Flag) {
 			if f.Name == "replay-size" {
@@ -1242,6 +1257,122 @@ func cmdWeights(args []string) {
 	}
 }
 
+// cmdAttention shows the attention band, switches it, or shows where one
+// correction would land through it (radixnet/attention.py, attention.go).
+func cmdAttention(args []string) {
+	fs := subFlagSet("attention")
+	on := fs.Bool("on", false, "switch the band on (at --blur, else the blur it had, else 0.5)")
+	off := fs.Bool("off", false, "switch the band off: each changed unit is charged to the step that wrote it")
+	blur := fs.Float64("blur", 0, "how blurred the ends of a gram are, 0..1: the band is 1 at the centre and 1 - blur at both ends (switches the band on)")
+	wrong := fs.String("wrong", "", "preview a correction: what the network wrote")
+	right := fs.String("right", "", "preview a correction: what it should have written")
+	dryRun := fs.Bool("dry-run", false, "change the band in memory only; nothing is saved")
+	_ = fs.Parse(args)
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if *on && *off {
+		fail("--on and --off contradict each other")
+	}
+	if *off && set["blur"] {
+		fail("--off and --blur contradict each other: a blur switches the band on")
+	}
+	if set["wrong"] != set["right"] {
+		fail("a preview needs both --wrong (what the network wrote) and --right (what it should say)")
+	}
+	m := openModel(true)
+	changed := map[string]any{}
+	saved := ""
+	if *on || *off || set["blur"] {
+		var onArg *bool
+		var blurArg *float64
+		if *on || *off {
+			value := *on
+			onArg = &value
+		}
+		if set["blur"] {
+			value := *blur
+			blurArg = &value
+		}
+		if _, err := m.ConfigureAttention(onArg, blurArg); err != nil {
+			fail("%v", err)
+		}
+		changed = map[string]any{"on": m.G.Attention.On, "blur": m.G.Attention.BlurOrNil()}
+		if !*dryRun {
+			saved = saveModel(m)
+		}
+	}
+	cfg := m.AttentionConfig()
+	var preview *radixnet.AttentionPreview
+	if set["wrong"] {
+		p, err := m.AttentionPreview(*wrong, *right, nil)
+		if err != nil {
+			fail("%v", err)
+		}
+		preview = p
+	}
+	if jsonMode {
+		var savedDoc any
+		if saved != "" {
+			savedDoc = saved
+		}
+		emit(map[string]any{"attention": cfg, "changed": changed, "saved": savedDoc, "preview": preview})
+		return
+	}
+	unit := "character"
+	if cfg.Unit == "word" {
+		unit = "word"
+	}
+	band := fmt.Sprintf("- (off: each changed %s is charged to the step that wrote it)", unit)
+	if cfg.On {
+		parts := make([]string, len(cfg.Weights))
+		for i, w := range cfg.Weights {
+			parts[i] = strconv.FormatFloat(w, 'g', 4, 64)
+		}
+		band = strings.Join(parts, " ")
+	}
+	fmt.Printf("band           %s\nover one gram  %s\ngram           %d %ss, stride %d\n",
+		m.G.Attention.Describe(cfg.Ngram), band, cfg.Ngram, unit, cfg.Stride)
+	if len(changed) > 0 {
+		fmt.Printf("changed        on=%v blur=%v\n", changed["on"], changed["blur"])
+	}
+	if saved != "" {
+		fmt.Printf("saved          %s\n", saved)
+	}
+	if preview != nil {
+		sayChanges(*wrong, *right, preview.Changes)
+		for _, side := range []struct {
+			title string
+			doc   radixnet.AttentionSide
+		}{{"the network wrote", preview.Wrong}, {"the teacher wrote", preview.Right}} {
+			fmt.Printf("\n%s: %q\n", side.title, side.doc.Text)
+			fmt.Printf("%-5s %-24s %-13s %-18s %s\n", "gram", "text", "writer (off)", fmt.Sprintf("band (blur %g)", preview.Blur), "focus")
+			rows := 0
+			for g, gram := range side.doc.Grams {
+				writes, charge := side.doc.Writer[g], side.doc.Charges[g]
+				if !writes && charge == 0 {
+					continue
+				}
+				mark, focus := "-", ""
+				if writes {
+					mark = "1"
+				}
+				if side.doc.Focus[g] && charge > 0 {
+					focus = "*"
+				}
+				fmt.Printf("%-5d %-24q %-13s %-18.4f %s\n", g, gram, mark, charge, focus)
+				rows++
+			}
+			if side.doc.End {
+				fmt.Printf("%-5s %-24s %-13s %-18s %s\n", "end", "(after the last unit)", "1", "1", "*")
+				rows++
+			}
+			if rows == 0 {
+				fmt.Println("  nothing in it changed")
+			}
+		}
+	}
+}
+
 func cmdInfo(args []string) {
 	fs := subFlagSet("info")
 	tail := fs.Int("tail", 5, "history records to show")
@@ -1275,6 +1406,150 @@ func toF(v any) float64 {
 	return 0
 }
 
+// sayTurn prints one spoken turn of a conversation, as the transcript prints it: the line, its numbers and
+// flags, and what the voice noticed about a repeat of its own.
+func sayTurn(t *radixnet.Turn) {
+	fmt.Printf("%s: %s\n", t.Speaker, t.Text)
+	detail := fmt.Sprintf("    cost %.4f  p %.4g", t.Cost, t.Probability)
+	if t.Context != "" {
+		detail += "  picked up " + quote(t.Context)
+	}
+	var flags []string
+	if t.Given {
+		flags = append(flags, "given")
+	}
+	if t.Fresh && !t.Given {
+		flags = append(flags, "new topic")
+	}
+	if t.Repeat {
+		flags = append(flags, "repeat")
+	}
+	if t.Stutter {
+		flags = append(flags, "repeats itself")
+	}
+	if t.Vetoed > 0 {
+		flags = append(flags, fmt.Sprintf("%d vetoed", t.Vetoed))
+	}
+	if len(flags) > 0 {
+		detail += "  [" + strings.Join(flags, ", ") + "]"
+	}
+	fmt.Println(detail)
+	if r := t.Rethink; r != nil {
+		caught := fmt.Sprintf("repeating %s", quote(r.Noticed))
+		if r.Kind == "stutter" {
+			caught = fmt.Sprintf("saying %s twice", quote(r.Noticed))
+		}
+		thought := "    caught itself " + caught
+		switch {
+		case r.Steps == 0:
+			thought += "; the words it picked up, not its own"
+		case r.Found:
+			thought += fmt.Sprintf("; kept %s and found another way on in %d path(s)", quote(r.Cut), r.Explored)
+		default:
+			ending := "took a lesser answer"
+			if t.Repeat {
+				ending = "said it anyway"
+			}
+			thought += fmt.Sprintf("; kept %s, weighed %d path(s), %s", quote(r.Cut), r.Explored, ending)
+		}
+		fmt.Println(thought)
+		if r.Thought != nil {
+			fmt.Printf("    %s\n", radixnet.Summarize(r.Thought))
+		}
+	}
+}
+
+// emitLine writes one compact JSON object on its own line of stdout: the JSON Lines a streamed command writes.
+func emitLine(doc any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(doc); err != nil {
+		fail("%v", err)
+	}
+}
+
+// isTerminal reports whether stdout is a terminal (where the window of a streamed conversation is dimmed).
+func isTerminal() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// A conversePrinter is the Stream of `converse -stream`: the conversation as it happens.
+//
+// A "turn" is printed the way the transcript always was (sayTurn) the moment it is spoken.  The window between
+// two turns - what the voice does before it commits: the context it continues, the draft it caught itself on,
+// where it backed up to, what it found - is printed as it happens too, indented and dimmed on a terminal, so the
+// answer stands apart from the thinking that may still be rewritten.  With --json every event is one JSON line
+// on stdout instead (radixnet.Stream).
+type conversePrinter struct {
+	dimmed  bool
+	looking *string // the context the current turn last continued
+}
+
+func newConversePrinter() *conversePrinter {
+	return &conversePrinter{dimmed: !jsonMode && isTerminal()}
+}
+
+// dim prints a line that belongs to the window rather than the answer.
+func (p *conversePrinter) dim(text string) {
+	if p.dimmed {
+		text = "\x1b[2m" + text + "\x1b[0m"
+	}
+	fmt.Println(text)
+}
+
+func (p *conversePrinter) event(event map[string]any) {
+	if jsonMode {
+		emitLine(event)
+		return
+	}
+	text := func(key string) string { s, _ := event[key].(string); return s }
+	number := func(key string) int {
+		switch v := event[key].(type) {
+		case int:
+			return v
+		case float64:
+			return int(v)
+		}
+		return 0
+	}
+	switch event["event"] {
+	case "turn":
+		p.looking = nil
+		if t, ok := event["turn"].(*radixnet.Turn); ok {
+			sayTurn(t)
+		}
+	case "look":
+		from := text("from")
+		if p.looking != nil { // the first look of a turn is the context the turn will say it picked up
+			tried := "changes the subject"
+			if from != "" {
+				tried = "tries " + quote(from)
+			}
+			p.dim(fmt.Sprintf("    nothing new follows %s; %s", quote(*p.looking), tried))
+		}
+		p.looking = &from
+	case "draft":
+		p.dim(fmt.Sprintf("    was about to say %s", quote(text("text"))))
+	case "caught":
+		caught := fmt.Sprintf("repeating %s", quote(text("noticed")))
+		if text("kind") == "stutter" {
+			caught = fmt.Sprintf("saying %s twice", quote(text("noticed")))
+		}
+		line := "    caught itself " + caught
+		if text("cut") == "" {
+			line += "; the words it picked up, not its own"
+		}
+		p.dim(line)
+	case "backtrack":
+		p.dim(fmt.Sprintf("    backs up to %s and weighs up to %d paths (step %d)", quote(text("cut")), number("wider"), number("step")))
+	case "found":
+		p.dim(fmt.Sprintf("    found another way on: %s (%d path(s) weighed)", quote(text("text")), number("explored")))
+	case "stuck":
+		p.dim(fmt.Sprintf("    nothing new in %d path(s)", number("explored")))
+	}
+}
+
 func cmdConverse(args []string) {
 	fs := subFlagSet("converse")
 	opening := fs.String("opening", "", "the first line, spoken as given")
@@ -1292,8 +1567,11 @@ func cmdConverse(args []string) {
 	allowWordRepeats := fs.Bool("allow-word-repeats", false, "do not skip a reply that repeats its own words")
 	explore := fs.Int("explore", radixnet.Explore, "times a reply that caught itself repeating may back up and look for another way on")
 	noLearn := fs.Bool("no-learn", false, "do not teach the graph where it goes round (leave the model exactly as it was)")
+	noThink := fs.Bool("no-think", false, "do not think before backing up out of a repeat (teach the hand-over directly)")
+	thinkDepth := fs.Int("think-depth", radixnet.ThinkDepth, "how deep a thought may question itself (0: never)")
 	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
+	stream := fs.Bool("stream", false, "print the conversation as it happens: each turn the moment it is spoken, and before it what the voice does - the context it continues, the draft it caught itself on, where it backed up to, what it found (with --json: one JSON object per line, the usual document last, as {\"event\": \"done\", ...})")
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	m := openModel(true)
@@ -1301,6 +1579,14 @@ func cmdConverse(args []string) {
 	opts.Turns, opts.Mode, opts.MaxLength, opts.Context, opts.K, opts.Beam = *turns, *mode, *maxLength, *context, *k, *beam
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
 	opts.AvoidWordRepeats, opts.Explore, opts.Learn = !*allowWordRepeats, *explore, !*noLearn
+	opts.Think, opts.ThinkDepth = !*noThink, *thinkDepth
+	// --stream: the conversation is printed as it happens - each turn the moment it is spoken, and before it
+	// what the voice does: the context it continues, a draft it catches itself on, where it backs up to
+	var live *conversePrinter
+	if *stream {
+		live = newConversePrinter()
+		opts.Stream = live.event
+	}
 	names := []string{}
 	for _, s := range strings.Split(*speakers, ",") {
 		if t := strings.TrimSpace(s); t != "" {
@@ -1351,61 +1637,37 @@ func cmdConverse(args []string) {
 		}
 	}
 	sort.Ints(taught)
+	thoughtAt := []int{}
+	seenThought := map[int]bool{}
+	for _, t := range turnsOut {
+		if t.Rethink == nil || t.Rethink.Thought == nil || t.Rethink.Thought.Taught < 0 {
+			continue
+		}
+		if node := t.Rethink.Thought.Taught; !seenThought[node] {
+			seenThought[node] = true
+			thoughtAt = append(thoughtAt, node)
+		}
+	}
+	sort.Ints(thoughtAt)
 	doc := map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode,
 		"opening": *opening, "kind": "count", "partner_kind": partnerKind, "repeats": saidTwice,
-		"taught": taught, "transcript": radixnet.Transcript(turnsOut), "guard": guard}
-	if len(taught) > 0 && *saveLearned {
+		"taught": taught, "thought_at": thoughtAt, "transcript": radixnet.Transcript(turnsOut), "guard": guard}
+	if (len(taught) > 0 || len(thoughtAt) > 0) && *saveLearned {
 		doc["saved"] = saveModel(m)
 	}
 	if jsonMode {
+		if live != nil {
+			// JSON Lines: the events went out as they happened, and the usual document is the last line
+			doc["event"] = "done"
+			emitLine(doc)
+			return
+		}
 		emit(doc)
 		return
 	}
-	for _, t := range turnsOut {
-		fmt.Printf("%s: %s\n", t.Speaker, t.Text)
-		detail := fmt.Sprintf("    cost %.4f  p %.4g", t.Cost, t.Probability)
-		if t.Context != "" {
-			detail += "  picked up " + quote(t.Context)
-		}
-		var flags []string
-		if t.Given {
-			flags = append(flags, "given")
-		}
-		if t.Fresh && !t.Given {
-			flags = append(flags, "new topic")
-		}
-		if t.Repeat {
-			flags = append(flags, "repeat")
-		}
-		if t.Stutter {
-			flags = append(flags, "repeats itself")
-		}
-		if t.Vetoed > 0 {
-			flags = append(flags, fmt.Sprintf("%d vetoed", t.Vetoed))
-		}
-		if len(flags) > 0 {
-			detail += "  [" + strings.Join(flags, ", ") + "]"
-		}
-		fmt.Println(detail)
-		if r := t.Rethink; r != nil {
-			caught := fmt.Sprintf("repeating %s", quote(r.Noticed))
-			if r.Kind == "stutter" {
-				caught = fmt.Sprintf("saying %s twice", quote(r.Noticed))
-			}
-			thought := "    caught itself " + caught
-			switch {
-			case r.Steps == 0:
-				thought += "; the words it picked up, not its own"
-			case r.Found:
-				thought += fmt.Sprintf("; kept %s and found another way on in %d path(s)", quote(r.Cut), r.Explored)
-			default:
-				ending := "took a lesser answer"
-				if t.Repeat {
-					ending = "said it anyway"
-				}
-				thought += fmt.Sprintf("; kept %s, weighed %d path(s), %s", quote(r.Cut), r.Explored, ending)
-			}
-			fmt.Println(thought)
+	if live == nil {
+		for _, t := range turnsOut {
+			sayTurn(t)
 		}
 	}
 	if len(turnsOut) == 0 {
@@ -1414,8 +1676,15 @@ func cmdConverse(args []string) {
 	if guard != nil {
 		printVetoes(verdicts, "replies")
 	}
-	if len(taught) > 0 && !*saveLearned {
-		fmt.Printf("it learned to hand over at %d node(s); --save writes that into the model\n", len(taught))
+	if (len(taught) > 0 || len(thoughtAt) > 0) && !*saveLearned {
+		learned := []string{}
+		if len(taught) > 0 {
+			learned = append(learned, fmt.Sprintf("to hand over at %d node(s)", len(taught)))
+		}
+		if len(thoughtAt) > 0 {
+			learned = append(learned, fmt.Sprintf("to stop and think at %d node(s)", len(thoughtAt)))
+		}
+		fmt.Printf("it learned %s; --save writes that into the model\n", strings.Join(learned, " and "))
 	}
 	if len(saidTwice) > 0 {
 		fmt.Printf("%d utterance(s) the model could only repeat - punish them (2NRL negative phase):\n", len(saidTwice))
@@ -1428,6 +1697,90 @@ func cmdConverse(args []string) {
 }
 
 var _ = filepath.Base
+
+// cmdThink has the model think: one thought from the Think sentinel, in the
+// language of the thoughts it was taught (`ollama think -train`), questioning
+// itself where it has learned to.  -about TEXT thinks at the node where that
+// text ends and teaches the model to stop and think there.
+func cmdThink(args []string) {
+	fs := subFlagSet("think")
+	about := fs.String("about", "", "think at the node where this text ends (and teach the model to stop and think there)")
+	mode := fs.String("mode", "beam", "beam (the most likely thought) | sample (a drawn one)")
+	k := fs.Int("k", 5, "thoughts weighed (beam: the K most likely; a question must say something new)")
+	beam := fs.Int("beam", 0, "beam width (0 = default)")
+	maxLength := fs.Int("max-length", radixnet.ThinkLength, "units a thought may run to")
+	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature")
+	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
+	depth := fs.Int("depth", radixnet.ThinkDepth, "how deep a thought may question itself (0: never)")
+	questions := fs.Int("questions", radixnet.ThinkQuestions, "questions one thought may ask itself")
+	noLearn := fs.Bool("no-learn", false, "think without teaching the model where it stopped to think")
+	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
+	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
+	_ = fs.Parse(args)
+	m := openModel(true)
+	o := radixnet.DefaultThinkOptions()
+	o.About, o.Mode, o.K, o.Beam, o.MaxLength = *about, *mode, *k, *beam, *maxLength
+	o.Temperature, o.StepPenalty, o.MaxDepth, o.MaxQuestions, o.Learn = *temperature, *stepPenalty, *depth, *questions, !*noLearn
+	if *seeded {
+		s := seedFlag
+		o.Seed = &s
+	}
+	thought, err := m.Think(o)
+	if err != nil {
+		fail("%v", err)
+	}
+	g := m.G
+	learned := []string{}
+	if thought.Taught >= 0 {
+		learned = append(learned, "to stop and think at "+quoteLabel(g, thought.Taught))
+	}
+	if thought.HandedOver >= 0 {
+		learned = append(learned, "to hand over at "+quoteLabel(g, thought.HandedOver))
+	}
+	doc := thought.ToDict()
+	doc["kind"] = m.Kind()
+	doc["saved"] = nil
+	if len(learned) > 0 && *saveLearned {
+		doc["saved"] = saveModel(m)
+	}
+	if jsonMode {
+		emit(doc)
+		return
+	}
+	aboutText := "(nothing in particular)"
+	if *about != "" {
+		aboutText = quote(*about)
+	}
+	at := "-"
+	if thought.At >= 0 {
+		at = quoteLabel(g, thought.At)
+	}
+	fmt.Printf("model           %s\n", modelFile())
+	fmt.Printf("about           %s\n", aboutText)
+	fmt.Printf("at              %s\n", at)
+	fmt.Printf("thoughts known  %d\n", len(g.Children(radixnet.Think)))
+	fmt.Println()
+	sayThought(thought, 0)
+	if thought.Stopped == radixnet.StoppedNothing && thought.Text == "" {
+		fmt.Println()
+		fmt.Println("(it has no thoughts to think with yet: `radixnet-count ollama think -prompt TOPIC -train` teaches it some)")
+	}
+	if saved, ok := doc["saved"].(string); ok && saved != "" {
+		fmt.Println()
+		fmt.Printf("saved %s\n", saved)
+	} else if len(learned) > 0 {
+		fmt.Println()
+		fmt.Printf("it learned %s; --save writes that into the model\n", strings.Join(learned, " and "))
+	}
+}
+
+// sayThought prints a thought and its questions, indented one level per depth.
+func sayThought(thought *radixnet.Thought, depth int) {
+	fmt.Printf("%s%s\n", strings.Repeat("    ", depth), radixnet.Summarize(thought))
+	for _, question := range thought.Questions {
+		sayThought(question, depth+1)
+	}
+}
 
 // cmdTutor runs the automated English lessons: Ollama writes sentence
 // openings, the model completes them with the prediction search, Ollama marks

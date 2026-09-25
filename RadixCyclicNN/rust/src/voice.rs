@@ -48,7 +48,12 @@ pub struct Speaker {
 
 impl Speaker {
     pub fn new(enc: Encoding, rate: u32, pitch: f64, tempo: f64, gain: f64) -> Result<Speaker, String> {
-        let voice = VoiceSettings { pitch, tempo, gain, ..VoiceSettings::default() };
+        let voice = VoiceSettings {
+            pitch,
+            tempo,
+            gain,
+            ..VoiceSettings::default()
+        };
         if enc.unit == Unit::Acoustic {
             let tok = crate::phonetic::acoustic_tokenizer()?;
             // the vocoder's gain is a multiplier on the level the units were learned at, so the
@@ -91,7 +96,10 @@ impl Speaker {
             return out;
         }
         if self.enc.unit.phonetic() {
-            let tokens: Vec<String> = crate::phonetic::text(self.enc.unit, piece).split_whitespace().map(String::from).collect();
+            let tokens: Vec<String> = crate::phonetic::text(self.enc.unit, piece)
+                .split_whitespace()
+                .map(String::from)
+                .collect();
             return self.feed_tokens(&tokens);
         }
         if self.enc.unit == Unit::Words {
@@ -123,7 +131,9 @@ impl Speaker {
 
     fn feed_words(&mut self, words: &[String]) -> Vec<u8> {
         let mut out = Vec::new();
-        let Ok(bridge) = crate::phonetic::tokenizer(Unit::Phones) else { return out };
+        let Ok(bridge) = crate::phonetic::tokenizer(Unit::Phones) else {
+            return out;
+        };
         for w in words {
             let tokens = {
                 let mut tok = bridge.lock().unwrap_or_else(|e| e.into_inner());
@@ -261,16 +271,31 @@ mod tests {
     use crate::model::{GenerateOptions, TrainOptions};
 
     fn spoken_model(spec: &str) -> Model {
-        let opts = GraphOptions { encoding: parse_encoding(spec).unwrap(), ..GraphOptions::default() };
+        let opts = GraphOptions {
+            encoding: parse_encoding(spec).unwrap(),
+            ..GraphOptions::default()
+        };
         let mut model = Model::new(1, opts).unwrap();
         model.workers = 1;
         model.g.workers = 1;
-        let texts: Vec<String> =
-            ["the cat sat on the mat", "the cat sat on the floor", "the dog sat on the mat", "a bird in the hand"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        model.train(&texts, &TrainOptions { epochs: 2, ..Default::default() }).unwrap();
+        let texts: Vec<String> = [
+            "the cat sat on the mat",
+            "the cat sat on the floor",
+            "the dog sat on the mat",
+            "a bird in the hand",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        model
+            .train(
+                &texts,
+                &TrainOptions {
+                    epochs: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         model
     }
 
@@ -287,9 +312,15 @@ mod tests {
         assert_eq!(parse_encoding("units:2:2").unwrap().unit, Unit::Acoustic);
         assert!(parse_encoding("rune:3").is_err());
         assert!(!Unit::Acoustic.phonetic() && Unit::Acoustic.tokens());
-        assert_eq!((Unit::Acoustic.name(), Unit::Acoustic.units_name()), ("acoustic", "units"));
+        assert_eq!(
+            (Unit::Acoustic.name(), Unit::Acoustic.units_name()),
+            ("acoustic", "units")
+        );
         assert_eq!(enc.units("q1  q2\nq3").len(), 3);
-        assert_eq!(enc.encode("q1 q2 q3 q4"), vec!["q1 q2 q3".to_string(), "q2 q3 q4".to_string()]);
+        assert_eq!(
+            enc.encode("q1 q2 q3 q4"),
+            vec!["q1 q2 q3".to_string(), "q2 q3 q4".to_string()]
+        );
         assert_eq!(enc.join(&["q1 q2", "q3"]), "q1 q2 q3");
         assert!(enc.has_unit_prefix("q1 q2 q3", "q1 q2") && !enc.has_unit_prefix("q1 q22 q3", "q1 q2"));
         assert_eq!(enc.spell("q1 q2"), "q1 q2");
@@ -309,11 +340,22 @@ mod tests {
             assert!(units.windows(2).all(|w| w[0] != w[1]), "a run survived");
             texts.push(text);
         }
-        let opts = GraphOptions { encoding: enc, ..GraphOptions::default() };
+        let opts = GraphOptions {
+            encoding: enc,
+            ..GraphOptions::default()
+        };
         let mut model = Model::new(1, opts).unwrap();
         model.workers = 1;
         model.g.workers = 1;
-        model.train(&texts, &TrainOptions { epochs: 2, ..Default::default() }).unwrap();
+        model
+            .train(
+                &texts,
+                &TrainOptions {
+                    epochs: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         assert!(model.g.num_trigrams() > 10);
         let opts = SpeakOptions {
             prefix: String::new(),
@@ -329,10 +371,14 @@ mod tests {
         let mut said = Vec::new();
         let mut pcm = 0usize;
         model
-            .speak_walks(&opts, &mut |chunk: &[u8]| pcm += chunk.len(), &mut |_, text, spelled| {
-                assert_eq!(text, spelled);
-                said.push(text.to_string())
-            })
+            .speak_walks(
+                &opts,
+                &mut |chunk: &[u8]| pcm += chunk.len(),
+                &mut |_, text, spelled| {
+                    assert_eq!(text, spelled);
+                    said.push(text.to_string())
+                },
+            )
             .unwrap();
         assert_eq!(said.len(), 2);
         assert!(pcm > 16000, "{pcm} bytes");
@@ -399,7 +445,11 @@ mod tests {
                         if prefix.is_empty() {
                             assert_eq!(enc.truncate(spoken, 40), walk.text, "{spec} seed {seed}");
                         } else {
-                            assert!(spoken.starts_with(&walk.text), "{spec} {prefix:?} {seed}: {spoken:?} vs {:?}", walk.text);
+                            assert!(
+                                spoken.starts_with(&walk.text),
+                                "{spec} {prefix:?} {seed}: {spoken:?} vs {:?}",
+                                walk.text
+                            );
                         }
                     }
                 }

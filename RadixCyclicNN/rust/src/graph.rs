@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::counter::{carry, Counter, COUNTER_LIMIT, INVALID_STAMP};
-use crate::encoding::{Encoding, Units, BACK_LABEL, END_LABEL, START_LABEL};
+use crate::encoding::{Encoding, Units, BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL};
 use crate::hash::{map, Map, Set};
 use crate::mt19937::Mt19937;
 use crate::paths::{PathKey, PathRow};
@@ -19,11 +19,21 @@ use crate::weights::ChildCost;
 /// ends - observed in the corpus, like everything else.  `BACK` is where the
 /// graph has *learned* that a walk goes round: nothing in a corpus says so, so
 /// its edges are taught by the voices that caught themselves repeating.
-/// `FIRST` is the first node id that is not a sentinel.
+/// `THINK` faces both ways: its in-edges are where the graph learned to stop
+/// and think (taught by experience, like `BACK`'s), its out-edges how thoughts
+/// begin - a thought is a text whose walk starts at `THINK` instead of `START`
+/// ([`crate::thinking`]).  `FIRST` is the first node id that is not a sentinel.
 pub const START: usize = 0;
 pub const END: usize = 1;
 pub const BACK: usize = 2;
-pub const FIRST: usize = 3;
+pub const THINK: usize = 3;
+pub const FIRST: usize = 4;
+
+/// Whether `node` is a sentinel a walk may begin at: `START` for a text,
+/// `THINK` for a thought.
+pub fn is_origin(node: usize) -> bool {
+    node == START || node == THINK
+}
 
 /// New edge weights of the sine network are drawn from `[W_LOW, W_HIGH]`; the
 /// count model discards the value but consumes the same random number, so the
@@ -215,6 +225,12 @@ pub struct Graph {
     pub res: Option<Box<crate::resonance::ResonantData>>,
     /// How a text becomes grams; fixed when the graph is created.
     pub enc: Encoding,
+    /// Where inside a gram a correction's blame and credit land
+    /// ([`crate::attention`]): off by default - each changed unit is charged
+    /// to the step that wrote it.  Unlike `enc` it changes nothing the graph
+    /// holds, so it can be switched at any time; it travels with the file
+    /// while it is on.
+    pub attention: crate::attention::AttentionBand,
     pub inverted: bool,
 
     pub(crate) version: Counter,
@@ -242,7 +258,7 @@ pub struct Graph {
 }
 
 impl Graph {
-    /// An empty graph with the three sentinels.
+    /// An empty graph with the four sentinels.
     pub fn new(seed: i64, opts: GraphOptions) -> Result<Graph, String> {
         if opts.window < 1 {
             return Err(format!("window must be >= 1, got {}", opts.window));
@@ -297,10 +313,12 @@ impl Graph {
             costs_version: INVALID_STAMP,
             workers: 0,
             enc: opts.encoding,
+            attention: crate::attention::AttentionBand::default(),
         };
         g.new_node(START_LABEL.to_string(), 0, 0);
         g.new_node(END_LABEL.to_string(), 0, 0);
         g.new_node(BACK_LABEL.to_string(), 0, 0);
+        g.new_node(THINK_LABEL.to_string(), 0, 0);
         Ok(g)
     }
 
@@ -779,13 +797,89 @@ impl Graph {
         Ok(e)
     }
 
+    /// Teaches that something at `p` made the model stop and think
+    /// (`RadixCyclicGraph.observe_think`): the twin of [`Graph::observe_back`],
+    /// learned the same way - from experience, never from a corpus.  `p ->
+    /// THINK` is created on first use and counted like any traversal, rewarded
+    /// by `amount` (the sine model nudges its weight instead), and competes
+    /// with `p`'s real children for probability.  Nothing is taught about what
+    /// to do instead - that is the thought's business ([`crate::thinking`]).
+    /// Returns the `THINK` edge.
+    pub fn observe_think(&mut self, p: usize, amount: f64) -> Result<usize, String> {
+        if self.radix.is_some() {
+            return self.radix_observe_think(p, amount);
+        }
+        if self.res.is_some() {
+            return self.resonant_observe_think(p, amount);
+        }
+        if p < FIRST || p >= self.labels.len() || !self.alive[p] {
+            return Err(format!("node {p} is not a real node to think at"));
+        }
+        if amount < 0.0 {
+            return Err(format!("amount must be >= 0, got {amount}"));
+        }
+        let e = match self.edge(p, THINK) {
+            Some(e) => e,
+            None => self.new_edge(p, THINK, 0, 0),
+        };
+        self.count[THINK].fetch_add(1, Ordering::Relaxed);
+        self.edge_count[e].fetch_add(1, Ordering::Relaxed);
+        self.traversals.add(1);
+        self.version.add(1);
+        self.record_traversals(&[e]);
+        self.add_reward(&[e], amount);
+        self.recompute_weights();
+        Ok(e)
+    }
+
+    /// What the model thinks it costs to stop and think at `p`: the cost of its
+    /// `THINK` edge, or `None` when it never had to (`RadixCyclicGraph.think_cost`).
+    pub fn think_cost(&mut self, p: usize) -> Option<f64> {
+        self.prepare();
+        self.child_costs(p).iter().find(|c| c.child == THINK).map(|c| c.cost)
+    }
+
+    /// What the model thinks it costs to go round at `p`: the cost of its `BACK`
+    /// edge, or `None` when it was never backed out of (`RadixCyclicGraph.back_cost`).
+    pub fn back_cost(&mut self, p: usize) -> Option<f64> {
+        self.prepare();
+        self.child_costs(p).iter().find(|c| c.child == BACK).map(|c| c.cost)
+    }
+
+    /// Whether the model has learned to stop and think at `p`: its `THINK`
+    /// edge is the cheapest way on (`RadixCyclicGraph.thinks_at`).
+    pub fn thinks_at(&mut self, p: usize) -> bool {
+        if p >= self.children.len() || !self.alive[p] {
+            return false;
+        }
+        self.prepare();
+        let costs = self.child_costs(p);
+        let Some(thinking) = costs.iter().find(|c| c.child == THINK).map(|c| c.cost) else {
+            return false;
+        };
+        costs
+            .iter()
+            .filter(|c| c.child != THINK && c.child != BACK)
+            .all(|c| c.cost >= thinking)
+    }
+
     /// Registers a training sequence `START -> g0 -> ... -> gn -> END`,
     /// splitting nodes so every transition runs from the last gram of one node
     /// to the first of another over an edge created on demand.  `count` also
     /// bumps the visit counters.
     pub fn observe(&mut self, grams: &[String], count: bool) -> Result<Vec<Transition>, String> {
+        self.observe_from(START, grams, count)
+    }
+
+    /// [`Graph::observe`] from either origin sentinel: `START` for a text,
+    /// `THINK` for a *thought* - the same structure, the same counting, the
+    /// same edge into `END`, only the first edge leaves the other sentinel.
+    pub fn observe_from(&mut self, origin: usize, grams: &[String], count: bool) -> Result<Vec<Transition>, String> {
         if grams.is_empty() {
             return Ok(Vec::new());
+        }
+        if !is_origin(origin) {
+            return Err(format!("a sequence begins at START or THINK, not at node {origin}"));
         }
         let enc = self.enc;
         let mut did_split = false;
@@ -802,13 +896,13 @@ impl Graph {
             ox = 0;
             did_split = true;
         }
-        let e = match self.children[START].get(px) {
+        let e = match self.children[origin].get(px) {
             Some(e) => e,
-            None => self.new_edge(START, px, 0, 0),
+            None => self.new_edge(origin, px, 0, 0),
         };
-        transitions.push(Transition { p: START, e });
+        transitions.push(Transition { p: origin, e });
         if count {
-            self.count[START].fetch_add(1, Ordering::Relaxed);
+            self.count[origin].fetch_add(1, Ordering::Relaxed);
             self.count[px].fetch_add(1, Ordering::Relaxed);
             self.edge_count[e].fetch_add(1, Ordering::Relaxed);
         }
@@ -867,12 +961,12 @@ impl Graph {
         if count {
             self.count[END].fetch_add(1, Ordering::Relaxed);
             self.edge_count[e].fetch_add(1, Ordering::Relaxed);
-            // every transition bumped one node counter and one edge counter, plus START's
+            // every transition bumped one node counter and one edge counter, plus the origin's
             self.traversals.add(2 * transitions.len() as i64 + 1);
         }
         if did_split {
             let (traced, _) = self
-                .trace(grams)
+                .trace_from(origin, grams)
                 .ok_or_else(|| "internal error: observed sequence is not walkable".to_string())?;
             transitions = traced;
         }
@@ -883,7 +977,12 @@ impl Graph {
     /// transitions and the node path `START ... END`, or `None` when a gram is
     /// unknown, an edge is missing or a split would be needed.
     pub fn trace(&self, grams: &[String]) -> Option<(Vec<Transition>, Vec<usize>)> {
-        if grams.is_empty() {
+        self.trace_from(START, grams)
+    }
+
+    /// [`Graph::trace`] from either origin sentinel (a thought from `THINK`).
+    pub fn trace_from(&self, origin: usize, grams: &[String]) -> Option<(Vec<Transition>, Vec<usize>)> {
+        if grams.is_empty() || !is_origin(origin) {
             return None;
         }
         let enc = self.enc;
@@ -892,11 +991,11 @@ impl Graph {
             return None;
         }
         let (mut px, mut ox) = (l.node, l.off);
-        let e = self.children[START].get(px)?;
+        let e = self.children[origin].get(px)?;
         let mut transitions = Vec::with_capacity(grams.len() + 1);
-        transitions.push(Transition { p: START, e });
+        transitions.push(Transition { p: origin, e });
         let mut path = Vec::with_capacity(grams.len() + 2);
-        path.push(START);
+        path.push(origin);
         path.push(px);
         for gram in &grams[1..] {
             let l = self.index.get(gram.as_str())?;
@@ -925,7 +1024,12 @@ impl Graph {
 
     /// The node path of a sequence (`START ... END`).
     pub fn node_path(&self, grams: &[String]) -> Option<Vec<usize>> {
-        self.trace(grams).map(|(_, path)| path)
+        self.node_path_from(START, grams)
+    }
+
+    /// [`Graph::node_path`] from either origin sentinel (a thought from `THINK`).
+    pub fn node_path_from(&self, origin: usize, grams: &[String]) -> Option<Vec<usize>> {
+        self.trace_from(origin, grams).map(|(_, path)| path)
     }
 
     /// Verifies the structural invariants, and - with texts - that every text
@@ -950,11 +1054,18 @@ impl Graph {
         {
             return Err("edge arrays have inconsistent lengths".into());
         }
-        if n < FIRST || !self.alive[START] || !self.alive[END] || !self.alive[BACK] {
+        if n < FIRST || !self.alive[START] || !self.alive[END] || !self.alive[BACK] || !self.alive[THINK] {
             return Err("sentinels missing or changed".into());
         }
-        if self.parents[START].size() != 0 || self.children[END].size() != 0 {
-            return Err("START has parents or END has children".into());
+        if self.labels[START] != START_LABEL
+            || self.labels[END] != END_LABEL
+            || self.labels[BACK] != BACK_LABEL
+            || self.labels[THINK] != THINK_LABEL
+        {
+            return Err("sentinel labels changed".into());
+        }
+        if self.parents[START].size() != 0 || self.children[END].size() != 0 || self.children[BACK].size() != 0 {
+            return Err("START has parents, END has children or BACK has children".into());
         }
         let mut alive_nodes = 0;
         let mut seen: Set<usize> = crate::hash::set();
@@ -1036,7 +1147,7 @@ impl Graph {
             for p in FIRST..n {
                 if self.alive[p] && self.children[p].size() == 1 {
                     let c = self.children[p].order[0];
-                    if c != p && c > END && self.parents[c].size() == 1 {
+                    if c != p && c >= FIRST && self.parents[c].size() == 1 {
                         return Err(format!("unary chain {p}->{c} survived compress"));
                     }
                 }

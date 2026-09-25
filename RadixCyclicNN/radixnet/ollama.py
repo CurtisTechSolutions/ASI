@@ -13,6 +13,22 @@ Two ways of hooking the network into a local large language model served by
   network's own generations (or given texts) and partitions them into ``bad``
   (failed) and ``good`` (passed) sets, ready for a 2NRL pass — an external
   discriminator in the spirit of the GAN loop.
+* **Letter-level correction** — :func:`correct_texts` makes the LLM play the
+  copy editor instead: every text comes back written out correctly with as few
+  characters changed as possible, and the *diff* between the two
+  (:mod:`radixnet.diff`) says exactly which characters were the mistake.
+  ``"Hi howe are you??"`` corrected to ``"Hi, how are you?"`` blames the
+  ``e`` and the second ``?`` (and the missing comma), nothing else: that is
+  what :func:`radixnet.blame.teach_corrections` hands the negative network
+  (:meth:`radixnet.negative.NegativeNet.correct`), while a text the editor
+  handed back unchanged clears blame.  :func:`adversarial_correction` runs it
+  over the network's own generations (or given texts).
+* **Thoughts** — a thinking model (``qwen3``, ``deepseek-r1``, ``gpt-oss``,
+  ...) answers with its reasoning beside the answer when asked to
+  (``think: true``; Ollama returns it as ``thinking``, older models inline it
+  between ``<think>`` tags).  :func:`thoughts_from_prompt` asks the LLM for
+  questions about a prompt and then for its thinking on each, which is what
+  the network's own thoughts are trained from (:func:`radixnet.thinking.think_on`).
 
 The Ollama endpoint is taken from the ``OLLAMA_HOST`` environment variable
 (Ollama's own convention; ``host:port`` without a scheme is accepted), else
@@ -34,20 +50,27 @@ from typing import Any
 from .llm import LLMError, loads_lenient as _loads_lenient
 
 __all__ = [
+    "CORRECTION_VERDICTS",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "DEFAULT_URL",
     "OllamaClient",
     "OllamaError",
+    "adversarial_correction",
     "adversarial_review",
     "chat_line",
+    "correct_texts",
     "corpus_from_prompt",
     "normalise_url",
     "parse_lines",
     "review_conversation",
     "review_texts",
     "sample_texts",
+    "summarise_corrections",
     "summarise_reviews",
+    "split_thinking",
+    "thoughts_from_prompt",
+    "questions_from_prompt",
 ]
 
 DEFAULT_TIMEOUT = 120.0
@@ -141,8 +164,36 @@ class OllamaClient:
         json_mode: bool = False,
         options: dict | None = None,
         timeout: float | None = None,
+        think: bool | str | None = None,
     ) -> str:
-        """One completion (``POST /api/generate``, non-streaming); ``json_mode`` asks for a JSON answer."""
+        """One completion (``POST /api/generate``, non-streaming); ``json_mode`` asks for a JSON answer.
+
+        ``think`` is Ollama's own switch for a thinking model's reasoning (``True`` / ``False``, or a level
+        such as ``"high"``); the reasoning itself is not returned here - :meth:`complete` gives both halves.
+        """
+        return self.complete(
+            prompt, system=system, model=model, json_mode=json_mode, options=options, timeout=timeout, think=think,
+        )["response"]
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        model: str | None = None,
+        json_mode: bool = False,
+        options: dict | None = None,
+        timeout: float | None = None,
+        think: bool | str | None = None,
+    ) -> dict:
+        """One completion with the model's thinking beside its answer: ``{"response", "thinking"}``.
+
+        ``think`` asks a thinking model for its reasoning (Ollama's ``think`` field: ``True``, ``False`` or a
+        level - ``"low"``, ``"medium"``, ``"high"``); ``None`` leaves the choice to the model.  The reasoning
+        comes back as Ollama's ``thinking`` field when the server separates it, or is cut out of the answer
+        when the model wrote it inline between ``<think>`` tags (:func:`split_thinking`); it is ``""`` for a
+        model that does not think.
+        """
         body: dict[str, Any] = {"model": model or self.model, "prompt": prompt, "stream": False}
         if system:
             body["system"] = system
@@ -150,11 +201,17 @@ class OllamaClient:
             body["format"] = "json"
         if options:
             body["options"] = dict(options)
+        thinking_asked = think_value(think)
+        if thinking_asked is not None:
+            body["think"] = thinking_asked
         data = self._request("POST", "/api/generate", body, timeout)
         text = data.get("response") if isinstance(data, dict) else None
         if not isinstance(text, str):
             raise OllamaError("unexpected /api/generate response (no 'response' text)")
-        return text
+        thinking = data.get("thinking") if isinstance(data, dict) else None
+        if not isinstance(thinking, str) or not thinking.strip():
+            thinking, text = split_thinking(text)
+        return {"response": text, "thinking": thinking.strip()}
 
     def chat(
         self,
@@ -165,10 +222,11 @@ class OllamaClient:
         options: dict | None = None,
         timeout: float | None = None,
         tools: list[dict] | None = None,
+        think: bool | str | None = None,
     ) -> str:
         """One chat turn (``POST /api/chat``); ``messages`` are ``{"role", "content"}`` dicts."""
         message = self.chat_message(
-            messages, model=model, json_mode=json_mode, options=options, timeout=timeout, tools=tools
+            messages, model=model, json_mode=json_mode, options=options, timeout=timeout, tools=tools, think=think,
         )
         content = message.get("content")
         if not isinstance(content, str):
@@ -184,14 +242,16 @@ class OllamaClient:
         options: dict | None = None,
         timeout: float | None = None,
         tools: list[dict] | None = None,
+        think: bool | str | None = None,
     ) -> dict:
         """The whole assistant message of one chat turn.
 
         ``tools`` are JSON-schema function definitions (Ollama's own ``tools``
         format, see :meth:`radixnet.tools.ToolBox.schemas`); a model that
         supports tool calling answers with ``{"tool_calls": [...]}`` beside (or
-        instead of) ``content``.  The message is returned as it came, with
-        ``content`` guaranteed to be a string.
+        instead of) ``content``.  ``think`` asks a thinking model for its
+        reasoning, which comes back as the message's ``thinking``.  The message
+        is returned as it came, with ``content`` guaranteed to be a string.
         """
         body: dict[str, Any] = {"model": model or self.model, "messages": list(messages), "stream": False}
         if json_mode:
@@ -200,6 +260,9 @@ class OllamaClient:
             body["options"] = dict(options)
         if tools:
             body["tools"] = list(tools)
+        thinking_asked = think_value(think)
+        if thinking_asked is not None:
+            body["think"] = thinking_asked
         data = self._request("POST", "/api/chat", body, timeout)
         message = data.get("message") if isinstance(data, dict) else None
         if not isinstance(message, dict):
@@ -207,6 +270,52 @@ class OllamaClient:
         if not isinstance(message.get("content"), str):
             message["content"] = ""
         return message
+
+
+THINK_LEVELS = ("low", "medium", "high")
+"""The reasoning levels a thinking model may be asked for, beside plain on / off."""
+
+
+def think_value(think: bool | str | None) -> bool | str | None:
+    """Ollama's ``think`` field for a request: ``None`` (not sent), a bool, or one of :data:`THINK_LEVELS`.
+
+    A string is read leniently - ``"true"`` / ``"on"`` / ``"yes"`` and ``"false"`` / ``"off"`` / ``"no"`` are
+    the two bools, a level is a level - so the flag can come from a command line or a JSON body as it is.
+    """
+    if think is None or isinstance(think, bool):
+        return think
+    text = str(think).strip().lower()
+    if text in ("", "none", "default"):
+        return None
+    if text in ("true", "on", "yes", "1"):
+        return True
+    if text in ("false", "off", "no", "0"):
+        return False
+    if text in THINK_LEVELS:
+        return text
+    raise ValueError(f"think must be true, false or one of {', '.join(THINK_LEVELS)} (got {think!r})")
+
+
+_THINK_OPEN = re.compile(r"<(think|thinking|reasoning)>", re.IGNORECASE)
+
+
+def split_thinking(text: str) -> tuple[str, str]:
+    """``(thinking, answer)`` of an answer that wrote its reasoning inline between ``<think>`` tags.
+
+    The first tagged block is the thinking and everything else the answer; a
+    block left open is thinking to the end.  A text without tags is all answer.
+    """
+    text = str(text or "")
+    match = _THINK_OPEN.search(text)
+    if match is None:
+        return "", text.strip()
+    tag = match.group(1)
+    close = re.compile(rf"</{re.escape(tag)}>", re.IGNORECASE).search(text, match.end())
+    if close is None:
+        return text[match.end():].strip(), text[:match.start()].strip()
+    thinking = text[match.end():close.start()].strip()
+    answer = (text[:match.start()] + text[close.end():]).strip()
+    return thinking, answer
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +374,65 @@ def corpus_from_prompt(
     user = f"Topic / instructions: {prompt.strip()}\n\nWrite the {lines} lines now."
     text = client.generate(user, system=system, model=model, options={"temperature": 0.9 if style == "good" else 1.1})
     return parse_lines(text, limit=lines)
+
+
+_QUESTIONS_SYSTEM = (
+    "You write questions for a small language model to think about. Answer with exactly {n} lines and nothing "
+    "else: one short, concrete question per line, plain text, no numbering, no bullets, no quotes, no blank "
+    "lines, no headings and no commentary. Every question must be about the topic requested and answerable "
+    "in a sentence or two."
+)
+_THINK_SYSTEM = (
+    "Think the question through before you answer, step by step, in short plain sentences - say what you "
+    "know, what you are unsure of and ask yourself whether you are right - and then answer in one short "
+    "sentence."
+)
+
+
+def questions_from_prompt(
+    client: OllamaClient, prompt: str, lines: int = 5, model: str | None = None
+) -> list[str]:
+    """Ask the LLM for ``lines`` short questions about ``prompt`` - what the network will be taught to think about."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("prompt must be a non-empty string")
+    if lines < 1:
+        raise ValueError("lines must be >= 1")
+    user = f"Topic / instructions: {prompt.strip()}\n\nWrite the {lines} questions now."
+    text = client.generate(user, system=_QUESTIONS_SYSTEM.format(n=lines), model=model, options={"temperature": 0.9})
+    return parse_lines(text, limit=lines)
+
+
+def thoughts_from_prompt(
+    client: OllamaClient,
+    prompt: str,
+    lines: int = 5,
+    *,
+    model: str | None = None,
+    think: bool | str | None = True,
+    temperature: float = 0.7,
+) -> list[dict]:
+    """The LLM's thinking about ``prompt``: ``lines`` questions about it, and the thinking behind each answer.
+
+    Two calls a question: :func:`questions_from_prompt` writes the questions and
+    :meth:`OllamaClient.complete` (``think``) answers each one with its
+    reasoning.  Every entry is ``{"question", "thinking", "answer"}``, the
+    thinking and the answer each collapsed to one line; ``thinking`` is ``""``
+    for a model that does not think, which the caller reports rather than
+    trains on.  The thinking is what :func:`radixnet.thinking.think_on` teaches
+    the network as its own thoughts.
+    """
+    questions = questions_from_prompt(client, prompt, lines, model)
+    out: list[dict] = []
+    for question in questions:
+        got = client.complete(
+            question, system=_THINK_SYSTEM, model=model, think=think, options={"temperature": temperature},
+        )
+        out.append({
+            "question": question,
+            "thinking": " ".join(got["thinking"].split()),
+            "answer": " ".join(got["response"].split()),
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +597,204 @@ def summarise_reviews(source: str, model: str, threshold: float, texts: list[str
         "good": passed,
         "bad": failed,
     }
+
+# ---------------------------------------------------------------------------
+# letter-level correction
+# ---------------------------------------------------------------------------
+
+_CORRECT_SYSTEM = (
+    "You are a meticulous copy editor correcting short texts written by a small experimental character-level "
+    "language model. For each text write the corrected text: the same text in correct, natural English with the "
+    "SMALLEST possible change. Keep every character that is already right, keep the wording, the meaning and the "
+    "length as they are, and change only what is actually wrong: a misspelt letter, a missing or doubled "
+    "punctuation mark, a wrong ending, a missing word. Never rewrite, never add commentary, never quote. If a text "
+    "is already correct, return it exactly as it is. Name the kind of mistake with one word from this list: "
+    "{reasons}; use \"none\" for a text you did not change. Reply with JSON only, no prose, exactly of the form "
+    "{{\"corrections\": [{{\"index\": <int>, \"correction\": \"<the corrected text>\", \"reason\": "
+    "\"<one word from the list>\", \"note\": \"<one short sentence saying what was wrong, or 'nothing'>\"}}, "
+    "...]}} with one entry per text, in the given order and with the given index."
+)
+
+CORRECTION_VERDICTS = ("corrected", "unchanged", "uncorrected")
+"""What the editor did with a text: changed it, handed it back as it was, or could not be understood about it."""
+
+
+def _parse_corrections(raw: str, count: int) -> dict[int, dict]:
+    """``{index: {"correction", "reason", "note"}}`` for the entries that could be understood."""
+    data = _loads_lenient(raw)
+    items: Any = None
+    if isinstance(data, dict):
+        items = data.get("corrections")
+        if items is None:
+            items = data.get("results", data.get("items"))
+        if items is None and ("correction" in data or "corrected" in data):
+            items = [data]
+    elif isinstance(data, list):
+        items = data
+    parsed: dict[int, dict] = {}
+    if not isinstance(items, list):
+        return parsed
+    for position, item in enumerate(items):
+        if isinstance(item, str):  # a bare list of corrected lines
+            item = {"correction": item}
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index", position)
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            index = position
+        correction = item.get("correction", item.get("corrected", item.get("text")))
+        if not isinstance(correction, str):
+            continue
+        correction = correction.strip().strip("\"'`\u201c\u201d").strip()
+        reason = str(item.get("reason") or item.get("error") or "").strip().lower()
+        note = " ".join(str(item.get("note") or item.get("critique") or item.get("comment") or "").split())
+        if 0 <= index < count and index not in parsed:
+            parsed[index] = {"correction": correction, "reason": reason, "note": note}
+    return parsed
+
+
+def _correction_entry(index: int, text: str, correction: str | None, reason: str, note: str) -> dict:
+    """One :func:`correct_texts` result: the diff against the correction, and what the editor said."""
+    from . import blame as blame_module
+    from . import diff
+
+    entry: dict[str, Any] = {"index": index, "text": text}
+    if correction is None:
+        entry.update(
+            correction=None, verdict="uncorrected", reason="", note=note or "no correction returned",
+            changes=[], edits=0, wrong_chars=0, right_chars=0,
+        )
+        return entry
+    changes = [
+        {"op": e.op, "wrong": e.wrong, "right": e.right, "at": [e.a0, e.a1], "to": [e.b0, e.b1]}
+        for e in diff.edits(text, correction) if e.op != "equal"
+    ]
+    changed = correction != text
+    entry.update(
+        correction=correction,
+        verdict="corrected" if changed else "unchanged",
+        reason=blame_module.correction_reason(reason, note, changes) if changed else "none",
+        note=note or ("nothing" if not changed else "corrected"),
+        changes=changes,
+        edits=len(changes),
+        wrong_chars=sum(e["at"][1] - e["at"][0] for e in changes),
+        right_chars=sum(e["to"][1] - e["to"][0] for e in changes),
+    )
+    return entry
+
+
+def correct_texts(
+    client: OllamaClient,
+    texts: list[str],
+    *,
+    context: str | None = None,
+    model: str | None = None,
+    batch: int = 20,
+) -> list[dict]:
+    """Letter-level corrections of ``texts`` (input order): ``{index, text, correction, verdict, reason, note,
+    changes, edits, wrong_chars, right_chars}`` each.
+
+    ``verdict`` is ``"corrected"`` when the editor changed something,
+    ``"unchanged"`` when it handed the text back as it was (it is correct, so
+    it clears blame), and ``"uncorrected"`` when its answer could not be
+    understood for that text (``correction`` is ``None``: nothing is known
+    about it, so it neither blames nor clears).  ``changes`` are the edits of
+    the alignment (:func:`radixnet.diff.edits`), ``{"op", "wrong", "right",
+    "at": [a0, a1], "to": [b0, b1]}``, with the equal runs left out; ``reason``
+    is the editor's word for the mistake, mapped onto
+    :data:`radixnet.blame.CORRECTION_REASONS` (the shape of the diff decides
+    when it gave none).  Blank texts are ``uncorrected`` without asking.
+    """
+    from .blame import CORRECTION_REASONS
+
+    if batch < 1:
+        raise ValueError("batch must be >= 1")
+    results: list[dict] = []
+    system = _CORRECT_SYSTEM.format(reasons=", ".join(r for r in CORRECTION_REASONS if r != "none"))
+    for start in range(0, len(texts), batch):
+        chunk = [str(t) for t in texts[start : start + batch]]
+        asked = [(i, t) for i, t in enumerate(chunk) if t.strip()]
+        parsed: dict[int, dict] = {}
+        if asked:
+            numbered = "\n".join(f"[{i}] {t}" for i, t in asked)
+            user = (
+                (f"Context: {context.strip()}\n\n" if context and context.strip() else "")
+                + f"Correct these {len(asked)} texts:\n{numbered}\n\nReturn the JSON now."
+            )
+            raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": 0.0})
+            parsed = _parse_corrections(raw, len(chunk))
+        for i, text in enumerate(chunk):
+            if not text.strip():
+                results.append(_correction_entry(start + i, text, None, "", "empty output"))
+            elif i in parsed:
+                item = parsed[i]
+                results.append(_correction_entry(start + i, text, item["correction"], item["reason"], item["note"]))
+            else:
+                results.append(_correction_entry(start + i, text, None, "", ""))
+    return results
+
+
+def adversarial_correction(
+    model: Any,
+    client: OllamaClient,
+    *,
+    count: int = 8,
+    prefix: str = "",
+    max_length: int = 60,
+    temperature: float = 1.0,
+    texts: list[str] | None = None,
+    context: str | None = None,
+    ollama_model: str | None = None,
+    seed: int | None = None,
+) -> dict:
+    """Let the LLM copy-edit the network's own output (or ``texts``), letter by letter.
+
+    Returns the :func:`summarise_corrections` shape: ``{"source", "model",
+    "texts", "corrections", "corrected", "unchanged", "uncorrected", "edits",
+    "wrong_chars", "right_chars", "change_rate"}``.
+    """
+    if texts is None:
+        if model is None:
+            raise ValueError("either a model to sample from or texts to correct is required")
+        samples = sample_texts(model, count, prefix=prefix, max_length=max_length, temperature=temperature, seed=seed)
+        source = "model"
+    else:
+        samples = [str(t) for t in texts]
+        source = "given"
+    corrections = correct_texts(client, samples, context=context, model=ollama_model)
+    return summarise_corrections(source, ollama_model or client.model, samples, corrections)
+
+
+def summarise_corrections(source: str, model: str, texts: list[str], corrections: list[dict]) -> dict:
+    """Split a copy-edited set into what was changed, what was right as it was, and what got no answer.
+
+    ``change_rate`` is the share of the answered texts the editor changed
+    (``None`` when it answered none): the copy editor's counterpart of the
+    reviewer's pass rate, falling as the model's writing improves.  Separate
+    from :func:`adversarial_correction` for the same reason
+    :func:`summarise_reviews` is: a server samples under its model lock and
+    corrects outside it.
+    """
+    corrected = [c["text"] for c in corrections if c["verdict"] == "corrected"]
+    unchanged = [c["text"] for c in corrections if c["verdict"] == "unchanged"]
+    uncorrected = [c["text"] for c in corrections if c["verdict"] == "uncorrected"]
+    answered = len(corrected) + len(unchanged)
+    return {
+        "source": source,
+        "model": model,
+        "texts": list(texts),
+        "corrections": corrections,
+        "corrected": corrected,
+        "unchanged": unchanged,
+        "uncorrected": uncorrected,
+        "edits": sum(int(c.get("edits") or 0) for c in corrections),
+        "wrong_chars": sum(int(c.get("wrong_chars") or 0) for c in corrections),
+        "right_chars": sum(int(c.get("right_chars") or 0) for c in corrections),
+        "change_rate": len(corrected) / answered if answered else None,
+    }
+
 
 # ---------------------------------------------------------------------------
 # conversing with the network, and marking the conversation

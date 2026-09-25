@@ -228,6 +228,46 @@ func (g *Graph) RecordFailure(edges []int, severity float64, reason string) int 
 	return touched
 }
 
+// RecordFailureShared is RecordFailure with every edge blamed severity times
+// its share - the attention band's charges (attention.go), so a step that only
+// glimpsed a change at the edge of its gram carries less of it.  Every listed
+// edge still counts one failure: it was part of one.
+func (g *Graph) RecordFailureShared(edges []int, severity float64, shares []float64, reason string) int {
+	n := g.Neg
+	if n == nil || len(shares) != len(edges) {
+		return 0
+	}
+	amount := math.Abs(severity)
+	if math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return 0
+	}
+	id := n.ReasonID(reason)
+	touched := 0
+	added := 0.0 // the blame laid, edge by edge
+	for i, e := range edges {
+		if e < 0 || e >= len(n.Blame) || !g.EdgeAlive[e] {
+			continue
+		}
+		owed := float64(amount * shares[i])
+		n.Blame[e] += owed
+		n.Fails[e]++
+		if owed > 0 {
+			n.Reasons[e] = addReasonBlame(n.Reasons[e], id, owed)
+		}
+		g.dirty[g.EdgeParent[e]] = struct{}{}
+		added += owed
+		touched++
+	}
+	if touched > 0 {
+		n.TotalBlame += added
+		n.TotalFails.Add(int64(touched))
+		n.ReasonBlame[id] += added
+		n.ReasonFails[id]++
+		g.Version.Add(1)
+	}
+	return touched
+}
+
 // addReasonBlame adds amount to one reason of an edge, dropping the weakest
 // entry when the list is full (the graph totals keep it).
 func addReasonBlame(list []ReasonBlame, id int, amount float64) []ReasonBlame {
@@ -911,6 +951,10 @@ type NegativeCorrection struct {
 //     sentence shares with it;
 //   - an edge the correction walks too is never blamed - the network wrote the
 //     right characters by another route.
+//
+// With the attention band on (attention.go) a step is blamed severity times
+// its charge for the changed characters its grams see, the gram with a change
+// at its centre the most, rather than severity for the characters it wrote.
 func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeCorrection, error) {
 	if err := m.requireNegative("teaching a correction"); err != nil {
 		return nil, err
@@ -947,15 +991,27 @@ func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeC
 		}
 	}
 	blamed := []int{}
-	for _, step := range m.stepsOver(grams, enc.Len(wrong), wrongSpans) {
+	shares := []float64{}
+	for _, step := range m.chargedSteps(grams, enc.Len(wrong), wrongSpans) {
 		if !cleared[step.Edge] {
 			blamed = append(blamed, step.Edge)
+			shares = append(shares, step.Charge)
 		}
 	}
 	if len(blamed) > 0 && amount > 0 {
-		out.Blamed = m.G.RecordFailure(blamed, amount, reason)
+		laid := 0.0
+		if m.G.Attention.On {
+			// each step blamed by its share of what its grams saw (attention.go)
+			out.Blamed = m.G.RecordFailureShared(blamed, amount, shares, reason)
+			for _, share := range shares { // every edge of a traced path is alive
+				laid += float64(amount * share)
+			}
+		} else {
+			out.Blamed = m.G.RecordFailure(blamed, amount, reason)
+			laid = amount * float64(out.Blamed)
+		}
 		m.metaAddInt("failures_total", 1)
-		m.metaAddFloat("blame_total", amount*float64(out.Blamed))
+		m.metaAddFloat("blame_total", laid)
 		m.metaAddInt("trained_texts", 1)
 		m.metaAddInt("trained_chars", int64(enc.Len(wrong)))
 		m.addSource(o.Source)
@@ -1319,6 +1375,7 @@ func (m *Model) negativeStats(lastLoss any) map[string]any {
 		"unit":                    string(g.Enc.Unit),
 		"ngram":                   g.Enc.N,
 		"stride":                  g.Enc.Stride,
+		"attention_blur":          g.Attention.BlurOrNil(),
 		"compression_ratio":       g.CompressionRatio(),
 		"inverted":                g.Inverted,
 		"backend":                 "go",

@@ -1,7 +1,9 @@
 package radixnet
 
 import (
+	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -249,4 +251,84 @@ func ruleName(rule *string) string {
 		return ""
 	}
 	return *rule
+}
+
+func TestTerseVerdictsKeepOnlyTheDecision(t *testing.T) {
+	whole := duoPair(t, DefaultFilterConfig())
+	config := DefaultFilterConfig()
+	config.Provenance = false
+	terse := duoPair(t, config)
+	texts := []string{duoFailure, duoCorpus[0], "a wholly unrelated sentence"}
+	full, err := whole.Filter(texts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief, err := terse.Filter(texts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(brief.Verdicts) != 3 || len(brief.Rejected) != 1 || len(brief.Kept) != 2 {
+		t.Fatalf("the same decisions: %+v", brief)
+	}
+	for i, verdict := range brief.Verdicts {
+		if verdict.Decision != full.Verdicts[i].Decision || verdict.Text != full.Verdicts[i].Text {
+			t.Fatalf("the decision is unchanged: %+v vs %+v", verdict, full.Verdicts[i])
+		}
+		if (verdict.Rule == nil) != (full.Verdicts[i].Rule == nil) || (verdict.Rule != nil && *verdict.Rule != *full.Verdicts[i].Rule) {
+			t.Fatalf("and so is the rule: %+v vs %+v", verdict, full.Verdicts[i])
+		}
+		if !verdict.IsTerse() || verdict.Why != "" || verdict.Reasons != nil {
+			t.Fatalf("nothing else survives: %+v", verdict)
+		}
+		raw, err := json.Marshal(verdict)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var keys map[string]any
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			t.Fatal(err)
+		}
+		if len(keys) != 3 || keys["text"] != verdict.Text || keys["decision"] != verdict.Decision {
+			t.Fatalf("a terse verdict serialises as exactly {text, decision, rule}: %s", raw)
+		}
+		if _, ok := keys["rule"]; !ok {
+			t.Fatalf("rule is always there, null when nothing rejected: %s", raw)
+		}
+	}
+	if raw, _ := json.Marshal(full.Verdicts[0]); !strings.Contains(string(raw), `"why"`) || full.Verdicts[0].IsTerse() {
+		t.Fatalf("a whole verdict still says why: %s", raw)
+	}
+	if terse.Describe()["config"].(map[string]any)["provenance"] != false || whole.Describe()["config"].(map[string]any)["provenance"] != true {
+		t.Fatal("the pair describes the setting")
+	}
+	// the output paths report terse verdicts too, and decide the same
+	o := DefaultGenerateOptions()
+	o.MaxLength, o.Mode = 30, "beam"
+	out, err := terse.Generate(2, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, verdict := range append(out.Verdicts, out.Rejected...) {
+		if !verdict.IsTerse() {
+			t.Fatalf("generate reports terse verdicts: %+v", verdict)
+		}
+	}
+	prediction, err := terse.Predict("the ", PredictOptions{Length: 10, Mode: "beam", K: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, verdict := range prediction.Verdicts {
+		if !verdict.IsTerse() {
+			t.Fatalf("predict reports terse verdicts: %+v", verdict)
+		}
+	}
+	// learning still blames what was vetoed
+	terse.Config.Learn = true
+	before := terse.Negative.G.Neg.TotalBlame
+	if _, err := terse.Filter([]string{duoFailure}); err != nil {
+		t.Fatal(err)
+	}
+	if terse.Negative.G.Neg.TotalBlame <= before {
+		t.Fatal("learn still blames without provenance")
+	}
 }

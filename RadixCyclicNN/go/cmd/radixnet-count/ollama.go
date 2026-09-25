@@ -11,18 +11,24 @@ import (
 )
 
 // The LLM command groups: a training corpus written to order, the adversarial
-// review that feeds the negative network, and ChatGPT's own two actions.
+// review and the copy editor's corrections that feed the negative network, and
+// ChatGPT's own two actions.
 
 func ollamaUsage() {
 	fmt.Fprint(os.Stderr, `usage: radixnet-count [global options] ollama <action> [options]
 
-Two ways of hooking the network into a local large language model: a corpus written to
-order, and an adversarial review of what the network itself writes.
+Three ways of hooking the network into a local large language model: a corpus written to
+order, an adversarial review of what the network itself writes, a copy editor's
+letter-level corrections of it, and a thinking model's thoughts taught to the network.
 
 actions:
   models   list the models the endpoint offers (never fails: it answers "is it there?")
   corpus   ask for --lines lines about --prompt (--style good | garbage), optionally training on them
   review   let the LLM mark --count samples (or --text / --data), optionally blaming the failures
+  correct  let the LLM write --count samples (or --text / --data) out correctly, changing as little
+           as it can; with --blame only the characters it changed are blamed
+  think    a thinking model thinks about --prompt: --lines questions and the thinking behind each answer;
+           --train teaches the thinking as thoughts that begin at the THINK sentinel
 
 --url and --ollama-model override $OLLAMA_HOST and $RADIXNET_OLLAMA_MODEL.
 `)
@@ -41,10 +47,14 @@ func cmdOllama(args []string) {
 		cmdOllamaCorpus(rest)
 	case "review":
 		cmdOllamaReview(rest)
+	case "correct":
+		cmdOllamaCorrect(rest)
+	case "think":
+		cmdOllamaThink(rest)
 	case "help", "-h", "--help":
 		ollamaUsage()
 	default:
-		fail("unknown ollama action %q (models, corpus, review)", action)
+		fail("unknown ollama action %q (models, corpus, review, correct, think)", action)
 	}
 }
 
@@ -189,6 +199,133 @@ func cmdOllamaCorpus(args []string) {
 	}
 }
 
+// cmdOllamaThink has Ollama think about a prompt, and the network taught its
+// thinking as thoughts of its own (Model.ThinkOn).
+func cmdOllamaThink(args []string) {
+	fs := flag.NewFlagSet("ollama think", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	prompt := fs.String("prompt", "", "what to think about (required)")
+	lines := fs.Int("lines", 5, "questions to think about")
+	think := fs.String("think", "true", "ask the model to think: true | false | low | medium | high ('' leaves it to the model)")
+	temperature := fs.Float64("temperature", 0.7, "sampling temperature")
+	out := fs.String("out", "", "write the thinking to this file, one thought per line")
+	train := fs.Bool("train", false, "teach the model the thinking as thoughts, then save it")
+	withAnswers := fs.Bool("with-answers", false, "with -train: train the answers as texts too")
+	noQuestions := fs.Bool("no-questions", false, "with -train: do not teach where a thought questions itself")
+	epochs := fs.Int("epochs", 10, "training epochs with -train")
+	fs.Float64("lr", 0.5, "accepted for the Python CLI's sake; the count model has no learning rate")
+	fs.Int("batch-size", 4, "accepted for the Python CLI's sake; the count model has no batches")
+	modelOut := fs.String("model-out", "", "where to save the model with -train (default: --model)")
+	_ = fs.Parse(args)
+
+	if strings.TrimSpace(*prompt) == "" {
+		fail("-prompt is required: say what to think about")
+	}
+	level, err := radixnet.ThinkValue(*think)
+	if err != nil {
+		fail("%v", err)
+	}
+	client, ok := flags.client(radixnet.ProviderOllama).(*radixnet.OllamaClient)
+	if !ok {
+		fail("thinking needs an Ollama client")
+	}
+	levelText := "the model's choice"
+	if level != nil {
+		levelText = fmt.Sprint(level)
+	}
+	say("ollama     %s: %s", client.BaseURL(), client.ModelName())
+	say("prompt     %s", quote(clip(*prompt, 60)))
+	say("questions  %d", *lines)
+	say("think      %s", levelText)
+	thoughts, err := radixnet.ThoughtsFromPrompt(client, *prompt, *lines, client.ModelName(), level, *temperature)
+	if err != nil {
+		fail("%v", err)
+	}
+	if len(thoughts) == 0 {
+		fail("Ollama model %q wrote no questions to think about", client.ModelName())
+	}
+	thinking, answers := []string{}, []string{}
+	for _, t := range thoughts {
+		if t.Thinking != "" {
+			thinking = append(thinking, t.Thinking)
+		}
+		if t.Answer != "" {
+			answers = append(answers, t.Answer)
+		}
+	}
+	say("")
+	for i, entry := range thoughts {
+		say("%3d  %s", i+1, entry.Question)
+		if entry.Thinking != "" {
+			say("     thinking: %s", clip(entry.Thinking, 200))
+		} else {
+			say("     thinking: (none: the model did not think)")
+		}
+		say("     answer:   %s", clip(entry.Answer, 200))
+	}
+	doc := map[string]any{
+		"url": client.BaseURL(), "model": client.ModelName(), "prompt": *prompt, "think": level,
+		"count": len(thoughts), "thinking": len(thinking), "thoughts": thoughts, "out": nil, "trained": nil,
+	}
+	if *out != "" {
+		text := strings.Join(thinking, "\n")
+		if len(thinking) > 0 {
+			text += "\n"
+		}
+		if err := os.WriteFile(*out, []byte(text), 0o644); err != nil {
+			fail("cannot write %s: %v", *out, err)
+		}
+		doc["out"] = *out
+		say("")
+		say("wrote %d thought(s) to %s", len(thinking), *out)
+	}
+	if *train {
+		if len(thinking) == 0 {
+			fail("Ollama model %q returned no thinking to train on: use a thinking model (qwen3, deepseek-r1, "+
+				"gpt-oss, ...) on an Ollama that separates it, or -think true", client.ModelName())
+		}
+		m := openModel(false)
+		if m.IsNegative() {
+			fail("the negative network judges; it does not think (a negative model cannot be taught thoughts)")
+		}
+		target := *modelOut
+		if target == "" {
+			target = modelFile()
+		}
+		say("")
+		say("model      %s", modelFile())
+		say("training   thoughts=%d epochs=%d%s", len(thinking), *epochs, map[bool]string{true: " +answers", false: ""}[*withAnswers])
+		say("output     %s", target)
+		opts := radixnet.TrainOptions{Epochs: *epochs, AutoCompress: true}
+		learned, err := m.ThinkOn(thinking, opts, !*noQuestions, 1.0)
+		if err != nil {
+			fail("%v", err)
+		}
+		answerEpochs := 0
+		if *withAnswers && len(answers) > 0 {
+			records, err := m.Train(answers, opts)
+			if err != nil {
+				fail("%v", err)
+			}
+			answerEpochs = len(records)
+		}
+		if err := m.Save(target); err != nil {
+			fail("cannot save %s: %v", target, err)
+		}
+		doc["trained"] = map[string]any{
+			"out": target, "thoughts": learned.Thoughts, "questions": learned.Questions, "taught": learned.Taught,
+			"epochs": learned.Epochs, "answers": answerEpochs, "saved": target, "stats": m.Stats(),
+		}
+		say("")
+		say("taught %d thought(s) and %d question(s) it asked itself; it now stops to think at %d more node(s)",
+			learned.Thoughts, learned.Questions, learned.Taught)
+		say("saved to %s", target)
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
 func cmdOllamaReview(args []string) {
 	var texts, data multiFlag
 	fs := flag.NewFlagSet("ollama review", flag.ExitOnError)
@@ -273,6 +410,128 @@ func cmdOllamaReview(args []string) {
 	if jsonMode {
 		emit(doc)
 	}
+}
+
+// cmdOllamaCorrect lets the LLM copy-edit the network's samples (or the given
+// texts); the diff is what the negative network learns.
+func cmdOllamaCorrect(args []string) {
+	var texts, data multiFlag
+	fs := flag.NewFlagSet("ollama correct", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	fs.Var(&texts, "text", "correct this text instead of sampling (repeatable)")
+	fs.Var(&data, "data", "correct the texts of FILE (one per line) instead of sampling")
+	count := fs.Int("count", 8, "samples to draw from the model")
+	prefix := fs.String("prefix", "", "continue this prefix instead of generating from scratch")
+	maxLength := fs.Int("max-length", 60, "characters per sample")
+	temperature := fs.Float64("temperature", 1.0, "sampling temperature")
+	context := fs.String("context", "", "extra context for the editor (e.g. what the model was trained on)")
+	blame := fs.Bool("blame", false, "teach the negative network: blame only the characters the editor changed, "+
+		"under its reason, and let the unchanged texts clear blame")
+	severity := fs.Float64("severity", radixnet.CorrectionSeverity, "blame per corrected text with -blame (1 = one ordinary failure)")
+	addNegativeFlag(fs)
+	_ = fs.Parse(args)
+
+	if *severity < 0 {
+		fail("-severity must be >= 0, got %v", *severity)
+	}
+	client := flags.client(radixnet.ProviderOllama)
+	o := radixnet.AdversarialCorrectionOptions{
+		Count: *count, Prefix: *prefix, MaxLength: *maxLength, Temperature: *temperature,
+		Context: *context, Model: client.ModelName(),
+	}
+	var model *radixnet.Model
+	given := append([]string{}, texts...) // a blank text is handed back uncorrected, so it stays in the set
+	if len(data) > 0 {
+		given = append(given, readTexts(data, "lines", 0)...)
+	}
+	if len(given) > 0 {
+		o.Texts = given
+	} else {
+		model = openModel(true)
+		seed := seedFlag
+		o.Seed = &seed
+	}
+	say("ollama     %s: %s", client.BaseURL(), client.ModelName())
+	if len(given) > 0 {
+		say("correcting %d given text(s)", len(given))
+	} else {
+		say("correcting %d sample(s) of %d chars", *count, *maxLength)
+	}
+	say("")
+	result, err := radixnet.AdversarialCorrection(model, client, o)
+	if err != nil {
+		fail("%v", err)
+	}
+	say("%-11s %-42s %-42s %-14s %s", "verdict", "text", "correction", "reason", "changes")
+	for _, entry := range result.Corrections {
+		correction := "-"
+		if entry.Correction != nil {
+			correction = quote(clip(*entry.Correction, 40))
+		}
+		reason := entry.Reason
+		if reason == "" {
+			reason = "-"
+		}
+		say("%-11s %-42s %-42s %-14s %s", entry.Verdict, quote(clip(entry.Text, 40)), correction, reason,
+			changesOf(entry.Changes, 4))
+	}
+	say("")
+	say("%d texts: %d corrected (%d change(s), %d wrong character(s)), %d unchanged, %d uncorrected; change rate %s",
+		len(result.Corrections), len(result.Corrected), result.Edits, result.WrongChars, len(result.Unchanged),
+		len(result.Uncorrected), fmtRate(result.ChangeRate))
+	doc := map[string]any{
+		"source": result.Source, "model": result.Model, "texts": result.Texts, "corrections": result.Corrections,
+		"corrected": result.Corrected, "unchanged": result.Unchanged, "uncorrected": result.Uncorrected,
+		"edits": result.Edits, "wrong_chars": result.WrongChars, "right_chars": result.RightChars,
+		"change_rate": result.ChangeRate, "negative": nil,
+	}
+	if *blame {
+		negative := openNegative(false)
+		say("")
+		say("negative model: %s", negativeFile())
+		say("blaming the changed characters of %d corrected text(s) at severity %g", len(result.Corrected), *severity)
+		report, err := radixnet.TeachCorrections(negative, result.Corrections, *severity, true, "correction",
+			radixnet.TeachOptions{})
+		if err != nil {
+			fail("%v", err)
+		}
+		saved := saveNegative(negative)
+		say("blamed %d text(s) over %d edge(s) (%d changed unit(s)), cleared %d of %d unchanged",
+			report.Blamed, report.Edges, report.Edits, report.Cleared, report.Passed)
+		say("negative model: %s", saved)
+		reasonTable(negative, 10)
+		doc["negative"] = map[string]any{
+			"path": saved, "taught": report, "reasons": negative.Reasons(), "stats": negative.Stats(),
+		}
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+// changesOf renders the edits of one correction for a table cell:
+// "e" -> "", "??" -> "?".
+func changesOf(changes []radixnet.Change, limit int) string {
+	parts := []string{}
+	for i, change := range changes {
+		if i >= limit {
+			parts = append(parts, fmt.Sprintf("+%d", len(changes)-limit))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s -> %s", quote(change.Wrong), quote(change.Right)))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// fmtRate renders a share that may be unknown.
+func fmtRate(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.4f", *value)
 }
 
 // -- ChatGPT ------------------------------------------------------------------

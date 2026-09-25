@@ -60,6 +60,10 @@ pub struct Plan {
     /// `min_delta` (0 = off).
     pub patience: usize,
     pub min_delta: f64,
+    /// Read every text backwards, in the encoding's units ([`read`], the
+    /// spec's section 9), before anything else sees it - so the order, the
+    /// buffer and the counters all see the reversed texts.
+    pub reverse: bool,
 }
 
 impl Default for Plan {
@@ -71,7 +75,20 @@ impl Default for Plan {
             replay_size: None,
             patience: 0,
             min_delta: 0.0,
+            reverse: false,
         }
+    }
+}
+
+/// The texts of one training call as `plan` reads them: each backwards, unit
+/// by unit, with `reverse` ([`crate::encoding::Encoding::reverse`]), and
+/// borrowed as they are without.  Every kind reads its texts through this
+/// first, exactly once per run.
+pub fn read<'a>(enc: &crate::encoding::Encoding, texts: &'a [String], plan: &Plan) -> std::borrow::Cow<'a, [String]> {
+    if plan.reverse {
+        std::borrow::Cow::Owned(texts.iter().map(|t| enc.reverse(t)).collect())
+    } else {
+        std::borrow::Cow::Borrowed(texts)
     }
 }
 
@@ -118,7 +135,8 @@ impl Plan {
         Ok(())
     }
 
-    /// The six settings as a training config writes them, after its own.
+    /// The seven settings as a training config writes them, after its own -
+    /// Python's `TrainConfig` field order.
     pub fn json_pairs(&self) -> Vec<(String, Json)> {
         vec![
             ("order".to_string(), Json::str(self.order.clone())),
@@ -130,6 +148,7 @@ impl Plan {
             ),
             ("patience".to_string(), Json::Int(self.patience as i64)),
             ("min_delta".to_string(), Json::Num(self.min_delta)),
+            ("reverse".to_string(), Json::Bool(self.reverse)),
         ]
     }
 }
@@ -525,6 +544,87 @@ mod tests {
         m.train(&texts[..2], &drop).unwrap();
         assert!(m.replay.is_none());
         assert!(m.to_doc().get("replay").is_none());
+    }
+
+    #[test]
+    fn reverse_reads_the_units_backwards() {
+        let chars = crate::encoding::Encoding::default();
+        let words = crate::encoding::parse_encoding("word:2:1").unwrap();
+        assert_eq!(chars.reverse("héllo wörld"), "dlröw olléh");
+        assert_eq!(chars.reverse("the cat\n"), "\ntac eht");
+        assert_eq!(chars.reverse(""), "");
+        assert_eq!(words.reverse("  the  cat\tsat\n"), "sat cat the");
+        assert_eq!(words.reverse("one"), "one");
+        assert_eq!(words.reverse(" \t "), "");
+        // a combining accent stays a code point of its own, so twice is the text again
+        let text = "cafe\u{301} au lait";
+        assert_eq!(chars.reverse(&chars.reverse(text)), text);
+        // read borrows the texts when the plan reads them forwards
+        let texts = vec!["abc".to_string()];
+        assert!(matches!(
+            read(&chars, &texts, &Plan::default()),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    /// A model's document with the clock taken out: what two runs that read
+    /// the same texts must agree on byte for byte.
+    fn timeless(doc: &Json) -> Json {
+        match doc {
+            Json::Obj(pairs) => Json::Obj(
+                pairs
+                    .iter()
+                    .filter(|(k, _)| !matches!(k.as_str(), "seconds" | "saved_at" | "created"))
+                    .map(|(k, v)| (k.clone(), timeless(v)))
+                    .collect(),
+            ),
+            Json::Arr(items) => Json::Arr(items.iter().map(timeless).collect()),
+            other => other.clone(),
+        }
+    }
+
+    #[test]
+    fn a_reversed_run_is_a_run_over_the_reversed_texts() {
+        use crate::kinds::{new_model, train, TrainSettings};
+        let texts: Vec<String> = (0..20).map(|i| format!("the cat number {i} sat on the mat")).collect();
+        for kind in ["count", "radix", "resonant", "negative"] {
+            for spec in ["char:3:1", "word:2:1"] {
+                let enc = crate::encoding::parse_encoding(spec).unwrap();
+                let reversed: Vec<String> = texts.iter().map(|t| enc.reverse(t)).collect();
+                // every kind trains through kinds::train, as the servers and the CLI do
+                let run = |texts: &[String], reverse: bool| {
+                    let mut m = new_model(kind, 3, enc, &[]).unwrap();
+                    let mut s = TrainSettings::default();
+                    s.config.epochs = 2;
+                    s.config.plan.reverse = reverse;
+                    train(&mut m, texts, &s, &mut |_| true).unwrap();
+                    timeless(&m.to_doc()).render(0)
+                };
+                let want = run(&reversed, false);
+                assert_ne!(want, run(&texts, false), "{kind} {spec}: backwards is not forwards");
+                assert_eq!(run(&texts, true), want, "{kind} {spec}");
+            }
+        }
+        // and the library's own entry point reads them backwards exactly once
+        use crate::model::{Model, TrainOptions};
+        let reversed: Vec<String> = texts
+            .iter()
+            .map(|t| crate::encoding::Encoding::default().reverse(t))
+            .collect();
+        let run = |texts: &[String], reverse: bool| {
+            let mut m = Model::new(3, crate::GraphOptions::default()).unwrap();
+            let opts = TrainOptions {
+                epochs: 2,
+                plan: Plan {
+                    reverse,
+                    ..Plan::default()
+                },
+                ..TrainOptions::default()
+            };
+            m.train(texts, &opts).unwrap();
+            timeless(&m.to_doc()).render(0)
+        };
+        assert_eq!(run(&texts, true), run(&reversed, false));
     }
 
     #[test]

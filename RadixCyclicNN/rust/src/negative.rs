@@ -303,6 +303,56 @@ impl Graph {
         touched
     }
 
+    /// [`Graph::record_failure`] with every edge blamed `severity` times its
+    /// share - the attention band's charges ([`crate::attention`]), so a step
+    /// that only glimpsed a change at the edge of its gram carries less of it.
+    /// Every listed edge still counts one failure: it was part of one.
+    pub fn record_failure_shared(&mut self, edges: &[usize], severity: f64, shares: &[f64], reason: &str) -> usize {
+        if self.neg.is_none() || shares.len() != edges.len() {
+            return 0;
+        }
+        let amount = severity.abs();
+        if !amount.is_finite() {
+            return 0;
+        }
+        let id = self.neg.as_mut().expect("checked").reason_id(reason);
+        let mut touched = 0;
+        let mut added = 0.0; // the blame laid, edge by edge
+        let mut parents: Vec<usize> = Vec::new();
+        {
+            let alive = &self.edge_alive;
+            let parent_of = &self.edge_parent;
+            let neg = self.neg.as_mut().expect("checked");
+            for (&e, &share) in edges.iter().zip(shares) {
+                if e >= neg.blame.len() || !alive[e] {
+                    continue;
+                }
+                let owed = amount * share;
+                neg.blame[e] += owed;
+                neg.fails[e] += 1;
+                if owed > 0.0 {
+                    add_reason_blame(&mut neg.reasons[e], id, owed);
+                }
+                parents.push(parent_of[e]);
+                added += owed;
+                touched += 1;
+            }
+            if touched > 0 {
+                neg.total_blame += added;
+                neg.total_fails.add(touched as i64);
+                neg.reason_blame[id] += added;
+                neg.reason_fails[id] += 1;
+            }
+        }
+        for p in parents {
+            self.dirty.insert(p);
+        }
+        if touched > 0 {
+            self.version.add(1);
+        }
+        touched
+    }
+
     /// Credits every listed alive edge with `weight` of cleared text; returns
     /// how many were credited.
     pub fn record_clear(&mut self, edges: &[usize], weight: f64) -> usize {
@@ -1507,7 +1557,10 @@ impl Model {
     /// wrote instead.  Only the steps of `wrong` that wrote a unit the teacher
     /// struck out or replaced are blamed; the correction clears blame wherever
     /// the failure structure already knows it (nothing is created); an edge
-    /// the correction walks too is never blamed.
+    /// the correction walks too is never blamed.  With the attention band on
+    /// ([`crate::attention`]) a step is blamed `severity * charge` for the
+    /// changed units its grams see, the gram with a change at its centre the
+    /// most.
     pub fn blame_correction(
         &mut self,
         wrong: &str,
@@ -1545,18 +1598,32 @@ impl Model {
                 }
             }
         }
-        let blamed: Vec<usize> = self
-            .steps_over(&grams, enc.len(wrong), &wrong_spans)
+        let steps: Vec<(usize, f64)> = self
+            .charged_steps(&grams, enc.len(wrong), &wrong_spans)
             .into_iter()
-            .map(|(_, e)| e)
-            .filter(|e| !cleared.contains(e))
+            .map(|s| (s.edge, s.charge))
+            .filter(|(e, _)| !cleared.contains(e))
             .collect();
+        let blamed: Vec<usize> = steps.iter().map(|&(e, _)| e).collect();
         if !blamed.is_empty() && amount != 0.0 {
-            out.blamed = self.g.record_failure(&blamed, amount, &reason);
+            let laid = if self.g.attention.is_on() {
+                // each step blamed by its share of what its grams saw
+                let shares: Vec<f64> = steps.iter().map(|&(_, charge)| charge).collect();
+                out.blamed = self.g.record_failure_shared(&blamed, amount, &shares, &reason);
+                // every edge of a traced path is alive: what record_failure_shared laid
+                let mut laid = 0.0;
+                for share in &shares {
+                    laid += amount * share;
+                }
+                laid
+            } else {
+                out.blamed = self.g.record_failure(&blamed, amount, &reason);
+                amount * out.blamed as f64
+            };
             {
                 let neg = self.neg.as_mut().expect("a negative model");
                 neg.failures_total.add(1);
-                neg.blame_total += amount * out.blamed as f64;
+                neg.blame_total += laid;
             }
             self.meta.trained_texts.add(1);
             self.meta.trained_chars.add(wrong.chars().count() as i64);
@@ -1892,6 +1959,11 @@ pub fn stats_json(model: &Model) -> Json {
         ("units".to_string(), Json::str(enc.units_name())),
         ("ngram".to_string(), Json::Int(enc.n as i64)),
         ("stride".to_string(), Json::Int(enc.stride as i64)),
+        // where a correction lands: the band's blur, null while it is off
+        (
+            "attention_blur".to_string(),
+            g.attention.blur.map(Json::Num).unwrap_or(Json::Null),
+        ),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str("rust")),

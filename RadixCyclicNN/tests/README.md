@@ -23,6 +23,7 @@ A few cover a behaviour rather than a module:
 | file | covers |
 |---|---|
 | `__init__.py` | puts the project root on `sys.path` so `radixnet` imports from a checkout |
+| `test_attention.py` | the **attention band** (`../radixnet/attention.py`, `../SPEC-AttentionBand.md`): the band's shape; the rule's three properties (one charge per changed unit, a whole text left alone, a unit one gram sees charged to it in full) over eight encodings; the charged steps; both kinds' corrections under the band, and off to the bit; the file block; the refusals; the CLI and the HTTP API |
 | `test_go_parity.py` | **the cross-language contract.** Trains the same corpus on both implementations and compares structure, counts, rewards, window, RNG state, predictions, generated texts, scores and conversations; blames the same failures and corrections and compares the verdicts character for character; and has each side read the other's model files. Skipped when `go` is not on `PATH`, and when `go build` of the CLI fails. |
 | `test_guard.py` | what the negative network stops on the way out, on every answer path |
 | `test_feedback.py` | ratings and the 2NRL phases they drive |
@@ -31,8 +32,8 @@ A few cover a behaviour rather than a module:
 | `test_phonetic.py` | the **phonetic units** (`../PhoneticTokenizer`, D-080): the text read as sounds, a label cut into the units it was made of, a prefix matched by its sounds, a prediction spelled back into words; skipped when the tokenizer is not importable |
 | `test_voice.py` | the **voice** (D-081): a walk reports every step and its END sentinel, and is heard as it goes; words and letters are read through the tokenizer; the `speak` command writes a WAV |
 | `test_acoustic_units.py` | the **acoustic unit** (D-082): a recording is heard as a text of learned units, a model is trained on such texts alone, saved and loaded, and spoken back through the vocoder; `train --data *.wav` and `speak` on the command line |
-| `test_search_training.py` | the **search and training methods** (`../SPEC-SearchAndTraining.md`): the sampling filters, the diverse beam, the keys (pinned - Go and Rust assert the same numbers), the curriculum, the replay buffer and early stopping on every kind that learns by walking texts, the rule that a feedback pass never touches the buffer, and the settings through the HTTP API and the CLI |
-| `test_rust_parity_methods.py` | the same methods against the Rust port: six training plans on three kinds, held to Python's graph, history and `replay` block byte for byte; the filters and the diverse beam, text for text; the server's 400s and a planned run over HTTP (`test_go_parity.py::TestGoSearchAndTraining` does the same for Go) |
+| `test_search_training.py` | the **search and training methods** (`../SPEC-SearchAndTraining.md`): the sampling filters, the diverse beam, the keys (pinned - Go and Rust assert the same numbers), the curriculum, the replay buffer and early stopping on every kind that learns by walking texts, the rule that a feedback pass never touches the buffer, and the settings through the HTTP API and the CLI; reading backwards (`reverse`) on every kind and both units - a reversed run is a run over the reversed texts - with an upload trained on backwards over HTTP and a file with `train --reverse` |
+| `test_rust_parity_methods.py` | the same methods against the Rust port: eight training plans on three kinds (two read backwards), held to Python's graph, history and `replay` block byte for byte; the filters and the diverse beam, text for text; the server's 400s and a planned run over HTTP (`test_go_parity.py::TestGoSearchAndTraining` does the same for Go) |
 
 Six modules have no file of their own, and are exercised through the callers
 that use them:

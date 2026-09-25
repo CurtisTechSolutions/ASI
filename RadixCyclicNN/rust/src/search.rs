@@ -2,7 +2,7 @@
 //! the stochastic walk.
 
 use crate::fsum::fsum;
-use crate::graph::{Graph, BACK, END, START};
+use crate::graph::{is_origin, Graph, BACK, END, FIRST, THINK};
 use crate::mt19937::Mt19937;
 use crate::penalty::PenaltyCosts;
 use crate::weights::ChildCost;
@@ -81,24 +81,37 @@ pub const PUNISH_TOLERANCE: f64 = 1e-12;
 /// most likely next step at this node is to stop rather than carry on: the walk
 /// hands over, which here means the branch offers nothing and the search goes
 /// on with its others.
+///
+/// `THINK` is not a continuation either, and the walk never takes it: stopping
+/// to think is not stopping, so it is dropped from the options and the real
+/// children stay on offer ([`crate::thinking`]).
 pub fn onward(costs: &mut Vec<ChildCost>) {
     let mut back = f64::INFINITY;
     let mut has_back = false;
+    let mut has_think = false;
     for it in costs.iter() {
         if it.child == BACK && (!has_back || it.cost < back) {
             back = it.cost;
             has_back = true;
         }
+        if it.child == THINK {
+            has_think = true;
+        }
     }
     if !has_back {
+        if has_think {
+            costs.retain(|it| it.child != THINK);
+        }
         return;
     }
-    let hand_over = !costs.iter().any(|it| it.child != BACK && it.cost < back);
+    let hand_over = !costs
+        .iter()
+        .any(|it| it.child != BACK && it.child != THINK && it.cost < back);
     if hand_over {
         costs.clear();
         return;
     }
-    costs.retain(|it| it.child != BACK);
+    costs.retain(|it| it.child != BACK && it.child != THINK);
 }
 
 /// Cuts `costs` down to the children the model has the least against - the
@@ -163,12 +176,12 @@ impl PathResult {
 }
 
 /// The number of characters the start node emits (its remainder after the
-/// matched trigram); `START` and `END` emit nothing.
+/// matched trigram); the sentinels emit nothing.
 pub(crate) fn start_emission(g: &Graph, start_node: usize, start_offset: usize) -> Result<usize, String> {
     if start_node >= g.num_node_ids() || !g.is_alive(start_node) {
         return Err(format!("start node {start_node} is not alive"));
     }
-    if start_node == START || start_node == END {
+    if start_node < FIRST {
         return Ok(0);
     }
     let len = g.label_len(start_node);
@@ -195,16 +208,14 @@ pub(crate) fn build_result(
 ) -> PathResult {
     let labels: Vec<String> = node_ids.iter().map(|&n| g.label(n).to_string()).collect();
     let start_node = node_ids[0];
-    let ctx = include_context.unwrap_or(start_node == START);
-    let offset = if start_node == START || start_node == END {
-        0
-    } else {
-        start_offset
-    };
+    // from START (or THINK) there is no matched context to strip: the first node in full
+    let ctx = include_context.unwrap_or(is_origin(start_node));
+    let offset = if start_node < FIRST { 0 } else { start_offset };
+    // sentinels are stripped by id: a real node may carry the label "<s>" or "</s>"
     let real: Vec<&str> = node_ids
         .iter()
         .enumerate()
-        .filter(|(_, &n)| n != START && n != END)
+        .filter(|(_, &n)| n >= FIRST)
         .map(|(i, _)| labels[i].as_str())
         .collect();
     let mut text = g.enc.decode_path(&real, offset, ctx);
@@ -368,7 +379,7 @@ impl Graph {
         let mut step_costs: Vec<f64> = Vec::new();
         let mut punish = 0.0f64;
         let mut steps = 0;
-        let mut came_from = if start_node == START { Some(START) } else { None };
+        let mut came_from = if is_origin(start_node) { Some(start_node) } else { None };
         let mut costs: Vec<ChildCost> = Vec::new();
         let mut weights: Vec<f64> = Vec::new();
         loop {

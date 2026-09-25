@@ -31,10 +31,12 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import attention as attention_band
+from .attention import DEFAULT_BLUR, AttentionBand
 from .backend import Backend, get_backend
 from .counter import CyclicCounter
 from .encoding import WINDOW, Decoder, Encoder, Encoding, _piece
-from .graph import BACK, END, FIRST, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, ORIGINS, START, THINK, RadixCyclicGraph
 from .beam import Prediction, beam_predict, default_beam
 from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
 from .search import LEAST_PUNISHED, REWARD, PathResult, check_sampling, dijkstra_predict, parse_traversal, sample_walk
@@ -152,6 +154,9 @@ class TrainConfig:
     """Stop after this many full epochs without the loss improving by ``min_delta`` (0 = off)."""
     min_delta: float = 0.0
     """How much an epoch's loss must fall below the best so far to count as an improvement."""
+    reverse: bool = False
+    """Read every text backwards, in the encoding's units: its last character (word) first, so the model
+    learns what comes *before* (``../SPEC-SearchAndTraining.md`` §9).  Off: the texts as given."""
 
     def rates(self) -> list[tuple[float, float]]:
         """``(lr, act_lr)`` for every epoch of this config, schedules applied (constant when none are set)."""
@@ -335,6 +340,9 @@ class GraphModel:
     description = ""
     units = "chars"
     """What a *new* model of this kind counts in; the encoding decides for a live one."""
+    takes_corrections = False
+    """Does this kind learn from a diff (``correct``)?  Only such a kind has anything for the attention band
+    (:mod:`radixnet.attention`) to spread, so only such a kind accepts one."""
 
     @property
     def counts_in(self) -> str:
@@ -353,6 +361,19 @@ class GraphModel:
     replay: ReplayBuffer | None = None
     """The replay buffer: a uniform sample of every text this model was trained on, rehearsed by a run with
     ``replay > 0`` - or ``None``, and then the file does not mention it (``../SPEC-SearchAndTraining.md`` §4)."""
+
+    def _read(self, texts: Iterable[str] | str, cfg: TrainConfig) -> Iterable[str] | str:
+        """The texts of one ``train`` call as ``cfg`` reads them: each backwards, unit by unit, with ``reverse``.
+
+        Every kind calls this first, so everything after it - the short texts
+        dropped, the plan, the structure pass, the counters, the replay buffer -
+        sees the reversed texts, exactly as if they had been given reversed.
+        Anything that is not a string is left for the kind to refuse.
+        """
+        if not cfg.reverse:
+            return texts
+        items = [texts] if isinstance(texts, str) else texts
+        return [self.encoding.reverse(t) if isinstance(t, str) else t for t in items]
 
     def _plan(self, texts: list[str], cfg: TrainConfig) -> TrainingPlan:
         """How one ``train`` call walks ``texts``: the order, the curriculum, the rehearsal, the stop."""
@@ -463,6 +484,122 @@ class GraphModel:
             position += size - overlap
         return out
 
+    def _charged_steps(
+        self, grams: list[str], length: int, spans: Sequence[tuple[int, int]]
+    ) -> list[tuple[int, int, float, bool]]:
+        """The steps of a traced text a correction charges, as ``(prev node, edge, charge, focus)`` in path order.
+
+        With the attention band off these are exactly :meth:`_steps_over`'s
+        steps, each charged 1 and each the focus.  With it on, every changed
+        unit is shared out over the grams that see it (:func:`radixnet.attention.spread`)
+        and a step is charged what the grams of its node collected - capped at
+        one, since a step is one decision - and is the *focus* when one of them
+        sees a changed unit most sharply.  The step into END answers for the
+        position after the last unit either way.  ``length`` is the text's
+        length in the encoding's units.
+        """
+        band = self.graph.attention
+        if not band.on:
+            return [(prev, edge, 1.0, True) for prev, edge in self._steps_over(grams, length, spans)]
+        graph = self.graph
+        path = graph.node_path(grams)
+        if not path or len(path) < 2:
+            return []
+        enc = graph.encoding
+        n, stride = enc.n, enc.stride
+        shared = attention_band.spread(n, stride, len(grams), length, spans, band.weights(n))
+        children = graph.children
+        out: list[tuple[int, int, float, bool]] = []
+        gram = 0  # the text's first gram inside the node being entered
+        for index in range(1, len(path)):
+            node = path[index]
+            prev = path[index - 2] if index >= 2 else START
+            edge = children[path[index - 1]].get(node)
+            if node == END:
+                if edge is not None and shared.end:
+                    out.append((prev, edge, 1.0, True))
+                break
+            held = (graph.label_len(node) - n) // stride + 1  # the grams a node of this length holds
+            charge = 0.0
+            focus = False
+            for g in range(gram, min(gram + held, len(grams))):
+                charge += shared.shares[g]
+                focus = focus or shared.focus[g]
+            gram += held
+            if edge is not None and charge > 0.0:
+                out.append((prev, edge, min(1.0, charge), focus))
+        return out
+
+    # -- the attention band: where a correction lands --------------------------
+
+    def attention_config(self) -> dict:
+        """The attention band as the API, the CLI and the frontend show it.
+
+        ``weights`` is the band over one gram of this model's encoding (``None``
+        while it is off); ``applies`` says whether this kind is ever corrected,
+        i.e. whether the band has anything to spread.
+        """
+        band = self.graph.attention
+        enc = self.encoding
+        return {
+            "on": band.on,
+            "blur": band.blur,
+            "weights": band.weights(enc.n),
+            "ngram": enc.n,
+            "stride": enc.stride,
+            "unit": enc.unit,
+            "units": enc.units_name,
+            "applies": self.takes_corrections,
+            "default_blur": DEFAULT_BLUR,
+        }
+
+    def configure_attention(self, *, on: bool | None = None, blur: float | None = None) -> dict:
+        """Switch the band on (at ``blur``, else the blur it had, else :data:`~radixnet.attention.DEFAULT_BLUR`)
+        or off; returns :meth:`attention_config`.
+
+        ``blur`` alone switches it on at that blur; ``on=False`` switches it off
+        whatever ``blur`` says.  A kind that is never corrected refuses rather
+        than keeping a setting that could not do anything.
+        """
+        if not self.takes_corrections:
+            raise ValueError(
+                f"the {self.kind} model is never corrected, so an attention band would have nothing to spread; "
+                "it belongs to the kinds that learn from a diff (count, negative)"
+            )
+        current = self.graph.attention
+        if on is False:
+            self.graph.attention = AttentionBand()
+        elif on is True or blur is not None:
+            if blur is None:
+                blur = current.blur if current.on else DEFAULT_BLUR
+            self.graph.attention = AttentionBand(blur)
+        return self.attention_config()
+
+    def attention_preview(self, wrong: str, right: str, blur: float | None = None) -> dict:
+        """Where one correction's charges land, gram by gram - under the writer rule and under a band.
+
+        The band shown is ``blur`` when given, else the model's own, else the
+        default one: a preview is how to see a blur before applying it, so it
+        never needs the band to be on and never changes anything.  Needs only
+        the encoding, not the graph.
+        """
+        from . import diff  # local import, as the negative network does: only corrections need the alignment
+
+        wrong, right = str(wrong or ""), str(right or "")
+        band = self.graph.attention
+        shown = AttentionBand(blur if blur is not None else (band.blur if band.on else DEFAULT_BLUR))
+        enc = self.encoding
+        weights = shown.weights(enc.n)
+        wrong_spans, right_spans = diff.changed_spans(wrong, right, enc)
+        return {
+            "attention": self.attention_config(),
+            "blur": shown.blur,
+            "weights": weights,
+            "changes": diff.summary(wrong, right, limit=0, encoding=enc),
+            "wrong": attention_band.preview(enc, weights, wrong, wrong_spans),
+            "right": attention_band.preview(enc, weights, right, right_spans),
+        }
+
     def _paths_of(self, texts: list[str]) -> list[list[int]]:
         """Node paths (sentinels included) of texts, registering a text structurally when it cannot be walked yet."""
         graph = self.graph
@@ -507,13 +644,17 @@ class GraphModel:
                 kept.append(t)
         return kept, skipped
 
-    def _observe_grams(self, grams: list[list[str]], count: bool) -> list[tuple[int, int]]:
+    def _observe_grams(
+        self, grams: list[list[str]], count: bool, origin: int = START
+    ) -> list[tuple[int, int]]:
         """Register encoded texts structurally; returns the ``(parent_id, edge_id)`` transitions.
 
         A text observed later can split a node that an earlier text's
         transition points at (the edge moves to the new node), so whenever the
         first pass changed the structure a second, non-counting pass re-derives
         every transition from the final structure - that pass never splits.
+        ``origin`` is the sentinel every sequence begins at (START; THINK for
+        thoughts).
         """
         graph = self.graph
         observe = graph.observe_sequence
@@ -521,17 +662,17 @@ class GraphModel:
         transitions: list[tuple[int, int]] = []
         extend = transitions.extend
         for g in grams:
-            extend(observe(g, count))
+            extend(observe(g, count, origin))
         if graph.structure_version != before:
             transitions = []
             extend = transitions.extend
             for g in grams:
-                extend(observe(g, False))
+                extend(observe(g, False, origin))
         return transitions
 
-    def _observe(self, texts: list[str], count: bool) -> tuple[list[tuple[int, int]], int]:
+    def _observe(self, texts: list[str], count: bool, origin: int = START) -> tuple[list[tuple[int, int]], int]:
         """Register every text structurally; returns ``(transitions, structure_version)``."""
-        transitions = self._observe_grams([self.encoder.encode(t) for t in texts], count)
+        transitions = self._observe_grams([self.encoder.encode(t) for t in texts], count, origin)
         return transitions, self.graph.structure_version
 
     # -- locating a prefix ---------------------------------------------------
@@ -638,6 +779,20 @@ class GraphModel:
         )
         return node, offset, lead
 
+    def _walk_start(self, prefix: str, origin: int = START) -> tuple[int, int, str]:
+        """Where a walk begins: at the end of ``prefix``, or - with no prefix - at the ``origin`` sentinel.
+
+        ``origin=THINK`` is a thought (:mod:`radixnet.thinking`): the same
+        search from the other sentinel, through the openings the model learned
+        for its thoughts rather than for its texts.  A prefix wins over the
+        origin, because a located prefix already says where the walk stands.
+        """
+        if origin not in ORIGINS:
+            raise ValueError(f"a walk begins at START or THINK, not at node {origin}")
+        if not prefix and origin != START:
+            return origin, 0, ""
+        return self._prefix_start(prefix)
+
     # -- the prediction search (shared by every kind) ------------------------
 
     @staticmethod
@@ -672,6 +827,7 @@ class GraphModel:
         top_p: float = 1.0,
         min_p: float = 0.0,
         diversity: float = 0.0,
+        origin: int = START,
     ) -> Prediction:
         """The prediction search from where ``prefix`` ends: ``"beam"`` (the ``k`` most and least likely
         continuations) or ``"sample"`` (one stochastic walk).  The result *is* the best path and carries ``top`` /
@@ -680,12 +836,13 @@ class GraphModel:
         (``"punishment"``, :mod:`radixnet.penalty`) or, with ``"least-punished"``,
         what a walk is *ranked* by (``../SPEC-LeastPunished.md``).  ``top_k`` / ``top_p`` / ``min_p`` narrow what
         a sampled step draws from and ``diversity`` spreads the top beam out
-        (``../SPEC-SearchAndTraining.md`` §1-2); each is off at its default."""
+        (``../SPEC-SearchAndTraining.md`` §1-2); each is off at its default.  ``origin=THINK`` with an empty
+        prefix walks a *thought* (:mod:`radixnet.thinking`)."""
         graph = self.graph
         enc = self.encoding
         traversal = resolve_traversal(traversal)
         costs = traversal_costs(graph, traversal, penalty_scale, merit_scale)
-        node, offset, lead = self._prefix_start(prefix)
+        node, offset, lead = self._walk_start(prefix, origin)
         # the lead is the unmatched rest of the located gram: a length in the encoding's units, as
         # `length` and `max_length` are - its words under a word encoding, not its characters
         lead_len = enc.length(lead)
@@ -955,6 +1112,7 @@ class RadixNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         phase: str | None = None,
+        origin: int = START,
         **overrides,
     ) -> list[dict]:
         """Train on ``texts`` (one string or an iterable of strings).
@@ -982,9 +1140,14 @@ class RadixNet(GraphModel):
         (:meth:`reward`, :meth:`punish`, :meth:`two_nrl`), walks every text in
         corpus order, and neither reads the replay buffer nor offers it a text -
         a punished text is not one to rehearse.
+
+        ``origin`` is the sentinel every text's walk begins at: START, or
+        THINK to train the texts as *thoughts* (:mod:`radixnet.thinking`).
         """
         cfg = _resolve_config(config, overrides)
-        texts, skipped_short = self._clean_texts(texts)
+        if origin not in ORIGINS:
+            raise ValueError(f"a text begins at START or THINK, not at node {origin}")
+        texts, skipped_short = self._clean_texts(self._read(texts, cfg))
         plan = self._plan(texts, cfg) if phase is None else None
         rehearsed = plan.replayed() if plan is not None else []
         graph = self.graph
@@ -993,10 +1156,10 @@ class RadixNet(GraphModel):
         meta = self.meta
         records: list[dict] = []
 
-        transitions, observed_version = self._observe(texts, count=True)
+        transitions, observed_version = self._observe(texts, count=True, origin=origin)
         if rehearsed:
-            self._observe(rehearsed, count=False)  # a rehearsed text is not new: nothing to count
-            transitions, observed_version = self._observe(texts, count=False)
+            self._observe(rehearsed, count=False, origin=origin)  # a rehearsed text is not new: nothing to count
+            transitions, observed_version = self._observe(texts, count=False, origin=origin)
         meta_add(meta, "trained_texts", len(texts))
         meta_add(meta, "trained_chars", sum(self.encoding.length(t) for t in texts))
         pending_merges = graph.compress() if cfg.auto_compress else 0
@@ -1013,11 +1176,11 @@ class RadixNet(GraphModel):
                 # this epoch's texts: the order, the curriculum and the rehearsal (../SPEC-SearchAndTraining.md)
                 chosen, again = plan.epoch(k, meta_counter(meta, "epochs_total").bumped(1).value)
                 walked = [texts[i] for i in chosen] + again
-                transitions, observed_version = self._observe(walked, count=False)
+                transitions, observed_version = self._observe(walked, count=False, origin=origin)
                 arrays_version = -1
             elif graph.structure_version != observed_version:
                 # a merge (or an external structural change) moved edge ids
-                transitions, observed_version = self._observe(walked, count=False)
+                transitions, observed_version = self._observe(walked, count=False, origin=origin)
             csr = graph.to_csr()
             state = backend.prepare(csr, graph.node_params())
             if arrays_version != observed_version:

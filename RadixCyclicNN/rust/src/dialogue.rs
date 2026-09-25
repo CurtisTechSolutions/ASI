@@ -20,6 +20,15 @@
 //! The negative network guards every turn when the server or the CLI has one
 //! ([`converse_guarded`]): a reply it vetoes is left unsaid, exactly like one
 //! that had been said before, except that it may not even be the fallback.
+//!
+//! A conversation can be **streamed** as it happens (a [`Stream`]).  The
+//! stream has two layers.  `turn` events are the response: a turn is spoken
+//! once and never taken back, so they can be appended to a transcript as they
+//! arrive.  Everything between two of them is the *window* - what the voice
+//! is doing before it commits, and what a backtrack may still rewrite: `look`,
+//! `draft`, `caught`, `backtrack`, `found` or `stuck`.  Streaming changes
+//! nothing about what is said: the turns are the ones [`converse`] returns,
+//! event for event, and the events are the ones Python and Go write.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -27,13 +36,14 @@ use std::sync::Arc;
 use crate::cli::Ctx;
 use crate::duo::{guard_report, Filter, FilterVerdict};
 use crate::graph::{FIRST, START};
-use crate::http::{Answer, ApiError, Request, Server};
+use crate::http::{Answer, ApiError, Request, Server, Sink};
 use crate::json::Json;
 use crate::model::{Model, PredictOptions};
 use crate::mt19937::Mt19937;
 use crate::penalty::DEFAULT_TRAVERSAL;
 use crate::search::PathResult;
 use crate::service::Service;
+use crate::thinking::{think, ThinkOptions, Thought, THINK_DEPTH, THINK_QUESTIONS};
 
 /// The two voices of a conversation.
 pub const DEFAULT_SPEAKERS: [&str; 2] = ["A", "B"];
@@ -45,6 +55,52 @@ pub const EXPLORE: usize = 3;
 /// How long a run of words may be for its immediate repetition to count as
 /// a stutter.
 pub const LONGEST_STUTTER: usize = 4;
+
+/// Where a conversation streams what it is doing, one event at a time, as it
+/// happens (Python's `radixnet.dialogue.StreamFn`).
+///
+/// Every event carries `event` (its kind), `index` and `speaker` (whose turn
+/// it is).  The committed layer is `turn` (`turn`: the [`Turn`] as
+/// [`Turn::to_json`] writes it) - a turn is spoken once and never taken back,
+/// so the turn events are the answer.  The window between two turns is what a
+/// backtrack may still rewrite: `look` (`from`: the context it continues, `""`
+/// for a fresh text from START), `draft` (`text`, `cost`: what it was about to
+/// say before it caught itself), `caught` (`kind`, `noticed`, `cut`: what it
+/// keeps, `""` when it cannot back up), `backtrack` (`step`, `cut`, `wider`),
+/// `found` (`text`, `cost`, `explored`) or `stuck` (`explored`: nothing new
+/// from any cut).
+pub type Stream<'a> = dyn FnMut(Json) + 'a;
+
+/// Every kind of event a streamed conversation emits, in the order a turn goes
+/// through them.
+pub const STREAM_EVENTS: [&str; 7] = ["look", "draft", "caught", "backtrack", "found", "stuck", "turn"];
+
+/// An event with the turn's `index` and `speaker` written after its kind.
+fn tagged(event: Json, index: usize, speaker: &str) -> Json {
+    let Json::Obj(pairs) = event else { return event };
+    let mut out: Vec<(String, Json)> = Vec::with_capacity(pairs.len() + 2);
+    for (key, value) in pairs {
+        out.push((key, value));
+        if out.len() == 1 {
+            out.push(("index".to_string(), Json::Int(index as i64)));
+            out.push(("speaker".to_string(), Json::str(speaker)));
+        }
+    }
+    Json::Obj(out)
+}
+
+/// The committed layer of the stream: a turn that has been spoken, and will
+/// not be taken back.
+fn spoken(stream: &mut Option<&mut Stream>, turn: &Turn) {
+    if let Some(s) = stream.as_mut() {
+        s(Json::obj([
+            ("event", Json::str("turn")),
+            ("index", Json::Int(turn.index as i64)),
+            ("speaker", Json::str(turn.speaker.clone())),
+            ("turn", turn.to_json()),
+        ]));
+    }
+}
 
 /// A voice catching itself repeating, and what it did about it.
 ///
@@ -63,6 +119,8 @@ pub struct Rethink {
     pub found: bool,
     /// The node it taught to hand over at, or -1 when it taught nothing.
     pub taught: i64,
+    /// What it thought before backing up ([`crate::thinking::think`]).
+    pub thought: Option<Thought>,
 }
 
 impl Rethink {
@@ -75,6 +133,10 @@ impl Rethink {
             ("explored", Json::Int(self.explored as i64)),
             ("found", Json::Bool(self.found)),
             ("taught", Json::Int(self.taught)),
+            (
+                "thought",
+                self.thought.as_ref().map(|t| t.to_json()).unwrap_or(Json::Null),
+            ),
         ])
     }
 }
@@ -321,6 +383,23 @@ impl Heard {
 /// judges with - the conversation's own, whoever is speaking.
 pub type Veto<'a> = dyn FnMut(&mut Model, &str) -> bool + 'a;
 
+/// Where a reply says what it is doing while it does it: `trace(event)` for
+/// every step of [`reply`], with the events Python's `dialogue.Trace` sends -
+/// `context` (`context`, `usable`), `candidates` (`context`, `offered`,
+/// `mode`), `pick` (`skipped`, `vetoed`, `repeat`, `spoken`, `caught`),
+/// `rethink` (`kind_of`, `noticed`, `cut`, `steps`, `explored`, `found`,
+/// `taught`) and `fresh`.  It is how the assistant format streams the
+/// thinking ([`crate::assistant`]); without one a reply is what it always was.
+pub type Trace<'a> = dyn FnMut(&Json) + 'a;
+
+fn notice(trace: &mut Option<&mut Trace>, kind: &str, fields: Vec<(&str, Json)>) {
+    if let Some(trace) = trace.as_deref_mut() {
+        let mut pairs = vec![("kind".to_string(), Json::str(kind))];
+        pairs.extend(fields.into_iter().map(|(k, v)| (k.to_string(), v)));
+        trace(&Json::Obj(pairs));
+    }
+}
+
 /// How one conversation runs.
 #[derive(Clone, Debug)]
 pub struct ConverseOptions {
@@ -344,6 +423,11 @@ pub struct ConverseOptions {
     /// Teaches the model what each rethink found out; a conversation with
     /// this on changes the model.
     pub learn: bool,
+    /// A voice that catches itself repeating thinks about it before it backs
+    /// up ([`crate::thinking`]); the thought rides on the turn's rethink.
+    pub think: bool,
+    /// How deep such a thought may question itself.
+    pub think_depth: usize,
 }
 
 impl Default for ConverseOptions {
@@ -364,6 +448,8 @@ impl Default for ConverseOptions {
             avoid_word_repeats: true,
             explore: EXPLORE,
             learn: true,
+            think: true,
+            think_depth: THINK_DEPTH,
         }
     }
 }
@@ -394,7 +480,7 @@ fn usable(voice: &Model, context: &str) -> bool {
 
 /// How one search for candidates runs.
 #[derive(Clone, Copy)]
-struct Look<'o> {
+pub(crate) struct Look<'o> {
     mode: &'o str,
     beam: usize,
     max_length: usize,
@@ -472,10 +558,23 @@ fn offer(
 /// gets cheaper.  From then on the search itself hands over at that node,
 /// wherever it is walking: the trait is the model's, not the conversation's.
 pub fn teach_back(voice: &mut Model, text: &str, at: usize, found: Option<&PathResult>, amount: f64) -> i64 {
-    let (node, _, lead) = voice.prefix_start(&text[..at]);
-    if node < FIRST || !lead.is_empty() || !voice.g.is_alive(node) {
+    let (node, went, instead) = backing(voice, text, at, found);
+    if node < 0 {
         // nothing of its own to mark: the repeat started where the graph could not place it
         return -1;
+    }
+    match voice.g.observe_back(node as usize, went, instead, amount) {
+        Ok(_) => node,
+        Err(_) => -1,
+    }
+}
+
+/// Where a rethink backs up to, and what it teaches: `(node, went, instead)`,
+/// `node = -1` when the graph cannot place the repeat.
+fn backing(voice: &Model, text: &str, at: usize, found: Option<&PathResult>) -> (i64, Option<usize>, Option<usize>) {
+    let (node, _, lead) = voice.prefix_start(&text[..at]);
+    if node < FIRST || !lead.is_empty() || !voice.g.is_alive(node) {
+        return (-1, None, None);
     }
     let rest = &text[at..];
     let word = match rest.find(' ') {
@@ -491,14 +590,84 @@ pub fn teach_back(voice: &mut Model, text: &str, at: usize, found: Option<&PathR
     let instead = found
         .and_then(|f| f.node_ids.get(1).copied())
         .filter(|&n| voice.g.edge(node, n).is_some());
-    match voice.g.observe_back(node, went, instead, amount) {
-        Ok(_) => node as i64,
-        Err(_) => -1,
+    (node as i64, went, instead)
+}
+
+/// A voice that caught itself repeating **thinks** before it backs up
+/// ([`crate::thinking::think`]): the event is the rethink itself (`kind`),
+/// the node it thinks at is the one it backed up to, and when the thought
+/// stops it hands over to `BACK` with the lesson [`teach_back`] used to write
+/// directly.  With `learn` off the voice still thinks, and teaches nothing.
+/// `None` when the graph cannot place the repeat: nothing of its own to think at.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn think_back(
+    voice: &mut Model,
+    text: &str,
+    at: usize,
+    found: Option<&PathResult>,
+    kind: &str,
+    learn: bool,
+    think_depth: usize,
+    look: Look,
+    k: usize,
+    rng: &mut Option<Mt19937>,
+) -> Result<Option<Thought>, String> {
+    let (node, went, instead) = backing(voice, text, at, found);
+    if node < 0 {
+        return Ok(None);
     }
+    let o = ThinkOptions {
+        about: text.to_string(),
+        at: Some(node as usize),
+        trigger: kind.to_string(),
+        went,
+        instead,
+        mode: look.mode.to_string(),
+        k,
+        beam: look.beam,
+        max_length: look.max_length,
+        step_penalty: look.step_penalty,
+        temperature: look.temperature,
+        seed: None,
+        max_depth: think_depth,
+        max_questions: THINK_QUESTIONS,
+        learn,
+        amount: 1.0,
+    };
+    Ok(Some(think(voice, &o, rng)?))
+}
+
+/// What a rethink teaches: a thought that hands over to BACK when it stops
+/// (`think`), else BACK directly (`learn`).  Returns the node taught to hand over.
+#[allow(clippy::too_many_arguments)]
+fn teach(
+    voice: &mut Model,
+    text: &str,
+    at: usize,
+    found: Option<&PathResult>,
+    record: &mut Rethink,
+    learn: bool,
+    thinking: bool,
+    think_depth: usize,
+    look: Look,
+    k: usize,
+    rng: &mut Option<Mt19937>,
+) -> Result<i64, String> {
+    if thinking {
+        let thought = think_back(voice, text, at, found, &record.kind, learn, think_depth, look, k, rng)?;
+        let taught = thought.as_ref().map(|t| t.handed_over).unwrap_or(-1);
+        record.thought = thought;
+        return Ok(taught);
+    }
+    Ok(if learn {
+        teach_back(voice, text, at, found, 1.0)
+    } else {
+        -1
+    })
 }
 
 /// How one [`backtrack`] runs.
-pub struct BacktrackOptions<'a, 'v> {
+pub struct BacktrackOptions<'a, 'v, 's> {
     /// What the voice may not rewrite - the context it picked up.
     pub keep: &'a str,
     /// What the reply would add to the context.
@@ -515,6 +684,13 @@ pub struct BacktrackOptions<'a, 'v> {
     pub avoid_word_repeats: bool,
     pub learn: bool,
     pub veto: Option<&'a mut Veto<'v>>,
+    /// Think about the repeat before backing up ([`think_back`]).
+    pub think: bool,
+    pub think_depth: usize,
+    /// Watches the backing up happen ([`Stream`]): `caught` the moment it
+    /// notices, `backtrack` for every step back, then `found` or `stuck`.  It
+    /// changes nothing about what is found.
+    pub stream: Option<&'a mut Stream<'s>>,
 }
 
 /// Has a voice that caught itself repeating go back to where it would have
@@ -536,6 +712,7 @@ pub fn backtrack(
 ) -> Result<(Option<PathResult>, Rethink), String> {
     let mut scorer = scorer;
     let mut veto = o.veto;
+    let mut stream = o.stream;
     let mut record = Rethink {
         taught: -1,
         ..Default::default()
@@ -555,6 +732,22 @@ pub fn backtrack(
             record.kind = "repeat".to_string();
             record.noticed = noticed;
             at = last_word_at(text);
+        }
+    }
+    if !record.noticed.is_empty() {
+        if let Some(s) = stream.as_mut() {
+            // what it will keep - "" when there is no backing up from here: nowhere to cut, the exploring
+            // off, the repeat inside the words it picked up, or nothing of its own before it
+            let kept = match at {
+                Some(at) if o.explore > 0 && at >= o.keep.len() && !text[..at].trim().is_empty() => &text[..at],
+                _ => "",
+            };
+            s(Json::obj([
+                ("event", Json::str("caught")),
+                ("kind", Json::str(record.kind.clone())),
+                ("noticed", Json::str(record.noticed.clone())),
+                ("cut", Json::str(kept)),
+            ]));
         }
     }
     let Some(at) = at else { return Ok((None, record)) };
@@ -581,6 +774,14 @@ pub fn backtrack(
         record.steps = step + 1;
         // the further back it goes, the wider it looks
         let wider = o.k * (step + 2);
+        if let Some(s) = stream.as_mut() {
+            s(Json::obj([
+                ("event", Json::str("backtrack")),
+                ("step", Json::Int((step + 1) as i64)),
+                ("cut", Json::str(cut.clone())),
+                ("wider", Json::Int(wider as i64)),
+            ]));
+        }
         let offered = offer(voice, &cut, look, wider, rng)?;
         for cand in offered {
             record.explored += 1;
@@ -602,8 +803,26 @@ pub fn backtrack(
                 continue;
             }
             record.found = true;
-            if o.learn {
-                record.taught = teach_back(voice, text, at, Some(&cand), 1.0);
+            record.taught = teach(
+                voice,
+                text,
+                at,
+                Some(&cand),
+                &mut record,
+                o.learn,
+                o.think,
+                o.think_depth,
+                look,
+                o.k,
+                rng,
+            )?;
+            if let Some(s) = stream.as_mut() {
+                s(Json::obj([
+                    ("event", Json::str("found")),
+                    ("text", Json::str(cand.full_text.clone())),
+                    ("cost", Json::Num(cand.cost)),
+                    ("explored", Json::Int(record.explored as i64)),
+                ]));
             }
             return Ok((Some(cand), record));
         }
@@ -616,9 +835,27 @@ pub fn backtrack(
         }
         cut = less;
     }
-    if o.learn {
-        // it goes round here even if it found no way out
-        record.taught = teach_back(voice, text, at, None, 1.0);
+    // it goes round here even if it found no way out
+    record.taught = teach(
+        voice,
+        text,
+        at,
+        None,
+        &mut record,
+        o.learn,
+        o.think,
+        o.think_depth,
+        look,
+        o.k,
+        rng,
+    )?;
+    if record.steps > 0 {
+        if let Some(s) = stream.as_mut() {
+            s(Json::obj([
+                ("event", Json::str("stuck")),
+                ("explored", Json::Int(record.explored as i64)),
+            ]));
+        }
     }
     Ok((None, record))
 }
@@ -681,7 +918,7 @@ fn pick(
 }
 
 /// How one voice finds what to say next.
-pub struct ReplyOptions<'a, 'v> {
+pub struct ReplyOptions<'a, 'v, 's> {
     /// What the conversation has already heard; remember a turn in it before
     /// asking for the next one, or the same reply comes back.
     pub heard: &'a Heard,
@@ -699,6 +936,18 @@ pub struct ReplyOptions<'a, 'v> {
     pub explore: usize,
     pub learn: bool,
     pub veto: Option<&'a mut Veto<'v>>,
+    /// Think about a repeat before backing up ([`think_back`]).
+    pub think: bool,
+    pub think_depth: usize,
+    /// Watches the turn being found ([`Stream`]): `look` for every context it
+    /// continues (and `""` for a fresh text), then - when a candidate is
+    /// caught repeating - `draft` and what [`backtrack`] does about it.  The
+    /// turn itself is not this function's event: it is the caller's to speak
+    /// ([`converse`] streams it as `turn`), since a reply may still be refused
+    /// for repeating a duplicate already repeated.
+    pub stream: Option<&'a mut Stream<'s>>,
+    /// Hears every step as it is taken (see [`Trace`]).
+    pub trace: Option<&'a mut Trace<'v>>,
 }
 
 /// What `voice` says next after `previous` - one turn, or `None` when it has
@@ -717,6 +966,8 @@ pub fn reply(
     }
     let mut scorer = scorer;
     let mut veto = o.veto;
+    let mut stream = o.stream;
+    let mut trace = o.trace;
     let look = Look {
         mode,
         beam: o.beam,
@@ -729,11 +980,24 @@ pub fn reply(
     let mut rethought: Option<Rethink> = None;
     let mut repeat = false;
     let draws = if mode == "sample" { o.k } else { 1 };
+    let (index, speaker) = (o.index, o.speaker);
+    // the window of the stream: what this turn does before it is spoken
+    let looking = |stream: &mut Option<&mut Stream>, from: &str| {
+        if let Some(s) = stream.as_mut() {
+            s(tagged(
+                Json::obj([("event", Json::str("look")), ("from", Json::str(from))]),
+                index,
+                speaker,
+            ));
+        }
+    };
     // one look through what `from` offers: candidates, a pick, and - for a
     // candidate rejected for repeating - one rethink per turn
     let look_from = |voice: &mut Model,
                      scorer: &mut Option<&mut Model>,
                      veto: &mut Option<&mut Veto>,
+                     trace: &mut Option<&mut Trace>,
+                     stream: &mut Option<&mut Stream>,
                      from: &str,
                      keep: &str,
                      rethought: &mut Option<Rethink>,
@@ -742,6 +1006,15 @@ pub fn reply(
      -> Result<(Option<PathResult>, bool), String> {
         let cands = candidates(voice, from, look, o.k, rng)?;
         counts.0 += cands.len();
+        notice(
+            trace,
+            "candidates",
+            vec![
+                ("context", Json::str(from)),
+                ("offered", Json::Int(cands.len() as i64)),
+                ("mode", Json::str(mode)),
+            ],
+        );
         let p = {
             let mut refuse = |text: &str| match veto.as_mut() {
                 Some(v) => match scorer.as_deref_mut() {
@@ -754,12 +1027,51 @@ pub fn reply(
         };
         counts.1 += p.skipped;
         counts.2 += p.vetoed;
+        notice(
+            trace,
+            "pick",
+            vec![
+                ("skipped", Json::Int(p.skipped as i64)),
+                ("vetoed", Json::Int(p.vetoed as i64)),
+                ("repeat", Json::Bool(p.repeat)),
+                (
+                    "spoken",
+                    p.spoken
+                        .as_ref()
+                        .map(|c| Json::str(c.full_text.clone()))
+                        .unwrap_or(Json::Null),
+                ),
+                (
+                    "caught",
+                    p.caught
+                        .as_ref()
+                        .map(|c| Json::str(c.full_text.clone()))
+                        .unwrap_or(Json::Null),
+                ),
+            ],
+        );
         let Some(caught) = p.caught.as_ref() else {
             return Ok((p.spoken, p.repeat));
         };
         if o.explore == 0 || rethought.is_some() {
             return Ok((p.spoken, p.repeat));
         }
+        if let Some(s) = stream.as_mut() {
+            s(tagged(
+                Json::obj([
+                    ("event", Json::str("draft")),
+                    ("text", Json::str(caught.full_text.clone())),
+                    ("cost", Json::Num(caught.cost)),
+                ]),
+                index,
+                speaker,
+            ));
+        }
+        let mut watch = |event: Json| {
+            if let Some(s) = stream.as_mut() {
+                s(tagged(event, index, speaker));
+            }
+        };
         let (found, record) = backtrack(
             voice,
             scorer.as_deref_mut(),
@@ -779,10 +1091,26 @@ pub fn reply(
                 avoid_word_repeats: o.avoid_word_repeats,
                 learn: o.learn,
                 veto: veto.as_deref_mut(),
+                think: o.think,
+                think_depth: o.think_depth,
+                stream: Some(&mut watch as &mut Stream),
             },
             rng,
         )?;
         counts.0 += record.explored;
+        notice(
+            trace,
+            "rethink",
+            vec![
+                ("kind_of", Json::str(record.kind.clone())),
+                ("noticed", Json::str(record.noticed.clone())),
+                ("cut", Json::str(record.cut.clone())),
+                ("steps", Json::Int(record.steps as i64)),
+                ("explored", Json::Int(record.explored as i64)),
+                ("found", Json::Bool(record.found)),
+                ("taught", Json::Int(record.taught)),
+            ],
+        );
         *rethought = Some(record);
         match found {
             Some(found) => Ok((Some(found), false)),
@@ -791,13 +1119,22 @@ pub fn reply(
     };
     let mut counts = (0usize, 0usize, 0usize);
     while !ctx.is_empty() {
-        if usable(voice, &ctx) {
+        let known = usable(voice, &ctx);
+        notice(
+            &mut trace,
+            "context",
+            vec![("context", Json::str(ctx.clone())), ("usable", Json::Bool(known))],
+        );
+        if known {
+            looking(&mut stream, &ctx);
             for _ in 0..draws {
                 let keep = ctx.clone();
                 let (got, rep) = look_from(
                     voice,
                     &mut scorer,
                     &mut veto,
+                    &mut trace,
+                    &mut stream,
                     &ctx,
                     &keep,
                     &mut rethought,
@@ -818,10 +1155,23 @@ pub fn reply(
     }
     if spoken.is_none() || repeat {
         // nothing (new) follows the previous line: change the subject with a fresh text
+        notice(&mut trace, "fresh", Vec::new());
         let mut fresh: Option<PathResult> = None;
         let mut fresh_repeat = false;
+        looking(&mut stream, "");
         for _ in 0..draws {
-            let (got, rep) = look_from(voice, &mut scorer, &mut veto, "", "", &mut rethought, &mut counts, rng)?;
+            let (got, rep) = look_from(
+                voice,
+                &mut scorer,
+                &mut veto,
+                &mut trace,
+                &mut stream,
+                "",
+                "",
+                &mut rethought,
+                &mut counts,
+                rng,
+            )?;
             fresh = got;
             fresh_repeat = rep;
             if fresh.is_some() && !fresh_repeat {
@@ -874,6 +1224,7 @@ pub fn converse(
     opening: &str,
     o: &ConverseOptions,
     veto: Option<&mut Veto>,
+    stream: Option<&mut Stream>,
 ) -> Result<Vec<Turn>, String> {
     let mode = check_mode(&o.mode)?;
     if o.k < 1 || o.temperature < 0.0 || o.step_penalty < 0.0 {
@@ -890,6 +1241,7 @@ pub fn converse(
     let mut rng = o.seed.map(Mt19937::new);
     let mut partner = partner;
     let mut veto = veto;
+    let mut stream = stream;
     let mut said: Vec<String> = o.history.clone();
     let mut repeated: HashSet<String> = HashSet::new();
     let mut result: Vec<Turn> = Vec::new();
@@ -914,6 +1266,7 @@ pub fn converse(
             candidates: 1,
             ..Default::default()
         });
+        spoken(&mut stream, result.last().expect("the opening was pushed"));
         said.push(opening.to_string());
         index += 1;
     }
@@ -936,27 +1289,32 @@ pub fn converse(
             explore: o.explore,
             learn: o.learn,
             veto: veto.as_deref_mut(),
+            think: o.think,
+            think_depth: o.think_depth,
+            trace: None,
+            stream: stream.as_deref_mut(),
         };
-        let spoken = match (index % 2, partner.as_deref_mut()) {
+        let said_next = match (index % 2, partner.as_deref_mut()) {
             (1, Some(other)) => reply(other, Some(&mut *model), &previous, options, &mut rng)?,
             _ => reply(model, None, &previous, options, &mut rng)?,
         };
-        let Some(spoken) = spoken else { break };
-        if spoken.repeat && repeated.contains(&normalize(&spoken.text)) {
+        let Some(said_next) = said_next else { break };
+        if said_next.repeat && repeated.contains(&normalize(&said_next.text)) {
             // the voice can only say a duplicate it has already repeated: the conversation is over
             break;
         }
-        said.push(spoken.text.clone());
-        let added = if spoken.context.is_empty() {
+        spoken(&mut stream, &said_next);
+        said.push(said_next.text.clone());
+        let added = if said_next.context.is_empty() {
             ""
         } else {
-            spoken.reply.as_str()
+            said_next.reply.as_str()
         };
-        heard.remember(&spoken.text, added);
-        if spoken.repeat {
-            repeated.insert(normalize(&spoken.text));
+        heard.remember(&said_next.text, added);
+        if said_next.repeat {
+            repeated.insert(normalize(&said_next.text));
         }
-        result.push(spoken);
+        result.push(said_next);
         index += 1;
     }
     Ok(result)
@@ -981,6 +1339,7 @@ pub fn converse_guarded(
     partner: Option<&mut Model>,
     opening: &str,
     o: &ConverseOptions,
+    stream: Option<&mut Stream>,
 ) -> Result<GuardedConversation, String> {
     let config = pair.config.clone();
     let mut verdicts: Vec<FilterVerdict> = Vec::new();
@@ -1003,7 +1362,7 @@ pub fn converse_guarded(
             verdicts.push(verdict);
             refused
         };
-        converse(pair.positive, partner, opening, o, Some(&mut veto))?
+        converse(pair.positive, partner, opening, o, Some(&mut veto), stream)?
     };
     let refused: Vec<String> = verdicts
         .iter()
@@ -1026,6 +1385,229 @@ fn turns_json(turns: &[Turn]) -> Json {
 }
 
 // -- the CLI --------------------------------------------------------------------------------------
+
+/// Text in double quotes with whitespace escaped (JSON string syntax), as the
+/// Python and Go CLIs quote what a voice says.
+fn quote(text: &str) -> String {
+    Json::str(text).render(0)
+}
+
+/// One spoken turn of a conversation, as the transcript prints it: the line,
+/// its numbers and flags, and what the voice noticed about a repeat of its own.
+fn say_turn(turn: &Turn) {
+    let mut flags: Vec<String> = Vec::new();
+    if turn.given {
+        flags.push("given".to_string());
+    }
+    if turn.fresh && !turn.given {
+        flags.push("new topic".to_string());
+    }
+    if turn.repeat {
+        flags.push("repeat".to_string());
+    }
+    if turn.stutter {
+        flags.push("repeats itself".to_string());
+    }
+    if turn.vetoed > 0 {
+        flags.push(format!("{} vetoed", turn.vetoed));
+    }
+    println!("{}: {}", turn.speaker, turn.text);
+    let mut detail = format!("    cost {:.4}  p {:.4}", turn.cost, turn.probability);
+    if !turn.context.is_empty() {
+        detail.push_str(&format!("  picked up {}", quote(&turn.context)));
+    }
+    if !flags.is_empty() {
+        detail.push_str(&format!("  [{}]", flags.join(", ")));
+    }
+    println!("{detail}");
+    if let Some(r) = turn.rethink.as_ref() {
+        let caught = if r.kind == "stutter" {
+            format!("saying {} twice", quote(&r.noticed))
+        } else {
+            format!("repeating {}", quote(&r.noticed))
+        };
+        let mut thought = format!("    caught itself {caught}");
+        if r.steps == 0 {
+            thought.push_str("; the words it picked up, not its own");
+        } else if r.found {
+            thought.push_str(&format!(
+                "; kept {} and found another way on in {} path(s)",
+                quote(&r.cut),
+                r.explored
+            ));
+        } else {
+            let ending = if turn.repeat {
+                "said it anyway"
+            } else {
+                "took a lesser answer"
+            };
+            thought.push_str(&format!(
+                "; kept {}, weighed {} path(s), {ending}",
+                quote(&r.cut),
+                r.explored
+            ));
+        }
+        println!("{thought}");
+        if let Some(t) = r.thought.as_ref() {
+            println!("    {}", crate::thinking::summarize(t));
+        }
+    }
+}
+
+/// The [`Stream`] of `radixnet converse --stream`: the conversation as it
+/// happens.
+///
+/// A `turn` is printed the way the transcript prints it ([`say_turn`]) the
+/// moment it is spoken.  The window between two turns - what the voice does
+/// before it commits: the context it continues, the draft it caught itself
+/// on, where it backed up to, what it found - is printed as it happens too,
+/// indented and dimmed on a terminal, so the answer stands apart from the
+/// thinking that may still be rewritten.  With `--json` every event is one
+/// JSON line on stdout instead.
+struct ConversePrinter {
+    json: bool,
+    dimmed: bool,
+    /// The context the current turn last continued.
+    looking: Option<String>,
+}
+
+impl ConversePrinter {
+    fn new(json: bool) -> ConversePrinter {
+        use std::io::IsTerminal;
+        ConversePrinter {
+            json,
+            dimmed: !json && std::io::stdout().is_terminal(),
+            looking: None,
+        }
+    }
+
+    /// A line that belongs to the window rather than the answer.
+    fn dim(&self, text: &str) {
+        if self.dimmed {
+            println!("\x1b[2m{text}\x1b[0m");
+        } else {
+            println!("{text}");
+        }
+    }
+
+    fn event(&mut self, event: Json) {
+        if self.json {
+            println!("{}", event.render(0));
+            return;
+        }
+        let text = |key: &str| event.at(key).as_str().unwrap_or("").to_string();
+        let number = |key: &str| event.at(key).as_i64().unwrap_or(0);
+        match event.at("event").as_str().unwrap_or("") {
+            "turn" => {
+                self.looking = None;
+                if let Some(turn) = Turn::from_json(event.at("turn")) {
+                    say_turn(&turn);
+                }
+            }
+            "look" => {
+                let from = text("from");
+                if let Some(previous) = self.looking.as_ref() {
+                    // the first look of a turn is the context the turn will say it picked up
+                    let tried = if from.is_empty() {
+                        "changes the subject".to_string()
+                    } else {
+                        format!("tries {}", quote(&from))
+                    };
+                    self.dim(&format!("    nothing new follows {}; {tried}", quote(previous)));
+                }
+                self.looking = Some(from);
+            }
+            "draft" => self.dim(&format!("    was about to say {}", quote(&text("text")))),
+            "caught" => {
+                let caught = if text("kind") == "stutter" {
+                    format!("saying {} twice", quote(&text("noticed")))
+                } else {
+                    format!("repeating {}", quote(&text("noticed")))
+                };
+                let mut line = format!("    caught itself {caught}");
+                if text("cut").is_empty() {
+                    line.push_str("; the words it picked up, not its own");
+                }
+                self.dim(&line);
+            }
+            "backtrack" => self.dim(&format!(
+                "    backs up to {} and weighs up to {} paths (step {})",
+                quote(&text("cut")),
+                number("wider"),
+                number("step")
+            )),
+            "found" => self.dim(&format!(
+                "    found another way on: {} ({} path(s) weighed)",
+                quote(&text("text")),
+                number("explored")
+            )),
+            "stuck" => self.dim(&format!("    nothing new in {} path(s)", number("explored"))),
+            _ => {}
+        }
+    }
+}
+
+impl Turn {
+    /// A turn read back from its JSON (what the stream carries); `None` for anything else.
+    pub fn from_json(doc: &Json) -> Option<Turn> {
+        let Json::Obj(_) = doc else { return None };
+        let text = |key: &str| doc.at(key).as_str().unwrap_or("").to_string();
+        let flag = |key: &str| doc.at(key).as_bool().unwrap_or(false);
+        let count = |key: &str| doc.at(key).as_i64().unwrap_or(0).max(0) as usize;
+        let rethink = match doc.at("rethink") {
+            Json::Obj(_) => {
+                let r = doc.at("rethink");
+                Some(Rethink {
+                    kind: r.at("kind").as_str().unwrap_or("").to_string(),
+                    noticed: r.at("noticed").as_str().unwrap_or("").to_string(),
+                    cut: r.at("cut").as_str().unwrap_or("").to_string(),
+                    steps: r.at("steps").as_i64().unwrap_or(0).max(0) as usize,
+                    explored: r.at("explored").as_i64().unwrap_or(0).max(0) as usize,
+                    found: r.at("found").as_bool().unwrap_or(false),
+                    taught: r.at("taught").as_i64().unwrap_or(-1),
+                    thought: Thought::from_json(r.at("thought")),
+                })
+            }
+            _ => None,
+        };
+        Some(Turn {
+            index: count("index"),
+            speaker: text("speaker"),
+            text: text("text"),
+            context: text("context"),
+            reply: text("reply"),
+            cost: doc.at("cost").as_f64().unwrap_or(0.0),
+            probability: doc.at("probability").as_f64().unwrap_or(0.0),
+            reached_end: flag("reached_end"),
+            fresh: flag("fresh"),
+            given: flag("given"),
+            repeat: flag("repeat"),
+            stutter: flag("stutter"),
+            rethink,
+            candidates: count("candidates"),
+            skipped: count("skipped"),
+            vetoed: count("vetoed"),
+            labels: doc
+                .at("labels")
+                .as_array()
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            node_ids: doc
+                .at("node_ids")
+                .as_array()
+                .iter()
+                .filter_map(|v| v.as_i64().map(|n| n.max(0) as usize))
+                .collect(),
+            step_costs: doc
+                .at("step_costs")
+                .as_array()
+                .iter()
+                .filter_map(|v| v.as_f64())
+                .collect(),
+        })
+    }
+}
 
 /// `radixnet converse`: the model converses with itself.
 pub fn cli(ctx: &Ctx) -> Result<(), String> {
@@ -1068,12 +1650,25 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         avoid_word_repeats: !args.on("allow-word-repeats"),
         explore: args.usize("explore", EXPLORE)?,
         learn: !args.on("no-learn"),
+        think: !args.on("no-think"),
+        think_depth: args.usize("think-depth", THINK_DEPTH)?,
+    };
+    // --stream: the conversation is printed as it happens - each turn the moment it is spoken, and
+    // before it what the voice does: the context it continues, a draft it catches itself on, where it
+    // backs up to (with --json: one JSON object per line, the usual document last)
+    let streaming = args.on("stream");
+    let mut printer = ConversePrinter::new(ctx.json);
+    let mut watch = |event: Json| printer.event(event);
+    let stream: Option<&mut Stream> = if streaming {
+        Some(&mut watch as &mut Stream)
+    } else {
+        None
     };
     let (turns, guard) = match ctx.open_guard()? {
         Some((mut negative, config)) => {
             // a reply the negative network vetoes is left unsaid; the voice looks for another one
             let mut pair = Filter::new(&mut model, &mut negative, config)?;
-            let outcome = converse_guarded(&mut pair, partner.as_mut(), &opening, &o)?;
+            let outcome = converse_guarded(&mut pair, partner.as_mut(), &opening, &o, stream)?;
             let report = guard_report(
                 &pair,
                 &outcome.verdicts,
@@ -1081,7 +1676,10 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
             );
             (outcome.turns, report)
         }
-        None => (converse(&mut model, partner.as_mut(), &opening, &o, None)?, Json::Null),
+        None => (
+            converse(&mut model, partner.as_mut(), &opening, &o, None, stream)?,
+            Json::Null,
+        ),
     };
     let said_twice = repeats(&turns);
     let mut taught: Vec<i64> = turns
@@ -1091,6 +1689,14 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         .collect();
     taught.sort_unstable();
     taught.dedup();
+    // the nodes the conversation's thoughts taught to stop and think at
+    let mut thought_at: Vec<i64> = turns
+        .iter()
+        .filter_map(|t| t.rethink.as_ref().and_then(|r| r.thought.as_ref()).map(|th| th.taught))
+        .filter(|&n| n >= 0)
+        .collect();
+    thought_at.sort_unstable();
+    thought_at.dedup();
     let mut doc = vec![
         ("guard".to_string(), guard),
         ("turns".to_string(), turns_json(&turns)),
@@ -1105,8 +1711,9 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         ),
         ("repeats".to_string(), Json::strs(said_twice)),
         ("taught".to_string(), Json::ints(taught.iter().copied())),
+        ("thought_at".to_string(), Json::ints(thought_at.iter().copied())),
     ];
-    if !taught.is_empty() && args.on("save") {
+    if (!taught.is_empty() || !thought_at.is_empty()) && args.on("save") {
         let path = ctx.save(&mut model)?;
         let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         doc.push((
@@ -1115,13 +1722,31 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         ));
     }
     doc.push(("transcript".to_string(), Json::str(transcript(&turns))));
+    if streaming && ctx.json {
+        // JSON Lines: the events went out as they happened, and the usual document is the last line
+        doc.insert(0, ("event".to_string(), Json::str("done")));
+        println!("{}", Json::Obj(doc).render(0));
+        return Ok(());
+    }
     ctx.emit(Json::Obj(doc));
     Ok(())
 }
 
 // -- the route ------------------------------------------------------------------------------------
 
-fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
+/// The one conversation `POST /api/converse` and `POST /api/converse/stream`
+/// both read from a body: the opening, how it runs, the partner kind (another
+/// kind kept in memory) and whether the guard is on.
+struct ConverseRequest {
+    opening: String,
+    options: ConverseOptions,
+    partner_kind: Option<&'static str>,
+    guard_on: bool,
+    /// This answer's own choice about the provenance of the vetoes (`None`: the server's setting).
+    provenance: Option<bool>,
+}
+
+fn converse_request(svc: &Arc<Service>, r: &Request) -> Result<ConverseRequest, ApiError> {
     // a partner of another kind is the model of that kind kept in memory (Python's `converse`)
     let partner = r.text("partner", "");
     let active = svc.with_model(|m| m.kind());
@@ -1167,22 +1792,41 @@ fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
         beam: r.usize("beam", 0)?,
         step_penalty: r.number("step_penalty", 0.0)?,
         seed: r.body.get("seed").and_then(|v| v.as_i64()),
-        speakers: speakers.clone(),
+        speakers,
         history,
         avoid_repeats: r.flag("avoid_repeats", true),
         avoid_word_repeats: r.flag("avoid_word_repeats", true),
         explore: r.usize("explore", EXPLORE)?,
         learn: r.flag("learn", true),
+        think: r.flag("think", true),
+        think_depth: r.usize("think_depth", THINK_DEPTH)?,
     };
-    let opening = r.text("opening", "");
-    let guard_on = r.flag("guard", true);
-    // one conversation, with or without a partner: the parked partner's lock is
-    // taken first, then the running model's, then the guard's
-    let talk = |partner: Option<&mut Model>| -> Result<(Vec<Turn>, Json), ApiError> {
+    Ok(ConverseRequest {
+        opening: r.text("opening", ""),
+        options: o,
+        partner_kind,
+        guard_on: r.flag("guard", true),
+        provenance: crate::duo::maybe_flag(r, "provenance")?,
+    })
+}
+
+/// One conversation as a route holds it - with or without a partner: the
+/// parked partner's lock is taken first, then the running model's, then the
+/// guard's - and the document it is answered with.
+fn hold(svc: &Arc<Service>, request: &ConverseRequest, stream: Option<&mut Stream>) -> Result<Json, ApiError> {
+    let ConverseRequest {
+        opening,
+        options: o,
+        partner_kind,
+        guard_on,
+        provenance,
+    } = request;
+    let talk = |partner: Option<&mut Model>, stream: Option<&mut Stream>| -> Result<(Vec<Turn>, Json), ApiError> {
         let mut partner = partner;
-        let guarded = if guard_on {
-            svc.guard(|pair| -> Result<(Vec<Turn>, Json), String> {
-                let outcome = converse_guarded(pair, partner.as_deref_mut(), &opening, &o)?;
+        let mut stream = stream;
+        let guarded = if *guard_on {
+            svc.guard(*provenance, |pair| -> Result<(Vec<Turn>, Json), String> {
+                let outcome = converse_guarded(pair, partner.as_deref_mut(), opening, o, stream.as_deref_mut())?;
                 // `vetoed` counts the distinct texts refused, `refusals` how often one was
                 let report = guard_report(
                     pair,
@@ -1197,22 +1841,22 @@ fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
         Ok(match guarded {
             Some(outcome) => outcome?,
             None => (
-                svc.with_model(|m| converse(m, partner, &opening, &o, None))?,
+                svc.with_model(|m| converse(m, partner, opening, o, None, stream))?,
                 Json::Null,
             ),
         })
     };
     let (turns, guard) = match partner_kind {
-        None => talk(None)?,
+        None => talk(None, stream)?,
         Some(kind) => svc
-            .with_parked_kind(kind, |other| talk(Some(other)))
+            .with_parked_kind(kind, |other| talk(Some(other), stream))
             .ok_or_else(|| ApiError::bad_request(format!("no {kind} model in memory to converse with")))??,
     };
     let kind = svc.with_model(|m| m.kind());
     Ok(Json::obj([
         ("kind", Json::str(kind)),
         ("partner", partner_kind.map(Json::str).unwrap_or(Json::Null)),
-        ("speakers", Json::strs(speakers)),
+        ("speakers", Json::strs(o.speakers.clone())),
         ("turns", turns_json(&turns)),
         ("count", Json::Int(turns.len() as i64)),
         // the duplicates the search could not avoid, ready to be punished
@@ -1221,9 +1865,32 @@ fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
     ]))
 }
 
-/// `POST /api/converse`.
+fn converse_route(svc: &Arc<Service>, r: &Request) -> Answer {
+    let request = converse_request(svc, r)?;
+    hold(svc, &request, None)
+}
+
+/// `POST /api/converse/stream`: the same conversation streamed as it happens
+/// ([`Stream`]) - every event is one JSON line, `turn` events are the answer
+/// and the rest is the window a backtrack may still rewrite, and the last
+/// line is `{"event": "done", ...}` carrying the document `/api/converse`
+/// answers with.  A request refused before anything was streamed is an
+/// ordinary 400; the server turns a failure after that into the stream's last
+/// event.
+fn converse_stream_route(svc: &Arc<Service>, r: &Request, sink: &mut Sink) -> Result<(), ApiError> {
+    let request = converse_request(svc, r)?;
+    let mut watch = |event: Json| sink.send(&event);
+    let document = hold(svc, &request, Some(&mut watch as &mut Stream))?;
+    let Json::Obj(mut pairs) = document else { return Ok(()) };
+    pairs.insert(0, ("event".to_string(), Json::str("done")));
+    sink.send(&Json::Obj(pairs));
+    Ok(())
+}
+
+/// `POST /api/converse` and `POST /api/converse/stream`.
 pub fn routes(server: &mut Server<Service>) {
     server.route("POST", "/api/converse", converse_route);
+    server.event_route("POST", "/api/converse/stream", converse_stream_route);
 }
 
 #[cfg(test)]
@@ -1289,7 +1956,7 @@ mod tests {
             turns: 4,
             ..Default::default()
         };
-        let turns = converse(&mut m, None, "the cat", &o, None).unwrap();
+        let turns = converse(&mut m, None, "the cat", &o, None, None).unwrap();
         assert!(turns.len() >= 2, "{turns:?}");
         assert!(turns[0].given && turns[0].fresh);
         assert_eq!(turns[0].speaker, "A");
@@ -1320,10 +1987,241 @@ mod tests {
             }
             no
         };
-        let turns = converse(&mut m, None, "", &o, Some(&mut veto)).unwrap();
+        let turns = converse(&mut m, None, "", &o, Some(&mut veto), None).unwrap();
         assert!(!turns.is_empty());
         assert!(turns.iter().all(|t| !t.text.contains("log")), "{turns:?}");
         assert!(refused > 0, "{turns:?}");
+    }
+
+    /// "ha ha ..." loops; the other two lines leave the loop after "ha ".
+    fn ways() -> Model {
+        let mut m = Model::new(3, GraphOptions::default()).unwrap();
+        let texts: Vec<String> = ["ha ha ha ha ha", "ha ha ho ho hum", "ha ha and then the cat sat"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        m.train(
+            &texts,
+            &TrainOptions {
+                epochs: 3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        m
+    }
+
+    fn streamed(m: &mut Model, opening: &str, o: &ConverseOptions) -> (Vec<Turn>, Vec<Json>) {
+        let mut events: Vec<Json> = Vec::new();
+        let mut watch = |event: Json| events.push(event);
+        let turns = converse(m, None, opening, o, None, Some(&mut watch as &mut Stream)).unwrap();
+        (turns, events)
+    }
+
+    fn kind(event: &Json) -> &str {
+        event.at("event").as_str().unwrap_or("")
+    }
+
+    #[test]
+    fn the_turns_streamed_are_the_turns_returned() {
+        let mut m = trained();
+        let o = ConverseOptions {
+            turns: 6,
+            learn: false,
+            ..Default::default()
+        };
+        let (turns, events) = streamed(&mut m, "the cat sat on the mat", &o);
+        assert_eq!(turns.len(), 7);
+        let spoken: Vec<Json> = events
+            .iter()
+            .filter(|e| kind(e) == "turn")
+            .map(|e| e.at("turn").clone())
+            .collect();
+        let expected: Vec<Json> = turns.iter().map(|t| t.to_json()).collect();
+        assert_eq!(spoken, expected);
+        // every event is one of the kinds, and the window between two turns belongs to the turn that follows
+        let mut owner: Option<i64> = None;
+        for event in events.iter().rev() {
+            assert!(STREAM_EVENTS.contains(&kind(event)), "{event:?}");
+            assert!(event.at("speaker").as_str().is_some(), "{event:?}");
+            if kind(event) == "turn" {
+                owner = event.at("index").as_i64();
+            } else {
+                assert_eq!(event.at("index").as_i64(), owner, "{event:?}");
+            }
+        }
+        // a turn's context is where its last look started from ("" when it changed the subject)
+        let mut looks: Vec<(i64, String)> = Vec::new();
+        for event in &events {
+            match kind(event) {
+                "look" => looks.push((
+                    event.at("index").as_i64().unwrap(),
+                    event.at("from").as_str().unwrap().to_string(),
+                )),
+                "turn" if !event.at("turn").at("given").as_bool().unwrap() => {
+                    let index = event.at("index").as_i64().unwrap();
+                    let last = looks.iter().rev().find(|(i, _)| *i == index).map(|(_, f)| f.clone());
+                    assert_eq!(last.as_deref(), event.at("turn").at("context").as_str());
+                }
+                _ => {}
+            }
+        }
+        // a turn read back from the stream is the turn
+        let back = Turn::from_json(&spoken[1]).unwrap();
+        assert_eq!(back.to_json(), spoken[1]);
+    }
+
+    #[test]
+    fn the_window_shows_the_backing_up() {
+        let mut m = ways();
+        let o = ConverseOptions {
+            turns: 6,
+            learn: false,
+            ..Default::default()
+        };
+        let (turns, events) = streamed(&mut m, "", &o);
+        let rethought: Vec<&Turn> = turns.iter().filter(|t| t.rethink.is_some()).collect();
+        assert!(!rethought.is_empty(), "{}", transcript(&turns));
+        let mut found_one = false;
+        for turn in rethought {
+            let r = turn.rethink.as_ref().unwrap();
+            let window: Vec<&Json> = events
+                .iter()
+                .filter(|e| e.at("index").as_i64() == Some(turn.index as i64) && kind(e) != "turn")
+                .collect();
+            let kinds: Vec<&str> = window.iter().map(|e| kind(e)).collect();
+            let draft = kinds.iter().position(|k| *k == "draft").expect("a draft");
+            let caught = kinds.iter().position(|k| *k == "caught").expect("what it caught");
+            assert_eq!(draft + 1, caught, "{kinds:?}");
+            assert_eq!(window[caught].at("kind").as_str(), Some(r.kind.as_str()));
+            assert_eq!(window[caught].at("noticed").as_str(), Some(r.noticed.as_str()));
+            let steps: Vec<&&Json> = window.iter().filter(|e| kind(e) == "backtrack").collect();
+            assert_eq!(steps.len(), r.steps);
+            if let Some(first) = steps.first() {
+                assert_eq!(window[caught].at("cut").as_str(), first.at("cut").as_str());
+                assert!(window[draft]
+                    .at("text")
+                    .as_str()
+                    .unwrap()
+                    .starts_with(first.at("cut").as_str().unwrap()));
+                assert_eq!(steps.last().unwrap().at("cut").as_str(), Some(r.cut.as_str()));
+                for (i, step) in steps.iter().enumerate() {
+                    assert_eq!(step.at("step").as_i64(), Some(i as i64 + 1));
+                    assert!(step.at("wider").as_i64().unwrap() >= 5);
+                }
+            } else {
+                assert_eq!(window[caught].at("cut").as_str(), Some(""));
+            }
+            if r.found {
+                found_one = true;
+                let found = window.iter().find(|e| kind(e) == "found").expect("the way on");
+                assert_eq!(found.at("text").as_str(), Some(turn.text.as_str()));
+                assert_eq!(found.at("explored").as_i64(), Some(r.explored as i64));
+                assert!(!kinds.contains(&"stuck"));
+            } else if !steps.is_empty() {
+                let stuck = window.iter().find(|e| kind(e) == "stuck").expect("stuck");
+                assert_eq!(stuck.at("explored").as_i64(), Some(r.explored as i64));
+                assert!(!kinds.contains(&"found"));
+            }
+        }
+        assert!(found_one, "{}", transcript(&turns));
+        // nothing to catch, nothing in the window but the looking
+        let off = ConverseOptions {
+            explore: 0,
+            ..o.clone()
+        };
+        let (_, events) = streamed(&mut ways(), "", &off);
+        assert!(events.iter().all(|e| matches!(kind(e), "look" | "turn")), "{events:?}");
+    }
+
+    #[test]
+    fn streaming_changes_nothing() {
+        let (mut silent, mut watched) = (trained(), trained());
+        let o = ConverseOptions {
+            turns: 10,
+            ..Default::default()
+        };
+        let plain = converse(&mut silent, None, "the cat sat on the mat", &o, None, None).unwrap();
+        let (turns, events) = streamed(&mut watched, "the cat sat on the mat", &o);
+        let a: Vec<Json> = plain.iter().map(|t| t.to_json()).collect();
+        let b: Vec<Json> = turns.iter().map(|t| t.to_json()).collect();
+        assert_eq!(a, b);
+        assert_eq!(silent.g.num_edges(), watched.g.num_edges(), "what was learned");
+        assert_eq!(events.iter().filter(|e| kind(e) == "turn").count(), plain.len());
+    }
+
+    /// How the backtracks below run: `keep`, and a stream to watch them.
+    fn watched<'a, 's>(
+        keep: &'a str,
+        heard: &'a Heard,
+        watch: &'a mut Stream<'s>,
+    ) -> BacktrackOptions<'a, 'static, 's> {
+        BacktrackOptions {
+            keep,
+            added: "",
+            heard,
+            explore: EXPLORE,
+            mode: "beam",
+            k: 3,
+            beam: 0,
+            max_length: 60,
+            step_penalty: 0.0,
+            temperature: 1.0,
+            avoid_repeats: true,
+            avoid_word_repeats: true,
+            learn: false,
+            think: false,
+            think_depth: THINK_DEPTH,
+            veto: None,
+            stream: Some(watch),
+        }
+    }
+
+    #[test]
+    fn backtrack_streams_on_its_own() {
+        let mut m = ways();
+        let heard = Heard::new(&[]);
+        let mut events: Vec<Json> = Vec::new();
+        let mut watch = |event: Json| events.push(event);
+        let (found, record) = backtrack(&mut m, None, "ha ha ha", watched("", &heard, &mut watch), &mut None).unwrap();
+        let found = found.expect("another way on");
+        let kinds: Vec<&str> = events.iter().map(kind).collect();
+        assert_eq!(kinds, ["caught", "backtrack", "found"]);
+        assert_eq!(
+            events[0],
+            Json::obj([
+                ("event", Json::str("caught")),
+                ("kind", Json::str("stutter")),
+                ("noticed", Json::str("ha")),
+                ("cut", Json::str("ha ")),
+            ])
+        );
+        assert_eq!(events[1].at("wider").as_i64(), Some(6));
+        assert_eq!(events[2].at("text").as_str(), Some(found.full_text.as_str()));
+        assert_eq!(events[2].at("explored").as_i64(), Some(record.explored as i64));
+        events.clear();
+        let mut watch = |event: Json| events.push(event);
+        backtrack(
+            &mut m,
+            None,
+            "ha ha ha",
+            watched("ha ha ", &heard, &mut watch),
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].at("cut").as_str(), Some(""));
+        events.clear();
+        let mut watch = |event: Json| events.push(event);
+        backtrack(
+            &mut m,
+            None,
+            "the cat sat on the mat",
+            watched("", &heard, &mut watch),
+            &mut None,
+        )
+        .unwrap();
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -1350,6 +2248,9 @@ mod tests {
                 avoid_word_repeats: true,
                 learn: true,
                 veto: None,
+                think: true,
+                think_depth: THINK_DEPTH,
+                stream: None,
             },
             &mut None,
         )

@@ -14,9 +14,13 @@
 //! model is `$RADIXNET_OLLAMA_MODEL`, else `llama3.2`.
 //!
 //! What is done *with* the answers - a corpus written to order, the
-//! adversarial review - is provider-independent and lives in
-//! [`crate::review`]; this module is the transport and the two front doors
-//! (the command line and the HTTP routes) onto it.
+//! adversarial review, the letter-level correction - is provider-independent
+//! and lives in [`crate::review`]; this module is the transport and the two
+//! front doors (the command line and the HTTP routes) onto it.  One thing is Ollama's
+//! own: a *thinking* model's reasoning (`think: true`, returned as
+//! `thinking`, or written inline between `<think>` tags by older models),
+//! which [`thoughts_from_prompt`] collects and the network is taught as its
+//! own thoughts ([`crate::thinking::think_on`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,14 +30,15 @@ use crate::cli::{negative_stats, read_named, Ctx};
 use crate::fetch::Request as FetchRequest;
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::{parse, Json};
+use crate::kinds::TrainSettings;
 use crate::llm::fields::{py_str_of, Fields};
 use crate::llm::{
     clip_chars, count_flag, env, http_reason, nonneg_flag, saved, seconds, timeout_flag, LlmClient, LlmError,
     LlmOptions, OLLAMA,
 };
-use crate::radix::Feedback;
+use crate::radix::{Feedback, TrainConfig};
 use crate::report::stats;
-use crate::review::{self, ReviewOptions};
+use crate::review::{self, CorrectionOptions, ReviewOptions};
 use crate::service::Service;
 
 /// What this module's own lines are filed under.
@@ -184,6 +189,9 @@ impl OllamaClient {
         if !tools.is_empty() {
             body.push(("tools".to_string(), Json::Arr(tools.to_vec())));
         }
+        if let Some(think) = &o.think {
+            body.push(("think".to_string(), think.clone()));
+        }
         let data = self.request("POST", "/api/chat", Some(&Json::Obj(body)), o.timeout)?;
         let Some(Json::Obj(mut message)) = data.get("message").cloned() else {
             return Err(Self::error("unexpected /api/chat response (no message)"));
@@ -195,6 +203,195 @@ impl OllamaClient {
         }
         Ok(Json::Obj(message))
     }
+}
+
+impl OllamaClient {
+    /// One completion with the model's thinking beside its answer
+    /// (`OllamaClient.complete`).  `o.think` asks a thinking model for its
+    /// reasoning; it comes back as Ollama's `thinking` field when the server
+    /// separates it, or is cut out of the answer when the model wrote it inline
+    /// between `<think>` tags ([`split_thinking`]); it is `""` for a model that
+    /// does not think.
+    pub fn complete(&self, prompt: &str, o: &LlmOptions) -> Result<Completion, LlmError> {
+        let mut body = vec![
+            ("model".to_string(), Json::str(o.model_or(&self.model))),
+            ("prompt".to_string(), Json::str(prompt)),
+            ("stream".to_string(), Json::Bool(false)),
+        ];
+        if !o.system.is_empty() {
+            body.push(("system".to_string(), Json::str(o.system.clone())));
+        }
+        if o.json {
+            body.push(("format".to_string(), Json::str("json")));
+        }
+        if !o.options.is_empty() {
+            body.push(("options".to_string(), Json::Obj(o.options.clone())));
+        }
+        if let Some(think) = &o.think {
+            body.push(("think".to_string(), think.clone()));
+        }
+        let data = self.request("POST", "/api/generate", Some(&Json::Obj(body)), o.timeout)?;
+        let text = match data.get("response") {
+            Some(Json::Str(text)) => text.clone(),
+            _ => return Err(Self::error("unexpected /api/generate response (no 'response' text)")),
+        };
+        let (thinking, response) = match data.get("thinking") {
+            Some(Json::Str(thinking)) if !thinking.trim().is_empty() => (thinking.trim().to_string(), text),
+            _ => split_thinking(&text),
+        };
+        Ok(Completion { response, thinking })
+    }
+}
+
+/// One completion of a thinking model: what it answered, and how it got there.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Completion {
+    pub response: String,
+    pub thinking: String,
+}
+
+/// The reasoning levels a thinking model may be asked for, beside plain on / off.
+pub const THINK_LEVELS: &[&str] = &["low", "medium", "high"];
+
+/// Ollama's `think` field for a request, read leniently from a command line or
+/// a JSON body (`ollama.think_value`): `None` (not sent) for `""` / `none` /
+/// `default`, a bool for `true` / `on` / `yes` and `false` / `off` / `no`, a
+/// level for one of [`THINK_LEVELS`].
+pub fn think_value(text: &str) -> Result<Option<Json>, String> {
+    let text = text.trim().to_ascii_lowercase();
+    match text.as_str() {
+        "" | "none" | "default" => Ok(None),
+        "true" | "on" | "yes" | "1" => Ok(Some(Json::Bool(true))),
+        "false" | "off" | "no" | "0" => Ok(Some(Json::Bool(false))),
+        level if THINK_LEVELS.contains(&level) => Ok(Some(Json::str(level))),
+        other => Err(format!(
+            "think must be true, false or one of {} (got {})",
+            THINK_LEVELS.join(", "),
+            crate::negative::python_repr(other)
+        )),
+    }
+}
+
+/// `(thinking, answer)` of an answer that wrote its reasoning inline between
+/// `<think>` (or `<thinking>` / `<reasoning>`) tags: the first tagged block is
+/// the thinking and everything else the answer; a block left open is thinking
+/// to the end; a text without tags is all answer.
+pub fn split_thinking(text: &str) -> (String, String) {
+    let lower = text.to_ascii_lowercase();
+    let mut open: Option<(usize, &str)> = None;
+    for tag in ["think", "thinking", "reasoning"] {
+        if let Some(at) = lower.find(&format!("<{tag}>")) {
+            if open.is_none_or(|(best, _)| at < best) {
+                open = Some((at, tag));
+            }
+        }
+    }
+    let Some((start, tag)) = open else {
+        return (String::new(), text.trim().to_string());
+    };
+    let open_end = start + tag.len() + 2;
+    match lower[open_end..].find(&format!("</{tag}>")) {
+        None => (text[open_end..].trim().to_string(), text[..start].trim().to_string()),
+        Some(rel) => {
+            let close = open_end + rel;
+            let close_end = close + tag.len() + 3;
+            let thinking = text[open_end..close].trim().to_string();
+            let answer = format!("{}{}", &text[..start], &text[close_end..]).trim().to_string();
+            (thinking, answer)
+        }
+    }
+}
+
+const QUESTIONS_SYSTEM: &str = "You write questions for a small language model to think about. Answer with exactly \
+                                {n} lines and nothing else: one short, concrete question per line, plain text, no \
+                                numbering, no bullets, no quotes, no blank lines, no headings and no commentary. \
+                                Every question must be about the topic requested and answerable in a sentence or two.";
+const THINK_SYSTEM: &str = "Think the question through before you answer, step by step, in short plain sentences - \
+                            say what you know, what you are unsure of and ask yourself whether you are right - and \
+                            then answer in one short sentence.";
+
+/// Asks the LLM for `lines` short questions about `prompt` - what the network
+/// will be taught to think about (`ollama.questions_from_prompt`).
+pub fn questions_from_prompt(
+    client: &OllamaClient,
+    prompt: &str,
+    lines: usize,
+    model: &str,
+) -> Result<Vec<String>, review::ReviewError> {
+    if prompt.trim().is_empty() {
+        return Err(review::ReviewError::Invalid(
+            "prompt must be a non-empty string".to_string(),
+        ));
+    }
+    if lines < 1 {
+        return Err(review::ReviewError::Invalid("lines must be >= 1".to_string()));
+    }
+    let user = format!(
+        "Topic / instructions: {}\n\nWrite the {lines} questions now.",
+        prompt.trim()
+    );
+    let o = LlmOptions::default()
+        .system(QUESTIONS_SYSTEM.replace("{n}", &lines.to_string()))
+        .model(model)
+        .temperature(0.9);
+    let text = client.generate(&user, &o)?;
+    Ok(crate::llm::parse_lines(&text, Some(lines)))
+}
+
+/// One question the LLM thought about: the question, its thinking and its
+/// answer, each on one line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Thinking {
+    pub question: String,
+    pub thinking: String,
+    pub answer: String,
+}
+
+impl Thinking {
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("question", Json::str(self.question.clone())),
+            ("thinking", Json::str(self.thinking.clone())),
+            ("answer", Json::str(self.answer.clone())),
+        ])
+    }
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The LLM's thinking about `prompt` (`ollama.thoughts_from_prompt`): `lines`
+/// questions about it, and the thinking behind each answer.  `thinking` is
+/// `""` for a model that does not think, which the caller reports rather than
+/// trains on.  The thinking is what [`crate::thinking::think_on`] teaches the
+/// network as its own thoughts.
+pub fn thoughts_from_prompt(
+    client: &OllamaClient,
+    prompt: &str,
+    lines: usize,
+    model: &str,
+    think: Option<Json>,
+    temperature: f64,
+) -> Result<Vec<Thinking>, review::ReviewError> {
+    let questions = questions_from_prompt(client, prompt, lines, model)?;
+    let mut out = Vec::with_capacity(questions.len());
+    for question in questions {
+        let mut o = LlmOptions::default()
+            .system(THINK_SYSTEM)
+            .model(model)
+            .temperature(temperature);
+        if let Some(value) = &think {
+            o = o.think(value.clone());
+        }
+        let got = client.complete(&question, &o)?;
+        out.push(Thinking {
+            question,
+            thinking: one_line(&got.thinking),
+            answer: one_line(&got.response),
+        });
+    }
+    Ok(out)
 }
 
 impl LlmClient for OllamaClient {
@@ -219,27 +416,10 @@ impl LlmClient for OllamaClient {
         }
     }
 
-    /// One completion (`POST /api/generate`, not streamed).
+    /// One completion (`POST /api/generate`, not streamed); the model's
+    /// thinking, if any, is cut out of it ([`OllamaClient::complete`] keeps both).
     fn generate(&self, prompt: &str, o: &LlmOptions) -> Result<String, LlmError> {
-        let mut body = vec![
-            ("model".to_string(), Json::str(o.model_or(&self.model))),
-            ("prompt".to_string(), Json::str(prompt)),
-            ("stream".to_string(), Json::Bool(false)),
-        ];
-        if !o.system.is_empty() {
-            body.push(("system".to_string(), Json::str(o.system.clone())));
-        }
-        if o.json {
-            body.push(("format".to_string(), Json::str("json")));
-        }
-        if !o.options.is_empty() {
-            body.push(("options".to_string(), Json::Obj(o.options.clone())));
-        }
-        let data = self.request("POST", "/api/generate", Some(&Json::Obj(body)), o.timeout)?;
-        match data.get("response") {
-            Some(Json::Str(text)) => Ok(text.clone()),
-            _ => Err(Self::error("unexpected /api/generate response (no 'response' text)")),
-        }
+        Ok(self.complete(prompt, o)?.response)
     }
 
     /// One chat turn (`POST /api/chat`): the assistant's text.
@@ -251,20 +431,158 @@ impl LlmClient for OllamaClient {
 
 // -- the command line ---------------------------------------------------------------------------
 
-/// `radixnet ollama <models | corpus | review>`: a corpus written to order,
-/// and an adversarial review of what the network itself writes.  `--url`,
-/// `--ollama-model` and `--timeout` override `$OLLAMA_HOST`,
-/// `$RADIXNET_OLLAMA_MODEL` and the 120 seconds one answer may take.
+/// `radixnet ollama <models | corpus | review | correct>`: a corpus written
+/// to order, an adversarial review of what the network itself writes, and a
+/// letter-level correction of it.  `--url`, `--ollama-model` and `--timeout`
+/// override `$OLLAMA_HOST`, `$RADIXNET_OLLAMA_MODEL` and the 120 seconds one
+/// answer may take.
 pub fn cli(ctx: &Ctx) -> Result<(), String> {
     match ctx.args.action() {
         "models" => models_cli(ctx),
         "corpus" => corpus_cli(ctx),
         "review" => review_cli(ctx),
-        "" => Err("ollama needs an action: models, corpus or review".to_string()),
+        "correct" => correct_cli(ctx),
+        "think" => think_cli(ctx),
+        "" => Err("ollama needs an action: models, corpus, review, correct or think".to_string()),
         other => Err(format!(
-            "unknown ollama action {other:?}; expected models, corpus or review"
+            "unknown ollama action {other:?}; expected models, corpus, review, correct or think"
         )),
     }
+}
+
+/// `radixnet ollama think --prompt TOPIC [--lines 5] [--think LEVEL] [--out FILE]
+/// [--train [--with-answers] [--no-questions] [--epochs] [--lr] [--batch-size]
+/// [--model-out]]`: a thinking model thinks about a prompt, and the network is
+/// taught its thinking as thoughts of its own (Python's `cmd_ollama_think`).
+fn think_cli(ctx: &Ctx) -> Result<(), String> {
+    let args = &ctx.args;
+    let prompt = args.str("prompt", "");
+    if prompt.trim().is_empty() {
+        return Err("--prompt is required: say what the questions should be about".to_string());
+    }
+    let lines = count_flag(ctx, "lines", 5, 1)?;
+    let think = think_value(&args.str("think", "true"))?;
+    let temperature = nonneg_flag(ctx, "temperature", 0.7)?;
+    let client = client_of(ctx)?;
+    let thoughts = thoughts_from_prompt(&client, &prompt, lines, &client.model, think.clone(), temperature)?;
+    if thoughts.is_empty() {
+        return Err(format!(
+            "Ollama model {} wrote no questions to think about",
+            crate::negative::python_repr(&client.model)
+        ));
+    }
+    let thinking: Vec<String> = thoughts
+        .iter()
+        .filter(|t| !t.thinking.is_empty())
+        .map(|t| t.thinking.clone())
+        .collect();
+    crate::log_info!(
+        LOG,
+        "ollama {} thought about {} question(s), {} with its thinking",
+        client.model,
+        thoughts.len(),
+        thinking.len()
+    );
+    let mut doc = vec![
+        ("url".to_string(), Json::str(client.url.clone())),
+        ("model".to_string(), Json::str(client.model.clone())),
+        ("prompt".to_string(), Json::str(prompt)),
+        ("think".to_string(), think.clone().unwrap_or(Json::Null)),
+        ("count".to_string(), Json::Int(thoughts.len() as i64)),
+        ("thinking".to_string(), Json::Int(thinking.len() as i64)),
+        (
+            "thoughts".to_string(),
+            Json::Arr(thoughts.iter().map(|t| t.to_json()).collect()),
+        ),
+        ("out".to_string(), Json::Null),
+        ("trained".to_string(), Json::Null),
+    ];
+    if let Some(out) = args.get("out") {
+        let content = if thinking.is_empty() {
+            String::new()
+        } else {
+            thinking.join("\n") + "\n"
+        };
+        std::fs::write(out, content).map_err(|err| format!("cannot write {out}: {err}"))?;
+        doc[7].1 = Json::str(out);
+    }
+    if args.on("train") {
+        if thinking.is_empty() {
+            return Err(format!(
+                "Ollama model {} returned no thinking to train on: use a thinking model (qwen3, deepseek-r1, \
+                 gpt-oss, ...) on an Ollama that separates it, or --think true",
+                crate::negative::python_repr(&client.model)
+            ));
+        }
+        let existed = std::path::Path::new(&ctx.model_path).exists();
+        let mut model = ctx.open(false)?;
+        if model.is_negative() {
+            return Err(
+                "the negative network judges; it does not think (--kind negative cannot be taught thoughts)"
+                    .to_string(),
+            );
+        }
+        let target = args.str("model-out", &ctx.model_path);
+        let settings = TrainSettings {
+            config: TrainConfig {
+                epochs: count_flag(ctx, "epochs", 10, 0)?,
+                lr: nonneg_flag(ctx, "lr", 0.5)?,
+                batch_size: count_flag(ctx, "batch-size", 4, 1)?,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let learned = crate::thinking::think_on(
+            &mut model,
+            &thinking,
+            &settings,
+            !args.on("no-questions"),
+            1.0,
+            &mut |_| true,
+        )?;
+        let mut answers_trained = 0usize;
+        if args.on("with-answers") {
+            let answers: Vec<String> = thoughts
+                .iter()
+                .filter(|t| !t.answer.is_empty())
+                .map(|t| t.answer.clone())
+                .collect();
+            if !answers.is_empty() {
+                answers_trained = crate::kinds::train(&mut model, &answers, &settings, &mut |_| true)?.len();
+            }
+        }
+        model.save(&target)?;
+        doc[8].1 = Json::obj([
+            (
+                "model",
+                Json::obj([
+                    ("kind", Json::str(if existed { "model" } else { "new" })),
+                    (
+                        "path",
+                        if existed {
+                            Json::str(ctx.model_path.clone())
+                        } else {
+                            Json::Null
+                        },
+                    ),
+                ]),
+            ),
+            ("out", Json::str(target.clone())),
+            ("thoughts", Json::Int(learned.thoughts as i64)),
+            ("questions", Json::Int(learned.questions as i64)),
+            ("taught", Json::Int(learned.taught as i64)),
+            (
+                "epochs",
+                Json::Arr(learned.epochs.iter().map(|r| r.to_json()).collect()),
+            ),
+            ("answers", Json::Int(answers_trained as i64)),
+            ("interrupted", Json::Bool(false)),
+            ("saved", saved(&target)),
+            ("stats", stats(&model)),
+        ]);
+    }
+    ctx.emit(Json::Obj(doc));
+    Ok(())
 }
 
 fn client_of(ctx: &Ctx) -> Result<OllamaClient, String> {
@@ -467,16 +785,220 @@ fn review_cli(ctx: &Ctx) -> Result<(), String> {
     Ok(())
 }
 
+/// `radixnet ollama correct`: the LLM plays the copy editor.  Every sample the
+/// network generates (`--count`, `--prefix`, `--max-length`, `--temperature`)
+/// or every given text (`--text`, `--data`) is written out correctly with as
+/// few characters changed as possible, and the diff between the two says
+/// which characters were the mistake.  With `--blame` only those characters
+/// are blamed in the negative network (`--negative`), under the editor's word
+/// for the mistake and at `--severity` per corrected text, and the texts it
+/// handed back unchanged clear blame.
+fn correct_cli(ctx: &Ctx) -> Result<(), String> {
+    let args = &ctx.args;
+    let client = client_of(ctx)?;
+    let given = args.all("text");
+    let texts = if !given.is_empty() {
+        Some(given)
+    } else if args.get("data").is_some() {
+        Some(read_named(args, "data")?)
+    } else {
+        None
+    };
+    let mut model = if texts.is_none() { Some(ctx.open(true)?) } else { None };
+    let o = CorrectionOptions {
+        count: count_flag(ctx, "count", 8, 1)?,
+        prefix: args.str("prefix", ""),
+        max_length: count_flag(ctx, "max-length", 60, 0)?,
+        temperature: nonneg_flag(ctx, "temperature", 1.0)?,
+        texts,
+        context: args.str("context", ""),
+        model: client.model.clone(),
+        seed: args.get("seed").map(|_| ctx.seed),
+        batch: 0,
+    };
+    let result = review::adversarial_correction(model.as_mut(), &client, &o)?;
+    let mut doc = match result.to_json() {
+        Json::Obj(pairs) => pairs,
+        _ => Vec::new(),
+    };
+    doc.push(("negative".to_string(), Json::Null));
+    if args.on("blame") {
+        let severity = nonneg_flag(ctx, "severity", crate::blame::CORRECTION_SEVERITY)?;
+        let path = ctx.negative_path();
+        let mut negative = ctx.open_negative(false)?;
+        let report = review::teach_corrections(
+            &mut negative,
+            &result.corrections,
+            severity,
+            true,
+            "correction",
+            &TeachOptions::default(),
+        )?;
+        negative.save(&path)?;
+        doc.last_mut().expect("the negative slot").1 = Json::obj([
+            ("blamed", Json::Int(report.blamed as i64)),
+            ("cleared", Json::Int(report.cleared as i64)),
+            ("edges", Json::Int(report.edges as i64)),
+            ("edits", Json::Int(report.edits.unwrap_or(0) as i64)),
+            ("reasons", review::reason_rows(&negative)),
+            (
+                "lessons",
+                Json::Arr(report.faults.iter().map(|f| f.to_json()).collect()),
+            ),
+            ("path", Json::str(path.clone())),
+            ("saved", saved(&path)),
+            ("stats", negative_stats(&mut negative)),
+        ]);
+    }
+    ctx.emit(Json::Obj(doc));
+    Ok(())
+}
+
 // -- the routes ---------------------------------------------------------------------------------
 
 /// This area's routes:
 /// `GET /api/ollama/models`
 /// `POST /api/ollama/corpus`
 /// `POST /api/ollama/review`
+/// `POST /api/ollama/correct`
 pub fn routes(server: &mut Server<Service>) {
     server.route("GET", "/api/ollama/models", models_route);
     server.route("POST", "/api/ollama/corpus", corpus_route);
     server.route("POST", "/api/ollama/review", review_route);
+    server.route("POST", "/api/ollama/correct", correct_route);
+    server.route("POST", "/api/ollama/think", think_route);
+}
+
+/// `POST /api/ollama/think {prompt, lines, think, temperature, model, url,
+/// timeout, save_as, train, questions, with_answers, epochs, lr, batch_size}`:
+/// a thinking model thinks about a prompt; its thinking is returned and, with
+/// `train`, taught to the network as thoughts (202 with the job).
+fn think_route(svc: &Arc<Service>, r: &Request) -> Answer {
+    let f = Fields::of(r);
+    let prompt = f.required_text("prompt")?;
+    if prompt.trim().is_empty() {
+        return Err(ApiError::bad_request("'prompt' must not be empty"));
+    }
+    let lines = f.count_or("lines", 5, 1)?;
+    // missing - or null, which the API reads as missing - asks the model to think; "default" leaves it to the model
+    let level = match f.get("think") {
+        None | Some(Json::Null) => Some(Json::Bool(true)),
+        Some(Json::Bool(b)) => Some(Json::Bool(*b)),
+        Some(Json::Str(s)) => think_value(s).map_err(ApiError::bad_request)?,
+        Some(other) => {
+            return Err(ApiError::bad_request(format!(
+                "'think' must be true, false or one of {} (got {})",
+                THINK_LEVELS.join(", "),
+                crate::llm::fields::py_repr_of(other)
+            )))
+        }
+    };
+    let temperature = f.number_or("temperature", 0.7, Some(0.0))?;
+    let train = f.flag("train", false)?;
+    let with_answers = f.flag("with_answers", false)?;
+    let questions = f.flag("questions", true)?;
+    let client = client_of_request(svc, &f)?;
+    let config = crate::service::train_config(r)?;
+    let save_as = f.text("save_as")?.filter(|name| !name.is_empty());
+    if train {
+        // an LLM call is not spent on a request that cannot start its job
+        svc.ensure_idle()?;
+        if svc.with_model(|m| m.is_negative()) {
+            return Err(ApiError::bad_request("the negative network judges; it does not think"));
+        }
+    }
+    let thoughts = thoughts_from_prompt(&client, &prompt, lines, &client.model, level.clone(), temperature)?;
+    if thoughts.is_empty() {
+        return Err(ApiError::with_status(
+            502,
+            format!(
+                "Ollama model {} wrote no questions to think about",
+                crate::negative::python_repr(&client.model)
+            ),
+        ));
+    }
+    let thinking: Vec<String> = thoughts
+        .iter()
+        .filter(|t| !t.thinking.is_empty())
+        .map(|t| t.thinking.clone())
+        .collect();
+    let upload = match save_as {
+        Some(name) => {
+            let content = if thinking.is_empty() {
+                String::new()
+            } else {
+                thinking.join("\n") + "\n"
+            };
+            store_upload(svc, &name, &content)?
+        }
+        None => Json::Null,
+    };
+    let mut doc = vec![
+        ("prompt".to_string(), Json::str(prompt)),
+        ("model".to_string(), Json::str(client.model.clone())),
+        ("url".to_string(), Json::str(client.url.clone())),
+        ("think".to_string(), level.clone().unwrap_or(Json::Null)),
+        ("count".to_string(), Json::Int(thoughts.len() as i64)),
+        ("thinking".to_string(), Json::Int(thinking.len() as i64)),
+        (
+            "thoughts".to_string(),
+            Json::Arr(thoughts.iter().map(|t| t.to_json()).collect()),
+        ),
+        ("upload".to_string(), upload),
+        ("job".to_string(), Json::Null),
+    ];
+    if !train {
+        return Ok(Json::Obj(doc));
+    }
+    if thinking.is_empty() {
+        return Err(ApiError::with_status(
+            502,
+            format!(
+                "Ollama model {} returned no thinking to train on: use a thinking model (qwen3, deepseek-r1, \
+                 gpt-oss, ...) on an Ollama that separates it",
+                crate::negative::python_repr(&client.model)
+            ),
+        ));
+    }
+    svc.ensure_idle()?;
+    svc.start_job("train");
+    let settings = TrainSettings {
+        config,
+        ..Default::default()
+    };
+    let answers: Vec<String> = if with_answers {
+        thoughts
+            .iter()
+            .filter(|t| !t.answer.is_empty())
+            .map(|t| t.answer.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let worker = Arc::clone(svc);
+    std::thread::spawn(move || {
+        let outcome = worker.with_model(|m| -> Result<Vec<Json>, String> {
+            let learned = crate::thinking::think_on(m, &thinking, &settings, questions, 1.0, &mut |record| {
+                worker.job_progress(record.to_json());
+                !worker.stopping()
+            })?;
+            let mut records: Vec<Json> = learned.epochs.iter().map(|r| r.to_json()).collect();
+            if !answers.is_empty() && !worker.stopping() {
+                let more = crate::kinds::train(m, &answers, &settings, &mut |record| {
+                    worker.job_progress(record.to_json());
+                    !worker.stopping()
+                })?;
+                records.extend(more.iter().map(|r| r.to_json()));
+            }
+            Ok(records)
+        });
+        if outcome.is_ok() {
+            worker.autosave();
+        }
+        worker.finish_job(outcome);
+    });
+    doc[8].1 = svc.job_json();
+    Ok(accepted(Json::Obj(doc)))
 }
 
 /// The request's Ollama overrides (`url`, `model`, `timeout`), falling back
@@ -783,6 +1305,71 @@ fn review_route(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(accepted(Json::Obj(doc)))
 }
 
+/// The copy editor over the model's samples or `{texts}`: `{count, prefix,
+/// max_length, temperature, seed, context, url, model, timeout, blame (teach
+/// the negative network: only the characters the editor changed are blamed),
+/// severity (blame per corrected text)}`.  The answer is the correction
+/// summary plus `source`, `url`, `severity` and `negative` (what was taught,
+/// or null).
+fn correct_route(svc: &Arc<Service>, r: &Request) -> Answer {
+    let f = Fields::of(r);
+    let given = f.texts_optional("texts", "text")?;
+    let client = client_of_request(svc, &f)?;
+    let severity = f.number_or("severity", crate::blame::CORRECTION_SEVERITY, Some(0.0))?;
+    let (samples, source) = if !given.is_empty() {
+        (given, "given")
+    } else {
+        let count = f.count_or("count", 8, 1)?;
+        let prefix = f.text_or("prefix", "")?;
+        let max_length = f.count_or("max_length", 60, 0)?;
+        let temperature = f.number_or("temperature", 1.0, Some(0.0))?;
+        let seed = f.integer("seed", None)?;
+        // the model writes under its lock; the editor thinks without it
+        let drawn = svc.with_model(|m| review::sample_texts(m, count, &prefix, max_length, temperature, seed))?;
+        (drawn, "model")
+    };
+    let context = f.text_or("context", "")?;
+    let corrections = review::correct_texts(&client, &samples, &context, &client.model, review::DEFAULT_BATCH)?;
+    let result = review::summarise_corrections(source, &client.model, samples, corrections);
+    let mut doc = match result.to_json() {
+        Json::Obj(pairs) => pairs,
+        _ => Vec::new(),
+    };
+    doc.push(("url".to_string(), Json::str(client.url.clone())));
+    doc.push(("severity".to_string(), Json::Num(severity)));
+    doc.push(("negative".to_string(), Json::Null));
+    if f.flag("blame", false)? {
+        let taught = crate::critic::with_negative(svc, |negative| -> Result<Json, String> {
+            let report = review::teach_corrections(
+                negative,
+                &result.corrections,
+                severity,
+                true,
+                "correction",
+                &TeachOptions::default(),
+            )?;
+            Ok(Json::obj([
+                ("blamed", Json::Int(report.blamed as i64)),
+                ("cleared", Json::Int(report.cleared as i64)),
+                ("unmatched", Json::Int(report.unmatched as i64)),
+                ("edges", Json::Int(report.edges as i64)),
+                ("edits", Json::Int(report.edits.unwrap_or(0) as i64)),
+                ("uncorrected", Json::Int(report.uncorrected.unwrap_or(0) as i64)),
+                ("reasons", report.to_json().at("reasons").clone()),
+                (
+                    "lessons",
+                    Json::Arr(report.faults.iter().map(|f| f.to_json()).collect()),
+                ),
+                ("severity_mean", Json::Num(report.severity_mean)),
+                ("stats", negative_stats(negative)),
+                ("reason_table", review::reason_rows(negative)),
+            ]))
+        })??;
+        doc.last_mut().expect("the negative slot").1 = taught;
+    }
+    Ok(Json::Obj(doc))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -850,6 +1437,35 @@ pub(crate) mod tests {
                 200,
                 "{\"models\": [{\"name\": \"fake:latest\", \"size\": 123}, \"junk\", {\"name\": \"other:7b\"}]}"
                     .to_string(),
+            ),
+            "/api/generate"
+                if body.at("format").as_str() == Some("json")
+                    && body.at("system").as_str().is_some_and(|s| s.contains("copy editor")) =>
+            {
+                (
+                    200,
+                    "{\"response\": \"{\\\"corrections\\\": [{\\\"index\\\": 0, \\\"correction\\\": \\\"a text.\\\", \
+                     \\\"reason\\\": \\\"punctuation\\\", \\\"note\\\": \\\"no full stop\\\"}]}\"}"
+                        .to_string(),
+                )
+            }
+            "/api/generate"
+                if body
+                    .at("system")
+                    .as_str()
+                    .is_some_and(|s| s.contains("one short, concrete question per line")) =>
+            {
+                (
+                    200,
+                    "{\"response\": \"1. question 1 about the sea?\\n2. question 2 about the sea?\"}".to_string(),
+                )
+            }
+            "/api/generate" if body.get("think").is_some() => (
+                200,
+                format!(
+                    "{{\"response\": \"The answer to {p}\", \"thinking\": \"Let me think about {p} Is that right? Yes, it is.\"}}",
+                    p = body.at("prompt").as_str().unwrap_or("")
+                ),
             ),
             "/api/generate" if body.at("format").as_str() == Some("json") => (
                 200,
@@ -945,6 +1561,72 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn thinking_comes_back_beside_the_answer() {
+        let server = fake(ollama_answers);
+        let client = OllamaClient::new(&server.url, "fake:latest", Some(Duration::from_secs(5))).unwrap();
+        let got = client
+            .complete("why is the sky blue?", &LlmOptions::default().think(Json::Bool(true)))
+            .unwrap();
+        assert_eq!(got.response, "The answer to why is the sky blue?");
+        assert_eq!(
+            got.thinking,
+            "Let me think about why is the sky blue? Is that right? Yes, it is."
+        );
+        let (_, body) = server.seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(body.at("think").as_bool(), Some(true));
+        client
+            .complete("x", &LlmOptions::default().think(Json::str("high")))
+            .unwrap();
+        let (_, body) = server.seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(body.at("think").as_str(), Some("high"));
+        client.generate("x", &LlmOptions::default()).unwrap();
+        let (_, body) = server.seen.lock().unwrap().last().cloned().unwrap();
+        assert!(body.get("think").is_none());
+        // a model that writes its thinking inline is read the same way, and one that does not think thinks nothing
+        assert_eq!(
+            split_thinking("<think>hmm</think> the answer"),
+            ("hmm".to_string(), "the answer".to_string())
+        );
+        assert_eq!(
+            split_thinking("before <THINKING>\nhmm\n</THINKING> after"),
+            ("hmm".to_string(), "before  after".to_string())
+        );
+        assert_eq!(
+            split_thinking("<think>open ended"),
+            ("open ended".to_string(), String::new())
+        );
+        assert_eq!(split_thinking("no tags"), (String::new(), "no tags".to_string()));
+        assert_eq!(think_value("default").unwrap(), None);
+        assert_eq!(think_value("on").unwrap(), Some(Json::Bool(true)));
+        assert_eq!(think_value("false").unwrap(), Some(Json::Bool(false)));
+        assert_eq!(think_value(" High ").unwrap(), Some(Json::str("high")));
+        assert!(think_value("loud").is_err());
+    }
+
+    #[test]
+    fn thoughts_are_collected_question_by_question() {
+        let server = fake(ollama_answers);
+        let client = OllamaClient::new(&server.url, "fake:latest", Some(Duration::from_secs(5))).unwrap();
+        let thoughts = thoughts_from_prompt(&client, "the sea", 2, "", Some(Json::Bool(true)), 0.7).unwrap();
+        assert_eq!(
+            thoughts.iter().map(|t| t.question.as_str()).collect::<Vec<_>>(),
+            vec!["question 1 about the sea?", "question 2 about the sea?"]
+        );
+        assert_eq!(
+            thoughts[0].thinking,
+            "Let me think about question 1 about the sea? Is that right? Yes, it is."
+        );
+        assert_eq!(thoughts[0].answer, "The answer to question 1 about the sea?");
+        let seen = server.seen.lock().unwrap();
+        let asked: Vec<&(String, Json)> = seen.iter().filter(|(p, _)| p == "/api/generate").collect();
+        assert_eq!(asked.len(), 3, "the questions, then one thought each");
+        assert!(asked[0].1.get("think").is_none());
+        assert!(asked[1..].iter().all(|(_, b)| b.at("think").as_bool() == Some(true)));
+        drop(seen);
+        assert!(thoughts_from_prompt(&client, "", 2, "", None, 0.7).is_err());
+    }
+
+    #[test]
     fn a_review_goes_out_over_http() {
         let server = fake(ollama_answers);
         let client = OllamaClient::new(&server.url, "fake:latest", Some(Duration::from_secs(5))).unwrap();
@@ -960,5 +1642,26 @@ pub(crate) mod tests {
             Some("Review these 1 texts:\n[0] a text\n\nReturn the JSON now.")
         );
         assert_eq!(body.at("options").render(0), "{\"temperature\":0.2}");
+    }
+
+    #[test]
+    fn a_correction_goes_out_over_http() {
+        let server = fake(ollama_answers);
+        let client = OllamaClient::new(&server.url, "fake:latest", Some(Duration::from_secs(5))).unwrap();
+        let o = CorrectionOptions {
+            texts: Some(vec!["a text".to_string()]),
+            ..Default::default()
+        };
+        let result = review::adversarial_correction(None, &client, &o).unwrap();
+        assert_eq!(result.corrected, vec!["a text".to_string()]);
+        assert_eq!(result.corrections[0].correction.as_deref(), Some("a text."));
+        assert_eq!(result.corrections[0].reason, "punctuation");
+        let (_, body) = server.seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            body.at("prompt").as_str(),
+            Some("Correct these 1 texts:\n[0] a text\n\nReturn the JSON now.")
+        );
+        assert_eq!(body.at("options").render(0), "{\"temperature\":0.0}");
+        assert_eq!(body.at("format").as_str(), Some("json"));
     }
 }

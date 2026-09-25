@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.backend import PythonBackend  # noqa: E402
 from radixnet.encoding import END_LABEL, START_LABEL, Encoder  # noqa: E402
-from radixnet.graph import BACK, END, FIRST, START, RadixCyclicGraph  # noqa: E402
+from radixnet.graph import BACK, END, FIRST, START, THINK, RadixCyclicGraph  # noqa: E402
 from radixnet.search import PathResult, dijkstra_predict, onward, sample_walk  # noqa: E402
 
 ENC = Encoder()
@@ -367,3 +367,40 @@ class TestHandsOver(unittest.TestCase):
         self.assertEqual(after.text, "")  # nowhere else to go from there
         walked = sample_walk(g, start, offset, max_chars=None, temperature=0.0)
         self.assertEqual(walked.text, "")
+
+    def test_think_is_never_a_continuation_and_never_stops_the_branch(self):
+        """Stopping to think is not stopping: THINK leaves the options, the real children stay on offer."""
+        g = self.graph()
+        node = g.lookup("the")[0]
+        before = onward(g.child_costs(node))
+        for _ in range(8):
+            g.observe_think(node)
+        self.assertTrue(g.thinks_at(node))
+        after = onward(g.child_costs(node))
+        self.assertEqual([c for c, _e, _cost in after], [c for c, _e, _cost in before])
+        self.assertNotIn(THINK, [c for c, _e, _cost in after])
+        # and with both sentinels on the node, BACK still decides against the real children alone
+        for _ in range(6):
+            g.observe_back(node)
+        self.assertEqual(onward(g.child_costs(node)), [])
+        walked = dijkstra_predict(g, g.lookup("cat")[0], 0, min_chars=0, to_end=True)
+        self.assertNotIn(THINK, walked.node_ids)
+
+    def test_a_walk_from_think_is_a_thought(self):
+        """A thought is the same search from the other sentinel, through the thought openings it learned."""
+        g = self.graph()
+        g.observe_sequence(ENC.encode("why? hmm..."), origin=THINK)  # no trigram in common with the text
+        thought = dijkstra_predict(g, THINK, 0, min_chars=0, to_end=True)
+        self.assertEqual(thought.node_ids[0], THINK)
+        self.assertTrue(thought.reached_end)
+        self.assertEqual(thought.text, "why? hmm...")
+        sampled = sample_walk(g, THINK, 0, max_chars=None, temperature=0.0)
+        self.assertEqual(sampled.text, "why? hmm...")
+        spoken = sample_walk(g, START, 0, max_chars=None, temperature=0.0)
+        self.assertTrue(spoken.text.startswith("the "))  # a text from START, greedy through the cyclic graph
+        self.assertNotIn(THINK, spoken.node_ids)
+        # a thought sharing words with the texts walks through the same nodes: one graph, two origins
+        g.observe_sequence(ENC.encode("is the cat on the mat?"), origin=THINK)
+        again = dijkstra_predict(g, THINK, 0, min_chars=0, to_end=True)
+        self.assertEqual(again.node_ids[0], THINK)
+        self.assertTrue(again.text.startswith(("why", "is the")))

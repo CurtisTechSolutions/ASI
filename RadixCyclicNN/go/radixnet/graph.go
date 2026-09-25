@@ -12,14 +12,24 @@ import (
 // are taught by the voices that caught themselves repeating (Backtrack).  An
 // edge p -> Back competes for probability with p's real children, so the more
 // often walks through p had to be backed out of, the likelier the search is to
-// hand over there instead of carrying on.  First is the first node id that is
+// hand over there instead of carrying on.  Think is where the graph has learned
+// to stop and *think*: its in-edges are taught by experience too - an event at
+// p made the model think there (thinking.go) - and, like Back's, compete with
+// the real children for probability; unlike Back it also has out-edges, which
+// are how thoughts begin, because a thought is trained from Think the way a
+// text is trained from Start (IsOrigin).  First is the first node id that is
 // not a sentinel.
 const (
 	Start = 0
 	End   = 1
 	Back  = 2
-	First = 3
+	Think = 3
+	First = 4
 )
+
+// IsOrigin reports whether node is a sentinel a sequence may begin at: Start
+// for a text, Think for a thought.
+func IsOrigin(node int) bool { return node == Start || node == Think }
 
 // New edge weights of the sine network are drawn from [WLow, WHigh]; the count
 // model discards the value but consumes the same random number, so the RNG
@@ -41,11 +51,15 @@ const (
 // random stream and its activation is firmly non-zero (see the Python graph).
 const BackZ = 4.5
 
+// ThinkZ is the Think sentinel's state: fixed at the *other* edge of that range,
+// as firmly non-zero as Back's and drawn from no stream either.
+const ThinkZ = -4.5
+
 const (
 	graphFormat = "radixnet-graph"
-	// 2 added the counter reset fields (version 1 files load with no resets); 3 the Back sentinel (older
-	// files gain an unvisited one on load, and their node ids shift up by one)
-	graphFormatVersion = 3
+	// 2 added the counter reset fields (version 1 files load with no resets); 3 the Back sentinel and 4 the
+	// Think sentinel (older files gain an unvisited one on load, and their node ids shift up by one)
+	graphFormatVersion = 4
 )
 
 type loc struct{ node, off int }
@@ -196,6 +210,12 @@ type Graph struct {
 	// its units - and travels with the model file.
 	Enc Encoding
 
+	// Attention is where inside a gram a correction's blame and credit land
+	// (attention.go): off by default - each changed unit is charged to the
+	// step that wrote it.  Unlike Enc it changes nothing the graph holds, so
+	// it can be switched at any time; it travels with the model file while on.
+	Attention AttentionBand
+
 	Version          Counter
 	StructureVersion Counter
 	nAliveNodes      int
@@ -280,6 +300,7 @@ func NewGraph(seed int64, opts GraphOptions) (*Graph, error) {
 	g.newNode(StartLabel, 0, 0)
 	g.newNode(EndLabel, 0, 0)
 	g.newNode(BackLabel, 0, 0)
+	g.newNode(ThinkLabel, 0, 0)
 	return g, nil
 }
 
@@ -463,6 +484,76 @@ func (g *Graph) BackCost(p int) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// ObserveThink teaches that something at p made the model stop and think.
+//
+// The twin of ObserveBack, learned the same way - from experience, never from a
+// corpus: an event at p (a voice catching itself repeating, a question asked
+// about the text that ends here, a thought questioning itself) called for a
+// thought, and the model remembers where (Think in thinking.go).  p -> Think is
+// created on first use and bumped like any observed transition; it competes
+// with p's real children for probability, so the oftener walks through p had to
+// stop and think, the likelier a thought passing through p is to question itself
+// there.  Nothing is taught about what to do instead - that is the thought's
+// business, and what it hands over to when it stops (Back, or nothing).
+// Returns the Think edge id.
+func (g *Graph) ObserveThink(p int, amount float64) (int, error) {
+	if p < First || p >= len(g.Labels) || !g.Alive[p] {
+		return 0, fmt.Errorf("node %d is not a real node to think at", p)
+	}
+	if amount < 0 {
+		return 0, fmt.Errorf("amount must be >= 0, got %v", amount)
+	}
+	e, ok := g.children[p].get(Think)
+	if !ok {
+		e = g.newEdge(p, Think, 0, 0)
+	}
+	g.Count[Think]++
+	g.EdgeCount[e]++
+	g.Traversals.Add(1)
+	g.Version.Add(1)
+	// as with Back: the count model learns the transition from its count and a reward on the edge
+	g.RecordTraversals([]int{e})
+	g.AddReward([]int{e}, amount)
+	g.RecomputeWeights()
+	return e, nil
+}
+
+// ThinkCost is what the model thinks it costs to stop and think at p, or
+// ok = false when it never had to: the cost of p's Think edge, to compare with
+// the costs of its real children.  When it is the cheapest of them the model's
+// most likely next step there is to question what it is doing, which is what a
+// thought passing through p acts on.
+func (g *Graph) ThinkCost(p int) (float64, bool) {
+	for _, it := range g.ChildCosts(p) {
+		if it.Child == Think {
+			return it.Cost, true
+		}
+	}
+	return 0, false
+}
+
+// ThinksAt reports whether the model has learned to stop and think at p: its
+// Think edge is the cheapest way on (Back is not a way on and does not count).
+func (g *Graph) ThinksAt(p int) bool {
+	costs := g.ChildCosts(p)
+	thinking, ok := 0.0, false
+	for _, it := range costs {
+		if it.Child == Think {
+			thinking, ok = it.Cost, true
+			break
+		}
+	}
+	if !ok {
+		return false
+	}
+	for _, it := range costs {
+		if it.Child != Think && it.Child != Back && it.Cost < thinking {
+			return false
+		}
+	}
+	return true
 }
 
 // -- sizes and lookup ------------------------------------------------------------
@@ -685,14 +776,28 @@ func (g *Graph) Compress() int {
 // (parent, edge) transitions; count also bumps the visit counters.  Takes the
 // structure write lock.
 func (g *Graph) ObserveSequence(grams []string, count bool) ([]Transition, error) {
+	return g.ObserveFrom(Start, grams, count)
+}
+
+// ObserveFrom is ObserveSequence from the sentinel origin: Start for a text,
+// Think for a *thought* - the same structure, the same counting, the same edge
+// into End, only the first edge leaves the other sentinel (IsOrigin).
+func (g *Graph) ObserveFrom(origin int, grams []string, count bool) ([]Transition, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.observeLocked(grams, count)
+	return g.observeFrom(origin, grams, count)
 }
 
 func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, error) {
+	return g.observeFrom(Start, trigrams, count)
+}
+
+func (g *Graph) observeFrom(origin int, trigrams []string, count bool) ([]Transition, error) {
 	if len(trigrams) == 0 {
 		return nil, nil
+	}
+	if !IsOrigin(origin) {
+		return nil, fmt.Errorf("a sequence begins at Start or Think, not at node %d", origin)
 	}
 	enc := g.Enc
 	stride, overlap := enc.Stride, enc.Overlap()
@@ -715,13 +820,13 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 		px, ox = b, 0
 		didSplit = true
 	}
-	e, ok := g.children[Start].get(px)
+	e, ok := g.children[origin].get(px)
 	if !ok {
-		e = g.newEdge(Start, px, 0, 0)
+		e = g.newEdge(origin, px, 0, 0)
 	}
-	transitions = append(transitions, Transition{Start, e})
+	transitions = append(transitions, Transition{origin, e})
 	if count {
-		g.Count[Start]++
+		g.Count[origin]++
 		g.Count[px]++
 		g.EdgeCount[e]++
 	}
@@ -785,12 +890,12 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 	if count {
 		g.Count[End]++
 		g.EdgeCount[e]++
-		// every transition bumped one node counter and one edge counter, plus Start's:
+		// every transition bumped one node counter and one edge counter, plus the origin's:
 		// the total bounds each of them and so decides when CarryCounters has work
 		g.Traversals.Add(int64(2*len(transitions) + 1))
 	}
 	if didSplit {
-		traced, _, ok := g.trace(trigrams)
+		traced, _, ok := g.traceFrom(origin, trigrams)
 		if !ok {
 			return nil, fmt.Errorf("internal error: observed sequence is not walkable")
 		}
@@ -803,19 +908,29 @@ func (g *Graph) observeLocked(trigrams []string, count bool) ([]Transition, erro
 // lock): the transitions and the node path START ... END, or ok=false when a
 // gram is unknown, an edge is missing or a split would be needed.
 func (g *Graph) Trace(trigrams []string) ([]Transition, []int, bool) {
+	return g.TraceFrom(Start, trigrams)
+}
+
+// TraceFrom is Trace from the sentinel origin (Start for a text, Think for a
+// thought): the path begins there.
+func (g *Graph) TraceFrom(origin int, trigrams []string) ([]Transition, []int, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.trace(trigrams)
+	return g.traceFrom(origin, trigrams)
 }
 
 // TraceUnlocked is Trace without the read lock, for read-only phases in which
 // no goroutine changes the structure (the counting passes of an epoch).
 func (g *Graph) TraceUnlocked(trigrams []string) ([]Transition, []int, bool) {
-	return g.trace(trigrams)
+	return g.traceFrom(Start, trigrams)
 }
 
 func (g *Graph) trace(trigrams []string) ([]Transition, []int, bool) {
-	if len(trigrams) == 0 {
+	return g.traceFrom(Start, trigrams)
+}
+
+func (g *Graph) traceFrom(origin int, trigrams []string) ([]Transition, []int, bool) {
+	if len(trigrams) == 0 || !IsOrigin(origin) {
 		return nil, nil, false
 	}
 	stride := g.Enc.Stride
@@ -824,14 +939,14 @@ func (g *Graph) trace(trigrams []string) ([]Transition, []int, bool) {
 		return nil, nil, false
 	}
 	px, ox := l.node, l.off
-	e, ok := g.children[Start].get(px)
+	e, ok := g.children[origin].get(px)
 	if !ok {
 		return nil, nil, false
 	}
 	transitions := make([]Transition, 0, len(trigrams)+1)
-	transitions = append(transitions, Transition{Start, e})
+	transitions = append(transitions, Transition{origin, e})
 	path := make([]int, 0, len(trigrams)+2)
-	path = append(path, Start, px)
+	path = append(path, origin, px)
 	for idx := 1; idx < len(trigrams); idx++ {
 		l, ok := g.index[trigrams[idx]]
 		if !ok {
@@ -871,6 +986,12 @@ func (g *Graph) NodePath(trigrams []string) ([]int, bool) {
 	return path, ok
 }
 
+// NodePathFrom is NodePath from the sentinel origin (a thought's path begins at Think).
+func (g *Graph) NodePathFrom(origin int, trigrams []string) ([]int, bool) {
+	_, path, ok := g.TraceFrom(origin, trigrams)
+	return path, ok
+}
+
 // CheckInvariants verifies the structural invariants (and, with texts, that
 // every text walks through the graph and decodes back to itself); compressed
 // additionally requires that no unary chain remains.
@@ -883,12 +1004,16 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 	if !(len(g.EdgeCount) == m && len(g.EdgeAlive) == m && len(g.EdgeReward) == m && len(g.WindowEdgeCount) == m && len(g.EdgeParent) == m) {
 		return fmt.Errorf("edge arrays have inconsistent lengths")
 	}
-	if n < First || !g.Alive[Start] || !g.Alive[End] || !g.Alive[Back] ||
-		g.Labels[Start] != StartLabel || g.Labels[End] != EndLabel || g.Labels[Back] != BackLabel {
+	if n < First || !g.Alive[Start] || !g.Alive[End] || !g.Alive[Back] || !g.Alive[Think] ||
+		g.Labels[Start] != StartLabel || g.Labels[End] != EndLabel || g.Labels[Back] != BackLabel ||
+		g.Labels[Think] != ThinkLabel {
 		return fmt.Errorf("sentinels missing or changed")
 	}
 	if g.parents[Start].size() != 0 || g.children[End].size() != 0 {
 		return fmt.Errorf("START has parents or END has children")
+	}
+	if g.children[Back].size() != 0 {
+		return fmt.Errorf("BACK must not have children")
 	}
 	aliveNodes := 0
 	seen := make(map[int]bool)
@@ -912,7 +1037,7 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 				return fmt.Errorf("edge %d on %d->%d is invalid, dead or listed twice", e, p, c)
 			}
 			seen[e] = true
-			if !g.Alive[c] || c == Start || p == End {
+			if !g.Alive[c] || c == Start || p == End || p == Back {
 				return fmt.Errorf("edge %d->%d touches a dead node or a sentinel illegally", p, c)
 			}
 			if got, ok := g.parents[c].get(p); !ok || got != e {
@@ -969,10 +1094,10 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		return fmt.Errorf("gram index has %d entries, expected %d", len(g.index), expected)
 	}
 	if compressed {
-		for p := 2; p < n; p++ {
+		for p := First; p < n; p++ {
 			if g.Alive[p] && g.children[p].size() == 1 {
 				c := g.children[p].order[0]
-				if !(c == p || c <= End || g.parents[c].size() != 1) {
+				if !(c == p || c < First || g.parents[c].size() != 1) {
 					return fmt.Errorf("unary chain %d->%d survived compress", p, c)
 				}
 			}

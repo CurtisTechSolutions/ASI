@@ -18,7 +18,7 @@ import math
 from dataclasses import dataclass, field
 
 from .encoding import WINDOW
-from .graph import END, START, RadixCyclicGraph
+from .graph import END, ORIGINS, RadixCyclicGraph, START
 from .search import (
     LEAST_PUNISHED,
     CostFn,
@@ -193,7 +193,7 @@ def _run_beam(
             expanded += 1
             parent_entry = entries[entry][1]
             # where the walk came from: a model that counts paths prices the next step by it
-            prev = entries[parent_entry][0] if parent_entry >= 0 else (START if node == START else None)
+            prev = entries[parent_entry][0] if parent_entry >= 0 else (node if node in ORIGINS else None)
             children = onward(child_costs(node, prev))
             if blamed:
                 children = least_punished(children)

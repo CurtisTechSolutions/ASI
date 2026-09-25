@@ -12,7 +12,9 @@ before, and a model file is byte for byte what it was.
 language models are usually driven with, and a beam that does not hand back
 five spellings of one sentence — and *more ways to train* — a curriculum, a
 rehearsal of what the model read before, and a run that stops when it stops
-learning.
+learning. A later request added a third: *training on a file in reverse*, so
+the model learns what comes before a text, and asking it backwards from the
+frontend (§9).
 
 This document is the contract, and it is precise on purpose. The three ports
 are held to the same graph, the same file and the same prediction by the
@@ -247,15 +249,18 @@ and 20).
 | `order`, `curriculum` | `TrainConfig` | `TrainOptions` | `TrainOptions` | `/api/train` | `--order`, `--curriculum` |
 | `replay`, `replay_size` | `TrainConfig` | `TrainOptions` | `TrainOptions` | `/api/train` | `--replay`, `--replay-size` |
 | `patience`, `min_delta` | `TrainConfig` | `TrainOptions` | `TrainOptions` | `/api/train` | `--patience`, `--min-delta` |
+| `reverse` | `TrainConfig` | `TrainOptions.Plan.Reverse` | `Plan.reverse` (in `TrainOptions`, the sine model's `TrainConfig`) | `/api/train` | `--reverse` |
 
 A value out of range is an error with the same meaning everywhere: `top_k < 0`,
 `top_p` outside `(0, 1]`, `min_p` outside `[0, 1)`, `diversity < 0`, an
 unknown `order`, `curriculum` outside `(0, 1]`, `replay < 0`,
-`replay_size < 0`, `patience < 0` and `min_delta < 0`.
+`replay_size < 0`, `patience < 0` and `min_delta < 0` - and, over HTTP, a
+`reverse` that is not a boolean.
 
 A streaming source (the Go and Rust readers of large files and archives) is
 read into memory first when a run asks for a non-corpus order, a curriculum or
-replay: each needs the whole list before the first epoch.
+replay: each needs the whole list before the first epoch. Reading backwards
+does not: every text is turned around as it streams in (§9).
 
 `GET /api/status` reports the buffer on all three servers: `"replay": {"size",
 "texts", "seen"}` - its capacity, how many texts it holds, how many were ever
@@ -264,11 +269,69 @@ offered - or `null` when the model keeps none.
 ## 8. What the frontend does with them
 
 The **Settings** tab keeps the search and training settings of this browser —
-the traversal, the sampling filters and the diversity, and how a run walks its
-texts — the defaults every tab starts from, shared by Predict, Generate and
-Train the way the traversal already was (`frontend/src/hooks/useSiteSettings.jsx`,
-the rules in `frontend/src/settings.js`). A tab sends a setting only when its
-mode reads it and it is not off, and refuses to send one out of range. The
+the traversal, the sampling filters and the diversity, whether a query is asked
+backwards (§9), and how a run walks its texts — the defaults every tab starts
+from, shared by Predict, Generate and Train the way the traversal already was
+(`frontend/src/hooks/useSiteSettings.jsx`, the rules in
+`frontend/src/settings.js`). A tab sends a setting only when its mode reads it
+and it is not off, and refuses to send one out of range. The
 **Model settings** tab holds what belongs to the model and is saved with it:
 the model's kind, encoding, size and replay buffer, a form that makes a new
 model in any kind and encoding, the score function, and the encoder / decoder.
+
+## 9. Reading backwards
+
+**`reverse`** (a boolean, off by default) reads every text of a training run
+backwards, so the model learns what comes *before* a text instead of what
+follows it. It is the file read from its end to its start: with `whole_file`
+(Go: `split: file`) each file is one text, turned around whole; one text per
+line turns every line around.
+
+**The turn.** A text is reversed in the units of the model's encoding, by
+`Encoding.reverse` (Go `Encoding.Reverse`, Rust `Encoding::reverse`):
+
+| unit | `reverse(text)` |
+|---|---|
+| characters | the code points in the opposite order - `"the cat"` → `"tac eht"`; a combining accent is a code point of its own, so turning a text around twice gives it back exactly |
+| words | the words in the opposite order, written with single spaces - `"the  cat sat"` → `"sat cat the"` - each word's letters in their order; the words are cut on Unicode `White_Space`, as the word encoding cuts them (`SPEC-WordNGrams.md` §4) |
+
+**Where.** The turn is the first thing a training call does, before anything
+else sees a text: the texts too short for one gram are dropped from the
+reversed list (the length is the same), the order and the curriculum walk it,
+the structure pass observes it, `trained_texts` and `trained_chars` count it,
+and the replay buffer is offered the reversed texts - the buffer keeps the
+texts as they were read, so a later run, reversed or not, rehearses them as
+they were learned. The order of the texts is not touched: `order` decides it,
+as it always did. A run with `reverse` is therefore exactly a run over the
+reversed texts: the same graph, history, counters and file, byte for byte, in
+all three ports.
+
+**Every kind.** The count, sine and phase models read their texts backwards,
+and so does the negative network, whose training is blaming: a model that
+reads backwards needs its failures backwards too. The turn belongs to the
+training call, not to its phase: a call stamped with a feedback phase and
+`reverse` reads its texts backwards as well - though no feedback route sets it.
+Reward, punishment, 2NRL and the feedback routes take their texts as given.
+
+**Off** changes nothing: the texts are the ones given, and no record gains a
+key. The flag is not saved with the model; the CLI's `train` document reports
+it in its `config` (`"reverse": false` when off), as the last field of the
+config in Python and Rust alike.
+
+**Streaming.** Go's readers stream a corpus of any size through training, and a
+reversed run streams too: `ReversedSource` turns every text around as it is
+read and keeps an archive's entries as parts that stream side by side, so
+reading backwards costs no memory. Python and Rust train on the run's list of
+texts, and turn the list around.
+
+**Asking it.** A model trained backwards continues what it was given
+backwards: the query has to be turned around too, and the answer turned back.
+The servers leave that to the caller - `Encoding.reverse` is public in every
+port - and the frontend does it (`frontend/src/backwards.js`): with **Query
+backwards** on (a site-wide setting beside the traversal), Predict and Generate
+send the prefix turned around, in the model's units, and show every answer
+turned back round, so a user types the end of a text and reads what precedes
+it the right way round. A thumbs up or down goes to the feedback routes as the
+model's own text, the backwards one, since that is the text feedback trains
+on. The Train tab sends `reverse` for every kind from its **Read every text
+backwards** box.

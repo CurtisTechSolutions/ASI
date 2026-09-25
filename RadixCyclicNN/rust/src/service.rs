@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::clock::utc_now;
-use crate::encoding::{parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL};
+use crate::encoding::{parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL};
 use crate::graph::{END, START};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
@@ -125,6 +125,8 @@ pub struct Service {
     /// Every route the server answers, filled in by [`build`]: `/api/status`
     /// reports it, and the frontend shows a tab when its route is there.
     routes: std::sync::OnceLock<Vec<String>>,
+    /// When this server started: what `/v1/models` reports as every model's `created`.
+    pub(crate) born: i64,
 }
 
 impl Service {
@@ -159,7 +161,87 @@ impl Service {
             codegen: Default::default(),
             agent: Default::default(),
             routes: std::sync::OnceLock::new(),
+            born: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
         }
+    }
+
+    /// How strictly the negative network guards the output paths, as set.
+    pub(crate) fn guard_config(&self) -> crate::duo::FilterConfig {
+        self.guard.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Runs `f` on the model a request's `model` names (`crate::assistant::kind_of_id`):
+    /// the running one for `""`, `radixnet` or its own kind, else the model of
+    /// that kind kept in memory - which is what `partner` does for
+    /// `/api/converse` - and a 404 for a kind that is not here.  Takes the
+    /// running model's lock, or the parked models', for as long as `f` runs.
+    pub(crate) fn with_voice<T>(&self, name: &str, f: impl FnOnce(&mut Model) -> T) -> Result<T, ApiError> {
+        let kind = crate::assistant::kind_of_id(name);
+        let (active, active_words) = self.with_model(|m| (m.kind(), m.encoding().unit == Unit::Words));
+        if kind.is_empty() || kind == active || (kind == "word" && active == "count" && active_words) {
+            return Ok(self.with_model(f));
+        }
+        let found = if kind == "word" {
+            let mut parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+            parked
+                .iter_mut()
+                .find(|(_, m)| m.kind() == "count" && m.encoding().unit == Unit::Words)
+                .map(|(_, m)| f(m))
+        } else {
+            self.with_parked_kind(&kind, f)
+        };
+        found.ok_or_else(|| {
+            ApiError::with_status(
+                404,
+                format!(
+                    "the model {} is not in memory; the models here are {} (select a kind once to load it)",
+                    crate::negative::python_repr(name),
+                    self.model_ids().join(", ")
+                ),
+            )
+        })
+    }
+
+    /// The ids of every model in memory, the running one first.
+    pub(crate) fn model_ids(&self) -> Vec<String> {
+        self.models_json()
+            .at("data")
+            .as_array()
+            .iter()
+            .filter_map(|m| m.at("id").as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// `GET /v1/models`: the models in memory as an OpenAI model list, `radixnet-<kind>` each.
+    pub(crate) fn models_json(&self) -> Json {
+        let describe = |m: &Model, active: bool| {
+            Json::obj([
+                ("id", Json::str(crate::assistant::model_id(m))),
+                ("object", Json::str("model")),
+                ("created", Json::Int(self.born)),
+                ("owned_by", Json::str("radixnet")),
+                ("kind", Json::str(m.kind())),
+                ("label", Json::str(kinds::label(m.kind()))),
+                ("encoding", Json::str(m.encoding().to_string())),
+                ("units", Json::str(m.encoding().units_name())),
+                ("active", Json::Bool(active)),
+            ])
+        };
+        let mut data = vec![self.with_model(|m| describe(m, true))];
+        {
+            let parked = self.parked.lock().unwrap_or_else(|e| e.into_inner());
+            data.extend(parked.iter().map(|(_, m)| describe(m, false)));
+        }
+        if !self.negative_active.load(std::sync::atomic::Ordering::Relaxed) {
+            let slot = self.negative.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(negative) = slot.as_ref() {
+                data.push(describe(negative, false));
+            }
+        }
+        Json::obj([("object", Json::str("list")), ("data", Json::Arr(data))])
     }
 
     /// Reads the `serve` command's flags into every area's state.
@@ -747,6 +829,7 @@ fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
         ("paths", Json::Obj(paths)),
         ("in_memory", Json::strs(svc.in_memory())),
         ("weights", weights),
+        ("attention", svc.with_model(|m| m.attention_config())),
         ("engine", Json::str(ENGINE)),
     ]))
 }
@@ -815,6 +898,64 @@ fn model_weights(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(out)
 }
 
+/// A boolean body field that may be absent or null (then `None`), the way
+/// Python's fields treat null as "not given".
+fn optional_flag(r: &Request, key: &str) -> Result<Option<bool>, ApiError> {
+    match r.body.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(ApiError::bad_request(format!("'{key}' must be a boolean"))),
+    }
+}
+
+/// A number body field that may be absent or null (then `None`).
+fn optional_number(r: &Request, key: &str) -> Result<Option<f64>, ApiError> {
+    match r.body.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Num(x)) => Ok(Some(*x)),
+        Some(Json::Int(n)) => Ok(Some(*n as f64)),
+        Some(_) => Err(ApiError::bad_request(format!("{key:?} must be a number"))),
+    }
+}
+
+/// `GET /api/model/attention`: where inside a gram the running model's
+/// corrections land ([`crate::attention`]).
+fn attention(svc: &Arc<Service>, _r: &Request) -> Answer {
+    Ok(svc.with_model(|m| Json::obj([("kind", Json::str(m.kind())), ("attention", m.attention_config())])))
+}
+
+/// `POST /api/model/attention`: the band on (at `blur`) or off; a kind that is
+/// never corrected refuses.
+fn attention_set(svc: &Arc<Service>, r: &Request) -> Answer {
+    svc.ensure_idle()?;
+    let on = optional_flag(r, "on")?;
+    let blur = optional_number(r, "blur")?;
+    let out = svc.with_model(|m| -> Result<Json, String> {
+        let config = m.configure_attention(on, blur)?;
+        Ok(Json::obj([
+            ("kind", Json::str(m.kind())),
+            ("attention", config),
+            ("stats", stats(m)),
+        ]))
+    })?;
+    Ok(out)
+}
+
+/// `POST /api/model/attention/preview`: where one correction would land, gram
+/// by gram, under the writer rule and a band; nothing changes.
+fn attention_preview(svc: &Arc<Service>, r: &Request) -> Answer {
+    let (wrong, right) = (r.text("wrong", ""), r.text("right", ""));
+    let blur = optional_number(r, "blur")?;
+    let out = svc.with_model(|m| -> Result<Json, String> {
+        let mut pairs = vec![("kind".to_string(), Json::str(m.kind()))];
+        if let Json::Obj(rest) = m.attention_preview(&wrong, &right, blur)? {
+            pairs.extend(rest);
+        }
+        Ok(Json::Obj(pairs))
+    })?;
+    Ok(out)
+}
+
 /// The options every search endpoint reads: the traversal and its two scales.
 fn traversal_of(r: &Request) -> Result<(String, f64, f64), ApiError> {
     let name = resolve_traversal(&r.text("traversal", DEFAULT_TRAVERSAL))?;
@@ -836,6 +977,7 @@ fn search_fields(r: &Request) -> Result<SearchTuning, ApiError> {
             min_p: r.number("min_p", 0.0)?,
         },
         diversity: r.number("diversity", 0.0)?,
+        ..Default::default()
     };
     tuning.check()?;
     Ok(tuning)
@@ -883,14 +1025,17 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         top_p: tuning.filter.top_p,
         min_p: tuning.filter.min_p,
         diversity: tuning.diversity,
+        origin: START,
     };
     let prefix = r.text("prefix", "");
     let (kind, ..) = svc.active_kind();
     // the negative network guards the answer: the best continuation it does
     // not veto is the one that comes back, and when it vetoes every one the
-    // continuation is empty and `guard` says why (`guard: false` turns it off)
+    // continuation is empty and `guard` says why (`guard: false` turns it off;
+    // `provenance: false` keeps the vetoes' reasons out of the answer)
+    let provenance = crate::duo::maybe_flag(r, "provenance")?;
     let guarded = if r.flag("guard", true) {
-        svc.guard(|pair| -> Result<(crate::beam::Prediction, Json), String> {
+        svc.guard(provenance, |pair| -> Result<(crate::beam::Prediction, Json), String> {
             let found = pair.positive.predict(&prefix, &opts)?;
             let (ranked, verdicts) = pair.rank(&prefix, &found);
             let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
@@ -959,22 +1104,27 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     };
     // the negative network guards the texts: the model is asked for
     // `over_sample` times as many and what the negative half recognises as
-    // failure never reaches the answer (fewer come back when it vetoed a lot)
+    // failure never reaches the answer (fewer come back when it vetoed a lot;
+    // `provenance: false` reports how many were vetoed, not which or why)
+    let provenance = crate::duo::maybe_flag(r, "provenance")?;
     let guarded = if r.flag("guard", true) {
-        svc.guard(|pair| -> Result<(Vec<crate::search::PathResult>, Json), String> {
-            let outcome = pair.generate(opts.count, &opts)?;
-            let report = crate::duo::guard_report(
-                pair,
-                &outcome.verdicts,
-                vec![
-                    ("candidates", Json::Int(outcome.candidates as i64)),
-                    ("kept", Json::Int(outcome.kept.len() as i64)),
-                    ("asked", Json::Int(outcome.asked as i64)),
-                    ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
-                ],
-            );
-            Ok((outcome.results, report))
-        })?
+        svc.guard(
+            provenance,
+            |pair| -> Result<(Vec<crate::search::PathResult>, Json), String> {
+                let outcome = pair.generate(opts.count, &opts)?;
+                let report = crate::duo::guard_report(
+                    pair,
+                    &outcome.verdicts,
+                    vec![
+                        ("candidates", Json::Int(outcome.candidates as i64)),
+                        ("kept", Json::Int(outcome.kept.len() as i64)),
+                        ("asked", Json::Int(outcome.asked as i64)),
+                        ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
+                    ],
+                );
+                Ok((outcome.results, report))
+            },
+        )?
     } else {
         None
     };
@@ -1181,8 +1331,10 @@ pub(crate) fn train_config(r: &Request) -> Result<TrainConfig, ApiError> {
 
 /// How a training run walks its texts (`../../SPEC-SearchAndTraining.md`
 /// sections 3-6): `order`, `curriculum`, `replay`, `replay_size`, `patience`
-/// and `min_delta`, each off when the request leaves it out.  A value out of
-/// range is a 400, before any job starts.
+/// and `min_delta`, and whether it reads them backwards (`reverse`, section
+/// 9), each off when the request leaves it out.  A value out of range - or a
+/// `reverse` that is not a boolean, as the Python and Go servers refuse it -
+/// is a 400, before any job starts.
 fn plan_fields(r: &Request) -> Result<crate::training::Plan, ApiError> {
     let order = r.text("order", "").trim().to_ascii_lowercase();
     let plan = crate::training::Plan {
@@ -1196,6 +1348,7 @@ fn plan_fields(r: &Request) -> Result<crate::training::Plan, ApiError> {
         },
         patience: r.usize("patience", 0)?,
         min_delta: r.number("min_delta", 0.0)?,
+        reverse: crate::llm::fields::Fields::of(r).flag("reverse", false)?,
     };
     plan.check()?;
     Ok(plan)
@@ -1505,6 +1658,7 @@ fn encoding(svc: &Arc<Service>, _r: &Request) -> Answer {
         ("start_label", Json::str(START_LABEL)),
         ("end_label", Json::str(END_LABEL)),
         ("back_label", Json::str(BACK_LABEL)),
+        ("think_label", Json::str(THINK_LABEL)),
         // the dial is chosen when a model is created and fixed for its life:
         // changing it means a different model, which POST /api/reset makes
         ("configurable", Json::Bool(true)),
@@ -1637,8 +1791,11 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
         parse_encoding(&spec)?
     };
     if let Some(name) = r.body.get("unit").and_then(|v| v.as_str()) {
-        encoding.unit = Unit::parse(name)
-            .ok_or_else(|| ApiError::bad_request(format!("unit must be char, word, phone, syllable or acoustic, got {name:?}")))?;
+        encoding.unit = Unit::parse(name).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "unit must be char, word, phone, syllable or acoustic, got {name:?}"
+            ))
+        })?;
     }
     if let Some(n) = r.body.get("ngram").and_then(|v| v.as_i64()) {
         encoding.n = n.max(0) as usize;
@@ -1676,7 +1833,9 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let path = entry.path();
-            if !path.is_file() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // a file still on its way in (a `.part`) is not an upload yet
+            if !path.is_file() || name.ends_with(".part") {
                 continue;
             }
             // an archive reports the lines of its text entries, not its bytes read as text
@@ -1684,16 +1843,10 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
                 rows.push(record);
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let lines = std::fs::read_to_string(&path)
-                .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count())
-                .unwrap_or(0);
-            rows.push(Json::obj([
-                ("name", Json::str(name)),
-                ("bytes", Json::Int(bytes as i64)),
-                ("lines", Json::Int(lines as i64)),
-            ]));
+            // a text file, counted a line at a time, whatever its size
+            if let Ok(record) = crate::multipart::record(&path) {
+                rows.push(record);
+            }
         }
     }
     Ok(Json::obj([("uploads", Json::Arr(rows))]))
@@ -1702,12 +1855,14 @@ fn uploads(svc: &Arc<Service>, _r: &Request) -> Answer {
 /// `POST /api/uploads`: every form Python's `_r_upload` takes - JSON `{name,
 /// content | content_base64}` or `{files: [...]}`, `multipart/form-data`, or a
 /// raw body named by `?name=` - answered with the records of what was stored.
-fn upload(svc: &Arc<Service>, r: &Request) -> Answer {
+/// The route streams: the body is read as it arrives and a multipart part or
+/// a raw body goes straight to disk, so an archive may be of any size
+/// (`multipart::store_stream`, D-035).
+fn upload(svc: &Arc<Service>, r: &Request, body: &mut dyn std::io::Read) -> Answer {
     if svc.upload_dir.is_none() {
         return Err(ApiError::bad_request("no upload directory is configured"));
     }
-    let files = crate::multipart::Form::read(r, None)?.files()?;
-    crate::multipart::store_all(svc, &files)
+    crate::multipart::store_stream(svc, r, body)
 }
 
 fn upload_delete(svc: &Arc<Service>, r: &Request) -> Answer {
@@ -1847,6 +2002,9 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("GET", "/api/model", model_info);
     server.route("POST", "/api/model/select", model_select);
     server.route("POST", "/api/model/weights", model_weights);
+    server.route("GET", "/api/model/attention", attention);
+    server.route("POST", "/api/model/attention", attention_set);
+    server.route("POST", "/api/model/attention/preview", attention_preview);
     server.route("POST", "/api/predict", predict);
     server.route("POST", "/api/generate", generate);
     server.route("POST", "/api/score", score);
@@ -1868,7 +2026,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("POST", "/api/load", load);
     server.route("POST", "/api/reset", reset);
     server.route("GET", "/api/uploads", uploads);
-    server.route("POST", "/api/uploads", upload);
+    server.stream_route("POST", "/api/uploads", upload);
     server.route("POST", "/api/uploads/delete", upload_delete);
     server.route("GET", "/api/schedule", schedule);
     server.route("POST", "/api/schedule/preview", schedule_preview);
@@ -1877,6 +2035,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     crate::duo::routes(&mut server);
     crate::critic::routes(&mut server);
     crate::dialogue::routes(&mut server);
+    crate::thinking::routes(&mut server);
     crate::checkpoint::routes(&mut server);
     crate::gan::routes(&mut server);
     crate::ollama::routes(&mut server);
@@ -1888,6 +2047,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     crate::chat::routes(&mut server);
     crate::codegen::routes(&mut server);
     crate::agent::routes(&mut server);
+    crate::assistant::routes(&mut server);
     let _ = server.state().routes.set(server.routes());
     if let Some(dir) = frontend {
         server.frontend(dir);

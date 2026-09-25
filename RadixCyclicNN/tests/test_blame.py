@@ -144,6 +144,95 @@ class TestFaults(unittest.TestCase):
         self.assertEqual(report["blamed"], 0)
 
 
+CORRECTIONS = [
+    {"index": 0, "text": "Hi howe are you??", "correction": "Hi, how are you?", "verdict": "corrected",
+     "reason": "spelling", "note": "howe is not a word and the question mark is doubled",
+     "changes": [{"op": "insert", "wrong": "", "right": ","}, {"op": "delete", "wrong": "e", "right": ""},
+                 {"op": "delete", "wrong": "?", "right": ""}]},
+    {"index": 1, "text": "the cat sat on the mat", "correction": "the cat sat on the mat", "verdict": "unchanged",
+     "reason": "none", "note": "nothing", "changes": []},
+    {"index": 2, "text": "the dog sat on", "correction": None, "verdict": "uncorrected", "reason": "", "note": "",
+     "changes": []},
+    {"index": 3, "text": "the cats sat here", "correction": "The cats sat here", "verdict": "corrected",
+     "reason": "", "note": "", "changes": [{"op": "replace", "wrong": "t", "right": "T"}]},
+]
+
+
+class TestCorrections(unittest.TestCase):
+    """The copy editor: the diff against the correction is the lesson, the sentence is not."""
+
+    def test_the_diff_speaks_for_itself(self):
+        cases = [
+            ([{"op": "delete", "wrong": "e", "right": ""}], "spelling"),
+            ([{"op": "replace", "wrong": "sit", "right": "sits"}], "spelling"),
+            ([{"op": "delete", "wrong": "?", "right": ""}], "punctuation"),
+            ([{"op": "insert", "wrong": "", "right": ","}], "punctuation"),
+            ([{"op": "replace", "wrong": "mat.", "right": "mat"}], "punctuation"),  # letters carried along
+            ([{"op": "replace", "wrong": "t", "right": "T"}], "capitalisation"),
+            ([{"op": "delete", "wrong": " ", "right": ""}], "spacing"),
+            ([{"op": "insert", "wrong": "", "right": "the "}], "grammar"),  # a whole word
+            ([{"op": "replace", "wrong": "cat the", "right": "the cat"}], "grammar"),
+            ([{"op": "delete", "wrong": "e", "right": ""}, {"op": "delete", "wrong": "?", "right": ""}], "spelling"),
+            ([{"op": "equal", "wrong": "same", "right": "same"}], "none"),
+            ([], "none"),
+        ]
+        for changes, reason in cases:
+            self.assertEqual(blame.reason_from_changes(changes), reason, changes)
+
+    def test_the_editors_own_word_wins_then_its_note_then_the_diff(self):
+        punctuation = [{"op": "delete", "wrong": "?", "right": ""}]
+        self.assertEqual(blame.correction_reason("Spelling", "", punctuation), "spelling")
+        self.assertEqual(blame.correction_reason("typo", "", punctuation), "spelling")  # an alias
+        self.assertEqual(blame.correction_reason("capitalization", "", punctuation), "capitalisation")
+        self.assertEqual(blame.correction_reason("word order", "", punctuation), "word-order")
+        self.assertEqual(blame.correction_reason("", "it is cut off mid-sentence", punctuation), "fragment")
+        self.assertEqual(blame.correction_reason("gobbledygook", "pure gibberish", punctuation), "nonsense")
+        self.assertEqual(blame.correction_reason("", "", punctuation), "punctuation")
+        self.assertEqual(blame.correction_reason("none", "", punctuation), "punctuation")  # a changed text is never "none"
+        self.assertEqual(blame.correction_reason("", "", []), "grammar")
+        for reason in blame.CORRECTION_REASONS:
+            if reason != "none":
+                self.assertEqual(blame.correction_reason(reason, "", []), reason)
+
+    def test_corrections_become_faults_and_unchanged_texts(self):
+        faults, unchanged = blame.faults_from_corrections(CORRECTIONS)
+        self.assertEqual([f["text"] for f in faults], ["Hi howe are you??", "the cats sat here"])
+        self.assertEqual([f["reason"] for f in faults], ["spelling", "capitalisation"])  # the diff decided the second
+        self.assertEqual([f["correction"] for f in faults], ["Hi, how are you?", "The cats sat here"])
+        self.assertEqual(faults[0]["severity"], blame.CORRECTION_SEVERITY)
+        self.assertEqual(faults[0]["source"], "correction")
+        self.assertIn("doubled", faults[0]["note"])
+        self.assertEqual(unchanged, ["the cat sat on the mat"])  # the uncorrected text is neither
+        self.assertEqual(blame.faults_from_corrections(CORRECTIONS, severity=2.5)[0][0]["severity"], 2.5)
+        self.assertEqual(blame.faults_from_corrections([{"text": ""}, "junk", {"text": "x", "correction": "x"}]),
+                         ([], ["x"]))
+
+    def test_teach_blames_only_the_characters_the_editor_changed(self):
+        model = NegativeNet(seed=6)
+        report = blame.teach_corrections(model, CORRECTIONS)
+        self.assertEqual((report["blamed"], report["passed"], report["uncorrected"]), (2, 1, 1))
+        self.assertEqual(report["reasons"], {"spelling": 1, "capitalisation": 1})
+        self.assertEqual(report["edits"], 3 + 1)
+        self.assertEqual(report["source"], "correction")
+        self.assertGreater(report["edges"], 0)
+        self.assertEqual(model.stats()["sources"], {"correction": 2})
+        self.assertEqual(model.recent(2)[-1]["note"], "howe is not a word and the question mark is doubled")
+        verdict = model.judge("Hi howe are you??")
+        self.assertEqual(verdict["reasons"][0]["reason"], "spelling")
+        self.assertIn("howe", "".join(span["fragment"] for span in verdict["spans"]))
+        self.assertEqual(model.judge("Hi, how are you?")["verdict"], "pass")  # the correction is not a failure
+        self.assertEqual(model.judge("the cat sat on the mat")["verdict"], "pass")
+        self.assertEqual(model.judge("the dog sat on")["verdict"], "pass")  # nobody said anything about it
+
+    def test_teach_accepts_the_whole_correction_result_and_the_severity(self):
+        model = NegativeNet(seed=7)
+        report = blame.teach_corrections(model, {"corrections": CORRECTIONS}, severity=2.0, clear_passes=False)
+        self.assertEqual(report["blamed"], 2)
+        self.assertEqual(report["severity"], 2.0)
+        self.assertEqual(report["severity_mean"], 2.0)
+        self.assertEqual(report["cleared"], 0)  # the unchanged text was not cleared (a correction still clears its own)
+
+
 LESSONS = [
     {
         "exercise": {"id": "r1e1", "prefix": "the cat", "focus": "subject-verb agreement",

@@ -37,6 +37,9 @@ pub const START_LABEL: &str = "<s>";
 pub const END_LABEL: &str = "</s>";
 /// The third sentinel: where the graph has learned a walk goes round.
 pub const BACK_LABEL: &str = "<back>";
+/// The fourth sentinel: where the graph has learned to stop and think, and
+/// where its thoughts begin.
+pub const THINK_LABEL: &str = "<think>";
 
 /// What one position of a text is.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -305,6 +308,29 @@ impl Encoding {
             return text.to_string();
         }
         crate::phonetic::spell(self.unit, text)
+    }
+
+    /// The text read backwards, unit by unit: its last character first, or
+    /// its last word - what a run with `reverse` trains on
+    /// (`../../SPEC-SearchAndTraining.md` section 9).
+    ///
+    /// Characters are reversed code point by code point, so reversing twice
+    /// gives the text back; a word encoding reverses the order of the words
+    /// and writes them with single spaces - the layout it keeps anyway - each
+    /// word's letters in their order.  Python's `Encoding.reverse`, character
+    /// for character.
+    pub fn reverse(&self, text: &str) -> String {
+        match self.unit {
+            Unit::Chars => text.chars().rev().collect(),
+            // words, sounds or acoustic units: the units in reverse order (a piece given as
+            // text is first turned into its sounds, as `join` does)
+            _ => self
+                .join(&[text])
+                .split_whitespace()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
     }
 
     // -- encoder -------------------------------------------------------------

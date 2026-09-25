@@ -4,6 +4,7 @@ import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, jobIsRunning, parseInteger, parseNumber, unitName } from "../util.js";
 import { ENCODING_PRESETS, describeEncoding, encodingSpec, replayLine } from "../settings.js";
 import Alert from "./Alert.jsx";
+import AttentionBandCard from "./AttentionBandCard.jsx";
 import { NumberField, SelectField, TextField } from "./Fields.jsx";
 
 /**
@@ -263,8 +264,19 @@ function EncodingCard({ status }) {
             </dd>
             <dt>sentinels</dt>
             <dd>
-              <code>{String(info.start_label)}</code> <code>{String(info.end_label)}</code>{" "}
-              <code>{String(info.back_label)}</code>
+              <code title="where every text begins">{String(info.start_label)}</code>{" "}
+              <code title="where every text ends">{String(info.end_label)}</code>{" "}
+              <code title="where the graph has learned a walk goes round: taught by the rethinks, never by a corpus">
+                {String(info.back_label)}
+              </code>
+              {info.think_label ? (
+                <>
+                  {" "}
+                  <code title="where the graph has learned to stop and think, and where its thoughts begin">
+                    {String(info.think_label)}
+                  </code>
+                </>
+              ) : null}
             </dd>
           </dl>
           <p className="muted">
@@ -520,8 +532,9 @@ function NewModelCard({ status, onStatus }) {
  *
  * **This model** - its kind, its encoding, its size and the replay buffer it
  * rehearses from; a **new model** in any kind and encoding; the **score
- * function** of whichever kind is active; and the **encoder / decoder** - what
- * a text becomes before the graph ever sees it, and what comes back out of it.
+ * function** of whichever kind is active; the **attention band** - where inside
+ * a gram a correction lands; and the **encoder / decoder** - what a text
+ * becomes before the graph ever sees it, and what comes back out of it.
  */
 export default function ModelSettingsPanel({ status, onStatus }) {
   return (
@@ -530,13 +543,14 @@ export default function ModelSettingsPanel({ status, onStatus }) {
         <h2>Model settings</h2>
         <p className="muted">
           What belongs to the model and is saved with it: the encoding it reads text in, how an edge is scored,
-          and the replay buffer it rehearses from. The settings of this browser - the traversal, the sampling
+          where inside a gram a correction lands (the attention band), and the replay buffer it rehearses from. The settings of this browser - the traversal, the sampling
           filters, how a run walks its texts - are on the <a href="#settings">Settings</a> tab.
         </p>
       </div>
       <ThisModelCard status={status} />
       <NewModelCard status={status} onStatus={onStatus} />
       <ScoreFunctionCard status={status} />
+      <AttentionBandCard status={status} onStatus={onStatus} />
       <EncodingCard status={status} />
     </>
   );

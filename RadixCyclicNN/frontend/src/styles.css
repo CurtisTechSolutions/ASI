@@ -568,6 +568,107 @@ dl.kv dd {
   font-style: italic;
 }
 
+/* the attention band (Model settings): the band over one gram, and grams drawn through it -
+   sharp at the centre, blurred towards the ends, as the eye reads a line */
+.band-picture {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 4px;
+}
+
+.band-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 64px;
+}
+
+.band-bar-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  width: 34px;
+}
+
+.band-bar {
+  width: 100%;
+  background: var(--accent);
+  border-radius: 4px 4px 0 0;
+}
+
+.band-bar-slot small {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.band-gram {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 18px;
+  display: inline-flex;
+  gap: 2px;
+}
+
+.band-table .band-gram {
+  font-size: 14px;
+}
+
+/* under the bars, each unit sits beneath the bar that says how sharply it is seen */
+.band-picture .band-gram {
+  gap: 6px;
+}
+
+.band-picture .band-unit {
+  width: 34px;
+}
+
+.band-unit {
+  display: inline-block;
+  min-width: 0.6em;
+  text-align: center;
+}
+
+.band-table {
+  border-collapse: collapse;
+  margin: 4px 0 12px;
+}
+
+.band-table th,
+.band-table td {
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.band-table tr.focus td {
+  font-weight: 600;
+}
+
+.band-share {
+  display: inline-block;
+  width: 60px;
+  height: 7px;
+  background: var(--chip);
+  border-radius: 4px;
+  vertical-align: middle;
+  overflow: hidden;
+}
+
+.band-share span {
+  display: block;
+  height: 100%;
+  background: var(--accent-2);
+}
+
+.text-display.inline {
+  display: inline;
+  font-weight: normal;
+}
+
 /* a gram the model has never seen (the encoder preview on the Model settings tab) */
 .chip.unknown {
   border-style: dashed;
@@ -911,6 +1012,48 @@ pre.sample {
 .badge.unrated {
   background: var(--warn-bg);
   color: var(--warn);
+}
+
+/* The copy editor's verdicts: it changed the text, handed it back as it was, or gave no usable answer. */
+.badge.corrected {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.badge.unchanged {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.badge.uncorrected {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+/* A correction shown as a diff: what the editor struck out of the model's text, what it wrote instead. */
+.diff {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff del {
+  background: var(--danger-bg);
+  color: var(--danger);
+  text-decoration: line-through;
+  border-radius: 2px;
+}
+
+.diff ins {
+  background: var(--ok-bg);
+  color: var(--ok);
+  text-decoration: none;
+  border-radius: 2px;
+}
+
+.diff .gap {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 table.data td.wrap {
@@ -1362,6 +1505,44 @@ ol.dialogue li.rated.down .bubble {
   border-left: 3px solid #dc2626;
 }
 
+/* The window of a streamed conversation: the turn being spoken, before it is committed. What the voice
+   backed out of is struck through, what it found instead is underlined, and the whole bubble is dashed so
+   it reads as provisional. */
+ol.dialogue li.turn.live .bubble {
+  border-style: dashed;
+  opacity: 0.85;
+}
+
+ol.dialogue li.turn.live .retracted {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+ol.dialogue li.turn.live .found {
+  text-decoration: underline;
+  text-decoration-color: #16a34a;
+  text-decoration-thickness: 2px;
+}
+
+ol.dialogue li.turn.live .pending::after {
+  content: "…";
+  animation: dialogue-thinking 1s steps(4, end) infinite;
+}
+
+@keyframes dialogue-thinking {
+  0% { opacity: 0.2; }
+  50% { opacity: 1; }
+  100% { opacity: 0.2; }
+}
+
+ol.dialogue .meta .draft {
+  color: var(--muted);
+}
+
+ol.dialogue .meta .draft s {
+  color: #dc2626;
+}
+
 /* header badge of the Go server */
 .badge.engine {
   background: rgba(47, 95, 216, 0.12);
@@ -1590,4 +1771,158 @@ table.data b.bad {
 /* the epoch that stopped a run early (the Train tab's history) */
 table.data tr.stopped td {
   font-weight: 600;
+}
+
+/* ---- Thinking: the Think tab, the thoughts under a turn, a thinking model's thinking ---- */
+
+/* what a voice thought before backing up, under its turn (Converse, Chat) */
+.thought-line {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+  font-style: italic;
+  max-width: 100%;
+}
+
+.thought-line .thought-question {
+  font-style: normal;
+}
+
+ol.thoughts {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+ol.thoughts > li + li {
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.thought .thought-summary {
+  margin: 0 0 6px;
+}
+
+.thought .thought-text {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border-bottom-left-radius: 4px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thought dl.kv {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.thought .thought-path {
+  margin-bottom: 8px;
+}
+
+/* the questions a thought asked itself: one level deeper each */
+ol.thought-questions {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0 0 0 14px;
+  border-left: 3px solid var(--accent-2);
+}
+
+.thought.question .thought-summary {
+  font-size: 13px;
+}
+
+/* a thinking model's answers, with the questions it asked itself marked */
+ol.thinking-list {
+  padding-left: 20px;
+  margin: 0 0 10px;
+}
+
+ol.thinking-list li {
+  margin-bottom: 12px;
+}
+
+ol.thinking-list .question,
+ol.thinking-list .answer {
+  margin: 0 0 4px;
+}
+
+.thinking-text {
+  margin: 0 0 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thinking-text mark {
+  background: var(--hl);
+  color: var(--hl-text);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+/* Talk: the thinking beside the reply, and a reply still being written ------ */
+
+ol.dialogue details.thinking {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  max-width: 100%;
+}
+
+ol.dialogue details.thinking summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+ol.dialogue details.thinking summary::-webkit-details-marker {
+  display: none;
+}
+
+ol.dialogue details.thinking summary::before {
+  content: "▸ ";
+}
+
+ol.dialogue details.thinking[open] summary::before {
+  content: "▾ ";
+}
+
+/* the search's trace is a plain numbered list, not the Think tab's stack of thought cards (ol.thoughts above) */
+ol.dialogue ol.thoughts {
+  list-style: decimal;
+  display: block;
+  margin: 4px 0 0;
+  padding-left: 18px;
+  text-align: left;
+}
+
+ol.dialogue ol.thoughts > li + li {
+  border-top: 0;
+  padding-top: 0;
+}
+
+ol.dialogue ol.thoughts li {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+ol.dialogue li.turn.streaming .bubble::after {
+  content: "▍";
+  animation: talk-cursor 1s steps(2) infinite;
+}
+
+@keyframes talk-cursor {
+  to {
+    visibility: hidden;
+  }
+}
+
+pre.code.wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
 }

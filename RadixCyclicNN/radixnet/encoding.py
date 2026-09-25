@@ -75,6 +75,11 @@ START_LABEL = "<s>"
 END_LABEL = "</s>"
 BACK_LABEL = "<back>"
 """The third sentinel: where the graph has learned that a walk goes round (``graph.BACK``)."""
+THINK_LABEL = "<think>"
+"""The fourth sentinel: where the graph has learned to stop and think, and where its thoughts begin
+(``graph.THINK``)."""
+SENTINEL_LABELS = (START_LABEL, END_LABEL, BACK_LABEL, THINK_LABEL)
+"""The labels of the four sentinel nodes, in node id order."""
 
 # A "unit view" is whatever slices by unit: a str for characters (Python slices
 # strings by code point already), a list of words for words.  ``len`` is the
@@ -352,6 +357,22 @@ class Encoding:
                 return True
         return text == prefix or text.startswith(prefix + " ")
 
+    def reverse(self, text: str) -> str:
+        """The text read backwards, unit by unit: its last character first, or its last word.
+
+        Characters are reversed code point by code point, so reading a text
+        backwards twice gives it back exactly.  A word encoding reverses the
+        order of the words and writes them with single spaces - the layout it
+        keeps anyway - and each word keeps its letters in their order.  This is
+        what training with ``reverse`` reads (``../SPEC-SearchAndTraining.md``
+        §9), and what a query to a model trained that way must be turned into.
+        """
+        if self.unit == CHARS:
+            return text[::-1]
+        # words, sounds or acoustic units: the units in reverse order (a phonetic unit reads the
+        # text as sounds first, so a text read backwards is its sounds backwards)
+        return " ".join(reversed(self.units(text)))
+
     # -- encoder -------------------------------------------------------------
 
     def covered(self, units: int) -> int:
@@ -407,7 +428,7 @@ class Encoding:
         parts: list[str] = []
         first = True
         for label in labels:
-            if skip_sentinels and label in (START_LABEL, END_LABEL, BACK_LABEL):
+            if skip_sentinels and label in SENTINEL_LABELS:
                 continue
             parts.append(self.piece(label, first_cut if first else self.overlap))
             first = False

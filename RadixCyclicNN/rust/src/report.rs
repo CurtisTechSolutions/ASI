@@ -39,6 +39,11 @@ pub fn stats(model: &Model) -> Json {
         ("units".to_string(), Json::str(model.units())),
         ("ngram".to_string(), Json::Int(g.enc.n as i64)),
         ("stride".to_string(), Json::Int(g.enc.stride as i64)),
+        // where a correction lands: the band's blur, null while it is off
+        (
+            "attention_blur".to_string(),
+            g.attention.blur.map(Json::Num).unwrap_or(Json::Null),
+        ),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str("rust")),

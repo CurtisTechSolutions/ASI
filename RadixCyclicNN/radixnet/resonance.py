@@ -94,7 +94,7 @@ from .backend import get_backend
 from .counter import CyclicCounter
 from .beam import Prediction, default_beam
 from .encoding import WINDOW, Decoder, Encoder, Encoding
-from .graph import BACK, END, FIRST, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, ORIGINS, START, THINK, RadixCyclicGraph
 from .metacog import ABORT, ESCAPE, RIDE, MetaLayer, cycle_signature
 from .model import (
     MODEL_FORMAT_VERSION,
@@ -522,6 +522,16 @@ class ResonantGraph(RadixCyclicGraph):
         self.recompute_weights()
         return e
 
+    def observe_think(self, p: int, amount: float = 1.0) -> int:
+        """As :meth:`RadixCyclicGraph.observe_think`, learned the way this model learns everything: the
+        ``THINK`` edge is counted **without a phase** (an event is not a walk of this model's search and cannot
+        say which phase it was in) and rewarded, and the weight follows from that."""
+        e = super().observe_think(p, amount=0.0)  # no weight is nudged by hand here
+        self.record_traversal(e, None, amount or 1.0)
+        self.add_reward([e], amount)
+        self.recompute_weights()
+        return e
+
     def back_probability(self, p: int) -> float:
         """``P(hand over | p)`` - the share ``p``'s ``BACK`` edge takes of its children, 0 when it has none."""
         cost = self.back_cost(p)
@@ -697,22 +707,25 @@ class ResonantNet(GraphModel):
 
     # -- walking a text with its phase ---------------------------------------
 
-    def _walk(self, text: str, *, learn: bool, count: bool, reward: float, strength: float) -> dict:
+    def _walk(
+        self, text: str, *, learn: bool, count: bool, reward: float, strength: float, origin: int = START
+    ) -> dict:
         """Walk one text through the structure carrying its phase.
 
         Counts each traversal into its edge's circular accumulator at the phase
         the walk was in (``count``), moves the edge's reward (``reward``), and
         teaches the metacognitive layer what the text did at every cycle it had
-        the option to close (``learn``).  Returns what the pass did.
+        the option to close (``learn``).  Returns what the pass did.  A thought
+        walks from ``origin=THINK``.
         """
         graph = self.graph
         grams = self.encoder.encode(text)
         if not grams:
             return {"transitions": 0, "cycles": 0, "cost": 0.0}
-        traced = graph._trace(grams)
+        traced = graph._trace(grams, origin)
         if traced is None:
-            graph.observe_sequence(grams, count=False)
-            traced = graph._trace(grams)
+            graph.observe_sequence(grams, count=False, origin=origin)
+            traced = graph._trace(grams, origin)
             if traced is None:  # pragma: no cover - observe_sequence guarantees walkability
                 raise RuntimeError("internal error: observed sequence is not walkable")
         transitions, path = traced
@@ -803,12 +816,14 @@ class ResonantNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         planned: bool = False,
+        origin: int = START,
     ) -> list[dict]:
         """One routine behind ``train`` / ``reward`` / ``punish``: N epochs of walks over ``texts``.
 
         ``planned`` (plain training) walks them the way ``cfg`` says
         (``../SPEC-SearchAndTraining.md``); the feedback passes walk every text
-        in corpus order.
+        in corpus order.  ``origin`` is the sentinel every walk begins at:
+        START for texts, THINK for thoughts.
         """
         cleaned, skipped = self._clean_texts(texts)
         plan = self._plan(cleaned, cfg) if planned else None
@@ -819,10 +834,10 @@ class ResonantNet(GraphModel):
         if cleaned:
             # register everything structurally (and compress) before the first counting pass, so
             # every epoch - the first included - walks exactly the same transitions
-            self._observe(cleaned + rehearsed, count=False)
+            self._observe(cleaned + rehearsed, count=False, origin=origin)
             if cfg.auto_compress:
                 graph.compress()
-            self._observe(cleaned + rehearsed, count=False)
+            self._observe(cleaned + rehearsed, count=False, origin=origin)
         for epoch in range(1, cfg.epochs + 1):
             started = time.perf_counter()
             transitions = 0
@@ -835,7 +850,7 @@ class ResonantNet(GraphModel):
                 chosen, again = plan.epoch(epoch - 1, base + epoch)
                 walked = [cleaned[i] for i in chosen] + again
             for text in walked:
-                done = self._walk(text, learn=learn, count=count, reward=reward, strength=strength)
+                done = self._walk(text, learn=learn, count=count, reward=reward, strength=strength, origin=origin)
                 transitions += done["transitions"]
                 cycles += done["cycles"]
                 cost += done["cost"] * done["transitions"]
@@ -890,15 +905,20 @@ class ResonantNet(GraphModel):
         progress: ProgressFn | None = None,
         stop_event: threading.Event | None = None,
         phase: str | None = None,
+        origin: int = START,
         **overrides,
     ) -> list[dict]:
-        """Learn from texts: count every traversal at its phase, and the cycle decisions beside it."""
+        """Learn from texts: count every traversal at its phase, and the cycle decisions beside it.
+
+        ``origin=THINK`` trains the texts as thoughts (:mod:`radixnet.thinking`)."""
         cfg = _resolve_config(config, overrides)
+        texts = self._read(texts, cfg)
         cleaned, _ = self._clean_texts(texts)
         records = self._passes(
             texts, cfg, count=True, reward=0.0, strength=1.0, phase=phase,
             checkpoint_manager=checkpoint_manager, progress=progress, stop_event=stop_event,
             planned=phase is None,  # a phase marks a feedback pass: corpus order, the buffer left alone
+            origin=origin,
         )
         self.meta["epochs_total"] += len(records)
         # the encoding's units, as every other kind counts them: words under a word encoding
@@ -1142,6 +1162,7 @@ class ResonantNet(GraphModel):
         top_p: float = 1.0,
         min_p: float = 0.0,
         diversity: float = 0.0,
+        origin: int = START,
     ) -> Prediction:
         """The shared search hook, routed through :meth:`predict`.
 
@@ -1154,7 +1175,7 @@ class ResonantNet(GraphModel):
             prefix, length=length, mode=mode, step_penalty=step_penalty, temperature=temperature,
             to_end=to_end, max_length=max_length, k=max(1, k), beam=beam, rng=rng,
             traversal=traversal, penalty_scale=penalty_scale, merit_scale=merit_scale,
-            top_k=top_k, top_p=top_p, min_p=min_p, diversity=diversity,
+            top_k=top_k, top_p=top_p, min_p=min_p, diversity=diversity, origin=origin,
         )
 
     def predict(
@@ -1176,6 +1197,7 @@ class ResonantNet(GraphModel):
         top_p: float = 1.0,
         min_p: float = 0.0,
         diversity: float = 0.0,
+        origin: int = START,
     ) -> Prediction:
         """Continue ``prefix`` over the phase-unrolled graph.
 
@@ -1202,7 +1224,8 @@ class ResonantNet(GraphModel):
 
         ``top_k`` / ``top_p`` / ``min_p`` narrow what ``"sample"`` draws from and
         ``diversity`` spreads ``"beam"`` out (``../SPEC-SearchAndTraining.md``);
-        the two exact searches take neither.
+        the two exact searches take neither.  ``origin=THINK`` with an empty
+        prefix walks a *thought* (:mod:`radixnet.thinking`).
         """
         mode = (mode or "kbest").lower()
         if mode not in ("kbest", "beam", "dijkstra", "sample"):
@@ -1211,7 +1234,7 @@ class ResonantNet(GraphModel):
         traversal = resolve_traversal(traversal)
         graph = self.graph
         costs = phase_traversal_costs(graph, traversal, penalty_scale, merit_scale)
-        node, offset, lead = self._prefix_start(prefix)
+        node, offset, lead = self._walk_start(prefix, origin)
         bucket = graph.text_bucket(prefix) if prefix else 0
         lead_len = self.encoding.length(lead)  # in units, as `length` is
         want = max(0, length - lead_len)
