@@ -3,6 +3,8 @@ __pycache__/
 frontend/node_modules/
 checkpoints/
 /model.json
+/model.phone.json
+/speech.wav
 /model.json.gz
 /*.json.gz
 .pytest_cache/

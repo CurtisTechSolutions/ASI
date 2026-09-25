@@ -366,8 +366,14 @@ def sample_walk(
     top_k: int = 0,
     top_p: float = 1.0,
     min_p: float = 0.0,
+    on_step: "Callable[[int], None] | None" = None,
 ) -> PathResult:
     """Stochastic walk sampling each child from ``softmax(scores / temperature)``.
+
+    ``on_step``, if given, is called with every node the walk steps onto, as it
+    steps onto it - END included, which is the walk's own final sentinel - so a
+    listener can act on the walk while it is walking (:mod:`radixnet.voice`
+    speaks it).
 
     Stops at END (if ``stop_at_end``), once ``max_chars`` characters were
     emitted (``None`` = no limit: only END or a dead end stops the walk), or
@@ -438,6 +444,8 @@ def sample_walk(
         node_ids.append(c)
         if c != END:
             chars += graph.label_len(c) - overlap
+        if on_step is not None:
+            on_step(c)
         came_from = node
         node = c
         steps += 1

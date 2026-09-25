@@ -1,0 +1,2061 @@
+;;; The core lexicon of phonetok: the common words of English, the numbers, the letters, the days and
+;;; months, and the words of the repository's sample corpora - a subset of the CMU Pronouncing Dictionary
+;;; (cmudict, Carnegie Mellon University, BSD licence: see LICENSE-cmudict beside this file).  A word's
+;;; alternative pronunciations follow it as word(2), word(3).  Read by phonetok.lexicon.Lexicon.core().
+a AH0
+a(2) EY1
+able EY1 B AH0 L
+about AH0 B AW1 T
+above AH0 B AH1 V
+accent AH0 K S EH1 N T
+accent(2) AE1 K S EH2 N T
+acceptance AE0 K S EH1 P T AH0 N S
+acceptance(2) AH0 K S EH1 P T AH0 N S
+acronym AE1 K R AH0 N IH0 M
+across AH0 K R AO1 S
+actions AE1 K SH AH0 N Z
+add AE1 D
+added AE1 D AH0 D
+added(2) AE1 D IH0 D
+adding AE1 D IH0 NG
+adds AE1 D Z
+afraid AH0 F R EY1 D
+after AE1 F T ER0
+again AH0 G EH1 N
+again(2) AH0 G EY1 N
+against AH0 G EH1 N S T
+against(2) AH0 G EY1 N S T
+age EY1 JH
+agent EY1 JH AH0 N T
+ago AH0 G OW1
+agree AH0 G R IY1
+agreed AH0 G R IY1 D
+agreeing AH0 G R IY1 IH0 NG
+agrees AH0 G R IY1 Z
+ah AA1
+air EH1 R
+algorithm AE1 L G ER0 IH2 DH AH0 M
+alive AH0 L AY1 V
+all AO1 L
+allow AH0 L AW1
+allowed AH0 L AW1 D
+allowing AH0 L AW1 IH0 NG
+allows AH0 L AW1 Z
+along AH0 L AO1 NG
+already AO0 L R EH1 D IY0
+already(2) AO0 R EH1 D IY0
+also AO1 L S OW0
+although AO2 L DH OW1
+always AO1 L W EY2 Z
+always(2) AO1 L W IY0 Z
+am AE1 M
+am(2) EY1 EH1 M
+among AH0 M AH1 NG
+an AE1 N
+an(2) AH0 N
+ancient EY1 N CH AH0 N T
+ancient(2) EY1 N SH AH0 N T
+and AH0 N D
+and(2) AE1 N D
+angry AE1 NG G R IY0
+animal AE1 N AH0 M AH0 L
+another AH0 N AH1 DH ER0
+answer AE1 N S ER0
+answered AE1 N S ER0 D
+ant AE1 N T
+any EH1 N IY0
+anybody EH1 N IY0 B AH0 D IY0
+anyone EH1 N IY0 W AH2 N
+anyone(2) EH1 N IY0 W AH0 N
+anything EH1 N IY0 TH IH2 NG
+appear AH0 P IH1 R
+appeared AH0 P IH1 R D
+appearing AH0 P IH1 R IH0 NG
+appears AH0 P IH1 R Z
+apple AE1 P AH0 L
+april EY1 P R AH0 L
+are AA1 R
+are(2) ER0
+area EH1 R IY0 AH0
+aren't AA1 R AH0 N T
+aren't(2) AA1 R N T
+around ER0 AW1 N D
+around(2) ER0 AW1 N
+arrays ER0 EY1 Z
+arrives ER0 AY1 V Z
+art AA1 R T
+ask AE1 S K
+asked AE1 S K T
+asked(2) AE1 S T
+asking AE1 S K IH0 NG
+asks AE1 S K S
+assert AH0 S ER1 T
+at AE1 T
+ate EY1 T
+attempts AH0 T EH1 M P T S
+attempts(2) AH0 T EH1 M P S
+august AA1 G AH0 S T
+august(2) AO1 G AH0 S T
+autumn AO1 T AH0 M
+available AH0 V EY1 L AH0 B AH0 L
+awake AH0 W EY1 K
+b B IY1
+back B AE1 K
+bad B AE1 D
+bag B AE1 G
+baker B EY1 K ER0
+bakes B EY1 K S
+banana B AH0 N AE1 N AH0
+bare B EH1 R
+barks B AA1 R K S
+base B EY1 S
+based B EY1 S T
+bat B AE1 T
+bath B AE1 TH
+be B IY1
+be(2) B IY0
+beach B IY1 CH
+bear B EH1 R
+beautiful B Y UW1 T AH0 F AH0 L
+because B IH0 K AO1 Z
+because(2) B IH0 K AH1 Z
+because(3) B IH0 K AA1 Z
+because(4) B IH0 K AH0 Z
+bed B EH1 D
+bee B IY1
+been B IH1 N
+been(2) B AH0 N
+been(3) B IH0 N
+beer B IH1 R
+bees B IY1 Z
+before B IH0 F AO1 R
+before(2) B IY2 F AO1 R
+began B IH0 G AE1 N
+began(2) B IY0 G AE1 N
+begin B IH0 G IH1 N
+beginning B IH0 G IH1 N IH0 NG
+begins B IH0 G IH1 N Z
+begun B IH0 G AH1 N
+begun(2) B EY1 G AH0 N
+behind B IH0 HH AY1 N D
+being B IY1 IH0 NG
+believe B IH0 L IY1 V
+believed B IH0 L IY1 V D
+believes B IH0 L IY1 V Z
+believing B IH0 L IY1 V IH0 NG
+below B IH0 L OW1
+below(2) B IY0 L OW1
+belt B EH1 L T
+bend B EH1 N D
+bending B EH1 N D IH0 NG
+bends B EH1 N D Z
+bent B EH1 N T
+beside B IH0 S AY1 D
+beside(2) B IY2 S AY1 D
+besides B IH0 S AY1 D Z
+besides(2) B IY2 S AY1 D Z
+bet B EH1 T
+bets B EH1 T S
+better B EH1 T ER0
+betting B EH1 T IH0 NG
+between B IH0 T W IY1 N
+between(2) B IY0 T W IY1 N
+beyond B IH0 AA1 N D
+beyond(2) B IY2 AO1 N D
+beyond(3) B IH0 AO1 N D
+big B IH1 G
+billion B IH1 L Y AH0 N
+bird B ER1 D
+birth B ER1 TH
+bit B IH1 T
+bite B AY1 T
+bites B AY1 T S
+biting B AY1 T IH0 NG
+bitten B IH1 T AH0 N
+bitter B IH1 T ER0
+black B L AE1 K
+blew B L UW1
+bloom B L UW1 M
+blow B L OW1
+blowing B L OW1 IH0 NG
+blown B L OW1 N
+blows B L OW1 Z
+blue B L UW1
+board B AO1 R D
+boat B OW1 T
+body B AA1 D IY0
+boiling B OY1 L IH0 NG
+boils B OY1 L Z
+book B UH1 K
+both B OW1 TH
+bottle B AA1 T AH0 L
+bough B AW1
+bought B AA1 T
+bought(2) B AO1 T
+box B AA1 K S
+boy B OY1
+branch B R AE1 N CH
+branches B R AE1 N CH AH0 Z
+branches(2) B R AE1 N CH IH0 Z
+brave B R EY1 V
+bread B R EH1 D
+break B R EY1 K
+breaking B R EY1 K IH0 NG
+breaks B R EY1 K S
+bridge B R IH1 JH
+bright B R AY1 T
+bring B R IH1 NG
+bringing B R IH1 NG IH0 NG
+brings B R IH1 NG Z
+broke B R OW1 K
+broken B R OW1 K AH0 N
+brought B R AO1 T
+brown B R AW1 N
+browsing B R AW1 Z IH0 NG
+brush B R AH1 SH
+build B IH1 L D
+builder B IH1 L D ER0
+building B IH1 L D IH0 NG
+builds B IH1 L D Z
+built B IH1 L T
+burn B ER1 N
+burned B ER1 N D
+burning B ER1 N IH0 NG
+burns B ER1 N Z
+burnt B ER1 N T
+bush B UH1 SH
+business B IH1 Z N AH0 S
+business(2) B IH1 Z N IH0 S
+busy B IH1 Z IY0
+but B AH1 T
+butter B AH1 T ER0
+button B AH1 T AH0 N
+buy B AY1
+buying B AY1 IH0 NG
+buys B AY1 Z
+by B AY1
+bye B AY1
+bytes B AY1 T S
+c S IY1
+call K AO1 L
+called K AO1 L D
+calling K AO1 L IH0 NG
+calls K AO1 L Z
+came K EY1 M
+can K AE1 N
+can(2) K AH0 N
+can't K AE1 N T
+cannot K AE1 N AA0 T
+cannot(2) K AH0 N AA1 T
+capital K AE1 P AH0 T AH0 L
+capital(2) K AE1 P IH0 T AH0 L
+car K AA1 R
+card K AA1 R D
+carried K AE1 R IY0 D
+carried(2) K EH1 R IY0 D
+carries K AE1 R IY0 Z
+carries(2) K EH1 R IY0 Z
+carry K AE1 R IY0
+carry(2) K EH1 R IY0
+carrying K AE1 R IY0 IH0 NG
+carrying(2) K EH1 R IY0 IH0 NG
+case K EY1 S
+cat K AE1 T
+catch K AE1 CH
+catches K AE1 CH AH0 Z
+catches(2) K AE1 CH IH0 Z
+catching K AE1 CH IH0 NG
+caught K AA1 T
+caught(2) K AO1 T
+cause K AA1 Z
+cause(2) K AO1 Z
+caused K AA1 Z D
+caused(2) K AO1 Z D
+causes K AA1 Z AH0 Z
+causes(2) K AO1 Z IH0 Z
+causing K AA1 Z IH0 NG
+causing(2) K AO1 Z IH0 NG
+celsius S EH1 L S IY0 AH0 S
+certain S ER1 T AH0 N
+chair CH EH1 R
+change CH EY1 N JH
+changed CH EY1 N JH D
+changes CH EY1 N JH AH0 Z
+changes(2) CH EY1 N JH IH0 Z
+changing CH EY1 N JH IH0 NG
+chased CH EY1 S T
+chat CH AE1 T
+cheese CH IY1 Z
+chicken CH IH1 K AH0 N
+child CH AY1 L D
+children CH IH1 L D R AH0 N
+choose CH UW1 Z
+chooses CH UW1 Z AH0 Z
+chooses(2) CH UW1 Z IH0 Z
+choosing CH UW1 Z IH0 NG
+chose CH OW1 Z
+chosen CH OW1 Z AH0 N
+church CH ER1 CH
+city S IH1 T IY0
+clean K L IY1 N
+clever K L EH1 V ER0
+climbs K L AY1 M Z
+clock K L AA1 K
+close K L OW1 S
+close(2) K L OW1 Z
+closed K L OW1 Z D
+closes K L OW1 Z IH0 Z
+closing K L OW1 Z IH0 NG
+cloth K L AO1 TH
+cloud K L AW1 D
+clouds K L AW1 D Z
+coat K OW1 T
+code K OW1 D
+coffee K AA1 F IY0
+coffee(2) K AO1 F IY0
+cold K OW1 L D
+color K AH1 L ER0
+color(2) K AO1 L ER0
+colour K AH1 L ER0
+come K AH1 M
+comes K AH1 M Z
+coming K AH1 M IH0 NG
+common K AA1 M AH0 N
+community K AH0 M Y UW1 N AH0 T IY0
+community(2) K AH0 M Y UW1 N IH0 T IY0
+company K AH1 M P AH0 N IY2
+complex K AA1 M P L EH0 K S
+complex(2) K AH0 M P L EH1 K S
+computer K AH0 M P Y UW1 T ER0
+computers K AH0 M P Y UW1 T ER0 Z
+consider K AH0 N S IH1 D ER0
+considered K AH0 N S IH1 D ER0 D
+considering K AH0 N S IH1 D ER0 IH0 NG
+considers K AH0 N S IH1 D ER0 Z
+consonant K AA1 N S AH0 N AH0 N T
+consonants K AA1 N S AH0 N AH0 N T S
+continue K AH0 N T IH1 N Y UW0
+continued K AH0 N T IH1 N Y UW0 D
+continues K AH0 N T IH1 N Y UW0 Z
+continuing K AH0 N T IH1 N Y UW0 IH0 NG
+cool K UW1 L
+corn K AO1 R N
+corpus K AO1 R P AH0 S
+cost K AA1 S T
+cost(2) K AO1 S T
+costing K AO1 S T IH0 NG
+costs K AA1 S T S
+costs(2) K AO1 S T S
+cotton K AA1 T AH0 N
+cotton(2) K AO1 T AH0 N
+cough K AA1 F
+cough(2) K AO1 F
+could K UH1 D
+couldn't K UH1 D AH0 N T
+couldn't(2) K UH1 D AH0 N
+count K AW1 N T
+country K AH1 N T R IY0
+cover K AH1 V ER0
+covered K AH1 V ER0 D
+covering K AH1 V ER0 IH0 NG
+covering(2) K AH1 V R IH0 NG
+covers K AH1 V ER0 Z
+cow K AW1
+crawls K R AO1 L Z
+create K R IY0 EY1 T
+created K R IY0 EY1 T AH0 D
+created(2) K R IY0 EY1 T IH0 D
+creates K R IY0 EY1 T S
+creating K R IY0 EY1 T IH0 NG
+criteria K R AY0 T IH1 R IY0 AH0
+crosses K R AO1 S IH0 Z
+cruel K R UW1 AH0 L
+cruel(2) K R UW1 L
+cup K AH1 P
+current K ER1 AH0 N T
+current(2) K ER1 N T
+current(3) K AA1 R AH0 N T
+cut K AH1 T
+cuts K AH1 T S
+cutting K AH1 T IH0 NG
+cyclic S AY1 K L IH0 K
+d D IY1
+dangerous D EY1 N JH ER0 AH0 S
+dare D EH1 R
+dark D AA1 R K
+dash D AE1 SH
+data D EY1 T AH0
+data(2) D AE1 T AH0
+day D EY1
+dead D EH1 D
+deal D IY1 L
+dealing D IY1 L IH0 NG
+deals D IY1 L Z
+dealt D EH1 L T
+death D EH1 TH
+december D IH0 S EH1 M B ER0
+decide D IH2 S AY1 D
+decided D IH2 S AY1 D IH0 D
+decides D IH2 S AY1 D Z
+deciding D IH2 S AY1 D IH0 NG
+deep D IY1 P
+deer D IH1 R
+define D IH0 F AY1 N
+defined D IH0 F AY1 N D
+degrees D IH0 G R IY1 Z
+desert D EH1 Z ER0 T
+desert(2) D IH0 Z ER1 T
+despite D IH0 S P AY1 T
+develop D IH0 V EH1 L AH0 P
+developed D IH0 V EH1 L AH0 P T
+developing D IH0 V EH1 L AH0 P IH0 NG
+develops D IH0 V EH1 L AH0 P S
+dictionary D IH1 K SH AH0 N EH2 R IY0
+did D IH1 D
+did(2) D IH0 D
+didn't D IH1 D AH0 N T
+didn't(2) D IH1 D N T
+didn't(3) D IH1 D AH0 N
+didn't(4) D IH1 N T
+die D AY1
+died D AY1 D
+dies D AY1 Z
+different D IH1 F ER0 AH0 N T
+different(2) D IH1 F R AH0 N T
+difficult D IH1 F AH0 K AH0 L T
+dig D IH1 G
+digging D IH1 G IH0 NG
+digs D IH1 G Z
+dim D IH1 M
+dirty D ER1 T IY0
+do D UW1
+doctor D AA1 K T ER0
+doctor(2) D AO1 K T ER0
+does D AH1 Z
+does(2) D IH0 Z
+doesn't D AH1 Z AH0 N T
+doesn't(2) D AH1 Z AH0 N
+dog D AO1 G
+doing D UW1 IH0 NG
+don't D OW1 N T
+don't(2) D OW1 N
+done D AH1 N
+door D AO1 R
+double D AH1 B AH0 L
+dough D OW1
+down D AW1 N
+drank D R AE1 NG K
+draw D R AO1
+drawing D R AO1 IH0 NG
+drawn D R AO1 N
+draws D R AO1 Z
+dream D R IY1 M
+dreamed D R IY1 M D
+dreaming D R IY1 M IH0 NG
+dreams D R IY1 M Z
+dreamt D R EH1 M T
+dress D R EH1 S
+drew D R UW1
+drink D R IH1 NG K
+drinking D R IH1 NG K IH0 NG
+drinks D R IH1 NG K S
+drive D R AY1 V
+driven D R IH1 V AH0 N
+drives D R AY1 V Z
+driving D R AY1 V IH0 NG
+drove D R OW1 V
+drunk D R AH1 NG K
+dry D R AY1
+duck D AH1 K
+dug D AH1 G
+dull D AH1 L
+during D UH1 R IH0 NG
+during(2) D Y UH1 R IH0 NG
+during(3) D ER1 IH0 NG
+dying D AY1 IH0 NG
+e IY1
+each IY1 CH
+early ER1 L IY0
+earth ER1 TH
+east IY1 S T
+easy IY1 Z IY0
+eat IY1 T
+eaten IY1 T AH0 N
+eating IY1 T IH0 NG
+eats IY1 T S
+economic EH2 K AH0 N AA1 M IH0 K
+economic(2) IY2 K AH0 N AA1 M IH0 K
+edge EH1 JH
+edges EH1 JH AH0 Z
+edges(2) EH1 JH IH0 Z
+education EH2 JH AH0 K EY1 SH AH0 N
+education(2) EH2 JH Y UW0 K EY1 SH AH0 N
+egg EH1 G
+eggs EH1 G Z
+eight EY1 T
+eighteen EY0 T IY1 N
+eighteen(2) EY1 T IY1 N
+eighth EY1 T TH
+eighth(2) EY1 TH
+eighty EY1 T IY0
+either IY1 DH ER0
+either(2) AY1 DH ER0
+eleven IH0 L EH1 V AH0 N
+eleven(2) IY1 L EH0 V AH0 N
+else EH1 L S
+em EH1 M
+empty EH1 M P T IY0
+empty(2) EH1 M T IY0
+en EH1 N
+encoded EH0 N K OW1 D IH0 D
+end EH1 N D
+engine EH1 N JH AH0 N
+engine(2) IH1 N JH AH0 N
+england IH1 NG G L AH0 N D
+enough IH0 N AH1 F
+enough(2) IY0 N AH1 F
+equals IY1 K W AH0 L Z
+even IY1 V IH0 N
+ever EH1 V ER0
+every EH1 V ER0 IY0
+every(2) EH1 V R IY0
+everybody EH1 V R IY0 B AA2 D IY0
+everyone EH1 V R IY0 W AH2 N
+everything EH1 V R IY0 TH IH2 NG
+exactly IH0 G Z AE1 K T L IY0
+except IH0 K S EH1 P T
+expect IH0 K S P EH1 K T
+expected IH0 K S P EH1 K T AH0 D
+expected(2) IH0 K S P EH1 K T IH0 D
+expecting IH0 K S P EH1 K T IH0 NG
+expects IH0 K S P EH1 K T S
+expects(2) IH0 K S P EH1 K S
+explain IH0 K S P L EY1 N
+explained IH0 K S P L EY1 N D
+explaining IH0 K S P L EY1 N IH0 NG
+explains IH0 K S P L EY1 N Z
+eye AY1
+f EH1 F
+face F EY1 S
+faces F EY1 S AH0 Z
+faces(2) F EY1 S IH0 Z
+fact F AE1 K T
+fahrenheit F EH1 R AH0 N HH AY2 T
+fake F EY1 K
+fall F AO1 L
+fall(2) F AA1 L
+fallen F AA1 L AH0 N
+falling F AA1 L IH0 NG
+falls F AO1 L Z
+false F AO1 L S
+farmer F AA1 R M ER0
+fast F AE1 S T
+fat F AE1 T
+father F AA1 DH ER0
+february F EH1 B Y AH0 W EH2 R IY0
+february(2) F EH1 B R UW0 EH2 R IY0
+fed F EH1 D
+feed F IY1 D
+feeding F IY1 D IH0 NG
+feeds F IY1 D Z
+feel F IY1 L
+feeling F IY1 L IH0 NG
+feels F IY1 L Z
+fell F EH1 L
+felt F EH1 L T
+few F Y UW1
+fib F IH1 B
+fibonacci F IH2 B AH0 N AA1 CH IY0
+field F IY1 L D
+fifteen F IH0 F T IY1 N
+fifteen(2) F IH1 F T IY1 N
+fifth F IH1 F TH
+fifth(2) F IH1 TH
+fifty F IH1 F T IY0
+fight F AY1 T
+fighting F AY1 T IH0 NG
+fights F AY1 T S
+fills F IH1 L Z
+final F AY1 N AH0 L
+find F AY1 N D
+finding F AY1 N D IH0 NG
+finds F AY1 N D Z
+fine F AY1 N
+fine(2) F IH1 N AH0
+fire F AY1 ER0
+fire(2) F AY1 R
+first F ER1 S T
+fish F IH1 SH
+five F AY1 V
+flat F L AE1 T
+flew F L UW1
+flies F L AY1 Z
+floor F L AO1 R
+flour F L AW1 ER0
+flour(2) F L AW1 R
+flower F L AW1 ER0
+flowers F L AW1 ER0 Z
+flown F L OW1 N
+flows F L OW1 Z
+fly F L AY1
+flying F L AY1 IH0 NG
+follow F AA1 L OW0
+followed F AA1 L OW0 D
+following F AA1 L OW0 IH0 NG
+follows F AA1 L OW0 Z
+foolish F UW1 L IH0 SH
+foot F UH1 T
+for F AO1 R
+for(2) F ER0
+for(3) F R ER0
+force F AO1 R S
+fore F AO1 R
+forest F AO1 R AH0 S T
+forest(2) F AO1 R IH0 S T
+forget F ER0 G EH1 T
+forget(2) F AO0 R G EH1 T
+forgets F ER0 G EH1 T S
+forgets(2) F AO0 R G EH1 T S
+forgetting F ER0 G EH1 T IH0 NG
+forgetting(2) F AO0 R G EH1 T IH0 NG
+forgot F ER0 G AA1 T
+forgot(2) F AO0 R G AA1 T
+forgotten F ER0 G AA1 T AH0 N
+forgotten(2) F AO0 R G AA1 T AH0 N
+fork F AO1 R K
+forty F AO1 R T IY0
+fought F AO1 T
+found F AW1 N D
+four F AO1 R
+fourteen F AO1 R T IY1 N
+fourteen(2) F AO2 R T IY1 N
+fourth F AO1 R TH
+fox F AA1 K S
+france F R AE1 N S
+free F R IY1
+freeze F R IY1 Z
+freezes F R IY1 Z IH0 Z
+freezing F R IY1 Z IH0 NG
+fresh F R EH1 SH
+friday F R AY1 D IY0
+friday(2) F R AY1 D EY2
+friend F R EH1 N D
+frog F R AA1 G
+from F R AH1 M
+froze F R OW1 Z
+frozen F R OW1 Z AH0 N
+fruit F R UW1 T
+full F UH1 L
+fun F AH1 N
+function F AH1 NG K SH AH0 N
+future F Y UW1 CH ER0
+g JH IY1
+game G EY1 M
+garden G AA1 R D AH0 N
+gave G EY1 V
+general JH EH1 N ER0 AH0 L
+general(2) JH EH1 N R AH0 L
+get G EH1 T
+get(2) G IH1 T
+gets G EH1 T S
+gets(2) G IH1 T S
+getting G EH1 T IH0 NG
+getting(2) G IH1 T IH0 NG
+gibberish G IH1 B ER0 IH0 SH
+girl G ER1 L
+give G IH1 V
+given G IH1 V AH0 N
+given(2) G IH1 V IH0 N
+gives G IH1 V Z
+giving G IH1 V IH0 NG
+glass G L AE1 S
+glitters G L IH1 T ER0 Z
+glove G L AH1 V
+gnu N UW1
+go G OW1
+goat G OW1 T
+goes G OW1 Z
+going G OW1 IH0 NG
+going(2) G OW1 IH0 N
+gold G OW1 L D
+gone G AO1 N
+good G UH1 D
+good(2) G IH0 D
+goodbye G UH2 D B AY1
+got G AA1 T
+gotten G AA1 T AH0 N
+gotten(2) G AO1 T AH0 N
+government G AH1 V ER0 M AH0 N T
+government(2) G AH1 V ER0 N M AH0 N T
+grape G R EY1 P
+graph G R AE1 F
+grass G R AE1 S
+gray G R EY1
+graze G R EY1 Z
+great G R EY1 T
+green G R IY1 N
+grew G R UW1
+grey G R EY1
+grow G R OW1
+growing G R OW1 IH0 NG
+grown G R OW1 N
+grows G R OW1 Z
+guy G AY1
+h EY1 CH
+had HH AE1 D
+hadn't HH AE1 D AH0 N T
+hadn't(2) HH AE1 D AH0 N
+half HH AE1 F
+hand HH AE1 N D
+hang HH AE1 NG
+hanging HH AE1 NG IH0 NG
+hanging(2) HH AE1 NG G IH0 NG
+hangs HH AE1 NG Z
+happen HH AE1 P AH0 N
+happened HH AE1 P AH0 N D
+happening HH AE1 P AH0 N IH0 NG
+happening(2) HH AE1 P N IH0 NG
+happens HH AE1 P AH0 N Z
+happy HH AE1 P IY0
+hard HH AA1 R D
+has HH AE1 Z
+has(2) HH AH0 Z
+hasn't HH AE1 Z AH0 N T
+hat HH AE1 T
+have HH AE1 V
+haven't HH AE1 V AH0 N T
+haven't(2) HH AE1 V AH0 N
+having HH AE1 V IH0 NG
+he HH IY1
+he'd HH IY1 D
+he'll HH IY1 L
+he's HH IY1 Z
+head HH EH1 D
+heals HH IY1 L Z
+health HH EH1 L TH
+healthy HH EH1 L TH IY0
+hear HH IY1 R
+heard HH ER1 D
+hearing HH IY1 R IH0 NG
+hears HH IY1 R Z
+heart HH AA1 R T
+heat HH IY1 T
+heavy HH EH1 V IY0
+held HH EH1 L D
+hello HH AH0 L OW1
+hello(2) HH EH0 L OW1
+help HH EH1 L P
+helped HH EH1 L P T
+helping HH EH1 L P IH0 NG
+helps HH EH1 L P S
+hen HH EH1 N
+her HH ER1
+her(2) HH ER0
+here HH IY1 R
+here's HH IH1 R Z
+hers HH ER0 Z
+hers(2) HH ER1 Z
+herself HH ER0 S EH1 L F
+hey HH EY1
+hi HH AY1
+hid HH IH1 D
+hidden HH IH1 D AH0 N
+hide HH AY1 D
+hides HH AY1 D Z
+hiding HH AY1 D IH0 NG
+high HH AY1
+hill HH IH1 L
+him HH IH1 M
+him(2) IH0 M
+himself HH IH0 M S EH1 L F
+his HH IH1 Z
+his(2) HH IH0 Z
+history HH IH1 S T ER0 IY0
+history(2) HH IH1 S T R IY0
+hit HH IH1 T
+hits HH IH1 T S
+hitting HH IH1 T IH0 NG
+hold HH OW1 L D
+holding HH OW1 L D IH0 NG
+holds HH OW1 L D Z
+home HH OW1 M
+honey HH AH1 N IY0
+hope HH OW1 P
+hoped HH OW1 P T
+hopes HH OW1 P S
+hoping HH OW1 P IH0 NG
+horse HH AO1 R S
+hot HH AA1 T
+hour AW1 ER0
+hour(2) AW1 R
+house HH AW1 S
+how HH AW1
+how's HH AW1 Z
+howls HH AW1 L Z
+http EY2 CH T IY2 T IY2 P IY1
+human HH Y UW1 M AH0 N
+human(2) Y UW1 M AH0 N
+hundred HH AH1 N D R AH0 D
+hundred(2) HH AH1 N D R IH0 D
+hundred(3) HH AH1 N ER0 D
+hundred(4) HH AH1 N D ER0 D
+hung HH AH1 NG
+hungry HH AH1 NG G R IY0
+hunts HH AH1 N T S
+hurt HH ER1 T
+hurting HH ER1 T IH0 NG
+hurts HH ER1 T S
+i AY1
+i'd AY1 D
+i'll AY1 L
+i'm AY1 M
+i'm(2) AH0 M
+i've AY1 V
+ice AY1 S
+id IH1 D
+id(2) AY1 D IY1
+idea AY0 D IY1 AH0
+if IH1 F
+if(2) IH0 F
+ignorance IH1 G N ER0 AH0 N S
+ignored IH2 G N AO1 R D
+important IH2 M P AO1 R T AH0 N T
+in IH0 N
+in(2) IH1 N
+include IH2 N K L UW1 D
+included IH2 N K L UW1 D AH0 D
+included(2) IH2 N K L UW1 D IH0 D
+includes IH2 N K L UW1 D Z
+including IH2 N K L UW1 D IH0 NG
+information IH2 N F ER0 M EY1 SH AH0 N
+information(2) IH0 N F AO1 R M EY1 SH AH0 N
+input IH1 N P UH2 T
+inside IH2 N S AY1 D
+inside(2) IH1 N S AY2 D
+integers IH1 N T AH0 JH ER0 Z
+international IH2 N T ER0 N AE1 SH AH0 N AH0 L
+international(2) IH2 N ER0 N AE1 SH AH0 N AH0 L
+into IH1 N T UW0
+into(2) IH0 N T UW1
+into(3) IH0 N T AH0
+iron AY1 ER0 N
+is IH1 Z
+is(2) IH0 Z
+island AY1 L AH0 N D
+isn't IH1 Z AH0 N T
+isn't(2) IH0 Z AH0 N T
+isn't(3) IH1 Z AH0 N
+issue IH1 SH UW0
+it IH1 T
+it(2) IH0 T
+it'll IH1 T AH0 L
+it'll(2) IH1 T L
+it's IH1 T S
+it's(2) IH0 T S
+italy IH1 T AH0 L IY0
+its IH1 T S
+its(2) IH0 T S
+itself IH2 T S EH1 L F
+j JH EY1
+january JH AE1 N Y UW0 EH2 R IY0
+job JH AA1 B
+job(2) JH OW1 B
+july JH UW2 L AY1
+july(2) JH AH0 L AY1
+jumps JH AH1 M P S
+june JH UW1 N
+just JH AH1 S T
+just(2) JH IH0 S T
+k K EY1
+keep K IY1 P
+keeping K IY1 P IH0 NG
+keeps K IY1 P S
+kept K EH1 P T
+kept(2) K AE1 P T
+key K IY1
+kid K IH1 D
+kill K IH1 L
+killed K IH1 L D
+killing K IH1 L IH0 NG
+kills K IH1 L Z
+kind K AY1 N D
+king K IH1 NG
+kitchen K IH1 CH AH0 N
+knew N UW1
+knew(2) N Y UW1
+knife N AY1 F
+knight N AY1 T
+know N OW1
+knowing N OW1 IH0 NG
+knowledge N AA1 L AH0 JH
+knowledge(2) N AA1 L IH0 JH
+known N OW1 N
+knows N OW1 Z
+l EH1 L
+laid L EY1 D
+lain L EY1 N
+lake L EY1 K
+land L AE1 N D
+lands L AE1 N D Z
+language L AE1 NG G W AH0 JH
+language(2) L AE1 NG G W IH0 JH
+large L AA1 R JH
+largest L AA1 R JH AH0 S T
+last L AE1 S T
+last(2) L AE1 S
+late L EY1 T
+later L EY1 T ER0
+law L AO1
+law(2) L AA1
+lay L EY1
+laying L EY1 IH0 NG
+lays L EY1 Z
+lazy L EY1 Z IY0
+lead L EH1 D
+lead(2) L IY1 D
+leading L IY1 D IH0 NG
+leads L IY1 D Z
+leaf L IY1 F
+learn L ER1 N
+learned L ER1 N D
+learned(2) L ER1 N IH0 D
+learning L ER1 N IH0 NG
+learns L ER1 N Z
+learnt L ER1 N T
+leather L EH1 DH ER0
+leave L IY1 V
+leaves L IY1 V Z
+leaving L IY1 V IH0 NG
+led L EH1 D
+left L EH1 F T
+lemon L EH1 M AH0 N
+lend L EH1 N D
+lending L EH1 N D IH0 NG
+lends L EH1 N D Z
+lent L EH1 N T
+let L EH1 T
+let's L EH1 T S
+lets L EH1 T S
+letter L EH1 T ER0
+letters L EH1 T ER0 Z
+letting L EH1 T IH0 NG
+level L EH1 V AH0 L
+library L AY1 B R EH0 R IY2
+lie L AY1
+lies L AY1 Z
+life L AY1 F
+light L AY1 T
+lighting L AY1 T IH0 NG
+lights L AY1 T S
+likely L AY1 K L IY0
+line L AY1 N
+lines L AY1 N Z
+lining L AY1 N IH0 NG
+lion L AY1 AH0 N
+list L IH1 S T
+listen L IH1 S AH0 N
+listened L IH1 S AH0 N D
+listening L IH1 S AH0 N IH0 NG
+listening(2) L IH1 S N IH0 NG
+listens L IH1 S AH0 N Z
+lit L IH1 T
+little L IH1 T AH0 L
+live L AY1 V
+live(2) L IH1 V
+lived L IH1 V D
+lived(2) L AY1 V D
+lives L IH1 V Z
+lives(2) L AY1 V Z
+living L IH1 V IH0 NG
+local L OW1 K AH0 L
+lock L AA1 K
+london L AH1 N D AH0 N
+long L AO1 NG
+lose L UW1 Z
+loses L UW1 Z AH0 Z
+loses(2) L UW1 Z IH0 Z
+losing L UW1 Z IH0 NG
+lost L AO1 S T
+lot L AA1 T
+lot(2) L AO1 T
+loud L AW1 D
+louder L AW1 D ER0
+love L AH1 V
+loved L AH1 V D
+loves L AH1 V Z
+loving L AH1 V IH0 NG
+low L OW1
+lying L AY1 IH0 NG
+m EH1 M
+machine M AH0 SH IY1 N
+machines M AH0 SH IY1 N Z
+made M EY1 D
+mail M EY1 L
+main M EY1 N
+major M EY1 JH ER0
+make M EY1 K
+makes M EY1 K S
+making M EY1 K IH0 NG
+male M EY1 L
+man M AE1 N
+many M EH1 N IY0
+map M AE1 P
+march M AA1 R CH
+market M AA1 R K AH0 T
+market(2) M AA1 R K IH0 T
+mat M AE1 T
+matrix M EY1 T R IH0 K S
+may M EY1
+maybe M EY1 B IY0
+me M IY1
+mean M IY1 N
+meaning M IY1 N IH0 NG
+means M IY1 N Z
+meant M EH1 N T
+meat M IY1 T
+meet M IY1 T
+meeting M IY1 T IH0 NG
+meets M IY1 T S
+member M EH1 M B ER0
+memory M EH1 M ER0 IY0
+met M EH1 T
+midnight M IH1 D N AY2 T
+might M AY1 T
+mightier M AY1 T IY0 ER0
+milk M IH1 L K
+million M IH1 L Y AH0 N
+mind M AY1 N D
+mine M AY1 N
+minor M AY1 N ER0
+minus M AY1 N AH0 S
+minute M IH1 N AH0 T
+minute(2) M AY0 N UW1 T
+minute(3) M AY0 N Y UW1 T
+mistake M IH0 S T EY1 K
+mistaken M IH0 S T EY1 K AH0 N
+mistakes M IH0 S T EY1 K S
+mistook M IH0 S T UH1 K
+model M AA1 D AH0 L
+models M AA1 D AH0 L Z
+modern M AA1 D ER0 N
+module M AA1 JH UW0 L
+moment M OW1 M AH0 N T
+monday M AH1 N D IY0
+monday(2) M AH1 N D EY2
+money M AH1 N IY0
+month M AH1 N TH
+moon M UW1 N
+more M AO1 R
+morning M AO1 R N IH0 NG
+most M OW1 S T
+most(2) M OW1 S
+mother M AH1 DH ER0
+mountain M AW1 N T AH0 N
+mouse M AW1 S
+move M UW1 V
+moved M UW1 V D
+moves M UW1 V Z
+moving M UW1 V IH0 NG
+much M AH1 CH
+multiplication M AH2 L T AH0 P L AH0 K EY1 SH AH0 N
+music M Y UW1 Z IH0 K
+must M AH1 S T
+mustn't M AH1 S AH0 N T
+my M AY1
+myself M AY2 S EH1 L F
+n EH1 N
+name N EY1 M
+narrow N EH1 R OW0
+narrow(2) N AE1 R OW0
+nation N EY1 SH AH0 N
+national N AE1 SH AH0 N AH0 L
+national(2) N AE1 SH N AH0 L
+natural N AE1 CH ER0 AH0 L
+natural(2) N AE1 CH R AH0 L
+near N IH1 R
+need N IY1 D
+neither N IY1 DH ER0
+neither(2) N AY1 DH ER0
+network N EH1 T W ER2 K
+networks N EH1 T W ER2 K S
+neural N UH1 R AH0 L
+neural(2) N Y UH1 R AH0 L
+never N EH1 V ER0
+new N UW1
+new(2) N Y UW1
+next N EH1 K S T
+next(2) N EH1 K S
+nice N AY1 S
+nice(2) N IY1 S
+night N AY1 T
+nine N AY1 N
+nineteen N AY1 N T IY1 N
+ninety N AY1 N T IY0
+ninth N AY1 N TH
+no N OW1
+nobody N OW1 B AA2 D IY2
+nobody(2) N OW1 B AH0 D IY0
+node N OW1 D
+nodes N OW1 D Z
+noise N OY1 Z
+none N AH1 N
+nor N AO1 R
+north N AO1 R TH
+not N AA1 T
+nothing N AH1 TH IH0 NG
+november N OW0 V EH1 M B ER0
+now N AW1
+number N AH1 M B ER0
+numbers N AH1 M B ER0 Z
+o OW1
+ocean OW1 SH AH0 N
+october AA0 K T OW1 B ER0
+of AH1 V
+off AO1 F
+offer AO1 F ER0
+offered AO1 F ER0 D
+offering AO1 F ER0 IH0 NG
+offering(2) AO1 F R IH0 NG
+offers AO1 F ER0 Z
+office AO1 F IH0 S
+often AO1 F AH0 N
+often(2) AO1 F T AH0 N
+oh OW1
+oil OY1 L
+ok OW1 K EY1
+okay OW2 K EY1
+old OW1 L D
+on AA1 N
+on(2) AO1 N
+once W AH1 N S
+one W AH1 N
+ones W AH1 N Z
+oneself W AH2 N S EH1 L F
+onion AH1 N Y AH0 N
+only OW1 N L IY0
+onto AA1 N T UW0
+onto(2) AO1 N T UW0
+open OW1 P AH0 N
+opened OW1 P AH0 N D
+opening OW1 P AH0 N IH0 NG
+opens OW1 P AH0 N Z
+or AO1 R
+or(2) ER0
+orange AO1 R AH0 N JH
+orange(2) AO1 R IH0 N JH
+orbits AO1 R B AH0 T S
+org AO1 R G
+other AH1 DH ER0
+others AH1 DH ER0 Z
+ought AO1 T
+our AW1 ER0
+our(2) AW1 R
+our(3) AA1 R
+ours AW1 ER0 Z
+ours(2) AA1 R Z
+ours(3) AW1 R Z
+ourselves AW0 ER0 S EH1 L V Z
+ourselves(2) AA0 R S EH1 L V Z
+out AW1 T
+output AW1 T P UH2 T
+outside AW1 T S AY1 D
+over OW1 V ER0
+owl AW1 L
+own OW1 N
+p P IY1
+paid P EY1 D
+pair P EH1 R
+paper P EY1 P ER0
+pare P EH1 R
+parent P EH1 R AH0 N T
+paris P EH1 R IH0 S
+paris(2) P AE1 R IH0 S
+park P AA1 R K
+part P AA1 R T
+particular P ER0 T IH1 K Y AH0 L ER0
+particular(2) P AA2 T IH1 K Y AH0 L ER0
+party P AA1 R T IY0
+pass P AE1 S
+passed P AE1 S T
+passes P AE1 S AH0 Z
+passes(2) P AE1 S IH0 Z
+passing P AE1 S IH0 NG
+past P AE1 S T
+path P AE1 TH
+paths P AE1 DH Z
+paths(2) P AE1 TH S
+pay P EY1
+paying P EY1 IH0 NG
+pays P EY1 Z
+peace P IY1 S
+pear P EH1 R
+pen P EH1 N
+pencil P EH1 N S AH0 L
+people P IY1 P AH0 L
+pepper P EH1 P ER0
+per P ER1
+perfect P ER0 F EH1 K T
+perfect(2) P ER1 F IH2 K T
+person P ER1 S AH0 N
+personal P ER1 S IH0 N AH0 L
+phone F OW1 N
+phones F OW1 N Z
+phonetic F AH0 N EH1 T IH0 K
+photograph F OW1 T AH0 G R AE2 F
+photographer F AH0 T AA1 G R AH0 F ER0
+photography F AH0 T AA1 G R AH0 F IY0
+picture P IH1 K CH ER0
+piece P IY1 S
+pig P IH1 G
+pink P IH1 NG K
+place P L EY1 S
+placed P L EY1 S T
+places P L EY1 S AH0 Z
+places(2) P L EY1 S IH0 Z
+placing P L EY1 S IH0 NG
+plain P L EY1 N
+plane P L EY1 N
+plants P L AE1 N T S
+plate P L EY1 T
+play P L EY1
+played P L EY1 D
+playing P L EY1 IH0 NG
+plays P L EY1 Z
+please P L IY1 Z
+plus P L AH1 S
+pocket P AA1 K AH0 T
+point P OY1 N T
+pointed P OY1 N T IH0 D
+pointed(2) P OY1 N AH0 D
+pointing P OY1 N T IH0 NG
+points P OY1 N T S
+political P AH0 L IH1 T AH0 K AH0 L
+political(2) P AH0 L IH1 T IH0 K AH0 L
+pond P AA1 N D
+poor P UW1 R
+possible P AA1 S AH0 B AH0 L
+potato P AH0 T EY1 T OW2
+power P AW1 ER0
+practice P R AE1 K T AH0 S
+practice(2) P R AE1 K T IH0 S
+predict P R IH0 D IH1 K T
+predict(2) P R IY0 D IH1 K T
+prediction P R IY0 D IH1 K SH AH0 N
+present P R EH1 Z AH0 N T
+present(2) P R IY0 Z EH1 N T
+present(3) P ER0 Z EH1 N T
+president P R EH1 Z AH0 D EH2 N T
+president(2) P R EH1 Z IH0 D AH0 N T
+pretty P R IH1 T IY0
+previous P R IY1 V IY0 AH0 S
+print P R IH1 N T
+private P R AY1 V AH0 T
+problem P R AA1 B L AH0 M
+problems P R AA1 B L AH0 M Z
+produce P R AH0 D UW1 S
+produce(2) P R OW1 D UW0 S
+produced P R AH0 D UW1 S T
+produces P R AH0 D UW1 S AH0 Z
+produces(2) P R AH0 D UW1 S IH0 Z
+producing P R AH0 D UW1 S IH0 NG
+product P R AA1 D AH0 K T
+program P R OW1 G R AE2 M
+programming P R OW1 G R AE2 M IH0 NG
+programs P R OW1 G R AE2 M Z
+prompt P R AA1 M P T
+pronounce P R AH0 N AW1 N S
+pronunciation P R OW0 N AH2 N S IY0 EY1 SH AH0 N
+pronunciation(2) P R AH0 N AH2 N S IY0 EY1 SH AH0 N
+proud P R AW1 D
+prove P R UW1 V
+proved P R UW1 V D
+proven P R UW1 V AH0 N
+proves P R UW1 V Z
+proving P R UW1 V IH0 NG
+public P AH1 B L IH0 K
+pull P UH1 L
+pulled P UH1 L D
+pulling P UH1 L IH0 NG
+pulls P UH1 L Z
+purple P ER1 P AH0 L
+put P UH1 T
+puts P UH1 T S
+putting P AH1 T IH0 NG
+putting(2) P UH1 T IH0 NG
+python P AY1 TH AA0 N
+q K Y UW1
+quarter K W AO1 R T ER0
+queen K W IY1 N
+question K W EH1 S CH AH0 N
+question(2) K W EH1 SH AH0 N
+quick K W IH1 K
+quiet K W AY1 AH0 T
+quieter K W AY1 AH0 T ER0
+quit K W IH1 T
+quits K W IH1 T S
+quitting K W IH1 T IH0 NG
+r AA1 R
+rabbit R AE1 B AH0 T
+rabbit(2) R AE1 B IH0 T
+rain R EY1 N
+raise R EY1 Z
+raised R EY1 Z D
+raises R EY1 Z AH0 Z
+raises(2) R EY1 Z IH0 Z
+raising R EY1 Z IH0 NG
+ran R AE1 N
+rarely R EH1 R L IY0
+rat R AE1 T
+reach R IY1 CH
+reached R IY1 CH T
+reaches R IY1 CH AH0 Z
+reaches(2) R IY1 CH IH0 Z
+reaching R IY1 CH IH0 NG
+read R EH1 D
+read(2) R IY1 D
+reading R IY1 D IH0 NG
+reading(2) R EH1 D IH0 NG
+reads R IY1 D Z
+real R IY1 L
+realize R IY1 AH0 L AY2 Z
+realized R IY1 AH0 L AY2 Z D
+realizes R IY1 AH0 L AY2 Z IH0 Z
+realizing R IY1 AH0 L AY2 Z IH0 NG
+reason R IY1 Z AH0 N
+receive R AH0 S IY1 V
+receive(2) R IH0 S IY1 V
+receive(3) R IY0 S IY1 V
+received R AH0 S IY1 V D
+received(2) R IH0 S IY1 V D
+received(3) R IY0 S IY1 V D
+receives R AH0 S IY1 V Z
+receives(2) R IH0 S IY1 V Z
+receives(3) R IY0 S IY1 V Z
+receiving R AH0 S IY1 V IH0 NG
+receiving(2) R IH0 S IY1 V IH0 NG
+receiving(3) R IY0 S IY1 V IH0 NG
+recent R IY1 S AH0 N T
+red R EH1 D
+remain R IH0 M EY1 N
+remain(2) R IY0 M EY1 N
+remained R IH0 M EY1 N D
+remained(2) R IY0 M EY1 N D
+remaining R IH0 M EY1 N IH0 NG
+remaining(2) R IY0 M EY1 N IH0 NG
+remains R IH0 M EY1 N Z
+remains(2) R IY0 M EY1 N Z
+remember R IH0 M EH1 M B ER0
+remember(2) R IY0 M EH1 M B ER0
+remembered R IH0 M EH1 M B ER0 D
+remembered(2) R IY0 M EH1 M B ER0 D
+remembering R IH0 M EH1 M B ER0 IH0 NG
+remembering(2) R IY0 M EH1 M B ER0 IH0 NG
+remembering(3) R IH0 M EH1 M B R IH0 NG
+remembering(4) R IY0 M EH1 M B R IH0 NG
+remembers R IH0 M EH1 M B ER0 Z
+remembers(2) R IY0 M EH1 M B ER0 Z
+report R IY0 P AO1 R T
+report(2) R IH0 P AO1 R T
+reported R IY2 P AO1 R T IH0 D
+reported(2) R IH0 P AO1 R T IH0 D
+reporting R IY0 P AO1 R T IH0 NG
+reporting(2) R IH0 P AO1 R T IH0 NG
+reports R IH0 P AO1 R T S
+reports(2) R IY0 P AO1 R T S
+require R IY2 K W AY1 ER0
+require(2) R IY0 K W AY1 R
+require(3) R IH0 K W AY1 ER0
+required R IY0 K W AY1 ER0 D
+required(2) R IY0 K W AY1 R D
+requires R IY0 K W AY1 ER0 Z
+requires(2) R IY0 K W AY1 R Z
+requiring R IY0 K W AY1 ER0 IH0 NG
+requiring(2) R IY0 K W AY1 R IH0 NG
+research R IY0 S ER1 CH
+research(2) R IY1 S ER0 CH
+result R IH0 Z AH1 L T
+result(2) R IY0 Z AH1 L T
+return R IH0 T ER1 N
+return(2) R IY0 T ER1 N
+returned R IH0 T ER1 N D
+returned(2) R IY0 T ER1 N D
+returning R IH0 T ER1 N IH0 NG
+returning(2) R IY0 T ER1 N IH0 NG
+returns R IH0 T ER1 N Z
+returns(2) R IY0 T ER1 N Z
+reverse R IH0 V ER1 S
+reverse(2) R IY0 V ER1 S
+rhyme R AY1 M
+rhymes R AY1 M Z
+rhythm R IH1 DH AH0 M
+rice R AY1 S
+rich R IH1 CH
+ridden R IH1 D AH0 N
+ride R AY1 D
+rides R AY1 D Z
+riding R AY1 D IH0 NG
+right R AY1 T
+ring R IH1 NG
+rise R AY1 Z
+risen R IH1 Z AH0 N
+rises R AY1 Z AH0 Z
+rises(2) R AY1 Z IH0 Z
+rising R AY1 Z IH0 NG
+rite R AY1 T
+river R IH1 V ER0
+road R OW1 D
+rock R AA1 K
+rocks R AA1 K S
+rocky R AA1 K IY0
+rode R OW1 D
+rome R OW1 M
+room R UW1 M
+root R UW1 T
+roots R UW1 T S
+rose R OW1 Z
+rote R OW1 T
+rotten R AA1 T AH0 N
+rough R AH1 F
+round R AW1 N D
+run R AH1 N
+running R AH1 N IH0 NG
+runs R AH1 N Z
+runway R AH1 N W EY2
+s EH1 S
+sad S AE1 D
+safe S EY1 F
+said S EH1 D
+sail S EY1 L
+sailor S EY1 L ER0
+sails S EY1 L Z
+sale S EY1 L
+salt S AO1 L T
+same S EY1 M
+sample S AE1 M P AH0 L
+sand S AE1 N D
+sang S AE1 NG
+sank S AE1 NG K
+sat S AE1 T
+saturday S AE1 T ER0 D IY0
+saturday(2) S AE1 T IH2 D EY2
+saw S AO1
+say S EY1
+saying S EY1 IH0 NG
+says S EH1 Z
+says(2) S IH1 Z
+school S K UW1 L
+sea S IY1
+search S ER1 CH
+second S EH1 K AH0 N D
+see S IY1
+seeds S IY1 D Z
+seeing S IY1 IH0 NG
+seek S IY1 K
+seeking S IY1 K IH0 NG
+seeks S IY1 K S
+seem S IY1 M
+seemed S IY1 M D
+seeming S IY1 M IH0 NG
+seems S IY1 M Z
+seen S IY1 N
+sees S IY1 Z
+seldom S EH1 L D AH0 M
+sell S EH1 L
+selling S EH1 L IH0 NG
+sells S EH1 L Z
+send S EH1 N D
+sending S EH1 N D IH0 NG
+sends S EH1 N D Z
+sent S EH1 N T
+sentence S EH1 N T AH0 N S
+separate S EH1 P ER0 EY2 T
+separate(2) S EH1 P ER0 IH0 T
+separate(3) S EH1 P R AH0 T
+separated S EH1 P ER0 EY2 T IH0 D
+september S EH0 P T EH1 M B ER0
+serve S ER1 V
+served S ER1 V D
+serves S ER1 V Z
+service S ER1 V AH0 S
+service(2) S ER1 V IH0 S
+serving S ER1 V IH0 NG
+set S EH1 T
+sets S EH1 T S
+setting S EH1 T IH0 NG
+settled S EH1 T AH0 L D
+seven S EH1 V AH0 N
+seventeen S EH1 V AH0 N T IY1 N
+seventh S EH1 V AH0 N TH
+seventy S EH1 V AH0 N T IY0
+seventy(2) S EH1 V AH0 N IY0
+sew S OW1
+sewed S OW1 D
+sewing S OW1 IH0 NG
+sewn S OW1 N
+shadow SH AE1 D OW2
+shake SH EY1 K
+shaken SH EY1 K AH0 N
+shakes SH EY1 K S
+shaking SH EY1 K IH0 NG
+shall SH AE1 L
+shallow SH AE1 L OW0
+sharp SH AA1 R P
+she SH IY1
+she'd SH IY1 D
+she'll SH IY1 L
+she's SH IY1 Z
+sheep SH IY1 P
+shine SH AY1 N
+shines SH AY1 N Z
+shining SH AY1 N IH0 NG
+ship SH IH1 P
+shirt SH ER1 T
+shoe SH UW1
+shone SH OW1 N
+shook SH UH1 K
+shoot SH UW1 T
+shooting SH UW1 T IH0 NG
+shoots SH UW1 T S
+shop SH AA1 P
+short SH AO1 R T
+shot SH AA1 T
+should SH UH1 D
+shouldn't SH UH1 D AH0 N T
+show SH OW1
+showed SH OW1 D
+showing SH OW1 IH0 NG
+shown SH OW1 N
+shows SH OW1 Z
+shut SH AH1 T
+shuts SH AH1 T S
+shutting SH AH1 T IH0 NG
+sick S IH1 K
+side S AY1 D
+signal S IH1 G N AH0 L
+signals S IH1 G N AH0 L Z
+silence S AY1 L AH0 N S
+silk S IH1 L K
+silver S IH1 L V ER0
+simple S IH1 M P AH0 L
+since S IH1 N S
+sing S IH1 NG
+singing S IH1 NG IH0 NG
+single S IH1 NG G AH0 L
+sings S IH1 NG Z
+sink S IH1 NG K
+sinking S IH1 NG K IH0 NG
+sinks S IH1 NG K S
+sit S IH1 T
+sits S IH1 T S
+sitting S IH1 T IH0 NG
+six S IH1 K S
+sixteen S IH0 K S T IY1 N
+sixteen(2) S IH1 K S T IY1 N
+sixth S IH1 K S TH
+sixty S IH1 K S T IY0
+skirt S K ER1 T
+sky S K AY1
+sleep S L IY1 P
+sleeping S L IY1 P IH0 NG
+sleeps S L IY1 P S
+slept S L EH1 P T
+slope S L OW1 P
+slow S L OW1
+small S M AO1 L
+smell S M EH1 L
+smelled S M EH1 L D
+smelling S M EH1 L IH0 NG
+smells S M EH1 L Z
+smelt S M EH1 L T
+smooth S M UW1 DH
+snake S N EY1 K
+snow S N OW1
+so S OW1
+social S OW1 SH AH0 L
+sock S AA1 K
+soft S AA1 F T
+soft(2) S AO1 F T
+sold S OW1 L D
+somebody S AH1 M B AA2 D IY0
+somebody(2) S AH1 M B AH0 D IY2
+someone S AH1 M W AH2 N
+something S AH1 M TH IH0 NG
+sometimes S AH0 M T AY1 M Z
+sometimes(2) S AH1 M T AY2 M Z
+son S AH1 N
+song S AO1 NG
+soon S UW1 N
+sorry S AA1 R IY0
+sought S AO1 T
+soul S OW1 L
+sound S AW1 N D
+sounds S AW1 N D Z
+sounds(2) S AW1 N Z
+soup S UW1 P
+sour S AW1 ER0
+sour(2) S AW1 R
+south S AW1 TH
+spaces S P EY1 S AH0 Z
+spaces(2) S P EY1 S IH0 Z
+sparse S P AA1 R S
+speak S P IY1 K
+speaking S P IY1 K IH0 NG
+speaks S P IY1 K S
+special S P EH1 SH AH0 L
+speech S P IY1 CH
+spell S P EH1 L
+spelled S P EH1 L D
+spelling S P EH1 L IH0 NG
+spells S P EH1 L Z
+spend S P EH1 N D
+spending S P EH1 N D IH0 NG
+spends S P EH1 N D Z
+spends(2) S P EH1 N Z
+spent S P EH1 N T
+spider S P AY1 D ER0
+spill S P IH1 L
+spilled S P IH1 L D
+spilling S P IH1 L IH0 NG
+spills S P IH1 L Z
+spilt S P IH1 L T
+spirit S P IH1 R AH0 T
+spirit(2) S P IH1 R IH0 T
+split S P L IH1 T
+splits S P L IH1 T S
+splitting S P L IH1 T IH0 NG
+spoke S P OW1 K
+spoken S P OW1 K AH0 N
+spoon S P UW1 N
+spread S P R EH1 D
+spreading S P R EH1 D IH0 NG
+spreads S P R EH1 D Z
+spring S P R IH1 NG
+spring(2) S P ER0 IH1 NG
+square S K W EH1 R
+stand S T AE1 N D
+standard S T AE1 N D ER0 D
+standing S T AE1 N D IH0 NG
+stands S T AE1 N D Z
+star S T AA1 R
+starting S T AA1 R T IH0 NG
+state S T EY1 T
+station S T EY1 SH AH0 N
+status S T AE1 T AH0 S
+status(2) S T EY1 T AH0 S
+stay S T EY1
+stayed S T EY1 D
+staying S T EY1 IH0 NG
+stays S T EY1 Z
+steal S T IY1 L
+stealing S T IY1 L IH0 NG
+steals S T IY1 L Z
+steel S T IY1 L
+steers S T IH1 R Z
+still S T IH1 L
+stole S T OW1 L
+stolen S T OW1 L AH0 N
+stone S T OW1 N
+stood S T UH1 D
+stop S T AA1 P
+stopped S T AA1 P T
+stopping S T AA1 P IH0 NG
+stops S T AA1 P S
+storage S T AO1 R AH0 JH
+storage(2) S T AO1 R IH0 JH
+store S T AO1 R
+storm S T AO1 R M
+story S T AO1 R IY0
+straight S T R EY1 T
+street S T R IY1 T
+strength S T R EH1 NG K TH
+strength(2) S T R EH1 NG TH
+strengths S T R EH1 NG K TH S
+strengths(2) S T R EH1 NG TH S
+stress S T R EH1 S
+strike S T R AY1 K
+strikes S T R AY1 K S
+striking S T R AY1 K IH0 NG
+string S T R IH1 NG
+strong S T R AO1 NG
+struck S T R AH1 K
+study S T AH1 D IY0
+stupid S T UW1 P AH0 D
+stupid(2) S T UW1 P IH0 D
+such S AH1 CH
+sugar SH UH1 G ER0
+suggest S AH0 JH EH1 S T
+suggested S AH0 JH EH1 S T IH0 D
+suggesting S AH0 JH EH1 S T IH0 NG
+suggests S AH0 JH EH1 S T S
+sum S AH1 M
+summer S AH1 M ER0
+sun S AH1 N
+sunday S AH1 N D EY2
+sunday(2) S AH1 N D IY2
+sung S AH1 NG
+sunk S AH1 NG K
+support S AH0 P AO1 R T
+supported S AH0 P AO1 R T IH0 D
+supporting S AH0 P AO1 R T IH0 NG
+supports S AH0 P AO1 R T S
+swam S W AE1 M
+sweep S W IY1 P
+sweeping S W IY1 P IH0 NG
+sweeps S W IY1 P S
+sweet S W IY1 T
+swept S W EH1 P T
+swim S W IH1 M
+swimming S W IH1 M IH0 NG
+swims S W IH1 M Z
+swing S W IH1 NG
+swinging S W IH1 NG IH0 NG
+swings S W IH1 NG Z
+sword S AO1 R D
+swum S W AH1 M
+swung S W AH1 NG
+syllable S IH1 L AH0 B AH0 L
+system S IH1 S T AH0 M
+t T IY1
+table T EY1 B AH0 L
+tail T EY1 L
+take T EY1 K
+taken T EY1 K AH0 N
+takes T EY1 K S
+taking T EY1 K IH0 NG
+tale T EY1 L
+tasks T AE1 S K S
+taught T AO1 T
+tea T IY1
+teach T IY1 CH
+teacher T IY1 CH ER0
+teaches T IY1 CH AH0 Z
+teaches(2) T IY1 CH IH0 Z
+teaching T IY1 CH IH0 NG
+team T IY1 M
+teapot T IY1 P AA2 T
+tear T EH1 R
+tear(2) T IH1 R
+tearing T EH1 R IH0 NG
+tearing(2) T IH1 R IH0 NG
+tears T EH1 R Z
+tears(2) T IH1 R Z
+teeth T IY1 TH
+tell T EH1 L
+telling T EH1 L IH0 NG
+tells T EH1 L Z
+ten T EH1 N
+tenth T EH1 N TH
+tests T EH1 S T S
+text T EH1 K S T
+texts T EH1 K S T S
+than DH AE1 N
+than(2) DH AH0 N
+thank TH AE1 NG K
+thanks TH AE1 NG K S
+that DH AE1 T
+that(2) DH AH0 T
+that's DH AE1 T S
+the DH AH0
+the(2) DH AH1
+the(3) DH IY0
+their DH EH1 R
+theirs DH EH1 R Z
+them DH EH1 M
+them(2) DH AH0 M
+themselves DH EH0 M S EH1 L V Z
+themselves(2) DH AH0 M S EH1 L V Z
+then DH EH1 N
+there DH EH1 R
+there's DH EH1 R Z
+these DH IY1 Z
+they DH EY1
+they'd DH EY1 D
+they'll DH EY1 L
+they're DH EH1 R
+they've DH EY1 V
+thick TH IH1 K
+thin TH IH1 N
+think TH IH1 NG K
+thinking TH IH1 NG K IH0 NG
+thinks TH IH1 NG K S
+third TH ER1 D
+thirsty TH ER1 S T IY0
+thirteen TH ER1 T IY1 N
+thirty TH ER1 D IY2
+thirty(2) TH ER1 T IY2
+this DH IH1 S
+this(2) DH IH0 S
+those DH OW1 Z
+though DH OW1
+thought TH AO1 T
+thousand TH AW1 Z AH0 N D
+thousand(2) TH AW1 Z AH0 N
+three TH R IY1
+threw TH R UW1
+through TH R UW1
+throw TH R OW1
+throwing TH R OW1 IH0 NG
+thrown TH R OW1 N
+throws TH R OW1 Z
+thursday TH ER1 Z D EY2
+thursday(2) TH ER1 Z D IY0
+tiger T AY1 G ER0
+time T AY1 M
+times T AY1 M Z
+tired T AY1 ER0 D
+to T UW1
+to(2) T IH0
+to(3) T AH0
+today T AH0 D EY1
+today(2) T UW0 D EY1
+token T OW1 K AH0 N
+tokens T OW1 K AH0 N Z
+told T OW1 L D
+tomato T AH0 M EY1 T OW2
+tomato(2) T AH0 M AA1 T OW2
+tomorrow T AH0 M AA1 R OW2
+tomorrow(2) T UW0 M AA1 R OW2
+tone T OW1 N
+tonight T AH0 N AY1 T
+tonight(2) T UH0 N AY1 T
+too T UW1
+took T UH1 K
+tooth T UW1 TH
+tore T AO1 R
+torn T AO1 R N
+tough T AH1 F
+toward T AH0 W AO1 R D
+toward(2) T AO1 R D
+towards T AH0 W AO1 R D Z
+towards(2) T AO1 R D Z
+town T AW1 N
+train T R EY1 N
+training T R EY1 N IH0 NG
+tree T R IY1
+trees T R IY1 Z
+tried T R AY1 D
+tries T R AY1 Z
+trillion T R IH1 L Y AH0 N
+triple T R IH1 P AH0 L
+true T R UW1
+try T R AY1
+trying T R AY1 IH0 NG
+trying(2) T R AY1 NG
+tuesday T UW1 Z D IY0
+tuesday(2) T UW1 Z D EY2
+tuesday(3) T Y UW1 Z D EY2
+twelve T W EH1 L V
+twenty T W EH1 N T IY0
+twenty(2) T W EH1 N IY0
+two T UW1
+u Y UW1
+ugly AH1 G L IY0
+under AH1 N D ER0
+understand AH2 N D ER0 S T AE1 N D
+understanding AH2 N D ER0 S T AE1 N D IH0 NG
+understands AH2 N D ER0 S T AE1 N D Z
+understood AH2 N D ER0 S T UH1 D
+unless AH0 N L EH1 S
+until AH0 N T IH1 L
+up AH1 P
+upon AH0 P AA1 N
+us AH1 S
+us(2) Y UW2 EH1 S
+use Y UW1 S
+use(2) Y UW1 Z
+used Y UW1 Z D
+uses Y UW1 S AH0 Z
+uses(2) Y UW1 S IH0 Z
+uses(3) Y UW1 Z AH0 Z
+uses(4) Y UW1 Z IH0 Z
+using Y UW1 Z IH0 NG
+usually Y UW1 ZH AH0 W AH0 L IY0
+usually(2) Y UW1 ZH AH0 L IY0
+v V IY1
+valley V AE1 L IY0
+very V EH1 R IY0
+village V IH1 L AH0 JH
+village(2) V IH1 L IH0 JH
+vocabulary V OW0 K AE1 B Y AH0 L EH2 R IY0
+voice V OY1 S
+vowel V AW1 AH0 L
+vowels V AW1 AH0 L Z
+vowels(2) V AW1 L Z
+w D AH1 B AH0 L Y UW0
+wait W EY1 T
+waited W EY1 T IH0 D
+waiting W EY1 T IH0 NG
+waits W EY1 T S
+wake W EY1 K
+wakes W EY1 K S
+waking W EY1 K IH0 NG
+walk W AO1 K
+walk(2) W AA1 K
+walked W AO1 K T
+walking W AO1 K IH0 NG
+walks W AO1 K S
+wall W AO1 L
+want W AA1 N T
+want(2) W AO1 N T
+wanted W AO1 N T IH0 D
+wanting W AA1 N T IH0 NG
+wanting(2) W AA1 N IH0 NG
+wants W AA1 N T S
+wants(2) W AO1 N T S
+war W AO1 R
+warm W AO1 R M
+was W AA1 Z
+was(2) W AH0 Z
+wasn't W AA1 Z AH0 N T
+wasn't(2) W AH1 Z AH0 N T
+watch W AA1 CH
+watch(2) W AO1 CH
+watched W AA1 CH T
+watched(2) W AO1 CH T
+watches W AA1 CH AH0 Z
+watches(2) W AA1 CH IH0 Z
+watching W AA1 CH IH0 NG
+water W AO1 T ER0
+way W EY1
+we W IY1
+we'd W IY1 D
+we'll W IY1 L
+we'll(2) W IH1 L
+we're W IY1 R
+we're(2) W IH1 R
+we're(3) W ER1
+we've W IY1 V
+weak W IY1 K
+wear W EH1 R
+wearing W EH1 R IH0 NG
+wears W EH1 R Z
+weather W EH1 DH ER0
+wednesday W EH1 N Z D IY0
+wednesday(2) W EH1 N Z D EY2
+week W IY1 K
+well W EH1 L
+went W EH1 N T
+were W ER1
+weren't W ER1 AH0 N T
+weren't(2) W ER1 N T
+west W EH1 S T
+wet W EH1 T
+what W AH1 T
+what(2) HH W AH1 T
+what's W AH1 T S
+what's(2) HH W AH1 T S
+whatever W AH2 T EH1 V ER0
+whatever(2) HH W AH2 T EH1 V ER0
+wheat W IY1 T
+wheat(2) HH W IY1 T
+when W EH1 N
+when(2) HH W EH1 N
+when(3) W IH1 N
+when(4) HH W IH1 N
+whenever W EH0 N EH1 V ER0
+whenever(2) HH W EH0 N EH1 V ER0
+where W EH1 R
+where(2) HH W EH1 R
+where's W EH1 R Z
+where's(2) HH W EH1 R Z
+wherever W EH0 R EH1 V ER0
+wherever(2) HH W EH0 R EH1 V ER0
+whether W EH1 DH ER0
+whether(2) HH W EH1 DH ER0
+which W IH1 CH
+which(2) HH W IH1 CH
+while W AY1 L
+while(2) HH W AY1 L
+white W AY1 T
+white(2) HH W AY1 T
+who HH UW1
+who's HH UW1 Z
+whoever HH UW0 EH1 V ER0
+whole HH OW1 L
+whom HH UW1 M
+whose HH UW1 Z
+why W AY1
+why(2) HH W AY1
+wide W AY1 D
+wiki W IH1 K IY2
+wikipedia W IH1 K IY0 P IY2 D IY2 AH0
+will W IH1 L
+will(2) W AH0 L
+win W IH1 N
+wind W AY1 N D
+wind(2) W IH1 N D
+window W IH1 N D OW0
+wine W AY1 N
+winning W IH1 N IH0 NG
+wins W IH1 N Z
+winter W IH1 N T ER0
+wise W AY1 Z
+with W IH1 DH
+with(2) W IH1 TH
+with(3) W IH0 TH
+with(4) W IH0 DH
+within W IH0 DH IH1 N
+within(2) W IH0 TH IH1 N
+without W IH0 TH AW1 T
+without(2) W IH0 DH AW1 T
+woke W OW1 K
+woken W OW1 K AH0 N
+wolf W UH1 L F
+woman W UH1 M AH0 N
+won W AH1 N
+won(2) W AA1 N
+won't W OW1 N T
+wood W UH1 D
+wooden W UH1 D AH0 N
+wool W UH1 L
+word W ER1 D
+words W ER1 D Z
+wore W AO1 R
+work W ER1 K
+worked W ER1 K T
+working W ER1 K IH0 NG
+works W ER1 K S
+world W ER1 L D
+worm W ER1 M
+worn W AO1 R N
+worth W ER1 TH
+would W UH1 D
+wouldn't W UH1 D AH0 N T
+wow W AW1
+wright R AY1 T
+write R AY1 T
+writes R AY1 T S
+writing R AY1 T IH0 NG
+written R IH1 T AH0 N
+wrong R AO1 NG
+wrote R OW1 T
+x EH1 K S
+y W AY1
+year Y IH1 R
+yellow Y EH1 L OW0
+yes Y EH1 S
+yesterday Y EH1 S T ER0 D EY2
+yesterday(2) Y EH1 S T ER0 D IY0
+yet Y EH1 T
+you Y UW1
+you'd Y UW1 D
+you'd(2) Y UH1 D
+you'll Y UW1 L
+you're Y UH1 R
+you're(2) Y UW1 R
+you've Y UW1 V
+young Y AH1 NG
+your Y AO1 R
+your(2) Y UH1 R
+yours Y UH1 R Z
+yours(2) Y AO1 R Z
+yours(3) Y ER0 Z
+yourself Y ER0 S EH1 L F
+yourself(2) Y UH0 R S EH1 L F
+yourself(3) Y AO1 R S EH0 L F
+yourselves Y UH0 R S EH1 L V Z
+yourselves(2) Y AO1 R S EH0 L V Z
+youth Y UW1 TH
+z Z IY1
+zero Z IH1 R OW0
+zero(2) Z IY1 R OW0

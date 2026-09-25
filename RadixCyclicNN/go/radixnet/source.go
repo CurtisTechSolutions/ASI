@@ -58,6 +58,23 @@ type FuncSource func(fn func(string) error) error
 // Each calls the function.
 func (f FuncSource) Each(fn func(string) error) error { return f(fn) }
 
+// AudioSource is a recording heard as one text of acoustic units (HearAudio):
+// one utterance, one text, whatever the splitting unit.
+type AudioSource struct{ Path string }
+
+// Each yields the recording's units.
+func (a AudioSource) Each(fn func(string) error) error {
+	data, err := os.ReadFile(a.Path)
+	if err != nil {
+		return err
+	}
+	text, err := HearAudio(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", a.Path, err)
+	}
+	return fn(text)
+}
+
 // CollectTexts drains a source into a slice (for small corpora and the callers that need a list).
 func CollectTexts(src TextSource) ([]string, error) {
 	var out []string
@@ -497,6 +514,9 @@ func (z ZipSource) Each(fn func(string) error) error {
 // SourceForFile picks a streaming source for a path: ZipSource for an archive (by
 // its magic bytes), FileSource otherwise.
 func SourceForFile(path, unit string, pageLines int) TextSource {
+	if IsAudioFile(path) {
+		return AudioSource{Path: path}
+	}
 	if IsZipFile(path) {
 		return ZipSource{Path: path, Unit: unit, PageLines: pageLines}
 	}

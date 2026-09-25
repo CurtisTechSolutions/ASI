@@ -35,7 +35,7 @@ from .beam import Prediction, path_probability
 from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
 from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS
-from .encoding import WINDOW, WORDS, Encoding, parse_encoding, word_rows
+from .encoding import CHARS, WINDOW, WORDS, Encoding, hear_audio, is_audio_file, parse_encoding, word_rows
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .training import ORDERS
@@ -646,6 +646,13 @@ def read_texts(paths: Sequence[str], whole_file: bool = False, what: str = "trai
     """
     texts: list[str] = []
     for path in paths:
+        if is_audio_file(path):  # a recording is heard as a text of acoustic units: one utterance, one text
+            try:
+                with open(path, "rb") as fh:
+                    texts.append(hear_audio(fh.read()))
+            except (OSError, ValueError) as exc:
+                raise CliError(f"{path}: {exc}") from exc
+            continue
         if _is_zip_file(path):
             try:
                 contents = [entry.text for entry in zip_texts_from_file(path)]
@@ -860,11 +867,15 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         result, verdicts = pair.rank(args.prefix, result)
         guard = _guard_doc(pair, verdicts, candidates=len(verdicts),
                            kept=sum(v["decision"] != "reject" for v in verdicts))
-    console.pairs([
+    pairs = [
         ("model", kind_label(model)),
         ("prefix", quote(args.prefix)),
         ("continuation", quote(result.text)),
         ("full text", quote(result.full_text)),
+    ]
+    if model.encoding.phonetic:  # a model that thinks in sounds: say what its answer spells
+        pairs.append(("spelled", quote(model.encoding.spell(result.full_text))))
+    console.pairs(pairs + [
         ("cost", result.cost),
         ("probability", path_probability(result)),
         ("reached end", result.reached_end),
@@ -895,6 +906,8 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         "mode": mode,
         "traversal": args.traversal,
     }
+    if model.encoding.phonetic:
+        doc["spelled"] = model.encoding.spell(result.full_text)
     if args.traversal != "reward":
         doc["traversal"] = args.traversal
         doc["punish"] = result.punish
@@ -937,10 +950,16 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
                            kept=len(outcome["kept"]), rate=outcome["rate"])
     rows = [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
     console.table(("#", "cost", "prob", "end", "text"), rows)
+    spelled: dict[int, str] = {}
+    if model.encoding.phonetic:  # what the sounds spell, sample by sample
+        spelled = {i: model.encoding.spell(r.text) for i, r in enumerate(results)}
+        console.say()
+        console.table(("#", "spelled"), [[i + 1, quote(clip(s, 100))] for i, s in spelled.items()])
     if guard is not None:
         _print_vetoes(console, guard)
     return {
-        "samples": [{**r.to_dict(), "probability": path_probability(r)} for r in results],
+        "samples": [{**r.to_dict(), "probability": path_probability(r), **({"spelled": spelled[i]} if i in spelled else {})}
+                    for i, r in enumerate(results)],
         "count": len(results),
         "mode": args.mode,
         "traversal": args.traversal,
@@ -949,6 +968,74 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         "temperature": args.temperature,
         "guard": guard,
     }
+
+
+def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
+    """Speak: sample walks and hear them as they go; each walk's END sentinel closes an utterance."""
+    from .voice import speak_walks
+
+    model, _ = open_model(args, console, required=True)
+    said: list[dict] = []
+
+    def on_utterance(i: int, text: str, spelled: str) -> None:
+        said.append({"text": text, "spelled": spelled})
+
+    from .voice import output_rate
+
+    rate = output_rate(model.encoding, args.rate)  # acoustic units are spoken at their codebook's rate
+    stream = speak_walks(
+        model, prefix=args.prefix, count=args.count, max_length=args.max_length, temperature=args.temperature,
+        seed=getattr(args, "seed", None), rate=rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain,
+        on_utterance=on_utterance,
+    )
+    from .encoding import phonetok_module
+
+    synth = phonetok_module("synth", "speaking")  # from the environment, or the checkout beside this one
+    find_player, wav_header, write_wav = synth.find_player, synth.wav_header, synth.write_wav
+
+    total = 0
+    sink = "file"
+    if args.play:
+        player = find_player()
+        if player is None:
+            raise CliError("no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw")
+        import subprocess
+
+        proc = subprocess.Popen(player, stdin=subprocess.PIPE)
+        assert proc.stdin is not None
+        proc.stdin.write(wav_header(rate))
+        for chunk in stream:  # every chunk reaches the player as the walk makes it
+            proc.stdin.write(chunk)
+            proc.stdin.flush()
+            total += len(chunk)
+        proc.stdin.close()
+        proc.wait()
+        sink = player[0]
+    elif args.raw:
+        out = sys.stdout.buffer
+        for chunk in stream:
+            out.write(chunk)
+            out.flush()
+            total += len(chunk)
+        sink = "stdout"
+    else:
+        pcm = b"".join(stream)
+        total = len(pcm)
+        write_wav(args.out, pcm, rate)
+        sink = args.out
+    seconds = total / 2.0 / rate
+    if not args.raw:
+        console.pairs([
+            ("model", kind_label(model)),
+            ("prefix", quote(args.prefix)),
+            ("utterances", len(said)),
+            ("speech", f"{seconds:.2f} s at {rate} Hz -> {sink}"),
+        ])
+        console.say()
+        console.table(("#", "said", "spelled"),
+                      [[i + 1, quote(clip(u["text"], 60)), quote(clip(u["spelled"], 40))] for i, u in enumerate(said)])
+    return {"prefix": args.prefix, "utterances": said, "seconds": seconds, "rate": rate, "sink": sink,
+            "count": len(said), "encoding": str(model.encoding)}
 
 
 def cmd_think(args: argparse.Namespace, console: Console) -> dict:
@@ -2064,10 +2151,10 @@ def cmd_words(args: argparse.Namespace, console: Console) -> dict:
     """A word encoding's alphabet: the words the graph has read and how many grams hold each."""
     model, origin = open_model(args, console, required=True)
     encoding = model.encoding
-    if encoding.unit != WORDS:
+    if encoding.unit == CHARS:
         raise CliError(
-            f"{args.model} counts in {encoding.units_name}, so it has no words to list; a word alphabet needs a "
-            f"word encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
+            f"{args.model} counts in {encoding.units_name}, so it has no words to list; an alphabet needs a word, "
+            f"phone, syllable or acoustic encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
         )
     rows = word_rows(encoding, model.graph.trigram_index)
     vocabulary = len(rows)
@@ -2076,8 +2163,8 @@ def cmd_words(args: argparse.Namespace, console: Console) -> dict:
     console.pairs([
         ("model", origin.describe()),
         ("encoding", encoding.describe()),
-        ("vocabulary", f"{vocabulary} word(s), {len(rows)} shown"),
-        ("read", f"{counter_text(model.stats(), 'trained_chars')} words over "
+        ("vocabulary", f"{vocabulary} {encoding.units_name[:-1]}(s), {len(rows)} shown"),
+        ("read", f"{counter_text(model.stats(), 'trained_chars')} {encoding.units_name} over "
                  f"{counter_text(model.stats(), 'trained_texts')} texts"),
     ])
     console.say()
@@ -4195,13 +4282,15 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             "kind always wins.  The default --model follows the kind "
                             f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
     group.add_argument("--encoding", metavar="SPEC", default=default(None),
-                       help="encoding of a NEW model: unit[:n[:stride]] - what one unit of text is (char | word), how "
-                            "many units a gram holds (the n of the n-gram) and how far apart consecutive grams start "
-                            "(1 = the sliding window, n = non-overlapping groups of n).  char:3:1 is the default, "
-                            "char:5:5 groups of five letters, word:2:1 the word bigram, word:3:1 the word trigram; the "
+                       help="encoding of a NEW model: unit[:n[:stride]] - what one unit of text is (char | word | "
+                            "phone | syllable), how many units a gram holds (the n of the n-gram) and how far apart "
+                            "consecutive grams start (1 = the sliding window, n = non-overlapping groups of n).  "
+                            "char:3:1 is the default, char:5:5 groups of five letters, word:2:1 the word bigram, "
+                            "word:3:1 the word trigram, phone:3:1 the trigram of sounds (the text read through the "
+                            "phonetic tokenizer: the cat -> DH AH0 # K AE1 T), syllable:2:1 the syllable bigram; the "
                             "names trigram | bigram | word-bigram | word-trigram work too.  A loaded file's own "
                             "encoding always wins, and is fixed for its life")
-    group.add_argument("--units", choices=("char", "word"), default=default(None),
+    group.add_argument("--units", choices=("char", "word", "phone", "syllable", "acoustic"), default=default(None),
                        help="what one unit of a NEW model is (default char); --encoding sets this too")
     group.add_argument("--ngram", type=int, metavar="N", default=default(None),
                        help="units per gram of a NEW model: the n of the n-gram (default 3)")
@@ -4440,7 +4529,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--data", nargs="+", required=True, metavar="FILE",
                    help="training text files, one text per line (blank lines are skipped); a .zip archive contributes "
-                        "every text file inside it")
+                        "every text file inside it; a .wav recording is heard as one text of acoustic units "
+                        "(--encoding acoustic:3:1)")
     p.add_argument("--whole-file", action="store_true", help="treat each file as a single text")
     p.add_argument("--reverse", action="store_true",
                    help="read every text backwards, in the model's units (its last character, or word, first), so the "
@@ -4507,6 +4597,29 @@ def build_parser() -> argparse.ArgumentParser:
     add_traversal_flags(p)
     add_guard_flags(p)
     p.set_defaults(handler=cmd_generate)
+
+    # speak ----------------------------------------------------------------
+    p = command(
+        "speak", "hear the model walk: speech synthesized as it traverses the graph",
+        "Sample --count walks from START (or continuing --prefix) and speak them through the formant\n"
+        "synthesizer of the phonetic tokenizer as they go: every step's units reach the voice the moment\n"
+        "the walk takes them, and the END sentinel closes each utterance.  A model of sounds\n"
+        "(--encoding phone:3:1) is spoken directly; a model of words or letters is read through the\n"
+        "tokenizer word by word.  --out writes a WAV (default speech.wav); --play streams to a player\n"
+        "(aplay, paplay, ffplay, play or afplay); --raw streams 16-bit PCM to stdout.",
+    )
+    p.add_argument("--prefix", default="", metavar="TEXT", help="start every walk with this (default: from START)")
+    p.add_argument("--count", type=pos_int, default=1, help="walks to speak, one utterance each")
+    p.add_argument("--max-length", type=nonneg_int, default=60, help="units per walk at most")
+    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="softmax temperature of the walk (0 = greedy)")
+    p.add_argument("--out", default="speech.wav", metavar="FILE", help="the WAV to write (default speech.wav)")
+    p.add_argument("--play", action="store_true", help="stream to a player as the walk goes")
+    p.add_argument("--raw", action="store_true", help="stream 16-bit mono PCM to stdout as the walk goes")
+    p.add_argument("--rate", type=pos_int, default=16000, help="sample rate (default 16000)")
+    p.add_argument("--pitch", type=nonneg_float, default=120.0, help="the voice's base pitch in Hz (default 120)")
+    p.add_argument("--tempo", type=nonneg_float, default=1.0, help="the voice's pace (default 1)")
+    p.add_argument("--gain", type=nonneg_float, default=0.5, help="peak level as a share of full scale (default 0.5)")
+    p.set_defaults(handler=cmd_speak)
 
     # converse -------------------------------------------------------------
     p = command(

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -528,7 +529,7 @@ class TestRustWordParity(unittest.TestCase):
 
     def test_the_other_dials_agree_too(self):
         """Any n, any stride: the two sides build the same graph from the same grams."""
-        for spec in ("char:5:1", "char:4:4", "word:2:1"):
+        for spec in ("char:5:1", "char:4:4", "word:2:1", "phone:3:1", "phone:2:2", "syllable:2:1"):
             with self.subTest(encoding=spec):
                 pym = os.path.join(TMP.name, f"py.{spec.replace(':', '-')}.json")
                 rsm = os.path.join(TMP.name, f"rs.{spec.replace(':', '-')}.json")
@@ -538,6 +539,40 @@ class TestRustWordParity(unittest.TestCase):
                 a, b = load_json(pym), load_json(rsm)
                 strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
                 self.assertEqual(strip(a), strip(b), spec)
+
+    def test_the_same_speech(self):
+        """Spoken as it walks: the same walk, the same words, and the same audio, sample for sample."""
+        spec = "phone:3:1"
+        py_model = os.path.join(TMP.name, "enc-speech-py.json")
+        other_model = os.path.join(TMP.name, "enc-speech-rust.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+           model=py_model)
+        rust("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=other_model)
+
+        def pcm(path):
+            with open(path, "rb") as fh:
+                data = fh.read()[44:]
+            return struct.unpack("<%dh" % (len(data) // 2), data)
+
+        for prefix in ("", "the cat"):
+            with self.subTest(prefix=prefix):
+                where = ["--prefix", prefix] if prefix else []
+                py_wav = os.path.join(TMP.name, "speech-py.wav")
+                other_wav = os.path.join(TMP.name, "speech-rust.wav")
+                a = py("--seed", 5, "speak", *where, "--count", 2, "--max-length", 40, "--out", py_wav, model=py_model)
+                b = rust("--seed", 5, "speak", *where, "--count", 2, "--max-length", 40, "--seeded", "--out", other_wav,
+                          model=other_model)
+                self.assertEqual(a["utterances"], b["utterances"])
+                self.assertEqual(a["count"], 2)
+                self.assertEqual(a["seconds"], b["seconds"])
+                self.assertEqual(a["encoding"], spec)
+                self.assertEqual(b["encoding"], spec)
+                if not prefix:  # from START the first node is whole: an utterance opens on a whole word
+                    self.assertFalse(a["utterances"][0]["text"].startswith("#"), a["utterances"][0])
+                x, y = pcm(py_wav), pcm(other_wav)
+                self.assertEqual(len(x), len(y))
+                self.assertGreater(len(x), 16000)
+                self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 64)
 
 
 class TestRustNegativeParity(unittest.TestCase):

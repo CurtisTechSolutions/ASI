@@ -9,6 +9,12 @@ gram holds, and how far apart consecutive grams start:
 * ``Encoding(n=4, stride=4)`` is *tokenisation*: non-overlapping groups of four
   letters. So is ``Encoding(n=5, stride=5)``.
 * ``Encoding(unit=WORDS, n=2)`` is the word bigram, ``n=3`` the word trigram.
+* ``Encoding(unit=PHONES)`` is the trigram of *sounds*: the text is read through
+  the phonetic tokenizer (``../PhoneticTokenizer``), and ``Encoding(unit=SYLLABLES)``
+  the trigram of syllables.
+* ``Encoding(unit=ACOUSTIC)`` is the trigram of *acoustic units*: sounds learned
+  from recordings with nothing written down (``q2 q28 q55``), heard from WAV
+  files through the same tokenizer's codebook and spoken back through its vocoder.
 
 :class:`Encoder` and :class:`Decoder` are the two halves of it kept as objects,
 because that is how the rest of the package holds them; ``Encoder(window=5)``
@@ -25,7 +31,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import importlib
+import os
 import re
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -36,7 +45,31 @@ CHARS = "char"
 """One unit is one character."""
 WORDS = "word"
 """One unit is one whitespace-delimited word; the text is normalised to single spaces."""
-UNIT_KINDS = (CHARS, WORDS)
+PHONES = "phone"
+"""One unit is one *sound*: a phoneme (``DH``, ``AH0``, ``K``), the ``#`` between two words, or a pause.
+
+The text is read through the phonetic tokenizer (the sibling ``PhoneticTokenizer`` package,
+``phonetok``): ``"the cat"`` becomes the units ``DH AH0 # K AE1 T``, and the graph is built over
+sounds rather than letters.  A label is that text, so a model file stays readable.
+"""
+SYLLABLES = "syllable"
+"""One unit is one syllable (``K.AE1.T``), the ``#`` between two words, or a pause."""
+ACOUSTIC = "acoustic"
+"""One unit is one *acoustic unit*: a sound learned from audio (``q17``), with nothing written down.
+
+The units are the phonetic tokenizer's acoustic units (``phonetok.acoustic``): a codebook learned from
+recordings by k-means over log-mel frames - the bundled one, or the file ``PHONETOK_CODEBOOK`` names.
+A recording (``--data speech.wav``) is heard as a text of units, ``q2 q28 q55 ...``, and that text is
+what the graph is built over, so a model learns from sound alone.  As text the units behave like
+words (whitespace-separated tokens, any token accepted); there are no words to spell back, and what
+the model says is spoken through the vocoder (``radixnet speak``).
+"""
+PHONETIC_UNITS = (PHONES, SYLLABLES)
+TOKEN_UNITS = (WORDS, ACOUSTIC)
+"""The units that are whitespace-separated tokens taken as they come."""
+UNIT_KINDS = (CHARS, WORDS, PHONES, SYLLABLES, ACOUSTIC)
+_UNITS_NAMES = {CHARS: "chars", WORDS: "words", PHONES: "phones", SYLLABLES: "syllables", ACOUSTIC: "units"}
+_UNIT_WORDS = {CHARS: "character", WORDS: "word", PHONES: "phone", SYLLABLES: "syllable", ACOUSTIC: "unit"}
 
 START_LABEL = "<s>"
 END_LABEL = "</s>"
@@ -58,6 +91,90 @@ def _piece(view: str | Sequence[str], lo: int, hi: int | None = None) -> str:
     """Units ``[lo:hi)`` of a view, as text."""
     part = view[lo:hi]
     return part if isinstance(part, str) else " ".join(part)
+
+
+_PHONETIC: dict[str, object] = {}
+
+
+def phonetok_module(name: str = "", what: str = "a phonetic unit"):
+    """The ``phonetok`` package - or its submodule *name*, such as ``"synth"`` - imported:
+    from the environment, or from the checkout beside this project.
+
+    The tokenizer lives in the sibling ``PhoneticTokenizer`` directory, and a checkout finds
+    it there on its own (the way the Go port's ``replace`` directive and the Rust port's path
+    dependency do); anywhere else, ``pip install -e ../PhoneticTokenizer`` or put that
+    directory on the path.  Raises :class:`ValueError` naming *what* needed it when neither
+    works.
+    """
+    full = f"phonetok.{name}" if name else "phonetok"
+    try:
+        return importlib.import_module(full)
+    except ImportError:
+        sibling = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                               "PhoneticTokenizer")
+        if os.path.isdir(os.path.join(sibling, "phonetok")) and sibling not in sys.path:
+            sys.path.append(sibling)
+        try:
+            return importlib.import_module(full)
+        except ImportError as exc:
+            raise ValueError(
+                f"{what} needs the phonetok package (the sibling PhoneticTokenizer directory: "
+                f"pip install -e ../PhoneticTokenizer): {exc}"
+            ) from None
+
+
+def phonetic_tokenizer(unit: str):
+    """The tokenizer a phonetic unit reads through: ``phonetok`` over its *portable* lexicon.
+
+    One tokenizer per unit, made on first use and kept: what it remembers of the words it
+    sounded out is what lets a prediction be spelled back.  The lexicon is the portable
+    one - the bundled core plus the file ``PHONETOK_LEXICON`` names - because that is the
+    lexicon the Go and Rust ports read too, and a model whose symbols are sounds is only
+    as portable as the lexicon that made them.
+
+    Raises :class:`ValueError` when the package cannot be imported
+    (:func:`phonetok_module` says where it is looked for).
+    """
+    tok = _PHONETIC.get(unit)
+    if tok is None:
+        phonetok = phonetok_module(what=f"the {unit} unit")
+        level = "phoneme" if unit == PHONES else "syllable"
+        tok = phonetok.PhoneticTokenizer(level=level, lexicon=phonetok.Lexicon.portable())
+        _PHONETIC[unit] = tok
+    return tok
+
+
+_ACOUSTIC: list = []
+
+
+def acoustic_tokenizer():
+    """The acoustic units' tokenizer: ``phonetok.acoustic`` over its codebook, made once.
+
+    The codebook is the bundled one, or the file ``PHONETOK_CODEBOOK`` names; a
+    model's units mean nothing without the codebook that made them, so the two
+    travel together.  It hears recordings (:func:`hear_audio`) and lends the
+    voice its vocoder; the text form of the acoustic unit needs no tokenizer at
+    all (a unit text is whitespace-separated tokens taken as they come).
+    """
+    if not _ACOUSTIC:
+        acoustic = phonetok_module("acoustic", "the acoustic unit")
+        _ACOUSTIC.append(acoustic.AcousticTokenizer(os.environ.get("PHONETOK_CODEBOOK") or None))
+    return _ACOUSTIC[0]
+
+
+def hear_audio(data: bytes) -> str:
+    """A WAV file's bytes as a text of acoustic units: ``"q2 q28 q55 ..."``, runs collapsed.
+
+    One recording is one utterance, and so one text; a model over the
+    acoustic unit is trained on these the way a phone model is trained on its
+    sounds.
+    """
+    return acoustic_tokenizer().listen(data).text
+
+
+def is_audio_file(path: str) -> bool:
+    """Is the file a WAV (by its name) - something to hear rather than read?"""
+    return path.lower().endswith(".wav")
 
 
 @dataclass(frozen=True)
@@ -88,6 +205,10 @@ class Encoding:
         """Raise :class:`ValueError` if this is not an encoding the graph can be built in."""
         if self.unit not in UNIT_KINDS:
             raise ValueError(f"unit must be one of {UNIT_KINDS}, got {self.unit!r}")
+        if self.unit in PHONETIC_UNITS:
+            phonetic_tokenizer(self.unit)  # a phonetic unit needs its tokenizer: better refused now than mid-run
+        if self.unit == ACOUSTIC:
+            acoustic_tokenizer()  # and the acoustic unit its codebook, to hear recordings and be heard
         if self.n < 1:
             raise ValueError(f"n must be >= 1, got {self.n}")
         if self.stride < 1:
@@ -107,6 +228,11 @@ class Encoding:
         """Do consecutive grams overlap at all?"""
         return self.stride < self.n
 
+    @property
+    def phonetic(self) -> bool:
+        """Are the units sounds (:data:`PHONES` or :data:`SYLLABLES`) rather than letters or words?"""
+        return self.unit in PHONETIC_UNITS
+
     def is_default(self) -> bool:
         """The character trigram of stride 1: what a model file leaves unwritten."""
         return self == Encoding()
@@ -116,7 +242,7 @@ class Encoding:
 
     def describe(self) -> str:
         """The human form: ``'2-word grams, stride 1 (sliding)'``."""
-        unit = "character" if self.unit == CHARS else "word"
+        unit = _UNIT_WORDS[self.unit]
         return f"{self.n}-{unit} grams, stride {self.stride} ({'sliding' if self.sliding else 'groups'})"
 
     def to_dict(self) -> dict:
@@ -132,29 +258,54 @@ class Encoding:
     # -- units ---------------------------------------------------------------
 
     def units(self, text: str) -> str | list[str]:
-        """The text as something that slices by unit: itself, or its words.
+        """The text as something that slices by unit: itself, its words, or its sounds.
 
         The split is :func:`split_words`, not ``str.split()``.  The two
         disagree about four separators, and Go and Rust split on the Unicode
         property, so a text holding one of them would be cut into different
         words here than there - and a word split differently is a different
         node (``../SPEC-WordNGrams.md`` §4).
+
+        A phonetic unit reads the text through the tokenizer first: every word
+        becomes its sounds, punctuation a pause, the gap between two words a
+        ``#``.  Text that is already sounds passes through unchanged, so a label
+        of the graph - which is that text - cuts into the same units it was
+        made of, and a text may even mix the two (``"the K AE1 T sat"``).
         """
-        return text if self.unit == CHARS else split_words(text)
+        if self.unit == CHARS:
+            return text
+        if self.unit in TOKEN_UNITS:
+            return split_words(text)
+        return split_words(phonetic_tokenizer(self.unit).text(text))
 
     def length(self, text: str) -> int:
         """How many units a text holds."""
-        return len(text) if self.unit == CHARS else len(split_words(text))
+        if self.unit == CHARS:
+            return len(text)
+        if self.unit in TOKEN_UNITS:
+            return len(split_words(text))
+        return len(self.units(text))
 
     @property
     def units_name(self) -> str:
-        """What this encoding counts in: ``"chars"`` or ``"words"``.
+        """What this encoding counts in: ``"chars"``, ``"words"``, ``"phones"`` or ``"syllables"``.
 
         Every length, count and score of a model is in these; a number whose
         unit depends on the encoding is a number that will be read wrong, so
         the CLI, the API and the frontend all carry this beside it.
         """
-        return "chars" if self.unit == CHARS else "words"
+        return _UNITS_NAMES[self.unit]
+
+    def spell(self, text: str) -> str:
+        """The words a phonetic text spells: ``"DH AH0 # K AE1 T"`` -> ``"the cat"``.
+
+        The tokenizer spells each word back through its lexicon and its memory of
+        what it read, and respells sounds no known word has, so a prediction made
+        of sounds can be read.  A character or word encoding returns the text as it is.
+        """
+        if not self.phonetic:
+            return text
+        return phonetic_tokenizer(self.unit).decode(split_words(text))
 
     def vocabulary(self, grams: Iterable[str]) -> dict[str, int]:
         """The words of a word encoding's grams, and how many grams hold each.
@@ -176,12 +327,14 @@ class Encoding:
         return _piece(self.units(text), lo, hi)
 
     def join(self, *parts: str) -> str:
-        """Glue unit-aligned pieces: nothing between characters, one space between words.
+        """Glue unit-aligned pieces: nothing between characters, one space between words or sounds.
 
         Empty pieces are dropped, so a label contributing no unit adds no separator.
         """
-        if self.unit != WORDS:
+        if self.unit == CHARS:
             return "".join(parts)
+        if self.phonetic:  # a piece given as text joins as the sounds it makes, so a joined text is all sounds
+            parts = tuple(" ".join(self.units(p)) for p in parts)
         return " ".join(p for p in parts if p)
 
     def truncate(self, text: str, n: int) -> str:
@@ -196,8 +349,12 @@ class Encoding:
         """
         if not prefix:
             return True
-        if self.unit != WORDS:
+        if self.unit == CHARS:
             return text.startswith(prefix)
+        if self.phonetic:  # a prefix given as text is looked for as the sounds it makes
+            prefix = " ".join(self.units(prefix))
+            if not prefix:
+                return True
         return text == prefix or text.startswith(prefix + " ")
 
     def reverse(self, text: str) -> str:
@@ -210,9 +367,11 @@ class Encoding:
         what training with ``reverse`` reads (``../SPEC-SearchAndTraining.md``
         §9), and what a query to a model trained that way must be turned into.
         """
-        if self.unit != WORDS:
+        if self.unit == CHARS:
             return text[::-1]
-        return " ".join(reversed(split_words(text)))
+        # words, sounds or acoustic units: the units in reverse order (a phonetic unit reads the
+        # text as sounds first, so a text read backwards is its sounds backwards)
+        return " ".join(reversed(self.units(text)))
 
     # -- encoder -------------------------------------------------------------
 
@@ -297,6 +456,9 @@ _ALIASES = {
 _UNIT_NAMES = {
     "char": CHARS, "chars": CHARS, "character": CHARS, "characters": CHARS, "letter": CHARS, "letters": CHARS,
     "word": WORDS, "words": WORDS,
+    "phone": PHONES, "phones": PHONES, "phoneme": PHONES, "phonemes": PHONES, "sound": PHONES, "sounds": PHONES,
+    "syllable": SYLLABLES, "syllables": SYLLABLES, "syl": SYLLABLES,
+    "acoustic": ACOUSTIC, "acoustics": ACOUSTIC, "audio": ACOUSTIC, "unit": ACOUSTIC, "units": ACOUSTIC,
 }
 
 
@@ -304,7 +466,8 @@ def parse_encoding(spec: str) -> Encoding:
     """Read a spec: ``unit[:n[:stride]]``, or one of the names in :data:`_ALIASES`.
 
     ``"char:3:1"`` is the default, ``"char:5:groups"`` (or ``"char:5:5"``)
-    non-overlapping groups of five letters, ``"word:2"`` the word bigram.
+    non-overlapping groups of five letters, ``"word:2"`` the word bigram,
+    ``"phone:3:1"`` the trigram of sounds and ``"syllable:2:1"`` the syllable bigram.
     """
     text = (spec or "").strip().lower()
     if text in _ALIASES:
@@ -313,7 +476,7 @@ def parse_encoding(spec: str) -> Encoding:
     if len(parts) > 3:
         raise ValueError(f"encoding {spec!r}: expected unit[:n[:stride]]")
     if parts[0] not in _UNIT_NAMES:
-        raise ValueError(f"encoding {spec!r}: unit must be char or word, got {parts[0]!r}")
+        raise ValueError(f"encoding {spec!r}: unit must be char, word, phone, syllable or acoustic, got {parts[0]!r}")
     unit = _UNIT_NAMES[parts[0]]
     n = WINDOW
     if len(parts) > 1 and parts[1]:

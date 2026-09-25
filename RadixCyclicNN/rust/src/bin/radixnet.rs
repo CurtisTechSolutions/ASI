@@ -13,6 +13,7 @@
 //!   train      train on texts the way the kind learns (counting, gradient descent, blame)
 //!   predict    continue a prefix: the K likeliest and the K least likely
 //!   generate   whole texts, by beam, by the single cheapest path, or sampled
+//!   speak      hear the model walk: speech synthesized as it traverses, closed by the END sentinel
 //!   score      the log-probability of a text under the model
 //!   feedback   thumbs up / down: reward or punish whole texts
 //!   2nrl       punish the bad texts, then count and reward the good ones
@@ -28,6 +29,7 @@
 //!   version    the port's version
 //! ```
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use radixnet::cli::{
@@ -47,20 +49,22 @@ use radixnet::report::{node_rows, path_rows, stats};
 use radixnet::search::SamplingFilter;
 use radixnet::service::Service;
 use radixnet::training::Plan;
+use radixnet::voice::SpeakOptions;
 
 const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SPEC] [--json] [--seed N] \
      [--workers N] [--out PATH] <command>\n\
-     commands: train predict generate score feedback 2nrl negative invert compress weights schedule paths nodes \
-     words info \
+     commands: train predict generate speak score feedback 2nrl negative invert compress weights schedule paths \
+     nodes words info \
      serve version\n\
      --kind radix | count | negative | resonant: the algorithm of a NEW model (count is this port's default); a \
      loaded file's own kind always wins.\n\
-     --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word), how many units a gram holds \
-     and how far apart\n\
+     --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word | phone | syllable), how many \
+     units a gram holds and how far apart\n\
      consecutive grams start (1 = the sliding window, n = non-overlapping groups).  char:3:1 is the default, \
      char:5:5 groups of five\n\
      letters, word:2:1 the word bigram, word:3:1 the word trigram; the names trigram | bigram | word-bigram | \
-     word-trigram work too.\n\
+     word-trigram work too.  phone:3:1 is a model of sounds (the phonetic tokenizer's), syllable:2:1 of \
+     syllables.\n\
      --units / --ngram / --stride set the three dials separately.  A loaded file's own encoding always wins, and \
      is fixed for its life.\n\
      --log SPEC (or $RADIXNET_LOG) sets what is written to stderr: a level (error | warn | info | debug | trace | \
@@ -79,6 +83,12 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      --min-delta X (stop after N full epochs without the loss improving by X; 0 = off), --reverse (read every \
      text\n\
      backwards - its last character, or word, first - so the model learns what comes before).  \
+     speak: --count N walks from START (or --prefix), spoken as they go through the formant synthesizer; \
+     --out FILE\n\
+     writes a WAV (speech.wav), --play streams to a player (aplay, paplay, ffplay, play, afplay), --raw \
+     streams 16-bit PCM\n\
+     to stdout; --rate, --pitch, --tempo, --gain shape the voice; --seeded walks with a private RNG from \
+     --seed.  \
      ../SPEC-SearchAndTraining.md has the rules.";
 
 /// The default `--model` per unit, so a word model never overwrites a
@@ -152,7 +162,8 @@ fn run() -> Result<(), String> {
         };
     let mut encoding = parse_encoding(&args.str("encoding", ""))?;
     if let Some(name) = args.get("units") {
-        encoding.unit = Unit::parse(name).ok_or_else(|| format!("--units must be char or word, got {name:?}"))?;
+        encoding.unit = Unit::parse(name)
+            .ok_or_else(|| format!("--units must be char, word, phone, syllable or acoustic, got {name:?}"))?;
     }
     if args.get("ngram").is_some() {
         encoding.n = args.usize("ngram", encoding.n)?;
@@ -354,6 +365,100 @@ fn run() -> Result<(), String> {
                 ("traversal", Json::str(opts.traversal.clone())),
                 ("guard", guard),
             ]));
+        }
+        "speak" => {
+            // the model is heard as it walks: every step's units reach the voice
+            // the moment the walk takes them, and the END sentinel closes each
+            // utterance ([`radixnet::voice`])
+            let mut model = open(true)?;
+            let max_length = args.int("max-length", 60)?;
+            // acoustic units are spoken at their codebook's rate
+            let rate = radixnet::phonetic::output_rate(
+                model.g.enc,
+                args.usize("rate", phonetok::synth::RATE as usize)? as u32,
+            )?;
+            let opts = SpeakOptions {
+                prefix: args.str("prefix", ""),
+                count: args.usize("count", 1)?,
+                max_length: (max_length >= 0).then_some(max_length as usize),
+                temperature: args.float("temperature", 1.0)?,
+                seed: args.on("seeded").then_some(seed),
+                rate,
+                pitch: args.float("pitch", 120.0)?,
+                tempo: args.float("tempo", 1.0)?,
+                gain: args.float("gain", 0.5)?,
+            };
+            let wav_path = args.str("out", "speech.wav");
+            let play = args.on("play");
+            let raw = args.on("raw");
+            let mut said: Vec<Json> = Vec::new();
+            let mut record = |_i: usize, text: &str, spelled: &str| {
+                said.push(Json::obj(vec![
+                    ("text", Json::str(text)),
+                    ("spelled", Json::str(spelled)),
+                ]));
+            };
+            let mut total = 0usize;
+            let sink: String;
+            if play {
+                let Some(player) = phonetok::synth::find_player() else {
+                    return Err(
+                        "no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw".to_string(),
+                    );
+                };
+                let mut child = std::process::Command::new(&player[0])
+                    .args(&player[1..])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("{}: {e}", player[0]))?;
+                {
+                    let stdin = child.stdin.as_mut().ok_or("no stdin")?;
+                    stdin
+                        .write_all(&phonetok::synth::wav_header(opts.rate, None))
+                        .map_err(|e| e.to_string())?;
+                    let mut emit_pcm = |chunk: &[u8]| {
+                        // every chunk reaches the player as the walk makes it
+                        if stdin.write_all(chunk).is_ok() {
+                            stdin.flush().ok();
+                        }
+                        total += chunk.len();
+                    };
+                    model.speak_walks(&opts, &mut emit_pcm, &mut record)?;
+                }
+                child.wait().ok();
+                sink = player[0].clone();
+            } else if raw {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                let mut emit_pcm = |chunk: &[u8]| {
+                    if out.write_all(chunk).is_ok() {
+                        out.flush().ok();
+                    }
+                    total += chunk.len();
+                };
+                model.speak_walks(&opts, &mut emit_pcm, &mut record)?;
+                sink = "stdout".to_string();
+            } else {
+                let mut pcm: Vec<u8> = Vec::new();
+                let mut emit_pcm = |chunk: &[u8]| pcm.extend_from_slice(chunk);
+                model.speak_walks(&opts, &mut emit_pcm, &mut record)?;
+                std::fs::write(&wav_path, phonetok::synth::wav_bytes(&pcm, opts.rate))
+                    .map_err(|e| format!("{wav_path}: {e}"))?;
+                total = pcm.len();
+                sink = wav_path.clone();
+            }
+            if !raw {
+                let count = said.len();
+                emit(Json::obj(vec![
+                    ("prefix", Json::str(&opts.prefix)),
+                    ("utterances", Json::Arr(said)),
+                    ("seconds", Json::Num(total as f64 / 2.0 / opts.rate as f64)),
+                    ("rate", Json::Int(opts.rate as i64)),
+                    ("sink", Json::str(&sink)),
+                    ("count", Json::Int(count as i64)),
+                    ("encoding", Json::str(model.g.enc.to_string())),
+                ]));
+            }
         }
         "score" => {
             let mut model = open(true)?;

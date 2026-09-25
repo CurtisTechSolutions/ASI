@@ -337,6 +337,14 @@ func (f SamplingFilter) Filter(options []ChildCost, temperature float64) []Child
 // from what the filter keeps, with the one random number it always drew - off,
 // the walk is draw for draw the one it always was.
 func (g *Graph) SampleWalkFiltered(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn, traversal Traversal, filter SamplingFilter) (*PathResult, error) {
+	return g.SampleWalkListening(startNode, startOffset, maxChars, temperature, rng, includeContext, costs, traversal, filter, nil)
+}
+
+// SampleWalkListening is SampleWalkFiltered with a listener: onStep is told every
+// node the walk steps onto, as it steps onto it - End included, which is the
+// walk's own final sentinel - so a listener can act on the walk while it is
+// walking (voice.go speaks it).
+func (g *Graph) SampleWalkListening(startNode, startOffset, maxChars int, temperature float64, rng *MT19937, includeContext *bool, costs CostFn, traversal Traversal, filter SamplingFilter, onStep func(node int)) (*PathResult, error) {
 	if traversal == ByLeastPunished {
 		costs = nil
 	}
@@ -416,6 +424,9 @@ func (g *Graph) SampleWalkFiltered(startNode, startOffset, maxChars int, tempera
 		nodeIDs = append(nodeIDs, pick.Child)
 		if pick.Child != End {
 			chars += g.labelLen[pick.Child] - g.Enc.Overlap()
+		}
+		if onStep != nil {
+			onStep(pick.Child)
 		}
 		cameFrom = node
 		node = pick.Child
