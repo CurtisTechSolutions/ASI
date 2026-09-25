@@ -2155,7 +2155,8 @@ class TestGoEncodingParity(unittest.TestCase):
     """
 
     ENCODINGS = ["char:3:1", "char:5:1", "char:4:4", "char:5:5", "char:6:3",
-                 "word:1:1", "word:2:1", "word:3:1", "word:2:2"]
+                 "word:1:1", "word:2:1", "word:3:1", "word:2:2",
+                 "phone:3:1", "phone:2:2", "syllable:2:1"]
 
     def test_the_same_graph_from_the_same_corpus(self):
         for spec in self.ENCODINGS:
@@ -2214,6 +2215,64 @@ class TestGoEncodingParity(unittest.TestCase):
         # the words come back whole, with the space the prefix needs
         self.assertTrue(a["full_text"].startswith("the cat "), a["full_text"])
         self.assertEqual(a["continuation"], " ".join(a["continuation"].split()))
+
+    def test_the_same_prediction_in_sounds(self):
+        """A model over sounds: the same walk, the same sounds, and the same words they spell."""
+        spec = "phone:3:1"
+        py_model = os.path.join(TMP.name, "enc-sound-py.json")
+        go_model = os.path.join(TMP.name, "enc-sound-go.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=go_model)
+        a = py("predict", "--prefix", "the cat sat", "--k", 3, "--length", 6, model=py_model)
+        b = go("predict", "--prefix", "the cat sat", "--k", 3, "--length", 6, model=go_model)
+        self.assertEqual(a["continuation"], b["continuation"])
+        self.assertEqual(a["full_text"], b["full_text"])
+        self.assertTrue(a["full_text"].startswith("DH AH0 # K AE1 T # S AE1 T"), a["full_text"])
+        self.assertEqual([r["full_text"] for r in a["top"]], [r["full_text"] for r in b["top"]])
+        # each side reads the other's file as the model of sounds it is
+        for reader, path in ((go, py_model), (py, go_model)):
+            info = reader("info", model=path)
+            self.assertEqual(info["stats"]["encoding"], spec)
+            self.assertEqual(info["stats"]["units"], "phones")
+        # and lists the same alphabet of sounds
+        self.assertEqual([r["word"] for r in py("words", "--limit", 10, model=py_model)["words"]],
+                         [r["word"] for r in go("words", "--limit", 10, model=go_model)["words"]])
+
+
+    def test_the_same_speech(self):
+        """Spoken as it walks: the same walk, the same words, and the same audio, sample for sample."""
+        spec = "phone:3:1"
+        py_model = os.path.join(TMP.name, "enc-speech-py.json")
+        other_model = os.path.join(TMP.name, "enc-speech-go.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=other_model)
+
+        def pcm(path):
+            with open(path, "rb") as fh:
+                data = fh.read()[44:]
+            return struct.unpack("<%dh" % (len(data) // 2), data)
+
+        for prefix in ("", "the cat"):
+            with self.subTest(prefix=prefix):
+                where = ["--prefix", prefix] if prefix else []
+                py_wav = os.path.join(TMP.name, "speech-py.wav")
+                other_wav = os.path.join(TMP.name, "speech-go.wav")
+                a = py("--seed", 5, "speak", *where, "--count", 2, "--max-length", 40, "--out", py_wav, model=py_model)
+                b = go("--seed", 5, "speak", *where, "--count", 2, "--max-length", 40, "--seeded", "--out", other_wav,
+                          model=other_model)
+                self.assertEqual(a["utterances"], b["utterances"])
+                self.assertEqual(a["count"], 2)
+                self.assertEqual(a["seconds"], b["seconds"])
+                self.assertEqual(a["encoding"], spec)
+                self.assertEqual(b["encoding"], spec)
+                if not prefix:  # from START the first node is whole: an utterance opens on a whole word
+                    self.assertFalse(a["utterances"][0]["text"].startswith("#"), a["utterances"][0])
+                x, y = pcm(py_wav), pcm(other_wav)
+                self.assertEqual(len(x), len(y))
+                self.assertGreater(len(x), 16000)
+                self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 64)
 
     def test_both_refuse_the_same_nonsense(self):
         model = os.path.join(TMP.name, "enc-bad.json")

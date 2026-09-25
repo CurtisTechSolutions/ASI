@@ -22,8 +22,15 @@ import "sort"
 // and the frontend all carry it beside the number - a per-word number read as
 // per-character is read wrong.
 func (e Encoding) UnitsName() string {
-	if e.Unit == Words {
+	switch e.Unit {
+	case Words:
 		return "words"
+	case Phones:
+		return "phones"
+	case Syllables:
+		return "syllables"
+	case Acoustic:
+		return "units"
 	}
 	return "chars"
 }
@@ -77,7 +84,7 @@ type WordRow struct {
 // the same alphabet hand back the same rows in the same order.
 func (m *Model) TopWords(limit int) []WordRow {
 	enc := m.Encoding()
-	if enc.Unit != Words {
+	if enc.Unit == Chars {
 		return nil
 	}
 	counts := enc.Vocabulary(m.G.GramIndex())

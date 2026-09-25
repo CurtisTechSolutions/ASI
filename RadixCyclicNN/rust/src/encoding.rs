@@ -50,6 +50,19 @@ pub enum Unit {
     /// One whitespace-delimited word.  The layout is not kept - a word
     /// encoding keeps the words, and a round trip writes single spaces.
     Words,
+    /// One *sound*: a phoneme (`DH`, `AH0`, `K`), the `#` between two words or
+    /// a pause, as the phonetic tokenizer (the sibling PhoneticTokenizer crate)
+    /// writes them.  `"the cat"` is the units `DH AH0 # K AE1 T`, and a label is
+    /// that text, so a model file stays readable.
+    Phones,
+    /// One syllable (`K.AE1.T`), a `#` or a pause.
+    Syllables,
+    /// One *acoustic unit*: a sound learned from audio (`q17`) by the phonetic
+    /// tokenizer's codebook, with nothing written down.  A recording is heard
+    /// as a text of units (`phonetic::hear_audio`), and that text is what the
+    /// graph is built over; as text the units are tokens taken as they come,
+    /// like words, and what the model says is spoken through the vocoder.
+    Acoustic,
 }
 
 impl Unit {
@@ -58,7 +71,21 @@ impl Unit {
         match self {
             Unit::Chars => "char",
             Unit::Words => "word",
+            Unit::Phones => "phone",
+            Unit::Syllables => "syllable",
+            Unit::Acoustic => "acoustic",
         }
+    }
+
+    /// Whether the units are sounds rather than letters or words.
+    pub fn phonetic(self) -> bool {
+        matches!(self, Unit::Phones | Unit::Syllables)
+    }
+
+    /// Whether the units are whitespace-separated tokens taken as they come
+    /// (words, acoustic units).
+    pub fn tokens(self) -> bool {
+        matches!(self, Unit::Words | Unit::Acoustic)
     }
 
     /// What a model under this unit counts in.
@@ -70,6 +97,9 @@ impl Unit {
         match self {
             Unit::Chars => "chars",
             Unit::Words => "words",
+            Unit::Phones => "phones",
+            Unit::Syllables => "syllables",
+            Unit::Acoustic => "units",
         }
     }
 
@@ -78,6 +108,9 @@ impl Unit {
         match name {
             "char" | "chars" | "character" | "characters" | "letter" | "letters" => Some(Unit::Chars),
             "word" | "words" => Some(Unit::Words),
+            "phone" | "phones" | "phoneme" | "phonemes" | "sound" | "sounds" => Some(Unit::Phones),
+            "syllable" | "syllables" | "syl" => Some(Unit::Syllables),
+            "acoustic" | "acoustics" | "audio" | "unit" | "units" => Some(Unit::Acoustic),
             _ => None,
         }
     }
@@ -122,6 +155,12 @@ impl Encoding {
 
     /// What is wrong with this encoding, if anything.
     pub fn validate(&self) -> Result<(), String> {
+        if self.unit.phonetic() {
+            crate::phonetic::tokenizer(self.unit)?; // a phonetic unit needs its tokenizer: better refused now than mid-run
+        }
+        if self.unit == Unit::Acoustic {
+            crate::phonetic::acoustic_tokenizer()?; // and the acoustic unit its codebook, to hear recordings and be heard
+        }
         if self.n < 1 {
             return Err(format!("n must be >= 1, got {}", self.n));
         }
@@ -163,6 +202,9 @@ impl Encoding {
         let unit = match self.unit {
             Unit::Chars => "character",
             Unit::Words => "word",
+            Unit::Phones => "phone",
+            Unit::Syllables => "syllable",
+            Unit::Acoustic => "unit",
         };
         let kind = if self.sliding() { "sliding" } else { "groups" };
         format!("{}-{unit} grams, stride {} ({kind})", self.n, self.stride)
@@ -174,7 +216,11 @@ impl Encoding {
     pub fn units(&self, text: &str) -> Units {
         match self.unit {
             Unit::Chars => Units::chars(text),
-            Unit::Words => Units::words(text),
+            Unit::Words | Unit::Acoustic => Units::words(text),
+            // the text read through the tokenizer: a word becomes its sounds, punctuation a
+            // pause, the gap between two words a #.  Text that is already sounds passes
+            // through unchanged, so a label cuts into the units it was made of.
+            Unit::Phones | Unit::Syllables => Units::words(&crate::phonetic::text(self.unit, text)),
         }
     }
 
@@ -182,7 +228,8 @@ impl Encoding {
     pub fn len(&self, text: &str) -> usize {
         match self.unit {
             Unit::Chars => text.chars().count(),
-            Unit::Words => text.split_whitespace().count(),
+            Unit::Words | Unit::Acoustic => text.split_whitespace().count(),
+            Unit::Phones | Unit::Syllables => crate::phonetic::text(self.unit, text).split_whitespace().count(),
         }
     }
 
@@ -205,11 +252,19 @@ impl Encoding {
     /// words.  Empty pieces are dropped, so a label contributing no unit adds
     /// no separator.
     pub fn join(&self, parts: &[&str]) -> String {
-        if self.unit != Unit::Words {
+        if self.unit == Unit::Chars {
             return parts.concat();
         }
         let mut out = String::new();
         for part in parts {
+            // a piece given as text joins as the sounds it makes, so a joined text is all sounds
+            let sounds;
+            let part: &str = if self.unit.phonetic() {
+                sounds = crate::phonetic::text(self.unit, part);
+                sounds.as_str()
+            } else {
+                part
+            };
             if part.is_empty() {
                 continue;
             }
@@ -229,10 +284,30 @@ impl Encoding {
         if prefix.is_empty() {
             return true;
         }
-        if self.unit != Unit::Words {
+        if self.unit == Unit::Chars {
             return text.starts_with(prefix);
         }
+        let sounds;
+        let prefix = if self.unit.phonetic() {
+            // a prefix given as text is looked for as the sounds it makes
+            sounds = crate::phonetic::text(self.unit, prefix);
+            if sounds.is_empty() {
+                return true;
+            }
+            sounds.as_str()
+        } else {
+            prefix
+        };
         text == prefix || (text.starts_with(prefix) && text.as_bytes().get(prefix.len()) == Some(&b' '))
+    }
+
+    /// The words a phonetic text spells (`"DH AH0 # K AE1 T"` -> `"the cat"`); a
+    /// character or word encoding returns the text as it is.
+    pub fn spell(&self, text: &str) -> String {
+        if !self.unit.phonetic() {
+            return text.to_string();
+        }
+        crate::phonetic::spell(self.unit, text)
     }
 
     /// The text read backwards, unit by unit: its last character first, or
@@ -247,7 +322,14 @@ impl Encoding {
     pub fn reverse(&self, text: &str) -> String {
         match self.unit {
             Unit::Chars => text.chars().rev().collect(),
-            Unit::Words => text.split_whitespace().rev().collect::<Vec<_>>().join(" "),
+            // words, sounds or acoustic units: the units in reverse order (a piece given as
+            // text is first turned into its sounds, as `join` does)
+            _ => self
+                .join(&[text])
+                .split_whitespace()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" "),
         }
     }
 
@@ -370,8 +452,12 @@ pub fn parse_encoding(spec: &str) -> Result<Encoding, String> {
     if parts.len() > 3 {
         return Err(format!("encoding {spec:?}: expected unit[:n[:stride]]"));
     }
-    let unit = Unit::parse(parts[0])
-        .ok_or_else(|| format!("encoding {spec:?}: unit must be char or word, got {:?}", parts[0]))?;
+    let unit = Unit::parse(parts[0]).ok_or_else(|| {
+        format!(
+            "encoding {spec:?}: unit must be char, word, phone, syllable or acoustic, got {:?}",
+            parts[0]
+        )
+    })?;
     let mut n = WINDOW;
     if let Some(text) = parts.get(1).filter(|p| !p.is_empty()) {
         n = text

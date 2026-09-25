@@ -1,0 +1,24 @@
+# phonetok (Rust) - the phonetic tokenizer of PhoneticTokenizer.
+#
+# No dependencies, on purpose: the Python package is pure standard library, the
+# Go port is the standard library, and so is this one.  The JSON reader and
+# writer, the Mersenne Twister and the rule engine are written out in src/.
+[package]
+name = "phonetok"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A phonetic tokenizer: text as the sounds it is made of, with the phonotactics that say which sounds go well together"
+license = "LicenseRef-ASI"
+publish = false
+
+[lib]
+name = "phonetok"
+path = "src/lib.rs"
+
+[[bin]]
+name = "phonetok"
+path = "src/bin/phonetok.rs"
+
+[profile.release]
+opt-level = 3

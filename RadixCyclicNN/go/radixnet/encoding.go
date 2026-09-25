@@ -61,10 +61,47 @@ const (
 	// units, and the text is normalised to single spaces on the way in - a
 	// word encoding keeps the words, not the layout.
 	Words UnitKind = "word"
+	// Phones: one unit is one *sound* - a phoneme (DH, AH0, K), the # between
+	// two words, or a pause - as the phonetic tokenizer (the sibling
+	// PhoneticTokenizer module) writes them.  "the cat" is the units
+	// DH AH0 # K AE1 T, and a label is that text, so a model file stays readable.
+	Phones UnitKind = "phone"
+	// Syllables: one unit is one syllable (K.AE1.T), a # or a pause.
+	Syllables UnitKind = "syllable"
+	// Acoustic: one unit is one *acoustic unit* - a sound learned from audio
+	// (q17) by the phonetic tokenizer's codebook, with nothing written down.  A
+	// recording is heard as a text of units (HearAudio), and that text is what
+	// the graph is built over; as text the units are tokens taken as they come,
+	// like words, and what the model says is spoken through the vocoder.
+	Acoustic UnitKind = "acoustic"
 )
 
 // Valid reports whether k is a unit kind this package knows.
-func (k UnitKind) Valid() bool { return k == Chars || k == Words }
+func (k UnitKind) Valid() bool {
+	return k == Chars || k == Words || k == Phones || k == Syllables || k == Acoustic
+}
+
+// Phonetic reports whether the units are sounds rather than letters or words.
+func (k UnitKind) Phonetic() bool { return k == Phones || k == Syllables }
+
+// Tokens reports whether the units are whitespace-separated tokens taken as
+// they come (words, acoustic units).
+func (k UnitKind) Tokens() bool { return k == Words || k == Acoustic }
+
+// Word is the unit as an English word: "character", "word", "phone", "syllable".
+func (k UnitKind) Word() string {
+	switch k {
+	case Words:
+		return "word"
+	case Phones:
+		return "phone"
+	case Syllables:
+		return "syllable"
+	case Acoustic:
+		return "unit"
+	}
+	return "character"
+}
 
 // -- the encoding ------------------------------------------------------------------
 
@@ -115,7 +152,17 @@ func (e Encoding) WithDefaults() Encoding {
 // Validate reports what is wrong with an encoding, if anything.
 func (e Encoding) Validate() error {
 	if !e.Unit.Valid() {
-		return fmt.Errorf("unit must be %q or %q, got %q", Chars, Words, e.Unit)
+		return fmt.Errorf("unit must be %q, %q, %q, %q or %q, got %q", Chars, Words, Phones, Syllables, Acoustic, e.Unit)
+	}
+	if e.Unit.Phonetic() {
+		if _, err := phoneticTokenizer(e.Unit); err != nil {
+			return err // a phonetic unit needs its tokenizer: better refused now than mid-run
+		}
+	}
+	if e.Unit == Acoustic {
+		if _, err := acousticTokenizer(); err != nil {
+			return err // and the acoustic unit its codebook, to hear recordings and be heard
+		}
 	}
 	if e.N < 1 {
 		return fmt.Errorf("n must be >= 1, got %d", e.N)
@@ -145,10 +192,7 @@ func (e Encoding) String() string { return fmt.Sprintf("%s:%d:%d", e.Unit, e.N, 
 
 // Describe is the human form: "character trigrams, stride 1 (sliding)".
 func (e Encoding) Describe() string {
-	unit := "character"
-	if e.Unit == Words {
-		unit = "word"
-	}
+	unit := e.Unit.Word()
 	kind := "sliding"
 	if !e.Sliding() {
 		kind = "groups"
@@ -188,8 +232,14 @@ func ParseEncoding(spec string) (Encoding, error) {
 		e.Unit = Chars
 	case "word", "words":
 		e.Unit = Words
+	case "phone", "phones", "phoneme", "phonemes", "sound", "sounds":
+		e.Unit = Phones
+	case "syllable", "syllables", "syl":
+		e.Unit = Syllables
+	case "acoustic", "acoustics", "audio", "unit", "units":
+		e.Unit = Acoustic
 	default:
-		return Encoding{}, fmt.Errorf("encoding %q: unit must be char or word, got %q", spec, parts[0])
+		return Encoding{}, fmt.Errorf("encoding %q: unit must be char, word, phone, syllable or acoustic, got %q", spec, parts[0])
 	}
 	if len(parts) > 1 && parts[1] != "" {
 		n, err := strconv.Atoi(parts[1])
@@ -264,8 +314,14 @@ func (u Units) At(i int) string { return u.Slice(i, i+1) }
 // a word encoding collapses every run of whitespace to a single space, a
 // character encoding leaves the text exactly as it is.
 func (e Encoding) Units(text string) Units {
-	if e.Unit == Words {
+	if e.Unit.Tokens() {
 		return wordUnits(text)
+	}
+	if e.Unit.Phonetic() {
+		// the text read through the tokenizer: a word becomes its sounds, punctuation a
+		// pause, the gap between two words a #.  Text that is already sounds passes
+		// through unchanged, so a label cuts into the units it was made of.
+		return wordUnits(phoneticText(e.Unit, text))
 	}
 	return charUnits(text)
 }
@@ -304,8 +360,11 @@ func wordUnits(text string) Units {
 
 // Len is the number of units in a text.
 func (e Encoding) Len(text string) int {
-	if e.Unit == Words {
+	if e.Unit.Tokens() {
 		return len(strings.Fields(text))
+	}
+	if e.Unit.Phonetic() {
+		return len(strings.Fields(phoneticText(e.Unit, text)))
 	}
 	return utf8.RuneCountInString(text)
 }
@@ -322,11 +381,14 @@ func (e Encoding) Slice(text string, from, to int) string {
 // single space between words.  Empty pieces are dropped, so a label that
 // contributes no unit adds no separator.
 func (e Encoding) Join(parts ...string) string {
-	if e.Unit != Words {
+	if e.Unit == Chars {
 		return strings.Join(parts, "")
 	}
 	kept := parts[:0:0]
 	for _, p := range parts {
+		if e.Unit.Phonetic() { // a piece given as text joins as the sounds it makes, so a joined text is all sounds
+			p = phoneticText(e.Unit, p)
+		}
 		if p != "" {
 			kept = append(kept, p)
 		}
@@ -352,8 +414,14 @@ func (e Encoding) HasUnitPrefix(text, prefix string) bool {
 	if prefix == "" {
 		return true
 	}
-	if e.Unit != Words {
+	if e.Unit == Chars {
 		return strings.HasPrefix(text, prefix)
+	}
+	if e.Unit.Phonetic() { // a prefix given as text is looked for as the sounds it makes
+		prefix = phoneticText(e.Unit, prefix)
+		if prefix == "" {
+			return true
+		}
 	}
 	return text == prefix || strings.HasPrefix(text, prefix+" ")
 }
@@ -366,8 +434,10 @@ func (e Encoding) HasUnitPrefix(text, prefix string) bool {
 // with single spaces, the layout it keeps anyway, each word's letters in their
 // order.  Python's Encoding.reverse, character for character.
 func (e Encoding) Reverse(text string) string {
-	if e.Unit == Words {
-		words := strings.Fields(text)
+	if e.Unit != Chars {
+		// words, sounds or acoustic units: the units in reverse order (a phonetic unit reads
+		// the text as sounds first, which Join does)
+		words := strings.Fields(e.Join(text))
 		for i, j := 0, len(words)-1; i < j; i, j = i+1, j-1 {
 			words[i], words[j] = words[j], words[i]
 		}

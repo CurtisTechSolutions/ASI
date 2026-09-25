@@ -2270,7 +2270,7 @@ build the same graph and read each other's files):
 
 | flag | what it sets | default |
 |---|---|---|
-| `--units char\|word` | what one unit of text is: a character, or a whitespace-delimited word | `char` |
+| `--units char\|word\|phone\|syllable` | what one unit of text is: a character, a whitespace-delimited word, a *sound* or a syllable (the text read through the phonetic tokenizer, `../PhoneticTokenizer`) | `char` |
 | `--ngram N` | how many units one gram holds - the *n* of the n-gram, any number | 3 |
 | `--stride N` | how far apart two consecutive grams start: **1** slides them (they overlap by n-1), **n** cuts the text into non-overlapping groups | 1 |
 
@@ -2288,7 +2288,71 @@ python -m radixnet --model m.json --encoding word:3:1 train --data book.txt   # 
 
 go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt   # the same dial in Go
 go/bin/radixnet-count --model m.json predict --prefix "the cat sat" --k 5        # ... and the same file
+
+python -m radixnet --model s.json --encoding phone:3:1 train --data book.txt   # trigrams of sounds
+python -m radixnet --model s.json predict --prefix "the cat sat" --k 5         # ... spelled back into words
+python -m radixnet --model s.json --encoding syllable:2:1 train --data book.txt   # syllable bigrams
 ```
+
+### The phonetic units: the same model over an alphabet of sounds
+
+`phone` and `syllable` read every text through the phonetic tokenizer of the
+sibling project (`../PhoneticTokenizer`: a checkout is found beside this one on
+its own, the way the Go port's `replace` directive and the Rust port's path
+dependency find it; anywhere else, `pip install -e ../PhoneticTokenizer`).
+*"the cat sat"* becomes the units
+`DH AH0 # K AE1 T # S AE1 T` - a phoneme per unit, `#` between words, a pause
+for punctuation - or the syllables `DH.AH0 # K.AE1.T # S.AE1.T`; the graph is
+built over those, its labels are that text (readable in the file and in every
+listing), and the text form is idempotent, so a label cuts into the units it
+was made of. A prefix given as text is looked for as the sounds it makes; the
+`spelled` line of `predict` and `generate` (and the `spelled` field of their
+JSON) is what the sounds say, through the tokenizer's lexicon, its memory of
+what it read, and a respelling for sounds no word has:
+
+```
+$ python -m radixnet --model s.json predict --prefix "the cat sat" --length 8 --mode beam
+prefix        "the cat sat"
+continuation  "# G L IH1 T ER0 Z #"
+full text     "DH AH0 # K AE1 T # S AE1 T # G L IH1 T ER0 Z #"
+spelled       "the cat sat glitters"
+```
+
+`words` lists the sounds the model has read; every length and count is in
+`phones` or `syllables`. **All three ports read the same sounds**: the Go and
+Rust ports carry the tokenizer's ports (a module and a crate beside this one)
+and read the same lexicon - the bundled core plus the file `PHONETOK_LEXICON`
+names - so a model of sounds trained in Python continues in Go or Rust and
+predicts the same continuation; `make phone-parity` holds them to it. The cost
+is the tokenizer's: an unread word is sounded out by rules, which are a guess,
+and a model is only as portable as the lexicon that made its sounds - train and
+predict with the same one.
+
+```bash
+make phone-demo                        # train on the sample corpus, predict, generate, list, speak
+make phone-go phone-rust               # the same model in the other two ports
+```
+
+### Hearing the model walk
+
+`speak` samples walks and **speaks them as they go**: every step's units reach
+the formant synthesizer of the tokenizer the moment the walk takes them, a
+word's audio is committed as soon as the token after it arrives, and the graph's
+**END sentinel closes each utterance** with the closing intonation. A model of
+sounds is spoken directly; a model of words or letters is read through the
+tokenizer word by word.
+
+```bash
+python -m radixnet --model s.json --seed 1 speak --prefix "the cat" --count 3 --out speech.wav
+python -m radixnet --model s.json speak --count 1 --play          # streamed to aplay / paplay / ffplay / play / afplay
+python -m radixnet --model s.json speak --count 1 --raw | aplay -r 16000 -f S16_LE
+make speak SPEECH=walk.wav COUNT=3
+```
+
+The voice (`../PhoneticTokenizer/phonetok/synth.py`) is a source-filter vocoder
+over a table of formants - no data, no download, the same in every port - and
+it runs some 70 x faster than real time in pure Python, so the walk is never
+waited for.
 
 The four Python model kinds all take it (`--kind radix | count | negative |
 resonant`), and so do the library constructors:
@@ -2316,6 +2380,31 @@ A model that is not `char:3:1` writes an `encoding` block into its file, and
 **both implementations read it**: `tests/test_go_parity.py::TestGoEncodingParity`
 trains the same corpus on both sides under nine encodings and holds them to the
 same graph, the same file and the same predictions.
+
+### The acoustic units: a model that learns from sound alone
+
+`--encoding acoustic:3:1` makes the model's symbols the tokenizer's **acoustic
+units**: sounds learned from recordings by k-means over log-mel frames, with
+nothing written down (D-082; `../PhoneticTokenizer/README.md`, *The acoustic
+units*). A `.wav` file given to `train --data` is heard as one text of units -
+`q2 q28 q55 q5 q60 ...` - and the graph is built over those exactly as it is
+built over phones or words, so the model learns from the recordings alone: no
+transcript, no recogniser. `speak` gives a walk back through the vocoder, each
+unit's centroid turned into sound as the walk takes it, and the END sentinel
+closes the utterance as ever.
+
+```bash
+python -m radixnet --model ears.json --encoding acoustic:3:1 train --data recordings/*.wav --epochs 3
+python -m radixnet --model ears.json predict --prefix "q2 q28 q55" --k 5       # continuations, in units
+python -m radixnet --model ears.json speak --count 3 --out heard.wav           # and spoken back
+```
+
+As text the units are tokens taken as they come, like words; there are no words
+to spell back (`spelled` is the units themselves). The units mean nothing without
+the codebook that made them: the bundled codebook was learned from the
+synthesizer's own speech, and `PHONETOK_CODEBOOK=mine.tsv` points every command
+at one learned from real recordings (`phonetok learn recordings/*.wav --out
+mine.tsv`), which is what real speech needs.
 
 ## The attention band: where inside a gram a correction lands
 

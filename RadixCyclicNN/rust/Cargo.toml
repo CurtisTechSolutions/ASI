@@ -13,6 +13,12 @@ description = "The count / reward model of RadixCyclicNN: a self-compressing cyc
 license = "LicenseRef-ASI"
 publish = false
 
+# The phonetic tokenizer lives beside this project in the same repository: the
+# phone and syllable units of the encoding read text through it.  Still no
+# third-party dependency.
+[dependencies]
+phonetok = { path = "../../PhoneticTokenizer/rust" }
+
 [lib]
 name = "radixnet"
 path = "src/lib.rs"

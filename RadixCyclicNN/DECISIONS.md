@@ -3544,6 +3544,127 @@ for a correction the user types, where both rules would put the blame. All three
 
 ---
 
+### D-080 — A sound is a unit: the phonetic tokenizer is a package, and the encoding dial reads it
+
+**Status** Accepted · 2026-09-24 · **Layer** representation · **Extends** D-071, keeps D-006
+
+**Context** D-006 rejected a learned sub-word tokenizer, and D-071 made the unit of the encoding a dial with two
+settings, a character or a whitespace word. The question was whether the model could think in *sounds* - whether
+*night* and *knight* could be one thing to it, and whether the way a sentence ends could be a symbol - without
+reopening D-006. It could, provided the tokenizer learns nothing: the alphabet of a language's sounds is the
+language's, and so are the rules that build its syllables.
+
+**Decision** The tokenizer is a package of its own, `../PhoneticTokenizer` (`phonetok`), built three times - Python,
+Go and Rust - over the same two data files (a rule table and a core lexicon) and held to one fixture, because this
+project has three ports and a model of sounds must mean the same sounds in each. The encoding dial gains two
+settings, `phone` and `syllable`: a text is read through the tokenizer into its text form (`DH AH0 # K AE1 T`),
+which is idempotent on any run of tokens, so a label cuts into the units it was made of and nothing in the graph
+changes. A prefix given as text is matched by its sounds; a prediction is spelled back into words through the
+tokenizer's lexicon and memory. The lexicon a model reads through is the *portable* one - the bundled core plus the
+file `PHONETOK_LEXICON` names - the one every port can build alike.
+
+**Alternatives rejected**
+* **A tokenizer inside `radixnet`.** It is wanted by other projects, and a package used by three ports of two
+  projects has to be one thing with one fixture.
+* **A learned phone-pair vocabulary (BPE over sounds).** D-006's reason holds for sounds as for letters: a corpus
+  before training, and an alphabet that is an accident of it. The phoneme level's ids are a fixed table; the
+  syllable level numbers what it reads.
+* **The Python-only `cmudict` package as the models' lexicon.** A model trained through it would sound out words
+  the Go and Rust ports cannot; the shared lexicon is what every port can read.
+* **Storing the lexicon's name in the model file.** It would name a file the reader may not have; the honest rule
+  is *train and predict with the same lexicon*, and the docs say so.
+
+**Consequences**
+* Both other ports refuse a `phone` file by the check they already made (D-073's argument), and now read it: the
+  Go module and the Rust crate depend on the tokenizer's ports beside them, still with no third-party dependency.
+* `words` lists an alphabet of sounds; every length and count is in `phones` or `syllables`; the frontend still
+  says *characters* for a model of sounds, a gap left for the next frontend build.
+* A text of sounds has no whitespace layout and no letters to keep: the same cost the word unit paid (D-071).
+* The parity suites carry three more encodings, and a model of sounds predicts the same sounds in all three ports.
+
+**Lives in** `../PhoneticTokenizer`, `radixnet/encoding.py`, `go/radixnet/encoding.go`, `go/radixnet/phonetic.go`,
+`rust/src/encoding.rs`, `rust/src/phonetic.rs`, `tests/test_phonetic.py`
+
+---
+
+### D-081 — The model is heard as it walks, and the END sentinel closes what it says
+
+**Status** Accepted · 2026-09-24 · **Layer** output · **Extends** D-080
+
+**Context** A model whose symbols are sounds could be *spoken*, and a walk of the graph takes time - the natural
+thing is to hear it while it walks rather than after. Two questions: what synthesizes the sounds, and what makes
+an utterance an utterance.
+
+**Decision** The tokenizer package carries a voice: a formant synthesizer, a source-filter vocoder over a table of
+formant targets, with no data and no download, ported to all three languages and held to one voice within a
+`libm`. It streams: fed a token at a time, it commits a word's audio when the token after the word arrives. The
+sampling walk reports every node it steps onto as it steps, and `speak` feeds each step's units to the voice, so
+the walk is audible while it is still walking. **The END sentinel is the trigger that closes an utterance**: when
+the walk steps onto `</s>` the voice is sent its own final sentinel, what is pending is spoken with the closing
+intonation and the silence that follows, and the next walk is the next utterance. A walk cut off by its length is
+closed the same way, by the caller.
+
+**Alternatives rejected**
+* **A neural vocoder.** Weights, a framework, and nothing the Go and Rust ports could reproduce.
+* **Speaking only after the walk.** It loses the point; the whole path is also spoken, by feeding it, for the
+  searches that have no steps to report (Dijkstra, the beam).
+* **Splitting utterances at pauses.** A pause is a pause; the utterance is what the model said before it reached
+  END, which is what END has meant since D-006.
+
+**Consequences** `radixnet speak` (a WAV, a player, or raw PCM on stdout, as the walk goes); a model of letters or
+words is read through the tokenizer word by word, so every model can be heard; `tests/test_voice.py`.
+
+**Lives in** `../PhoneticTokenizer/phonetok/synth.py` (and `go/phonetok/synth.go`, `rust/src/synth.rs`),
+`radixnet/voice.py`, `radixnet/search.py` (`on_step`), `radixnet/cli.py` (`speak`)
+
+---
+
+### D-082 — Acoustic units: the tokenizer learns, from audio, and the model learns from sound alone
+
+**Status** Accepted · 2026-09-25 · **Layer** representation · **Extends** D-080, D-081 · **Reopens** D-006 (for audio)
+
+**Context** D-006 rejected a learned tokenizer, and D-080 admitted the phonetic units on the condition that the
+tokenizer learns nothing: the alphabet of a language's sounds is the language's. Both are about *text*. Speech
+starts from sound, and no table of the language's maps a waveform to units: there is no dictionary of waveforms
+and no alphabet of them. Until now the model met audio as base64 of 8-bit samples (D-036's images-as-text trick
+applied to sound), which a count graph cannot generalise over because a waveform never repeats, and as words that
+a large recogniser it does not own had written down. If speech is the focus, the question is not *learned or
+rule-based* but *what is learned and what the units should be*.
+
+**Decision** The tokenizer package gains **acoustic units**: a codebook learned from recordings by k-means over
+log-mel frames (25 ms every 10 ms, 40 mel bands, the utterance's mean taken out), with no transcript, no
+dictionary and no rule. Every frame goes to its nearest centroid, a run of one centroid is one unit, and a unit is
+a token (`q17`) that a text can hold. `Encoding(unit=ACOUSTIC)` (`--encoding acoustic:3:1`) makes those the
+model's symbols: a WAV given to `train --data` is heard as one text of units, the graph is built over the units
+exactly as it is built over phones or words, and `speak` gives a walk back through a vocoder that turns each
+unit's centroid into sound as the walk takes it, closed by the END sentinel as D-081 says. **What is learned is
+learned from audio and stored as a data file** (`acoustic.tsv`: the centroids, each unit's count and typical run,
+the analysis settings and the mean of the training audio) that all three ports read and can produce, to the last
+digit, from the same recordings and seed. **What is not learned** stays not learned: the inventory is small (64
+units) so that symbols recur the way phones do, and the phone and syllable units are untouched.
+
+**Alternatives rejected**
+* **Neural codec tokens or self-supervised units** (EnCodec, SoundStream, HuBERT under k-means). Better units,
+  and a framework with pretrained weights in every port, and a token stream too dense and too varied for a count
+  graph to learn from.
+* **Learning the units inside the model** (a codebook that moves as the graph grows). A unit that changes its
+  meaning changes every label that holds it; the codebook is fixed for a model's life, like its encoding.
+* **Keeping audio as text of samples.** It is what D-036 does for images, and it never generalised for sound.
+* **A learned grapheme-to-phoneme model** instead. Worth doing for text, and beside the point once audio is the
+  input.
+
+**Consequences** A model can be trained on recordings alone (`--data *.wav`) and heard back; the units are a
+recording's own, so a codebook learned on one voice or channel fits others less well, and the bundled codebook,
+learned from the synthesizer's speech, fits real speech least well - a codebook for real speech is learned from
+real speech (`phonetok learn`). A model's units mean nothing without the codebook that made them
+(`PHONETOK_CODEBOOK` names one other than the bundled); `tests/test_acoustic_units.py`.
+
+**Lives in** `../PhoneticTokenizer/phonetok/acoustic.py` (and `go/phonetok/acoustic.go`, `rust/src/acoustic.rs`),
+`../PhoneticTokenizer/DESIGN.md` §5, `radixnet/encoding.py` (`ACOUSTIC`, `hear_audio`), `radixnet/voice.py`,
+`radixnet/cli.py` (`read_texts`, `speak`)
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.

@@ -84,7 +84,7 @@ pub fn stats(model: &Model) -> Json {
         ),
         ("window_traversals".to_string(), Json::Int(g.window_traversals() as i64)),
     ]);
-    if g.enc.unit == crate::encoding::Unit::Words {
+    if g.enc.unit != crate::encoding::Unit::Chars {
         let words = crate::encoding::vocabulary(&g.enc, g.gram_index());
         pairs.push(("vocabulary".to_string(), Json::Int(words.len() as i64)));
     }

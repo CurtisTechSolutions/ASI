@@ -3,5 +3,12 @@
 version = 3
 
 [[package]]
+name = "phonetok"
+version = "0.1.0"
+
+[[package]]
 name = "radixnet"
 version = "0.1.0"
+dependencies = [
+ "phonetok",
+]

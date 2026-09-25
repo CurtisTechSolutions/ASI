@@ -1053,7 +1053,7 @@ func (s *Service) Words(limit int) (map[string]any, error) {
 	}
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		enc := m.Encoding()
-		if enc.Unit != radixnet.Words {
+		if enc.Unit == radixnet.Chars {
 			return nil, badRequest(
 				"this model counts in %s, so it has no words to list; a word alphabet needs a word encoding "+
 					"(--encoding word:%d:%d)", enc.UnitsName(), enc.N, enc.Stride)

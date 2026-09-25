@@ -982,7 +982,7 @@ func TestResetTakesAnEncoding(t *testing.T) {
 	// a reset that cannot be encoded is a bad request, and leaves the model alone
 	before := e.svc.Model().Encoding()
 	for _, bad := range []map[string]any{
-		{"encoding": "rune:3"}, {"unit": "syllable"}, {"ngram": 3, "stride": 4}, {"ngram": 0},
+		{"encoding": "rune:3"}, {"unit": "rune"}, {"ngram": 3, "stride": 4}, {"ngram": 0},
 	} {
 		if status, doc := e.post("/api/reset", bad); status != 400 {
 			t.Fatalf("reset %v: %d %v", bad, status, doc)
