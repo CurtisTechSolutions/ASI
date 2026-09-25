@@ -48,7 +48,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/duo.rs` | the pair on the way out: the positive model writes, the negative one vetoes; the guard on every answer and the `/api/negative` routes |
 | `src/blame.rs`, `src/diff.rs` | where the negative network's data comes from - verdicts turned into faults - and the unit diff that blames only what a teacher changed |
 | `src/correct.rs` | `Model::correct` and `radixnet correct`: teach one correction, only what changed moves |
-| `src/dialogue.rs` | the model converses with itself: skipping what was heard, backing out of a repeat, and teaching the graph where it goes round |
+| `src/dialogue.rs` | the model converses with itself: skipping what was heard, backing out of a repeat, and teaching the graph where it goes round; `converse --stream` and `POST /api/converse/stream` watch it happen, the turns as they are spoken and the backing up between them (a `Stream`, the same events as Python and Go) |
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
 | `src/parallel.rs` | the worker pool, and the one `unsafe` in the crate (with its contract) |
 | `src/fsum.rs`, `src/mt19937.rs`, `src/hash.rs`, `src/pyheap.rs`, `src/blake2b.rs` | the exact sum, CPython's RNG, the hash, `heapq`'s array layout and BLAKE2b, written out |

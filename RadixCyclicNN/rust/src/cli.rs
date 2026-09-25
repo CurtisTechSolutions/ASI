@@ -135,6 +135,7 @@ pub const SWITCHES: &[&str] = &[
     "save",
     "seeded",
     "shared-token",
+    "stream",
     "strict",
     "to-end",
     "train",

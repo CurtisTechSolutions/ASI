@@ -1362,6 +1362,44 @@ ol.dialogue li.rated.down .bubble {
   border-left: 3px solid #dc2626;
 }
 
+/* The window of a streamed conversation: the turn being spoken, before it is committed. What the voice
+   backed out of is struck through, what it found instead is underlined, and the whole bubble is dashed so
+   it reads as provisional. */
+ol.dialogue li.turn.live .bubble {
+  border-style: dashed;
+  opacity: 0.85;
+}
+
+ol.dialogue li.turn.live .retracted {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+ol.dialogue li.turn.live .found {
+  text-decoration: underline;
+  text-decoration-color: #16a34a;
+  text-decoration-thickness: 2px;
+}
+
+ol.dialogue li.turn.live .pending::after {
+  content: "…";
+  animation: dialogue-thinking 1s steps(4, end) infinite;
+}
+
+@keyframes dialogue-thinking {
+  0% { opacity: 0.2; }
+  50% { opacity: 1; }
+  100% { opacity: 0.2; }
+}
+
+ol.dialogue .meta .draft {
+  color: var(--muted);
+}
+
+ol.dialogue .meta .draft s {
+  color: #dc2626;
+}
+
 /* header badge of the Go server */
 .badge.engine {
   background: rgba(47, 95, 216, 0.12);

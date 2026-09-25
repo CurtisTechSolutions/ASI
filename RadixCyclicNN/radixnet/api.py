@@ -199,6 +199,7 @@ _CORS_HEADERS = (
 
 _JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 _HTML_CONTENT_TYPE = "text/html; charset=utf-8"
+_NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8"
 
 _MIME_TYPES = {
     ".html": _HTML_CONTENT_TYPE,
@@ -242,6 +243,23 @@ class ApiError(Exception):
         super().__init__(message)
         self.status = int(status)
         self.message = message
+
+
+class StreamedResponse:
+    """A route's answer that is written as it happens: one JSON object per line (``application/x-ndjson``).
+
+    ``run(write)`` does the work and hands every event to ``write``; the handler
+    sends the headers with the first one and chunks the rest out as they come,
+    so a client reads the events while the model is still talking.  A request
+    refused *before* the first event is an ordinary 4xx JSON error; a failure
+    after it is the stream's last event, ``{"event": "error", "error": ...}``,
+    because the status line has already gone.
+    """
+
+    __slots__ = ("run",)
+
+    def __init__(self, run: Callable[[Callable[[Any], None]], None]) -> None:
+        self.run = run
 
 
 class Job:
@@ -2603,9 +2621,10 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     )
 
 
-def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+def _converse_fields(f: Fields) -> dict:
+    """The one conversation ``POST /api/converse`` and ``POST /api/converse/stream`` both read from a body."""
     partner = f.text("partner", None)
-    return 200, svc.converse(
+    return dict(
         opening=f.text("opening", ""),
         turns=f.integer("turns", 6, minimum=0),
         partner=partner or None,
@@ -2643,6 +2662,23 @@ def _r_think(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         max_questions=f.integer("questions", THINK_QUESTIONS, minimum=0),
         learn=f.flag("learn", True),
     )
+
+
+def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.converse(**_converse_fields(f))
+
+
+def _r_converse_stream(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The same conversation, streamed as it happens (:class:`radixnet.dialogue.StreamFn`): every event is one
+    JSON line, ``turn`` events are the answer and the rest is the window a backtrack may still rewrite, and
+    the last line is ``{"event": "done", ...}`` carrying the document ``POST /api/converse`` answers with."""
+    options = _converse_fields(f)
+
+    def run(write: Callable[[Any], None]) -> None:
+        document = svc.converse(stream=write, **options)
+        write({"event": "done", **document})
+
+    return 200, StreamedResponse(run)
 
 
 def _r_score(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -4102,6 +4138,14 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "(how deep a thought may question itself), "
      "guard (default on: a reply the negative network vetoes is left unsaid)} "
      "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
+    ("POST", "/api/converse/stream", _r_converse_stream,
+     "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON "
+     "object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes "
+     "it) are the answer and are never taken back; between them is the window a backtrack may still rewrite: "
+     "look (from: the context it continues, \"\" for a fresh text), draft (text, cost: what it was about to say), "
+     "caught (kind, noticed, cut: what it keeps), backtrack (step, cut, wider), found (text, cost, explored) or "
+     "stuck (explored); the last line is {event: done, ...} with the /api/converse document; a failure after the "
+     "first line is {event: error, error}"),
     ("POST", "/api/think", _r_think,
      "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught "
      "(POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this "
@@ -4483,6 +4527,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - reported to the client, logged here
             self._log_exception(f"{method} {path} failed")
             status, payload = 500, {"error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(payload, StreamedResponse):
+            return self._send_stream(payload, method, path)
         return self._send_json(status, payload, method)
 
     # -- static files ----------------------------------------------------------
@@ -4539,6 +4585,55 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise ApiError(400, "incomplete request body")
         return data
+
+    def _send_stream(self, streamed: StreamedResponse, method: str, path: str) -> int:
+        """Write a :class:`StreamedResponse`: chunked ``application/x-ndjson``, one event per line, each flushed
+        as it is written.  The headers wait for the first event, so a request refused before anything was
+        streamed still gets its 4xx JSON; a failure after that is the stream's last event."""
+        started = False
+
+        def write(event: Any) -> None:
+            nonlocal started
+            try:
+                line = json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n"
+            except (TypeError, ValueError) as exc:
+                line = json.dumps({"event": "error", "error": f"event is not JSON-serialisable: {exc}"}) + "\n"
+            data = line.encode("utf-8")
+            if not started:
+                started = True
+                self.send_response(200)
+                for name, value in _CORS_HEADERS:
+                    self.send_header(name, value)
+                self.send_header("Content-Type", _NDJSON_CONTENT_TYPE)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
+
+        try:
+            streamed.run(write)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True  # the client went away mid-conversation
+            return 200
+        except ApiError as exc:
+            if not started:
+                return self._send_json(exc.status, {"error": exc.message}, method)
+            write({"event": "error", "error": exc.message})
+        except (ValueError, TypeError) as exc:
+            if not started:
+                return self._send_json(400, {"error": str(exc) or type(exc).__name__}, method)
+            write({"event": "error", "error": str(exc) or type(exc).__name__})
+        except Exception as exc:  # noqa: BLE001 - reported to the client, logged here
+            self._log_exception(f"{method} {path} failed")
+            if not started:
+                return self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"}, method)
+            write({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+        if not started:
+            return self._send(200, b"", _NDJSON_CONTENT_TYPE, method)
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+        return 200
 
     def _send_json(self, status: int, payload: Any, method: str, allow: str | None = None) -> int:
         try:

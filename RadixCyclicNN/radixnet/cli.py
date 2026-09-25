@@ -203,6 +203,18 @@ class Console:
         """The one JSON document of ``--json`` mode."""
         print(json.dumps(doc, indent=2, ensure_ascii=False, default=str), file=self.stdout, flush=True)
 
+    def line(self, doc: Any) -> None:
+        """One compact JSON object on its own line of stdout: the JSON Lines a streamed command writes."""
+        print(json.dumps(doc, ensure_ascii=False, default=str), file=self.stdout, flush=True)
+
+    def dim(self, text: str) -> None:
+        """A line that belongs to the window rather than the answer: dimmed on a terminal, plain elsewhere."""
+        if self.json_mode:
+            return
+        if self.stdout.isatty():
+            text = f"\x1b[2m{text}\x1b[0m"
+        print(text, file=self.stdout, flush=True)
+
 
 # --------------------------------------------------------------------------
 # streaming progress printers (train / 2nrl / evolve)
@@ -993,7 +1005,90 @@ def summarize_thought(thought: Any) -> str:
     return summarize(thought)
 
 
-def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
+def _say_turn(console: Console, turn: dict) -> None:
+    """One spoken turn of a conversation, as the transcript prints it: the line, its numbers and flags, and
+    what the voice noticed about a repeat of its own."""
+    flags = [f for f, on in (("given", turn["given"]), ("new topic", turn["fresh"] and not turn["given"]),
+                             ("repeat", turn["repeat"]), ("repeats itself", turn["stutter"])) if on]
+    if turn["vetoed"]:
+        flags.append(f"{turn['vetoed']} vetoed")
+    console.say(f"{turn['speaker']}: {turn['text']}")
+    detail = f"    cost {fmt(turn['cost'])}  p {fmt(turn['probability'])}"
+    if turn["context"]:
+        detail += f"  picked up {quote(turn['context'])}"
+    if flags:
+        detail += f"  [{', '.join(flags)}]"
+    console.say(detail)
+    r = turn["rethink"]
+    if r is not None:
+        caught = "saying {} twice" if r["kind"] == "stutter" else "repeating {}"
+        thought = f"    caught itself {caught.format(quote(r['noticed']))}"
+        if not r["steps"]:
+            thought += "; the words it picked up, not its own"
+        elif r["found"]:
+            thought += f"; kept {quote(r['cut'])} and found another way on in {r['explored']} path(s)"
+        else:
+            ending = "said it anyway" if turn["repeat"] else "took a lesser answer"
+            thought += f"; kept {quote(r['cut'])}, weighed {r['explored']} path(s), {ending}"
+        console.say(thought)
+        if r.get("thought") is not None:
+            from .thinking import Thought
+
+            console.say(f"    {summarize_thought(Thought.from_dict(r['thought']))}")
+
+
+class ConversePrinter:
+    """The ``stream`` of ``converse --stream``: the conversation as it happens.
+
+    A ``turn`` is printed the way the transcript always was (:func:`_say_turn`)
+    the moment it is spoken.  The window between two turns - what the voice
+    does before it commits: the context it continues, the draft it caught
+    itself on, where it backed up to, what it found - is printed as it
+    happens too, indented and dimmed on a terminal, so the answer stands apart
+    from the thinking that may still be rewritten.  With ``--json`` every
+    event is one JSON line on stdout instead (:data:`radixnet.dialogue.StreamFn`).
+    """
+
+    __slots__ = ("console", "looking", "count")
+
+    def __init__(self, console: Console) -> None:
+        self.console = console
+        self.looking: str | None = None  # the context the current turn last continued
+        self.count = 0  # events seen
+
+    def __call__(self, event: dict) -> None:
+        self.count += 1
+        console = self.console
+        if console.json_mode:
+            console.line(event)
+            return
+        kind = event["event"]
+        if kind == "turn":
+            self.looking = None
+            _say_turn(console, event["turn"])
+        elif kind == "look":
+            if self.looking is not None:  # the first look of a turn is the context the turn will say it picked up
+                tried = f"tries {quote(event['from'])}" if event["from"] else "changes the subject"
+                console.dim(f"    nothing new follows {quote(self.looking)}; {tried}")
+            self.looking = event["from"]
+        elif kind == "draft":
+            console.dim(f"    was about to say {quote(event['text'])}")
+        elif kind == "caught":
+            caught = "saying {} twice" if event["kind"] == "stutter" else "repeating {}"
+            line = f"    caught itself {caught.format(quote(event['noticed']))}"
+            if not event["cut"]:
+                line += "; the words it picked up, not its own"
+            console.dim(line)
+        elif kind == "backtrack":
+            console.dim(f"    backs up to {quote(event['cut'])} and weighs up to {event['wider']} paths "
+                        f"(step {event['step']})")
+        elif kind == "found":
+            console.dim(f"    found another way on: {quote(event['text'])} ({event['explored']} path(s) weighed)")
+        elif kind == "stuck":
+            console.dim(f"    nothing new in {event['explored']} path(s)")
+
+
+def cmd_converse(args: argparse.Namespace, console: Console) -> dict | None:
     model, _ = open_model(args, console, required=True)
     partner = None
     if args.partner:
@@ -1002,11 +1097,15 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         partner = load_model(args.partner, backend=args.backend, device=args.device)
     speakers = [name.strip() for name in args.speakers.split(",") if name.strip()] or list(DEFAULT_SPEAKERS)
     pair = open_guard(args, console, model)
+    # --stream: the conversation is printed as it happens - each turn the moment it is spoken, and before it
+    # what the voice does: the context it continues, a draft it catches itself on, where it backs up to
+    streaming = ConversePrinter(console) if args.stream else None
     options = dict(
         mode=args.mode, max_length=args.max_length, context=args.context, temperature=args.temperature, k=args.k,
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
         explore=args.explore, learn=not args.no_learn, think=not args.no_think, think_depth=args.think_depth,
+        stream=streaming,
     )
     guard: dict | None = None
     if pair is None:
@@ -1016,32 +1115,9 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         outcome = pair.converse(args.opening, args.turns, **options)
         turns = outcome["turns"]
         guard = _guard_doc(pair, outcome["verdicts"], refusals=outcome["vetoed"])
-    for turn in turns:
-        flags = [f for f, on in (("given", turn.given), ("new topic", turn.fresh and not turn.given),
-                                 ("repeat", turn.repeat), ("repeats itself", turn.stutter)) if on]
-        if turn.vetoed:
-            flags.append(f"{turn.vetoed} vetoed")
-        console.say(f"{turn.speaker}: {turn.text}")
-        detail = f"    cost {fmt(turn.cost)}  p {fmt(turn.probability)}"
-        if turn.context:
-            detail += f"  picked up {quote(turn.context)}"
-        if flags:
-            detail += f"  [{', '.join(flags)}]"
-        console.say(detail)
-        if turn.rethink is not None:
-            r = turn.rethink
-            caught = "saying {} twice" if r.kind == "stutter" else "repeating {}"
-            thought = f"    caught itself {caught.format(quote(r.noticed))}"
-            if not r.steps:
-                thought += "; the words it picked up, not its own"
-            elif r.found:
-                thought += f"; kept {quote(r.cut)} and found another way on in {r.explored} path(s)"
-            else:
-                ending = "said it anyway" if turn.repeat else "took a lesser answer"
-                thought += f"; kept {quote(r.cut)}, weighed {r.explored} path(s), {ending}"
-            console.say(thought)
-            if r.thought is not None:
-                console.say(f"    {summarize_thought(r.thought)}")
+    if streaming is None:
+        for turn in turns:
+            _say_turn(console, turn.to_dict())
     if not turns:
         console.say("(nothing to say: train the model first)")
     if guard is not None:
@@ -1065,7 +1141,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         if thought_at:
             learned.append(f"to stop and think at {len(thought_at)} node(s)")
         console.say(f"it learned {' and '.join(learned)}; --save writes that into the model")
-    return {
+    doc = {
         "guard": guard,
         "turns": [t.to_dict() for t in turns],
         "count": len(turns),
@@ -1080,6 +1156,11 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict:
         **({"saved": saved} if saved is not None else {}),
         "transcript": transcript(turns),
     }
+    if streaming is not None and console.json_mode:
+        # JSON Lines: the events went out as they happened, and the usual document is the last line
+        console.line({"event": "done", **doc})
+        return None
+    return doc
 
 
 def cmd_score(args: argparse.Namespace, console: Console) -> dict:
@@ -4076,6 +4157,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how deep a thought may question itself (0: never)")
     p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
     p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
+    p.add_argument("--stream", action="store_true",
+                   help="print the conversation as it happens: each turn the moment it is spoken, and before it "
+                        "what the voice does - the context it continues, the draft it caught itself on, where it "
+                        "backed up to, what it found (with --json: one JSON object per line, the usual document "
+                        "last, as {\"event\": \"done\", ...})")
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
 

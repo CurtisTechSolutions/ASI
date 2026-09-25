@@ -235,12 +235,86 @@ pub type Handler<S> = fn(&Arc<S>, &Request) -> Answer;
 /// short is ever taken for whole.  The route need not drain it.
 pub type StreamHandler<S> = fn(&Arc<S>, &Request, &mut dyn Read) -> Answer;
 
-/// A route, by how it takes its body.
+/// What answers a route that answers as it happens: it writes JSON Lines into
+/// a [`Sink`] - one object per line, each flushed as it is sent.  A request it
+/// refuses before anything was sent gets that error as an ordinary JSON answer;
+/// a failure after the first line becomes the stream's last event,
+/// `{"event": "error"}`, because the status line has already gone.
+pub type EventHandler<S> = fn(&Arc<S>, &Request, &mut Sink) -> Result<(), ApiError>;
+
+/// Where a streaming route writes: chunked `application/x-ndjson`, one JSON
+/// object per line, each flushed as it is sent, so a client reads the events
+/// while the model is still talking.  The headers wait for the first event.
+/// A client that goes away is remembered ([`Sink::failed`]) and everything
+/// after that is dropped rather than reported, since the conversation behind
+/// the stream finishes either way.
+pub struct Sink<'a> {
+    out: &'a mut dyn Write,
+    started: bool,
+    failed: bool,
+}
+
+impl<'a> Sink<'a> {
+    pub fn new(out: &'a mut dyn Write) -> Sink<'a> {
+        Sink {
+            out,
+            started: false,
+            failed: false,
+        }
+    }
+
+    /// Whether the headers have gone (after which the status cannot change).
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Whether a write failed: the client went away.
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    /// Sends one event as its own line.
+    pub fn send(&mut self, doc: &Json) {
+        if self.failed {
+            return;
+        }
+        let line = doc.render(0) + "\n";
+        let mut chunk = String::new();
+        if !self.started {
+            self.started = true;
+            chunk.push_str(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\n\
+                 Transfer-Encoding: chunked\r\nCache-Control: no-store\r\n\
+                 Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+            );
+        }
+        chunk.push_str(&format!("{:x}\r\n{line}\r\n", line.len()));
+        if self
+            .out
+            .write_all(chunk.as_bytes())
+            .and_then(|_| self.out.flush())
+            .is_err()
+        {
+            self.failed = true;
+        }
+    }
+
+    /// Ends the stream (the empty chunk), once something was sent.
+    pub fn finish(&mut self) {
+        if self.started && !self.failed && self.out.write_all(b"0\r\n\r\n").and_then(|_| self.out.flush()).is_err() {
+            self.failed = true;
+        }
+    }
+}
+
+/// A route, by how it takes its body, or gives its answer.
 enum Route<S> {
     /// The body is read whole (under [`MAX_BODY`]) and parsed as JSON first.
     Json(Handler<S>),
     /// The body is handed over as it arrives, of any size.
     Stream(StreamHandler<S>),
+    /// The answer is written as it happens, as JSON Lines through a [`Sink`].
+    Events(EventHandler<S>),
 }
 
 // a function pointer copies whatever `S` is, which a derive would not know
@@ -277,6 +351,11 @@ impl<S: Send + Sync + 'static> Server<S> {
     /// size: the handler gets the request without a body, and a reader of it.
     pub fn stream_route(&mut self, method: &'static str, path: &'static str, handler: StreamHandler<S>) {
         self.routes.push((method, path, Route::Stream(handler)));
+    }
+
+    /// Adds one route that answers as it happens, as JSON Lines ([`EventHandler`]).
+    pub fn event_route(&mut self, method: &'static str, path: &'static str, handler: EventHandler<S>) {
+        self.routes.push((method, path, Route::Events(handler)));
     }
 
     /// Every route, as `"METHOD /path"`, in the order added.
@@ -379,6 +458,8 @@ impl<S: Send + Sync + 'static> Server<S> {
                 }
                 match other {
                     Some(Route::Json(handler)) => Some(handler(&self.state, &request)),
+                    // answered as it happens: the sink writes the lines, and the log line, itself
+                    Some(Route::Events(handler)) => return self.answer_events(&mut stream, &request, handler, started),
                     _ => None,
                 }
             }
@@ -424,6 +505,52 @@ impl<S: Send + Sync + 'static> Server<S> {
             .iter()
             .find(|(method, path, _)| *path == request.path && *method == request.method)
             .map(|(_, _, route)| *route)
+    }
+
+    /// Answers a [`Route::Events`] route: the handler writes its lines into a
+    /// [`Sink`] on the connection, and the outcome is logged the way a JSON
+    /// answer is.  A refusal before anything was sent is an ordinary error
+    /// answer; a failure after the first line is the stream's last event.
+    fn answer_events(
+        &self,
+        stream: &mut TcpStream,
+        request: &Request,
+        handler: EventHandler<S>,
+        started: std::time::Instant,
+    ) -> std::io::Result<()> {
+        let mut sink = Sink::new(stream);
+        let outcome = handler(&self.state, request, &mut sink);
+        let (level, status, why) = match &outcome {
+            Ok(()) => (Level::Debug, 200, String::new()),
+            Err(err) if !sink.started() => (Level::Warn, err.status, format!(": {}", err.message)),
+            Err(err) => (
+                Level::Warn,
+                200,
+                format!(" (the stream ended in an error: {})", err.message),
+            ),
+        };
+        crate::log_at!(
+            LOG,
+            level,
+            "{} {} -> {status} in {:.1}ms{why}",
+            request.method,
+            request.path,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        match outcome {
+            Err(err) if !sink.started() => return write_json(stream, err.status, &error_doc(&err.message)),
+            Err(err) => sink.send(&Json::obj([
+                ("event", Json::str("error")),
+                ("error", Json::str(err.message)),
+            ])),
+            Ok(()) => {}
+        }
+        if !sink.started() {
+            // a stream that had nothing to say is still a stream: an empty body
+            sink.send(&Json::obj([("event", Json::str("done"))]));
+        }
+        sink.finish();
+        Ok(())
     }
 
     fn serve_static(&self, stream: &mut TcpStream, request: &Request) -> std::io::Result<()> {
@@ -724,6 +851,43 @@ mod tests {
         assert_eq!(parsed[1], ("node".to_string(), "the cat".to_string()));
         assert_eq!(parsed[2], ("flag".to_string(), String::new()));
         assert_eq!(percent_decode("a+b%2Fc"), "a b/c");
+    }
+
+    #[test]
+    fn a_sink_streams_one_line_per_event_with_late_headers() {
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut sink = Sink::new(&mut out);
+            assert!(!sink.started());
+            sink.send(&Json::obj([
+                ("event", Json::str("look")),
+                ("from", Json::str("the cat")),
+            ]));
+            assert!(sink.started());
+            sink.send(&Json::obj([("event", Json::str("done"))]));
+            sink.finish();
+            assert!(!sink.failed());
+        }
+        let text = String::from_utf8(out).unwrap();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "{head}");
+        assert!(head.contains("Content-Type: application/x-ndjson; charset=utf-8\r\n"));
+        assert!(head.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(!head.contains("Content-Length"));
+        let first = "{\"event\":\"look\",\"from\":\"the cat\"}\n";
+        let second = "{\"event\":\"done\"}\n";
+        assert_eq!(
+            body,
+            format!(
+                "{:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\n\r\n",
+                first.len(),
+                second.len()
+            )
+        );
+        // nothing sent, nothing ended: an untouched sink writes no bytes at all
+        let mut out: Vec<u8> = Vec::new();
+        Sink::new(&mut out).finish();
+        assert!(out.is_empty());
     }
 
     #[test]
