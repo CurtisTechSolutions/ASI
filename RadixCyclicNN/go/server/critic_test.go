@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,15 +21,20 @@ var criticCorpus = []string{
 var reviewLine = regexp.MustCompile(`^\[(\d+)\] (.*)$`)
 
 // fakeReviewer answers the review and corpus prompts: anything with "good" in
-// it passes, everything else fails for repeating itself.
+// it passes, everything else fails for repeating itself.  It also writes the
+// questions a thinking request asks for and thinks about each one, the way
+// `thinking` says: "field" (Ollama's thinking field), "inline" (<think> tags in
+// the answer) or "none" (a model that does not think).
 type fakeReviewer struct {
-	server  *httptest.Server
-	prompts []string
+	server   *httptest.Server
+	prompts  []string
+	bodies   []map[string]any
+	thinking string
 }
 
 func newFakeReviewer(t *testing.T) *fakeReviewer {
 	t.Helper()
-	fake := &fakeReviewer{}
+	fake := &fakeReviewer{thinking: "field"}
 	fake.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
@@ -40,13 +46,48 @@ func newFakeReviewer(t *testing.T) *fakeReviewer {
 		prompt, _ := body["prompt"].(string)
 		system, _ := body["system"].(string)
 		fake.prompts = append(fake.prompts, prompt)
-		json.NewEncoder(w).Encode(map[string]any{"response": fake.answer(system, prompt)})
+		fake.bodies = append(fake.bodies, body)
+		think, asked := body["think"]
+		asked = asked && think != nil && think != false
+		reply := map[string]any{"response": fake.answer(system, prompt, asked)}
+		if asked && fake.thinking != "none" {
+			thinking := fmt.Sprintf("Let me think about %s Is that right? Yes, it is.", prompt)
+			if fake.thinking == "inline" {
+				reply["response"] = "<think>" + thinking + "</think>\n" + reply["response"].(string)
+			} else {
+				reply["thinking"] = thinking
+			}
+		}
+		json.NewEncoder(w).Encode(reply)
 	}))
 	t.Cleanup(fake.server.Close)
 	return fake
 }
 
-func (f *fakeReviewer) answer(system, prompt string) string {
+var (
+	questionCount = regexp.MustCompile(`exactly (\d+) lines`)
+	questionTopic = regexp.MustCompile(`instructions: (.*)`)
+)
+
+func (f *fakeReviewer) answer(system, prompt string, think bool) string {
+	if strings.Contains(system, "one short, concrete question per line") { // questions to think about
+		count := 3
+		if m := questionCount.FindStringSubmatch(system); m != nil {
+			count, _ = strconv.Atoi(m[1])
+		}
+		topic := "unknown"
+		if m := questionTopic.FindStringSubmatch(prompt); m != nil {
+			topic = strings.TrimSpace(m[1])
+		}
+		lines := make([]string, 0, count)
+		for i := 1; i <= count; i++ {
+			lines = append(lines, fmt.Sprintf("%d. question %d about %s?", i, i, topic))
+		}
+		return strings.Join(lines, "\n")
+	}
+	if strings.HasPrefix(system, "Think the question through") || think {
+		return "The answer to " + prompt
+	}
 	if strings.Contains(system, "adversarial reviewer") {
 		type entry struct {
 			Index    int     `json:"index"`
@@ -321,7 +362,7 @@ func TestTheNewRoutesAreDocumented(t *testing.T) {
 	raw, _ := json.Marshal(doc)
 	for _, path := range []string{
 		"/api/negative/auto", "/api/negative/auto/history", "/api/ollama/models",
-		"/api/ollama/corpus", "/api/ollama/review",
+		"/api/ollama/corpus", "/api/ollama/review", "/api/ollama/think", "/api/think",
 	} {
 		if !strings.Contains(string(raw), path) {
 			t.Errorf("%s is not in the endpoint index", path)

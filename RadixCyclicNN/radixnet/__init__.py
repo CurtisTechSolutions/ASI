@@ -30,10 +30,11 @@ from .backend import (
 )
 from .checkpoint import CheckpointManager
 from .encoding import (
-    CHARS, END_LABEL, START_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
+    BACK_LABEL, CHARS, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding,
+    parse_encoding,
 )
 from .gan import EvolveConfig, Evolver
-from .graph import END, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, START, THINK, RadixCyclicGraph
 from .beam import Prediction, beam_predict
 from .countnet import CountRewardGraph, CountRewardNet
 from .duo import FilterConfig, NegativeFilter

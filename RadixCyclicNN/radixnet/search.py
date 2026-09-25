@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from heapq import heappop, heappush
 
 from .encoding import WINDOW, Decoder
-from .graph import BACK, END, FIRST, START, RadixCyclicGraph
+from .graph import BACK, END, FIRST, ORIGINS, START, THINK, RadixCyclicGraph
 
 __all__ = ["CostFn", "PathResult", "check_sampling", "dijkstra_predict", "sample_walk", "sampling_filter"]
 
@@ -118,11 +118,18 @@ def onward(costs: list[tuple]) -> list[tuple]:
     path.  But it *competes* with the real children for probability, and when it is the cheapest of them the
     model's most likely next step at this node is to stop rather than carry on: the walk hands over, which here
     means the branch offers nothing and the search goes on with its others (:meth:`RadixCyclicGraph.observe_back`).
+
+    ``THINK`` is not a continuation either, and the walk never takes it: stopping to think is not stopping, so
+    it is dropped from the options and the real children stay on offer.  What a thought does with the node is
+    the thinker's business (:func:`radixnet.thinking.think`), not the walk's.
     """
-    onward = [item for item in costs if item[0] != BACK]
+    onward = [item for item in costs if item[0] != BACK and item[0] != THINK]
     if len(onward) == len(costs):
         return costs
-    back = min(item[2] for item in costs if item[0] == BACK)
+    backs = [item[2] for item in costs if item[0] == BACK]
+    if not backs:
+        return onward
+    back = min(backs)
     return [] if all(item[2] >= back for item in onward) else onward
 
 
@@ -231,8 +238,8 @@ def _build_result(
     labels = [graph.labels[n] for n in node_ids]
     start_node = node_ids[0]
     if include_context is None:
-        # From START there is no matched context to strip: emit the first node in full.
-        include_context = start_node == START
+        # From START (or THINK) there is no matched context to strip: emit the first node in full.
+        include_context = start_node in ORIGINS
     offset = 0 if start_node < FIRST else start_offset
     # sentinels are stripped by id: a real node may carry the label "<s>" or "</s>"
     real = [lab for n, lab in zip(node_ids, labels) if n >= FIRST]
@@ -292,7 +299,7 @@ def dijkstra_predict(
     # a model that counts paths prices a step by the node the walk came from, so the state has to carry it -
     # but only where it makes a difference, which keeps the search as small as it was everywhere else
     context = graph.nodes_with_paths()
-    start_from = START if start_node == START else -1
+    start_from = start_node if start_node in ORIGINS else -1  # a walk from a sentinel starts in its context
     start_key = (start_from if start_node in context else -1, start_node, start_chars)
     best: dict[tuple[int, int, int], float] = {start_key: 0.0}
     best_get = best.get
@@ -400,7 +407,7 @@ def sample_walk(
     node_ids = [node]
     step_costs: list[float] = []
     steps = 0
-    came_from = START if start_node == START else None
+    came_from = start_node if start_node in ORIGINS else None
     while True:
         if (node == END and stop_at_end) or (max_chars is not None and chars >= max_chars):
             break

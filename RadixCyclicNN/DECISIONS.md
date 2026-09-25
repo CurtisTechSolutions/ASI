@@ -70,7 +70,8 @@ D-055 chat with an LLM
 D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
 
 **Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood ·
-D-068 the BACK sentinel: where it goes round, learned
+D-068 the BACK sentinel: where it goes round, learned · D-080 the THINK sentinel: a thought is a walk that begins
+there
 
 **Part XIII — Counters** · D-064 the odometer
 
@@ -86,7 +87,7 @@ D-073 words as symbols (superseded by it)
 D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 
 **Part XVIII — More ways to search and to train** · D-078 every method off by default, and none draws a random
-number · D-079 a setting's home is decided by who keeps it · D-080 a model is taught backwards by its run, and asked
+number · D-079 a setting's home is decided by who keeps it · D-081 a model is taught backwards by its run, and asked
 backwards by its caller
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
@@ -3138,7 +3139,7 @@ encoder card being read-only is history: the encoding is chosen on the New model
 **Lives in** `frontend/src/components/SettingsPanel.jsx`, `frontend/src/components/ModelSettingsPanel.jsx`,
 `frontend/src/hooks/useSiteSettings.jsx`, `frontend/src/settings.js`
 
-### D-080 — A model is taught backwards by its training run, and asked backwards by its caller
+### D-081 — A model is taught backwards by its training run, and asked backwards by its caller
 
 **Status** Accepted · 2026-09-25 · **Layer** training, frontend · **Extends** D-078, D-079
 
@@ -3183,6 +3184,59 @@ is then among the others the beam returns.
 `GraphModel._read`), `go/radixnet/training.go` (`Plan.Reverse`, `ReversedSource`), `rust/src/training.rs`
 (`Plan.reverse`, `read`), `frontend/src/backwards.js`, `frontend/src/components/BackwardsField.jsx`,
 `SPEC-SearchAndTraining.md` §9
+
+---
+
+### D-080 — Thinking is a fourth sentinel that faces both ways, and a thought is a walk that begins there
+
+**Status** Research claim · 2026-09-24 · **Layer** structure · **Extends** D-068
+
+**Context** D-068 taught the graph *where it goes round* by experience: an edge into `BACK`, competing with a
+node's real children, and a search that hands over when it wins. What it could not do is think - between
+noticing a repeat and backing out of it there was nothing, and a model asked a question about a text had no
+words of its own to answer in. The one source of thinking within reach is the local LLM, whose reasoning Ollama
+returns beside its answer.
+
+**Decision** A fourth sentinel, **`THINK`**, learned the same way as `BACK` and used the opposite way round as
+well. Its in-edges `p -> THINK` are taught by experience (`observe_think`) whenever an *event* at `p` called for a
+thought - a rethink, a question asked about a text, a thought questioning itself, a question the LLM asked itself
+in its own thinking - and compete for `p`'s probability like `BACK`'s. Its out-edges are where **thoughts
+begin**: a thought is trained as a text whose walk starts at `THINK` instead of `START` (`train(origin=THINK)`),
+the same structure, counting and compression, so the model learns how thoughts open without a word of them
+leaking into what it says. `think()` is one thought and always has a trigger: it teaches where it had to think,
+thinks (the search from `THINK`), questions itself where its path crosses a node it has learned to think at
+(`thinks_at`, bounded by a depth and a count, each question having to say something new), and when it stops
+triggers the sentinel the event calls for - `BACK` for a repeat (D-068's lesson, now taught *after* thinking
+rather than in place of it), the asking thought for a question, the end for a request. The thoughts come from
+`ollama think`: a thinking model's reasoning about questions on a topic, with the questions it asked itself
+teaching the network where to question.
+
+**Alternatives rejected**
+* *A second graph for thoughts.* Two files, two searches, and no way for a thought to share a node with the
+  text it is about; one graph with two origins keeps every mechanism - the split, the merge, the counters, the
+  ports - and separates the two by their first edge alone.
+* *`THINK` handing over like `BACK`.* A walk that stopped wherever the model has learned to think would say
+  less, not more; the search carries on and the thought happens beside it, asked for by whoever walked.
+* *Training the LLM's whole answer.* Its answers are text and go in from `START` (`--with-answers`); it is the
+  *thinking* that is in the right register - short, hedged, self-questioning - and it is kept apart.
+
+**Consequences**
+* Graph **format 4**; older files gain an unvisited `THINK` on load, `FIRST` is 4, and `THINK_Z` is fixed at the
+  other edge of the drawn range so no random stream moved.
+* A conversation now *thinks* before it backs up (`think`, on by default; `--no-think`), and the rethink carries
+  the thought; a model taught no thoughts thinks nothing and says so (`stopped: "nothing"`), which is the honest
+  answer rather than a made-up one.
+* `onward` drops `THINK` from every continuation; only `BACK` hands over. `BACK` may not have children and
+  `THINK` may, and the invariants say so.
+* The rate of self-questioning is a research question: a node questions a thought once `THINK` is its cheapest
+  way on, which the count model reaches after a few `observe_think`s and the sine model after a few more. Nothing
+  decays it; a depth of 2 and one question per thought keep a thought from spending itself questioning.
+* All three ports carry it, record for record: the Go parity tests compare the rethinks' thoughts, the Rust ones
+  the model files.
+
+**Lives in** `radixnet/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
+`radixnet/dialogue.py::think_back`, `radixnet/ollama.py::thoughts_from_prompt`, `go/radixnet/thinking.go`,
+`rust/src/thinking.rs`
 
 ---
 

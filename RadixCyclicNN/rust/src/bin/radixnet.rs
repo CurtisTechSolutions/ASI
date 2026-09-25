@@ -255,6 +255,7 @@ fn run() -> Result<(), String> {
                 top_p: tuning.filter.top_p,
                 min_p: tuning.filter.min_p,
                 diversity: tuning.diversity,
+                origin: radixnet::START,
             };
             let mut found = model.predict(&prefix, &opts)?;
             // the guard re-ranks what the search already offered: the best
@@ -920,6 +921,7 @@ fn search_tuning(args: &radixnet::cli::Args) -> Result<SearchTuning, String> {
             min_p: args.float("min-p", 0.0)?,
         },
         diversity: args.float("diversity", 0.0)?,
+        ..Default::default()
     };
     tuning.check()?;
     Ok(tuning)

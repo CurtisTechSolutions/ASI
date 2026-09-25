@@ -210,6 +210,10 @@ type TrainOptions struct {
 	// value (training.go, ../../SPEC-SearchAndTraining.md).  Train reads it;
 	// the feedback passes walk every text in corpus order.
 	Plan Plan
+	// Origin is the sentinel every text's walk begins at: Start (the zero
+	// value) for texts, Think for thoughts (thinking.go) - the same structure,
+	// the same counting, only the first edge leaves the other sentinel.
+	Origin int
 }
 
 // DefaultTrainOptions mirror the Python defaults (5 epochs, compression after every epoch).
@@ -227,6 +231,9 @@ func (m *Model) Train(texts []string, opts TrainOptions) ([]map[string]any, erro
 		texts = reversed
 	}
 	if m.IsNegative() {
+		if opts.Origin != Start {
+			return nil, fmt.Errorf("the negative network judges; it does not think")
+		}
 		return m.Blame(texts, blameFromTrain(opts))
 	}
 	return m.trainSource(SliceSource(texts), texts, opts)
@@ -540,6 +547,10 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 	if opts.Epochs < 0 {
 		return nil, fmt.Errorf("epochs must be >= 0, got %d", opts.Epochs)
 	}
+	origin := opts.Origin
+	if !IsOrigin(origin) {
+		return nil, fmt.Errorf("a sequence begins at Start or Think, not at node %d", origin)
+	}
 	g := m.G
 	records := []map[string]any{}
 	chunkSize := opts.ChunkSize
@@ -561,7 +572,7 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 		grams := m.encodeAll(chunk)
 		novel := make([]bool, len(chunk))
 		parallelFor(len(chunk), workers, func(i int) {
-			_, _, ok := g.Trace(grams[i])
+			_, _, ok := g.TraceFrom(origin, grams[i])
 			novel[i] = !ok
 		})
 		seq.submit(part, idx, func() {
@@ -569,7 +580,7 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 			defer g.mu.Unlock()
 			for i, n := range novel {
 				if n {
-					_, _ = g.observeLocked(grams[i], false)
+					_, _ = g.observeFrom(origin, grams[i], false)
 				}
 			}
 		})
@@ -623,7 +634,7 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 			failed := make([]bool, len(chunk))
 			var anyFailed atomic.Bool
 			bump := func(i int) {
-				tr, path, ok := g.Trace(grams[i])
+				tr, path, ok := g.TraceFrom(origin, grams[i])
 				if !ok {
 					failed[i] = true
 					anyFailed.Store(true)
@@ -666,9 +677,9 @@ func (m *Model) passesSource(src TextSource, opts TrainOptions, count bool, rewa
 							continue
 						}
 						g.mu.Lock()
-						_, _ = g.observeLocked(grams[i], false)
+						_, _ = g.observeFrom(origin, grams[i], false)
 						g.mu.Unlock()
-						tr, path, ok := g.Trace(grams[i])
+						tr, path, ok := g.TraceFrom(origin, grams[i])
 						if !ok {
 							continue
 						}
@@ -994,7 +1005,7 @@ func (m *Model) bestGram(key string) (int, int, bool) {
 func (m *Model) bestNodeWithPrefix(prefix string) (int, bool) {
 	g := m.G
 	best, bestCount := -1, Counter{Value: -1}
-	for node := 2; node < len(g.Labels); node++ {
+	for node := First; node < len(g.Labels); node++ {
 		if g.Alive[node] && g.Enc.HasUnitPrefix(g.Labels[node], prefix) {
 			if c := g.NodeCount(node); bestCount.Less(c) {
 				best, bestCount = node, c
@@ -1013,6 +1024,22 @@ func (m *Model) prefixStart(prefix string) (int, int, string) {
 		lead = m.G.Enc.Slice(m.G.Labels[node], offset+matched, offset+m.G.Enc.N)
 	}
 	return node, offset, lead
+}
+
+// walkStart is where a walk begins: at the end of prefix, or - with no prefix -
+// at the origin sentinel.  origin Think is a thought (thinking.go): the same
+// search from the other sentinel, through the openings the model learned for
+// its thoughts rather than for its texts.  A prefix wins over the origin,
+// because a located prefix already says where the walk stands.
+func (m *Model) walkStart(prefix string, origin int) (int, int, string, error) {
+	if !IsOrigin(origin) {
+		return 0, 0, "", fmt.Errorf("a walk begins at Start or Think, not at node %d", origin)
+	}
+	if prefix == "" && origin != Start {
+		return origin, 0, "", nil
+	}
+	node, offset, lead := m.prefixStart(prefix)
+	return node, offset, lead, nil
 }
 
 // PredictOptions configure Predict; MaxLength < 0 means no cap, Beam 0 the default width.
@@ -1118,6 +1145,8 @@ type walkCosts struct {
 	MeritScale   float64
 	Filter       SamplingFilter
 	Diversity    float64
+	// Origin is the sentinel a walk with no prefix begins at: Start (the zero value), or Think for a thought.
+	Origin int
 }
 
 // rewardWalk is the default traversal: the model's own distribution, unchanged.
@@ -1160,7 +1189,10 @@ func (m *Model) search(prefix string, length int, mode string, k, beam int, step
 		return nil, err
 	}
 	traversal, _ := ResolveTraversal(walk.Traversal)
-	node, offset, lead := m.prefixStart(prefix)
+	node, offset, lead, err := m.walkStart(prefix, walk.Origin)
+	if err != nil {
+		return nil, err
+	}
 	// the lead is the unmatched rest of the located gram: a length in the
 	// encoding's units, as length and maxLength are - words under a word encoding
 	leadLen := g.Enc.Len(lead)

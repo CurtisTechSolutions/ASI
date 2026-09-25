@@ -43,7 +43,7 @@ use crate::backend::{Csr, NodeParams, State};
 use crate::counter::Counter;
 use crate::dijkstra::dijkstra_predict;
 use crate::encoding::Encoding;
-use crate::graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START};
+use crate::graph::{Graph, GraphOptions, Transition, BACK, END, FIRST, START, THINK};
 use crate::json::Json;
 use crate::model::{EpochRecord, Model, PredictOptions};
 use crate::mt19937::Mt19937;
@@ -60,6 +60,9 @@ pub const Z_RANGE: f64 = 4.5;
 /// The `BACK` sentinel's state: fixed at the far edge of the range rather than
 /// drawn, so adding the sentinel moved no random stream.
 pub const BACK_Z: f64 = 4.5;
+/// The `THINK` sentinel's state: fixed at the other edge of the range, as
+/// firmly non-zero as `BACK`'s and distinguishable from it.
+pub const THINK_Z: f64 = -4.5;
 
 /// What the model's own lines are filed under.
 const LOG: &str = "train";
@@ -94,9 +97,9 @@ impl RadixData {
 // -- the graph ------------------------------------------------------------------------------------
 
 impl Graph {
-    /// An empty radix graph: the three sentinels, START and END with random
-    /// states (drawn in that order, as Python draws them) and BACK with its
-    /// fixed one.
+    /// An empty radix graph: the four sentinels, START and END with random
+    /// states (drawn in that order, as Python draws them), BACK and THINK
+    /// with their fixed ones.
     pub fn new_radix(seed: i64, encoding: Encoding) -> Result<Graph, String> {
         let mut g = Graph::new(
             seed,
@@ -106,11 +109,11 @@ impl Graph {
             },
         )?;
         let mut data = RadixData::default();
-        for sentinel in [START, END, BACK] {
-            let z = if sentinel == BACK {
-                BACK_Z
-            } else {
-                g.rng.uniform(-Z_RANGE, Z_RANGE)
+        for sentinel in [START, END, BACK, THINK] {
+            let z = match sentinel {
+                BACK => BACK_Z,
+                THINK => THINK_Z,
+                _ => g.rng.uniform(-Z_RANGE, Z_RANGE),
             };
             data.push(z, DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K);
         }
@@ -217,7 +220,17 @@ impl Graph {
     pub fn node_parameters(&self, node: usize) -> (f64, f64, f64, f64, f64) {
         match &self.radix {
             Some(r) => (r.z[node], r.a[node], r.b[node], r.h[node], r.k[node]),
-            None => (if node == BACK { BACK_Z } else { 0.0 }, 0.0, DEFAULT_B, DEFAULT_H, 1.0),
+            None => (
+                match node {
+                    BACK => BACK_Z,
+                    THINK => THINK_Z,
+                    _ => 0.0,
+                },
+                0.0,
+                DEFAULT_B,
+                DEFAULT_H,
+                1.0,
+            ),
         }
     }
 
@@ -358,6 +371,27 @@ impl Graph {
         if let Some(instead) = instead.filter(|&i| i != BACK) {
             self.nudge_edge(p, instead, amount);
         }
+        Ok(e)
+    }
+
+    /// `observe_think` as the sine model learns it: the `THINK` edge is counted
+    /// and nudged likelier - a weight moved directly, as everything here is.
+    pub(crate) fn radix_observe_think(&mut self, p: usize, amount: f64) -> Result<usize, String> {
+        if p < FIRST || p >= self.labels.len() || !self.alive[p] {
+            return Err(format!("node {p} is not a real node to think at"));
+        }
+        if amount < 0.0 {
+            return Err(format!("amount must be >= 0, got {amount}"));
+        }
+        let e = match self.edge(p, THINK) {
+            Some(e) => e,
+            None => self.new_edge(p, THINK, 0, 0),
+        };
+        self.bump_node(THINK);
+        self.bump_edge(e);
+        self.add_traversals(1);
+        self.version.add(1);
+        self.nudge_edge(p, THINK, amount);
         Ok(e)
     }
 
@@ -523,6 +557,9 @@ pub struct TrainConfig {
     /// order, the curriculum, the rehearsal of the replay buffer and the
     /// early stop ([`crate::training`], `../../SPEC-SearchAndTraining.md`).
     pub plan: crate::training::Plan,
+    /// The sentinel every text's walk begins at: `START`, or `THINK` to train
+    /// the texts as *thoughts* ([`crate::thinking`]).
+    pub origin: usize,
 }
 
 impl Default for TrainConfig {
@@ -542,6 +579,7 @@ impl Default for TrainConfig {
             act_lr_schedule: None,
             reverse_schedule: false,
             plan: crate::training::Plan::default(),
+            origin: START,
         }
     }
 }
@@ -751,16 +789,16 @@ impl Model {
     /// Python's `_observe_grams`: when the first pass changed the structure,
     /// a second, uncounted pass re-derives every transition from the final
     /// one (a later text may have split a node an earlier one pointed at).
-    fn observe_grams(&mut self, grams: &[Vec<String>], count: bool) -> Result<Vec<Transition>, String> {
+    fn observe_grams(&mut self, origin: usize, grams: &[Vec<String>], count: bool) -> Result<Vec<Transition>, String> {
         let before = self.g.structure_version;
         let mut transitions = Vec::new();
         for gram in grams {
-            transitions.extend(self.g.observe(gram, count)?);
+            transitions.extend(self.g.observe_from(origin, gram, count)?);
         }
         if self.g.structure_version != before {
             transitions.clear();
             for gram in grams {
-                transitions.extend(self.g.observe(gram, false)?);
+                transitions.extend(self.g.observe_from(origin, gram, false)?);
             }
         }
         Ok(transitions)
@@ -785,6 +823,10 @@ impl Model {
         on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
     ) -> Result<Vec<EpochRecord>, String> {
         cfg.validate()?;
+        if !crate::graph::is_origin(cfg.origin) {
+            return Err(format!("a text begins at START or THINK, not at node {}", cfg.origin));
+        }
+        let origin = cfg.origin;
         let enc = self.g.enc;
         let read = crate::training::read(&enc, texts, &cfg.plan);
         let texts: &[String] = &read;
@@ -804,13 +846,13 @@ impl Model {
             None
         };
         let grams: Vec<Vec<String>> = kept.iter().map(|t| enc.encode(t)).collect();
-        let mut transitions = self.observe_grams(&grams, true)?;
+        let mut transitions = self.observe_grams(origin, &grams, true)?;
         let rehearsed = plan.as_ref().map(|p| p.replayed()).unwrap_or_default();
         if !rehearsed.is_empty() {
             // a rehearsed text is not new: nothing to count
             let again: Vec<Vec<String>> = rehearsed.iter().map(|t| enc.encode(t)).collect();
-            self.observe_grams(&again, false)?;
-            transitions = self.observe_grams(&grams, false)?;
+            self.observe_grams(origin, &again, false)?;
+            transitions = self.observe_grams(origin, &grams, false)?;
         }
         let mut observed_version = self.g.structure_version;
         self.meta.trained_texts.add(kept.len() as i64);
@@ -832,12 +874,12 @@ impl Model {
                     .iter()
                     .map(|t| enc.encode(t))
                     .collect();
-                transitions = self.observe_grams(&walked, false)?;
+                transitions = self.observe_grams(origin, &walked, false)?;
                 observed_version = self.g.structure_version;
                 arrays_version = None;
             } else if self.g.structure_version != observed_version {
                 // a merge (or another structural change) moved edge ids
-                transitions = self.observe_grams(&grams, false)?;
+                transitions = self.observe_grams(origin, &grams, false)?;
                 observed_version = self.g.structure_version;
             }
             let csr = self.g.to_csr();

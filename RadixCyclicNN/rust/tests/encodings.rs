@@ -330,15 +330,15 @@ fn the_structure_is_the_one_the_other_two_build() {
         .collect();
     // (spec, nodes, edges, grams) - as Python and Go report them
     let expected = [
-        ("char:3:1", 469, 824, 715),
-        ("char:5:1", 274, 432, 1144),
-        ("char:4:4", 153, 262, 323),
-        ("char:5:5", 111, 196, 274),
-        ("char:6:3", 129, 223, 467),
-        ("word:1:1", 147, 274, 203),
-        ("word:2:1", 112, 199, 261),
-        ("word:3:1", 71, 131, 239),
-        ("word:2:2", 77, 141, 155),
+        ("char:3:1", 470, 824, 715),
+        ("char:5:1", 275, 432, 1144),
+        ("char:4:4", 154, 262, 323),
+        ("char:5:5", 112, 196, 274),
+        ("char:6:3", 130, 223, 467),
+        ("word:1:1", 148, 274, 203),
+        ("word:2:1", 113, 199, 261),
+        ("word:3:1", 72, 131, 239),
+        ("word:2:2", 78, 141, 155),
     ];
     for (spec, nodes, edges, grams) in expected {
         let enc = parse_encoding(spec).unwrap();

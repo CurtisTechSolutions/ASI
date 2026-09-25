@@ -58,7 +58,9 @@ impl Graph {
             return 0;
         }
         let mut touched = 0;
-        let mut prev = START;
+        // the origin is the context of its own first step (START for a text, THINK for a thought)
+        let first = transitions[0].p;
+        let mut prev = if crate::graph::is_origin(first) { first } else { START };
         for (i, t) in transitions.iter().enumerate() {
             if i > 0 {
                 prev = transitions[i - 1].p;

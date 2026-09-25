@@ -3,7 +3,7 @@
 Single-page React app (Vite, plain JSX, one CSS file, no UI or chart libraries)
 for the RadixCyclicNN HTTP API described in `../DESIGN.md` sections 12 and 13.
 
-Panels: Train, Predict, Generate, Converse, Chat, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
+Panels: Train, Predict, Generate, Converse, Chat, Think, Score, Words, 2NRL, Negative, Evolve, Ollama, Tutor,
 Code, Agent, Images, Speech, Checkpoints, Model settings, Settings, Graph.
 The status bar polls `/api/status` every 2 s; asynchronous jobs (train, 2NRL,
 evolve, codegen) are polled via `/api/job` every second and can be stopped from the UI.
@@ -27,9 +27,23 @@ the conversation's, keeps what it said once, backs up to where it would have
 said them again and explores other ways on ("Explore"), each turn saying what
 it noticed and whether it found one. With "Learn where it goes round" on (the
 default) what a rethink finds out is taught to the graph, so the model itself
-hands over there next time - which means a conversation changes the model. The
-duplicates it could not avoid come back flagged, and "Punish duplicates" marks
-them 👎 so "Train on ratings" runs the 2NRL negative phase on them.
+hands over there next time - which means a conversation changes the model. With
+"Think before backing up" on (the default) the voice thinks first: a thought
+from the THINK sentinel, questioning itself up to "Think depth" deep where the
+model has learned to, that hands over to BACK when it stops - and the 💭 line
+under the turn says what it thought. The duplicates it could not avoid come back
+flagged, and "Punish duplicates" marks them 👎 so "Train on ratings" runs the
+2NRL negative phase on them.
+
+The Think panel (`POST /api/think`) has the model think: one thought per press,
+the prediction search run from the THINK sentinel instead of START, so it is in
+the language of the thoughts the model was taught. "About" thinks at the node
+where a text ends and - with "Learn where it thinks" on - teaches the model to
+stop and think there. Wherever its own path crosses a node the model has learned
+to think at, the thought questions itself, and the questions are shown nested
+under it; each thought says what set it off, how it stopped, what it triggered
+and what it taught, with its path from `<think>` as chips. A model taught no
+thoughts says so, and points at the Ollama panel.
 
 The Chat panel (`POST /api/chat/start`) has an LLM converse with the model and
 mark every reply; its transcript reads newest first as well, it has the same
@@ -37,11 +51,17 @@ mark every reply; its transcript reads newest first as well, it has the same
 repeat is punished with the failures whatever the judge made of it.
 
 The Ollama panel talks to a local Ollama server through the API
-(`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`).
+(`GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`,
+`POST /api/ollama/think`).
 It writes a training corpus from a prompt (good or garbage style) that can be
 trained on, saved as an upload or held as 2NRL data, and it acts as an
 adversarial reviewer that rates samples from the model so the failed ones can
-be fed back through 2NRL. The Ollama URL and model default to the server's
+be fed back through 2NRL. A thinking model (qwen3, deepseek-r1, gpt-oss, ...)
+thinks about a prompt in "Thinking from a prompt": the questions it wrote, the
+thinking behind each answer with the questions it asked itself marked, and the
+answers come back, and "Teach the thinking to the network" trains that thinking
+as thoughts - walks from the THINK sentinel, which the Think panel runs - with
+every question it asked itself a place where the network stops to think. The Ollama URL and model default to the server's
 settings (`ollama` in `/api/status`) and can be overridden per request.
 
 The Speech panel teaches the model by talking to it (`GET /api/speech`,
@@ -179,7 +199,7 @@ another model is loaded.
   negative network's blame function stays on the Negative tab beside the
   failures it weighs;
 * the **encoder / decoder** (`GET /api/encoding`, `POST /api/encoding/preview`):
-  the unit, the n and the stride, the three sentinels, and a live preview that
+  the unit, the n and the stride, the four sentinels, and a live preview that
   encodes a text, decodes it back and walks it through the graph's own node
   labels, where a label longer than one gram is a radix chain the graph merged
   into one node.

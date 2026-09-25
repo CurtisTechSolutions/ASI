@@ -11,9 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from radixnet.activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K  # noqa: E402
 from radixnet.backend import CSR, NodeParams  # noqa: E402
 from radixnet.encoding import (  # noqa: E402
-    BACK_LABEL, END_LABEL, START_LABEL, WORDS, Decoder, Encoder, Encoding,
+    BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL, WORDS, Decoder, Encoder, Encoding,
 )
-from radixnet.graph import BACK, END, FIRST, START, RadixCyclicGraph  # noqa: E402
+from radixnet.graph import BACK, END, FIRST, START, THINK, RadixCyclicGraph  # noqa: E402
 
 ENC = Encoder()
 DEC = Decoder()
@@ -56,12 +56,12 @@ def assert_transitions_consistent(tc: unittest.TestCase, g: RadixCyclicGraph, tr
 class TestBasics(unittest.TestCase):
     def test_fresh_graph(self):
         g = RadixCyclicGraph(seed=3)
-        self.assertEqual(g.labels[:FIRST], [START_LABEL, END_LABEL, BACK_LABEL])
-        self.assertEqual(g.num_nodes(), FIRST)  # the three sentinels and nothing else
+        self.assertEqual(g.labels[:FIRST], [START_LABEL, END_LABEL, BACK_LABEL, THINK_LABEL])
+        self.assertEqual(g.num_nodes(), FIRST)  # the four sentinels and nothing else
         self.assertEqual(g.num_edges(), 0)
         self.assertEqual(g.num_trigrams(), 0)
         self.assertEqual(g.compression_ratio(), 0.0)
-        self.assertEqual(g.alive_nodes(), [START, END, BACK])
+        self.assertEqual(g.alive_nodes(), [START, END, BACK, THINK])
         self.assertFalse(g.inverted)
         self.assertNotIn(START_LABEL, g.trigram_index)
         g.check_invariants()
@@ -125,7 +125,7 @@ class TestBasics(unittest.TestCase):
         self.assertEqual(g.count[START], 1)
         self.assertEqual(g.count[END], 1)
         for n in g.alive_nodes():
-            self.assertEqual(g.count[n], 0 if n == BACK else 1)  # nothing has gone round yet
+            self.assertEqual(g.count[n], 0 if n in (BACK, THINK) else 1)  # nothing went round or thought yet
         for p, e in trans:
             self.assertEqual(g.edge_count[e], 1)
         g.check_invariants(texts=[text])
@@ -671,6 +671,125 @@ class TestSentinelLookalikeLabels(unittest.TestCase):
         clone.check_invariants(texts=texts, compressed=True)
         for t in texts:
             self.assertEqual(round_trip(clone, t), t)
+
+
+
+class TestThinkSentinel(unittest.TestCase):
+    """The fourth sentinel: where the graph learned to stop and think, and where its thoughts begin."""
+
+    def graph(self):
+        g = RadixCyclicGraph(seed=2)
+        g.observe_sequence(ENC.encode("the cat sat on the mat"))
+        return g
+
+    def test_a_thought_is_a_text_observed_from_think(self):
+        g = self.graph()
+        thought = "is the cat on the mat?"
+        trans = g.observe_sequence(ENC.encode(thought), origin=THINK)
+        self.assertEqual(trans[0][0], THINK)
+        self.assertEqual(g.count[THINK], 1)
+        self.assertEqual(g.count[START], 1)  # a thought is not a text: START saw nothing
+        path = g.node_path(ENC.encode(thought), origin=THINK)
+        self.assertEqual((path[0], path[-1]), (THINK, END))
+        self.assertIsNone(g.node_path(ENC.encode(thought)))  # and it does not begin at START
+        self.assertIsNone(g.node_path(ENC.encode("the cat sat on the mat"), origin=THINK))
+        g.check_invariants(texts=["the cat sat on the mat"])
+        # the thought decodes back through the sentinel-free labels
+        labels = [g.labels[n] for n in path if n >= FIRST]
+        self.assertEqual(g._decoder.decode_path(labels, 0, True, skip_sentinels=False), thought)
+        with self.assertRaises(ValueError):
+            g.observe_sequence(ENC.encode(thought), origin=BACK)
+
+    def test_observe_think_teaches_where_to_stop_and_think(self):
+        g = self.graph()
+        g.compress()
+        node = g.lookup("cat")[0]
+        self.assertIsNone(g.think_cost(node))
+        self.assertFalse(g.thinks_at(node))
+        e = g.observe_think(node)
+        self.assertEqual(g.children[node][THINK], e)
+        self.assertEqual(g.count[THINK], 1)
+        self.assertEqual(g.edge_count[e], 1)
+        self.assertIsNotNone(g.think_cost(node))
+        for _ in range(5):
+            g.observe_think(node)
+        self.assertTrue(g.thinks_at(node))  # after a few events THINK is its most likely next step
+        self.assertEqual(g.edge_count[e], 6)
+        with self.assertRaises(ValueError):
+            g.observe_think(START)
+        with self.assertRaises(ValueError):
+            g.observe_think(node, amount=-1.0)
+        g.check_invariants(texts=["the cat sat on the mat"], compressed=True)
+        # a node taught to think is a junction: compression leaves it alone
+        self.assertEqual(g.compress(), 0)
+        self.assertIn(THINK, g.children[node])
+        self.assertEqual(g.lookup("cat")[0], node)
+
+    def test_the_file_carries_thoughts_and_the_place_it_thinks(self):
+        g = self.graph()
+        g.observe_sequence(ENC.encode("is that so?"), origin=THINK)
+        node = g.lookup("sat")[0]
+        g.observe_think(node, amount=2.0)
+        d = g.to_dict()
+        self.assertEqual(d["format_version"], 4)
+        self.assertEqual(d["nodes"]["labels"][:FIRST], [START_LABEL, END_LABEL, BACK_LABEL, THINK_LABEL])
+        g2 = RadixCyclicGraph.from_dict(d)
+        g2.check_invariants()
+        self.assertEqual(g2.node_path(ENC.encode("is that so?"), origin=THINK)[0], THINK)
+        self.assertIsNotNone(g2.think_cost(g2.lookup("sat")[0]))
+        self.assertEqual(g2.to_dict(), d)
+
+    def test_a_file_written_before_think_gains_it_on_load(self):
+        """Format 3 files have no THINK node; every id from there up shifts by one."""
+        g = self.graph()
+        node = g.lookup("the")[0]
+        g.observe_back(node)
+        d = g.to_dict()
+        old = {**d, "format_version": 3, "nodes": dict(d["nodes"]), "edges": dict(d["edges"])}
+        for key in ("labels", "z", "a", "b", "h", "k", "count"):
+            values = old["nodes"][key]
+            old["nodes"][key] = values[:THINK] + values[THINK + 1:]
+        shift = lambda i: i - 1 if i > THINK else i  # noqa: E731
+        old["edges"]["src"] = [shift(i) for i in d["edges"]["src"]]
+        old["edges"]["dst"] = [shift(i) for i in d["edges"]["dst"]]
+        loaded = RadixCyclicGraph.from_dict(old)
+        loaded.check_invariants(texts=["the cat sat on the mat"])
+        self.assertEqual(loaded.labels[THINK], THINK_LABEL)
+        self.assertEqual(loaded.count[THINK], 0)
+        self.assertEqual(loaded.children[THINK], {})
+        self.assertEqual(loaded.z[THINK], g.z[THINK])
+        self.assertEqual(loaded.num_nodes(), g.num_nodes())
+        self.assertEqual(loaded.to_dict()["nodes"], d["nodes"])
+        self.assertEqual(sorted(zip(loaded.to_dict()["edges"]["src"], loaded.to_dict()["edges"]["dst"])),
+                         sorted(zip(d["edges"]["src"], d["edges"]["dst"])))
+        self.assertIsNotNone(loaded.back_cost(loaded.lookup("the")[0]))  # BACK survived the shift
+
+    def test_a_file_written_before_back_gains_both_sentinels(self):
+        """Format 2 files gain BACK and THINK, in that order."""
+        g = self.graph()
+        d = g.to_dict()
+        old = {**d, "format_version": 2, "nodes": dict(d["nodes"]), "edges": dict(d["edges"])}
+        for key in ("labels", "z", "a", "b", "h", "k", "count"):
+            values = old["nodes"][key]
+            old["nodes"][key] = values[:BACK] + values[FIRST:]
+        shift = lambda i: i - 2 if i >= FIRST else i  # noqa: E731
+        old["edges"]["src"] = [shift(i) for i in d["edges"]["src"]]
+        old["edges"]["dst"] = [shift(i) for i in d["edges"]["dst"]]
+        loaded = RadixCyclicGraph.from_dict(old)
+        loaded.check_invariants(texts=["the cat sat on the mat"])
+        self.assertEqual(loaded.labels[:FIRST], [START_LABEL, END_LABEL, BACK_LABEL, THINK_LABEL])
+        self.assertEqual(loaded.to_dict()["nodes"], d["nodes"])
+
+    def test_the_sentinel_moved_no_random_stream(self):
+        """THINK's state is fixed, so a seeded graph draws exactly what it drew before."""
+        g = RadixCyclicGraph(seed=7)
+        self.assertEqual(g.z[THINK], -4.5)
+        self.assertEqual(g.z[BACK], 4.5)
+        # START and END draw first, and the next draw is the first real node's - THINK took none
+        fresh = RadixCyclicGraph(seed=7)
+        expected = fresh.rng.uniform(-4.5, 4.5)
+        g.observe_sequence(ENC.encode("abc"))
+        self.assertEqual(g.z[FIRST], expected)
 
 
 if __name__ == "__main__":

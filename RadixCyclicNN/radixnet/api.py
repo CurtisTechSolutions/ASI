@@ -87,7 +87,7 @@ from .codegen import (
     parse_problems,
 )
 from .encoding import (
-    BACK_LABEL, END_LABEL, START_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
+    BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding, parse_encoding,
     word_rows,
 )
 from .gan import EvolveConfig, Evolver
@@ -95,6 +95,7 @@ from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
+from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS, think, think_on
 from .duo import FilterConfig, NegativeFilter
 from .model import (
     GraphModel,
@@ -117,6 +118,8 @@ from .ollama import (
     corpus_from_prompt,
     normalise_url,
     sample_texts,
+    think_value,
+    thoughts_from_prompt,
 )
 from .blame import teach_reviews
 from .schedule import ScheduleError
@@ -830,6 +833,34 @@ class ModelService:
             ),
         }
 
+    def think(self, **options: Any) -> dict:
+        """The active model thinks: one thought from the THINK sentinel (:func:`radixnet.thinking.think`).
+
+        With ``learn`` (the default) the thought teaches the model where it
+        stopped to think, so - like a conversation - a thought changes the
+        model; the server keeps that in memory until something saves.
+        """
+        with self.session() as model:
+            try:
+                thought = think(model, **options)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"kind": model.kind, **thought.to_dict()}
+
+    def start_train_thoughts(self, thoughts: list[str], config: TrainConfig, questions: bool = True) -> dict:
+        """Start a ``train`` job that teaches ``thoughts`` as thoughts (:func:`radixnet.thinking.think_on`)."""
+        config.validate()
+        if self.model.kind == "negative":
+            raise ApiError(400, "the negative network judges; it does not think")
+
+        def work(job: Job) -> None:
+            think_on(
+                self.model, thoughts, questions=questions, config=config, progress=self._progress(job),
+                stop_event=job.stop_event,
+            )
+
+        return self._start_job("train", work)
+
     def converse(
         self, opening: str = "", turns: int = 6, partner: str | None = None, *, guard: bool = True, **options: Any,
     ) -> dict:
@@ -1298,6 +1329,7 @@ class ModelService:
             "start_label": START_LABEL,
             "end_label": END_LABEL,
             "back_label": BACK_LABEL,
+            "think_label": THINK_LABEL,
             "configurable": True,
             "note": (
                 f"Text goes in as {enc.describe()}, and comes back out of the (possibly compressed) node "
@@ -2594,6 +2626,24 @@ def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         avoid_word_repeats=f.flag("avoid_word_repeats", True),
         explore=f.integer("explore", EXPLORE, minimum=0),
         learn=f.flag("learn", True),
+        think=f.flag("think", True),
+        think_depth=f.integer("think_depth", THINK_DEPTH, minimum=0),
+    )
+
+
+def _r_think(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.think(
+        about=f.text("about", ""),
+        mode=f.text("mode", "beam"),
+        k=f.integer("k", 5, minimum=1),
+        beam=f.integer("beam", None, minimum=1),
+        max_length=f.integer("max_length", THINK_LENGTH, minimum=0),
+        temperature=f.number("temperature", 1.0, minimum=0.0),
+        step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
+        seed=f.integer("seed", None),
+        max_depth=f.integer("depth", THINK_DEPTH, minimum=0),
+        max_questions=f.integer("questions", THINK_QUESTIONS, minimum=0),
+        learn=f.flag("learn", True),
     )
 
 
@@ -3334,6 +3384,68 @@ def _r_ollama_corpus(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, result
 
 
+def _r_ollama_think(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """A thinking model thinks about a prompt; its thinking is returned and, with ``train``, taught as thoughts."""
+    prompt = f.text("prompt")
+    if not prompt.strip():
+        raise ApiError(400, "'prompt' must not be empty")
+    lines = f.integer("lines", 5, minimum=1)
+    raw_think = f._lookup("think")
+    try:
+        level = think_value(True if raw_think is _MISSING else raw_think)
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    temperature = f.number("temperature", 0.7, minimum=0.0)
+    train = f.flag("train", False)
+    with_answers = f.flag("with_answers", False)
+    questions = f.flag("questions", True)
+    client = _ollama_client(svc, f)
+    if train:
+        svc._ensure_idle()  # do not spend an LLM call on a request that cannot start a job
+        if svc.model.kind == "negative":
+            raise ApiError(400, "the negative network judges; it does not think")
+    try:
+        thoughts = thoughts_from_prompt(
+            client, prompt, lines=lines, model=client.model, think=level, temperature=temperature,
+        )
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    if not thoughts:
+        raise ApiError(502, f"Ollama model {client.model!r} wrote no questions to think about")
+    thinking = [t["thinking"] for t in thoughts if t["thinking"]]
+    result: dict[str, Any] = {
+        "prompt": prompt, "model": client.model, "url": client.url, "think": level, "count": len(thoughts),
+        "thinking": len(thinking), "thoughts": thoughts, "upload": None, "job": None,
+    }
+    save_as = f.text("save_as", None)
+    if save_as:
+        result["upload"] = svc.upload(save_as, "\n".join(thinking) + ("\n" if thinking else ""))
+    if not train:
+        return 200, result
+    if not thinking:
+        raise ApiError(
+            502, f"Ollama model {client.model!r} returned no thinking to train on: use a thinking model "
+                 "(qwen3, deepseek-r1, gpt-oss, ...) on an Ollama that separates it",
+        )
+    config = _train_config(f)
+    if with_answers:
+        answers = [t["answer"] for t in thoughts if t["answer"]]
+        config.validate()
+
+        def work(job: Job) -> None:
+            think_on(
+                svc.model, thinking, questions=questions, config=config, progress=svc._progress(job),
+                stop_event=job.stop_event,
+            )
+            if answers and not job.stop_event.is_set():
+                svc.model.train(answers, config, progress=svc._progress(job), stop_event=job.stop_event)
+
+        result["job"] = svc._start_job("train", work)
+    else:
+        result["job"] = svc.start_train_thoughts(thinking, config, questions=questions)
+    return 202, result
+
+
 def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     given = f.texts_optional("texts", "text")
     apply = f.text("apply", "none").strip().lower()
@@ -3988,9 +4100,19 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "(what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a "
      "reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn "
      "(default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes "
-     "round - a conversation with this on changes the model), "
+     "round - a conversation with this on changes the model), think (default on: a voice that caught itself "
+     "repeating thinks about it before it backs up, and the thought rides on the turn's rethink), think_depth "
+     "(how deep a thought may question itself), "
      "guard (default on: a reply the negative network vetoes is left unsaid)} "
      "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
+    ("POST", "/api/think", _r_think,
+     "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught "
+     "(POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this "
+     "text ends), mode: beam | sample, k, beam, max_length, temperature, step_penalty, seed, depth (how deep it may "
+     "question itself), questions (per thought), learn (default on: the node is taught to stop and think there - a "
+     "thought changes the model)} -> {kind, trigger, at, about, text, stopped: end | length | nothing, then: end | back "
+     "| think (what it triggered when it stopped), taught, handed_over, questions: [the same], cost, probability, "
+     "labels, node_ids, step_costs}"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl,
      "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr, "
@@ -4113,6 +4235,13 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),
+    ("POST", "/api/ollama/think", _r_ollama_think,
+     "a thinking model thinks about a prompt and the network is taught its thinking as thoughts: {prompt, lines "
+     "(questions to think about), think: true | false | low | medium | high, temperature, model, url, timeout, "
+     "save_as, train (teach the thinking as thoughts that begin at the THINK sentinel, and where a thought "
+     "questions itself as a place to stop and think), questions (default on), with_answers (also train the "
+     "answers as texts), epochs, lr, batch_size} -> {prompt, model, url, think, count, thinking (how many "
+     "thought), thoughts: [{question, thinking, answer}], upload, job}; 202 with the job when training"),
     ("POST", "/api/ollama/review", _r_ollama_review,
      "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, "
      "good, good_files, blame (teach the negative network what failed and why)}"),

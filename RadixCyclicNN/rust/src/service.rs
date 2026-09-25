@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::clock::utc_now;
-use crate::encoding::{parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL};
+use crate::encoding::{parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL};
 use crate::graph::{END, START};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
@@ -836,6 +836,7 @@ fn search_fields(r: &Request) -> Result<SearchTuning, ApiError> {
             min_p: r.number("min_p", 0.0)?,
         },
         diversity: r.number("diversity", 0.0)?,
+        ..Default::default()
     };
     tuning.check()?;
     Ok(tuning)
@@ -883,6 +884,7 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         top_p: tuning.filter.top_p,
         min_p: tuning.filter.min_p,
         diversity: tuning.diversity,
+        origin: START,
     };
     let prefix = r.text("prefix", "");
     let (kind, ..) = svc.active_kind();
@@ -1508,6 +1510,7 @@ fn encoding(svc: &Arc<Service>, _r: &Request) -> Answer {
         ("start_label", Json::str(START_LABEL)),
         ("end_label", Json::str(END_LABEL)),
         ("back_label", Json::str(BACK_LABEL)),
+        ("think_label", Json::str(THINK_LABEL)),
         // the dial is chosen when a model is created and fixed for its life:
         // changing it means a different model, which POST /api/reset makes
         ("configurable", Json::Bool(true)),
@@ -1880,6 +1883,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     crate::duo::routes(&mut server);
     crate::critic::routes(&mut server);
     crate::dialogue::routes(&mut server);
+    crate::thinking::routes(&mut server);
     crate::checkpoint::routes(&mut server);
     crate::gan::routes(&mut server);
     crate::ollama::routes(&mut server);

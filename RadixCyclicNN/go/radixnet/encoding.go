@@ -43,6 +43,8 @@ const (
 	EndLabel   = "</s>"
 	// BackLabel is the third sentinel: where the graph has learned a walk goes round (Back).
 	BackLabel = "<back>"
+	// ThinkLabel is the fourth: where the graph has learned to stop and think, and where thoughts begin (Think).
+	ThinkLabel = "<think>"
 )
 
 // -- what a unit is --------------------------------------------------------------
