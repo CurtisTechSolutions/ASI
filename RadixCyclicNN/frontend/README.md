@@ -245,6 +245,12 @@ another model is loaded.
   with its units blurred as the band sees them, and a correction you type
   previewed under both rules at the slider's blur before anything is applied
   (`POST /api/model/attention/preview`);
+* the **dynamic window** (`GET` / `POST /api/model/window`): the ladder of node
+  sizes the graph is halved down and regrown up through - 32, 16, 8, 4 and back
+  to 32 - on or off, the top, the floor, where it stands and whether it steps
+  by itself at the end of every training epoch, the ladder drawn as its rungs,
+  and a **Step** button that steps it by hand (`POST /api/model/window/step`:
+  merge what fits, halve what is longer, move the window);
 * the **encoder / decoder** (`GET /api/encoding`, `POST /api/encoding/preview`):
   the unit, the n and the stride, the four sentinels, and a live preview that
   encodes a text, decodes it back and walks it through the graph's own node
@@ -278,6 +284,7 @@ The old `#network` link opens Model settings.
     src/settings.js             the site-wide settings' rules: ranges, what a mode reads, request bodies (pure)
     src/backwards.js            turning a query and an answer around for a model trained backwards (pure)
     src/attention.js            the attention band read for display: the band over a gram, how sharply a unit is drawn (pure)
+    src/window.js               the dynamic window read for display: the ladder of sizes, the next rung, a step in one line (pure)
     src/hooks/useSiteSettings.jsx     the settings several panels share, held once (search, training, backwards)
     src/hooks/useNetworkSettings.jsx  the traversal, one of them
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

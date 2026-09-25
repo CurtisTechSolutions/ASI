@@ -669,6 +669,47 @@ dl.kv dd {
   font-weight: normal;
 }
 
+/* the dynamic window (Model settings): the ladder of sizes drawn as its rungs, the one the window
+   stands on lit, the next one marked, and the turn back up to the top at the end */
+.ladder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 4px;
+}
+
+.ladder .rung {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ladder .rung b {
+  display: inline-block;
+  min-width: 34px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--chip);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.ladder .rung.current b {
+  background: var(--accent);
+  color: #fff;
+}
+
+.ladder .rung.next b {
+  outline: 2px dashed var(--accent-2);
+  outline-offset: 1px;
+}
+
+.ladder .rung-arrow {
+  color: var(--muted);
+  font-size: 13px;
+}
+
 /* a gram the model has never seen (the encoder preview on the Model settings tab) */
 .chip.unknown {
   border-style: dashed;

@@ -91,7 +91,7 @@ from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_B, DEFAULT_H
 from .backend import get_backend
-from .counter import CyclicCounter
+from .counter import COUNTER_LIMIT, CyclicCounter
 from .beam import Prediction, default_beam
 from .encoding import WINDOW, Decoder, Encoder, Encoding
 from .graph import BACK, END, FIRST, ORIGINS, START, THINK, RadixCyclicGraph
@@ -153,6 +153,7 @@ class ResonantGraph(RadixCyclicGraph):
 
     SMOOTHING = 0.5
     """Add-``s`` smoothing of an edge's share of its parent's traversals."""
+    learns_weights = False  # a weight is a function of the counts, the rewards and the phase: recompute_weights writes it
 
     def __init__(
         self,
@@ -493,6 +494,29 @@ class ResonantGraph(RadixCyclicGraph):
         self._refresh_advance(a_id)
         self._refresh_advance(b_id)
         return a_id, b_id
+
+    def _heavy_bridge(self, a: int, b: int, through: int) -> None:
+        """The bridge between two halves takes what passed through the node: ``through`` traversals.
+
+        This model counts its edges, not its nodes (:meth:`record_traversal`),
+        so the node count a split hands its bridge is 0 here; the traversals
+        of the out-edges the bridge now stands before are what the node saw,
+        and that share is what makes it heavy.  It fires at no phase - a step
+        inside a merged node was never fired at one - so it competes on its
+        share alone, as any traversal whose phase is unknown does.
+        """
+        e = self.children[a].get(b)
+        if e is None:
+            return
+        self.edge_count[e] = through % COUNTER_LIMIT
+        self._set_resets(self.edge_count_resets, e, through // COUNTER_LIMIT)
+
+    def split_window(self, size: int) -> int:
+        """Halve what is longer than the window, then give every bridge its weight from the counts and the phase."""
+        splits = super().split_window(size)
+        if splits:
+            self.recompute_weights()
+        return splits
 
     def merge_child(self, p: int) -> bool:
         merged = super().merge_child(p)
@@ -859,6 +883,8 @@ class ResonantNet(GraphModel):
                 graph.sharpen(touched, sharpen)
             if count or reward or sharpen != 1.0:
                 graph.recompute_weights()
+            # the dynamic window's step; this kind compresses once before its passes, so the step merges as well
+            stepped = self._window_epoch(compress=cfg.auto_compress)
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             loss = cost / max(1, transitions)
             record = {
@@ -869,7 +895,8 @@ class ResonantNet(GraphModel):
                 "edges": graph.num_edges(),
                 "trigrams": graph.num_trigrams(),
                 "compression_ratio": graph.compression_ratio(),
-                "merges": 0,
+                "merges": stepped["merges"] if stepped else 0,
+                **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
                 "transitions": transitions,
                 "traversed": transitions if count else 0,
                 "reward": reward * transitions,
@@ -1471,6 +1498,7 @@ class ResonantNet(GraphModel):
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
             "compression_ratio": graph.compression_ratio(),
+            "dynamic_window": graph.dynamic_window.size,
             "inverted": graph.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,

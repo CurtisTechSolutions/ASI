@@ -1454,6 +1454,8 @@ impl Model {
             let loss = self.mean_cost(&flat);
             let merges = if blame && !o.no_compress { self.g.compress() } else { 0 } + pending_merges;
             pending_merges = 0;
+            // the dynamic window's step, after the compression it rides on: a blame pass is a training pass
+            let stepped = if blame { self.window_epoch(false) } else { None };
             // the epoch is over: wrap whatever reached the limit
             self.g.carry_counters(false);
             self.meta.epochs_total.add(1);
@@ -1467,6 +1469,8 @@ impl Model {
                 trigrams: self.g.num_trigrams(),
                 compression_ratio: self.g.compression_ratio(),
                 merges,
+                splits: stepped.as_ref().map(|s| s.splits),
+                window: stepped.as_ref().map(|s| s.from),
                 transitions: flat.len() as i64,
                 seconds: started.elapsed().as_secs_f64(),
                 skipped_short,
@@ -1965,6 +1969,8 @@ pub fn stats_json(model: &Model) -> Json {
             g.attention.blur.map(Json::Num).unwrap_or(Json::Null),
         ),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
+        // the dynamic window's size, null while it is off
+        ("dynamic_window".to_string(), g.dynamic_window.size_json()),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str("rust")),
         ("device".to_string(), Json::str(model.device_label())),

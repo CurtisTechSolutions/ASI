@@ -913,6 +913,7 @@ impl Model {
             self.g.apply_node_params(params)?;
             let merges = if cfg.auto_compress { self.g.compress() } else { 0 } + pending_merges;
             pending_merges = 0;
+            let stepped = self.window_epoch(false); // the dynamic window's step, after the compression it rides on
             let loss = if n > 0 { loss_sum / n as f64 } else { 0.0 };
             self.g.carry_counters(false); // the epoch is over: wrap whatever reached the limit
             self.meta.epochs_total.add(1);
@@ -931,6 +932,8 @@ impl Model {
                 trigrams: self.g.num_trigrams(),
                 compression_ratio: self.g.compression_ratio(),
                 merges,
+                splits: stepped.as_ref().map(|s| s.splits),
+                window: stepped.as_ref().map(|s| s.from),
                 transitions: n as i64,
                 seconds: started.elapsed().as_secs_f64(),
                 skipped_short,
@@ -1318,6 +1321,7 @@ pub fn stats_json(model: &Model) -> Json {
         ("ngram".to_string(), Json::Int(enc.n as i64)),
         ("stride".to_string(), Json::Int(enc.stride as i64)),
         ("compression_ratio".to_string(), Json::Num(g.compression_ratio())),
+        ("dynamic_window".to_string(), g.dynamic_window.size_json()),
         ("inverted".to_string(), Json::Bool(g.inverted)),
         ("backend".to_string(), Json::str(crate::backend::NAME)),
         ("device".to_string(), Json::str(crate::backend::DEVICE)),

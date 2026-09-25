@@ -40,8 +40,9 @@ from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
 from .encoding import (
     BACK_LABEL, CHARS, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, Decoder, Encoder, Encoding, _piece,
 )
+from .window import DynamicWindow
 
-__all__ = ["START", "END", "BACK", "THINK", "FIRST", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH"]
+__all__ = ["START", "END", "BACK", "THINK", "FIRST", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH", "W_HEAVY"]
 
 START, END, BACK, THINK = 0, 1, 2, 3
 """The sentinels.  START and END are where a text begins and ends - observed in the corpus, like everything
@@ -75,6 +76,14 @@ Z_RANGE = 4.5
 """New node state ``z`` is drawn uniformly from ``[-Z_RANGE, Z_RANGE]``."""
 W_LOW, W_HIGH = 0.5, 1.5
 """New edge weights are drawn uniformly from ``[W_LOW, W_HIGH]`` (negated when inverted)."""
+
+W_HEAVY = 8.0
+"""The weight of the **heavy connection** between the two halves of a node the dynamic window split
+(:meth:`RadixCyclicGraph.split_window`, :mod:`radixnet.window`), in the sine model - negated while inverted, as
+every fresh weight is.  The halves are copies of one node, so the edge's score is ``W_HEAVY * f * f >= 0``:
+heavier than any fresh edge can draw (``W_HIGH``) by a factor that keeps the bridge the likeliest way on once
+other children attach to the first half.  The kinds that compute their weights from counts need no number here:
+their bridge carries every traversal the node ever had, and that count is what makes it heavy."""
 
 BACK_Z = Z_RANGE
 """BACK's state, fixed at the far edge of the range instead of drawn - the strongest activation a state in
@@ -140,6 +149,10 @@ def _with_think(d: dict) -> dict:
 class RadixCyclicGraph:
     """Nodes, edges, trigram index and the radix split / merge operations."""
 
+    learns_weights = True
+    """Whether ``edge_w`` is learned - the sine model's - or computed from counts and rewards by the kind's
+    ``recompute_weights`` (the count, negative and phase graphs), which overwrites anything written into it."""
+
     def __init__(self, seed: int = 0, encoding: Encoding | None = None) -> None:
         self.seed = int(seed)
         self.encoding = encoding if encoding is not None else Encoding()
@@ -154,6 +167,13 @@ class RadixCyclicGraph:
         Off by default - each changed unit is charged to the step that wrote
         it.  Unlike the encoding it changes nothing the graph holds, so it can
         be switched at any time; it travels with the model file while it is on."""
+        self.dynamic_window = DynamicWindow()
+        """The ceiling on a node's length, and the ladder it moves down and back up (:mod:`radixnet.window`).
+
+        Off by default: compression is unbounded and no node is ever halved.
+        On, :meth:`merge_child` merges nothing longer than its ``size`` and a
+        step (:meth:`split_window`) halves what is longer.  It travels with
+        the model file while it is on."""
         self.rng = random.Random(self.seed)
         self.labels: list[str] = []
         self.z: list[float] = []
@@ -291,6 +311,25 @@ class RadixCyclicGraph:
         # honour
         return len(label) if self._n_is_chars else self.encoding.length(label)
 
+    def grams_held(self, node: int) -> int:
+        """How many grams a node's label holds: ``(length - n) / stride + 1``."""
+        return (self.label_len(node) - self._n) // self._stride + 1
+
+    def longer_than(self, size: int) -> tuple[int, int]:
+        """``(how many real nodes are longer than size, the longest label)`` - what a window step would halve."""
+        longer = 0
+        longest = 0
+        llen = self.label_len
+        for node in range(FIRST, len(self.labels)):
+            if not self.alive[node]:
+                continue
+            length = llen(node)
+            if length > size:
+                longer += 1
+            if length > longest:
+                longest = length
+        return longer, longest
+
     def _create_trigram_node(self, trigram: str) -> int:
         """Create the node for an unknown gram and index it."""
         if self.encoding.length(trigram) != self._n:
@@ -414,6 +453,75 @@ class RadixCyclicGraph:
         self.labels[a_id] = _piece(view, 0, i + ov)
         return (a_id, b_id)
 
+    def _heavy_bridge(self, a: int, b: int, through: int) -> None:
+        """Make the edge ``a -> b`` between two halves the **heavy connection**.
+
+        In the sine model its weight becomes :data:`W_HEAVY` (negated while
+        inverted, as every fresh weight is): the halves are copies of one node,
+        so the score ``w * f_a * f_b = W_HEAVY * f * f`` is as large as the
+        activation allows, whatever its sign.  A kind that computes its
+        weights from counts is left alone - its bridge already carries every
+        traversal of the node it came out of (:meth:`split`), which is what
+        makes it heavy there, and ``recompute_weights`` would overwrite a
+        number anyway.  ``through`` is what passed through the node before it
+        was halved - the traversals of its out-edges - for a kind that counts
+        its edges but not its nodes (the phase model's override).
+        """
+        if not self.learns_weights:
+            return
+        e = self.children[a].get(b)
+        if e is None:
+            return
+        self.edge_w[e] = -W_HEAVY if self.inverted else W_HEAVY
+        self.version += 1
+
+    def split_window(self, size: int) -> int:
+        """Halve every real node longer than ``size`` units until none is; returns how many splits were made.
+
+        The step of the dynamic window (:mod:`radixnet.window`).  Nodes are
+        visited in id order; a node longer than the window is split at its
+        middle gram - the first half keeps ``(grams + 1) // 2`` of its grams,
+        the id and the in-edges, the second half (a new id at the end, halved
+        in its turn when the scan reaches it) takes the rest and the
+        out-edges, and both carry the node's state, activation parameters and
+        visit count (:meth:`split`).  The edge between them is the heavy
+        connection (:meth:`_heavy_bridge`).  A node of one gram cannot be
+        halved and is left as it is, however long the window says it should
+        be.  Nothing is merged here: :meth:`compress` does that, within the
+        window.
+        """
+        if size < 1:
+            raise ValueError(f"size must be >= 1, got {size}")
+        labels = self.labels
+        alive = self.alive
+        children = self.children
+        stride = self._stride
+        llen = self.label_len
+        grams_held = self.grams_held
+        traversals = self.edge_traversals
+        split = self.split
+        heavy = self._heavy_bridge
+        splits = 0
+        node = FIRST
+        while node < len(labels):  # the second halves are appended, and are halved in turn when the scan reaches them
+            if alive[node]:
+                through = -1
+                while llen(node) > size:
+                    grams = grams_held(node)
+                    if grams < 2:
+                        break
+                    if through < 0:
+                        # what passed through the node, read before it is halved: every walk that
+                        # entered it left it over one of these edges
+                        through = 0
+                        for e in children[node].values():
+                            through += traversals(e)
+                    a, b = split(node, ((grams + 1) // 2) * stride)
+                    heavy(a, b, through)
+                    splits += 1
+            node += 1
+        return splits
+
     def merge_child(self, p: int) -> bool:
         """Merge ``p``'s single child ``c`` into ``p`` if the chain is unary.
 
@@ -444,6 +552,9 @@ class RadixCyclicGraph:
             return False
         enc = self.encoding
         lp_view, lc_view = enc.units(self.labels[p]), enc.units(self.labels[c])
+        window = self.dynamic_window
+        if window.on and len(lp_view) + len(lc_view) - self._ov > window.size:
+            return False  # the merged node would be longer than the dynamic window allows
         lc = self.labels[c]
         shift = len(lp_view) - self._ov
         ew = self.edge_w
@@ -491,7 +602,11 @@ class RadixCyclicGraph:
         return True
 
     def compress(self) -> int:
-        """Merge every unary chain until none remains; returns the merge count."""
+        """Merge every unary chain until none remains; returns the merge count.
+
+        With the dynamic window on, a chain whose merged label would be longer
+        than the window's size is left as it is (:meth:`merge_child`).
+        """
         merges = 0
         alive = self.alive
         merge = self.merge_child
@@ -1039,6 +1154,8 @@ class RadixCyclicGraph:
             **({} if self.encoding.is_default() else {"encoding": self.encoding.to_dict()}),
             # the attention band, likewise only while it is on: a file without it was written with it off
             **({"attention": self.attention.to_dict()} if self.attention.on else {}),
+            # the dynamic window, likewise: the ladder, where it stands and whether it steps by itself
+            **({"dynamic_window": self.dynamic_window.to_dict()} if self.dynamic_window.on else {}),
             "seed": self.seed,
             "inverted": self.inverted,
             "version": self.version.value,
@@ -1077,6 +1194,7 @@ class RadixCyclicGraph:
             raise ValueError("graph document is missing the START/END/BACK/THINK sentinels")
         g = cls(seed=int(d.get("seed", 0)), encoding=Encoding.from_dict(d.get("encoding")))
         g.attention = AttentionBand.from_dict(d.get("attention"))
+        g.dynamic_window = DynamicWindow.from_dict(d.get("dynamic_window"))
         enc = g.encoding
         g.inverted = bool(d.get("inverted", False))
         g.labels = labels
@@ -1219,10 +1337,13 @@ class RadixCyclicGraph:
                 f"gram {t!r} indexed at {p}@{o} but label is {labels[p]!r}"
             )
         if compressed:
+            window = self.dynamic_window
             for p in range(FIRST, n):
                 if alive[p] and len(children[p]) == 1:
                     c = next(iter(children[p]))
-                    assert c == p or c < FIRST or len(parents[c]) != 1, (
+                    # a chain the dynamic window holds apart - merged, it would be longer than the window - stays
+                    held = window.on and self.label_len(p) + self.label_len(c) - ov > window.size
+                    assert c == p or c < FIRST or len(parents[c]) != 1 or held, (
                         f"unary chain {p}->{c} survived compress ({labels[p]!r} -> {labels[c]!r})"
                     )
         if texts is not None:

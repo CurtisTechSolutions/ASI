@@ -562,6 +562,7 @@ class ModelService:
             "in_memory": sorted({self.kind, *self._parked}),
             "weights": self.model.weight_config() if hasattr(self.model, "weight_config") else None,
             "attention": self.model.attention_config(),
+            "dynamic_window": self.model.window_config(),
         }
 
     def select_kind(self, kind: str) -> dict:
@@ -1626,6 +1627,32 @@ class ModelService:
                 return {"kind": model.kind, **model.attention_preview(wrong, right, blur=blur)}
             except ValueError as exc:
                 raise ApiError(400, str(exc)) from exc
+
+    def window(self) -> dict:
+        """The active model's dynamic window: the ladder of node sizes and where it stands (:mod:`radixnet.window`)."""
+        with self.session() as model:
+            return {"kind": model.kind, "window": model.window_config()}
+
+    def configure_window(
+        self, on: bool | None = None, top: int | None = None, floor: int | None = None, size: int | None = None,
+        auto: bool | None = None,
+    ) -> dict:
+        """Switch the active model's window on (at the ladder given) or off; 400 for a size off the ladder."""
+        with self.mutating() as model:
+            try:
+                config = model.configure_window(on=on, top=top, floor=floor, size=size, auto=auto)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"kind": model.kind, "window": config, "stats": model.stats()}
+
+    def window_step(self, steps: int = 1) -> dict:
+        """Step the active model's window by hand: merge what fits, halve what is longer, move the window."""
+        with self.mutating() as model:
+            try:
+                done = model.window_step(steps)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"kind": model.kind, "step": done, "window": done["window"], "stats": model.stats()}
 
     def _replace_model(self, model: GraphModel) -> dict:
         """Install ``model``; a model of another kind that was active is kept in memory (see :meth:`select_kind`)."""
@@ -3087,6 +3114,21 @@ def _r_attention_preview(svc: ModelService, f: Fields, q: dict) -> tuple[int, An
     return 200, svc.attention_preview(f.text("wrong", "") or "", f.text("right", "") or "", blur=f.number("blur", None))
 
 
+def _r_window(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.window()
+
+
+def _r_window_set(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.configure_window(
+        on=f.flag("on", None), top=f.integer("top", None), floor=f.integer("floor", None),
+        size=f.integer("size", None), auto=f.flag("auto", None),
+    )
+
+
+def _r_window_step(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.window_step(f.integer("steps", 1, minimum=1))
+
+
 def _r_encoding(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.encoding()
 
@@ -4538,6 +4580,21 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "units, grams, spans, writer (the gram writes a changed unit: the rule with the band off), charges (its "
      "share under the band, at most 1), focus (it sees a change most sharply), end (the step into END answers "
      "for the position after the last unit)}"),
+    ("GET", "/api/model/window", _r_window,
+     "the active model's dynamic window - the ladder of node sizes, halving from 32 to 4 and back up: {kind, "
+     "window: {on, top, floor, size, auto, sizes (the ladder), next, unit, units, ngram, longer (real nodes a step "
+     "would halve; null while off), longest, nodes, heavy (the bridge weight of the sine model; null where the "
+     "bridge is heavy by its count), default_top, default_floor}}"),
+    ("POST", "/api/model/window", _r_window_set,
+     "switch the window: {on, top, floor, size, auto} - on: false switches it off (the graph stays as it is), "
+     "on: true or any setting switches it on at the values given over the ones it had (else 32 down to 4, at "
+     "the top, stepping every epoch); 400 for a size that is not a power of two or off the ladder -> {kind, "
+     "window, stats}"),
+    ("POST", "/api/model/window/step", _r_window_step,
+     "step the window by hand: {steps (default 1)} - each step merges what fits the window, halves every node "
+     "that is longer (both halves keep the node's data, joined by a heavy connection) and moves the window down "
+     "the ladder, back to the top from the floor -> {kind, step: {steps, sizes, from, to, merges, splits, "
+     "nodes_before, nodes_after, edges_before, edges_after, window}, window, stats}; 400 while it is off"),
     ("GET", "/api/negative", _r_negative,
      "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
      "filter settings"),

@@ -91,6 +91,7 @@ pub const SWITCHES: &[&str] = &[
     "allow-private",
     "allow-repeats",
     "allow-word-repeats",
+    "auto",
     "blame",
     "browser",
     "correct",
@@ -102,6 +103,7 @@ pub const SWITCHES: &[&str] = &[
     "learn-thinking",
     "lenient",
     "listen-back",
+    "manual",
     "no-adapt",
     "no-avoid",
     "no-blame",
@@ -156,8 +158,9 @@ pub const SWITCHES: &[&str] = &[
 ];
 
 /// Flags whose value may be left out, with what a bare one means (Python's
-/// `nargs="?"` and `const`): `--plan` alone plans the default three lessons.
-pub const OPTIONAL_VALUES: &[(&str, &str)] = &[("plan", "3")];
+/// `nargs="?"` and `const`): `--plan` alone plans the default three lessons,
+/// `--step` alone takes one step of the dynamic window.
+pub const OPTIONAL_VALUES: &[(&str, &str)] = &[("plan", "3"), ("step", "1")];
 
 /// Splits a command line into the command and its flags.
 pub fn parse_args(argv: &[String]) -> Result<(String, Args), String> {
@@ -372,6 +375,11 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
         "attention",
         crate::attention::cli,
         "the attention band: where inside a gram a correction's blame and credit land",
+    ),
+    (
+        "window",
+        crate::window::cli,
+        "the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up",
     ),
     (
         "evolve",

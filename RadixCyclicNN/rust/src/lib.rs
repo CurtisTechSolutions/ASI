@@ -112,6 +112,7 @@ pub mod vision;
 pub mod voice;
 pub mod web;
 pub mod weights;
+pub mod window;
 pub mod words;
 pub mod zip;
 // the sine-activation and phase models (radix / resonant) and what they stand on

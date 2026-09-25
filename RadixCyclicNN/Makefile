@@ -269,6 +269,22 @@ invert: ## Invert the network (flip every edge weight and activation amplitude)
 compress: ## Merge unary chains (radix-tree path compression) and save
 	$(RADIXNET) $(GLOBAL) compress
 
+WINDOW_TOP   ?= 32
+WINDOW_FLOOR ?= 4
+STEPS        ?= 1
+
+window: ## Show the dynamic window: the ladder of node sizes (32 -> 16 -> 8 -> 4 -> 32) and where it stands
+	$(RADIXNET) $(GLOBAL) window
+
+window-on: ## Switch the dynamic window on (WINDOW_TOP=32 WINDOW_FLOOR=4; it steps at the end of every training epoch) and save
+	$(RADIXNET) $(GLOBAL) window --on --top $(WINDOW_TOP) --floor $(WINDOW_FLOOR)
+
+window-step: ## Step the dynamic window by hand STEPS times: merge what fits, halve what is longer, move the window; then save
+	$(RADIXNET) $(GLOBAL) window --step $(STEPS)
+
+window-off: ## Switch the dynamic window off (compression is unbounded again) and save
+	$(RADIXNET) $(GLOBAL) window --off
+
 ##@ Word n-grams (the encoding dial's word unit: the same model over words)
 MODEL_WORD  ?= model.word.json
 WORD_ENC    ?= word:3:1

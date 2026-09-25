@@ -216,6 +216,13 @@ type Graph struct {
 	// it can be switched at any time; it travels with the model file while on.
 	Attention AttentionBand
 
+	// DynamicWindow is the ceiling on a node's length and the ladder it moves
+	// down and back up (window.go): off by default - compression is unbounded
+	// and no node is ever halved.  On, MergeChild merges nothing longer than
+	// its Size and a step (SplitWindow) halves what is longer.  It travels
+	// with the model file while it is on.
+	DynamicWindow DynamicWindow
+
 	Version          Counter
 	StructureVersion Counter
 	nAliveNodes      int
@@ -703,6 +710,9 @@ func (g *Graph) MergeChild(p int) bool {
 	if g.blocksMerge(ch.edges[0]) {
 		return false // a blamed transition stays an edge, so the negative network can still name it
 	}
+	if g.heldApart(p, c) {
+		return false // the merged node would be longer than the dynamic window allows
+	}
 	enc := g.Enc
 	lp := enc.Units(g.Labels[p])
 	lc := enc.Units(g.Labels[c])
@@ -749,7 +759,9 @@ func (g *Graph) MergeChild(p int) bool {
 	return true
 }
 
-// Compress merges every unary chain until none remains; returns the merge count.
+// Compress merges every unary chain until none remains; returns the merge
+// count.  With the dynamic window on, a chain whose merged label would be
+// longer than the window's size is left as it is (MergeChild).
 func (g *Graph) Compress() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -1097,7 +1109,8 @@ func (g *Graph) CheckInvariants(texts []string, compressed bool) error {
 		for p := First; p < n; p++ {
 			if g.Alive[p] && g.children[p].size() == 1 {
 				c := g.children[p].order[0]
-				if !(c == p || c < First || g.parents[c].size() != 1) {
+				// a chain the dynamic window holds apart - merged, it would be longer than the window - stays
+				if !(c == p || c < First || g.parents[c].size() != 1 || g.heldApart(p, c)) {
 					return fmt.Errorf("unary chain %d->%d survived compress", p, c)
 				}
 			}

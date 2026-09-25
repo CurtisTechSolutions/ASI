@@ -98,6 +98,8 @@ D-083 the veto can keep its provenance to itself
 
 **Part XXI — Attention** · D-086 the attention band: a correction lands where the gram looks, not where it wrote
 
+**Part XXII — Structure** · D-087 the dynamic window: nodes halved down a binary ladder, and grown back at the top
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -3671,6 +3673,91 @@ real speech (`phonetok learn`). A model's units mean nothing without the codeboo
 
 ---
 
+# Part XXII — Structure
+
+### D-087 — The dynamic window: nodes halved down a binary ladder, and grown back at the top
+
+**Status** Research claim · 2026-09-25 · **Layer** representation · **Extends** D-007 ·
+**Specified in** `SPEC-DynamicWindow.md`
+
+**Context — my reason** *"Implement a dynamic window that is sized in the binary number system. It starts at 32,
+then moves to 16, then 8, then maybe 4. This algorithm will split nodes into two parts and assign the same weights
+and data for traversal as well as a heavy connection for the two halves. This process happens manually or
+automatically. Then we size up the windows back to 32 and do this process again."* It applies to the actual nodes
+of the radix cyclic graph: a node with the value `ABCD` becomes `AB` and `CD`.
+
+Compression (D-007) only ever coarsens the structure. It merges every unary chain into one node, and a merged node
+is a corridor: entered at its first gram, left at its last, with nothing to learn inside - no edge, no count, no
+weight - and nowhere to branch. The graph's granularity is whatever the corpus's branching happened to leave. The
+claim is that the structure should *breathe*: a ceiling on a node's length that halves - 32, 16, 8, 4 - cuts the
+corridors into halves that carry the same data for traversal and are joined by a heavy connection, so a walk is
+unchanged the moment they are cut but has places to branch afterwards; and then the ceiling goes back up to 32 and
+what nothing branched into grows together again.
+
+**Decision** A `DynamicWindow` on the graph, beside the encoding and the band: a ladder of powers of two from a top
+to a floor (32 down to 4 by default), the size it stands at, and whether it steps by itself. One **step** merges
+what fits the window (compression, which with the window on merges nothing longer than its size), halves every node
+that is longer at its middle gram - the first half keeping the odd gram, the id and the in-edges, the second half
+the rest and the out-edges, both the node's state, activation parameters and count - and moves the window down the
+ladder, back to the top from the floor. The edge between two halves is the **heavy connection**, in each kind's own
+currency: the count the node had (what a split already hands its bridge, and what makes it heavy where weights are
+computed from counts), the weight `W_HEAVY = 8` in the sine model (negated while inverted), the traversals of the
+out-edges it stands before in the phase model, which counts edges and not nodes. A step happens by hand (`radixnet
+window --step`, `POST /api/model/window/step`, the Step button) or automatically at the end of every training
+epoch, in every kind's loop, feedback passes included. All three implementations carry it, node for node.
+
+**Alternatives rejected**
+* **Pinning the halves for good** - a flag on the bridge, the way a blamed edge is kept out of compression
+  (D-046). The cycle would then be one-way: after 32, 16, 8, 4 the graph would be shredded to four-unit nodes
+  forever, compression - the structure's whole idea - switched off, and "back up to 32" would have nothing to do.
+  The window as a ceiling on *merging* gives the ladder both directions: down, it cuts; up, compression regrows
+  whatever stayed unary.
+* **Measuring the window in grams.** The halving is exact in grams, but every length the system reports - labels,
+  `length`, `max_length`, a text's `chars` - is in units, and a window of 32 that meant 34 characters would be the
+  one number counted differently.
+* **Cutting at the unit midpoint regardless of the overlap** - `ABCD` into `AB` and `CD` under the trigram. Not
+  representable: neither half holds a trigram, the trigram `BCD` would have to live in two nodes at once, and every
+  edge, split, decode and the index rest on the overlap (D-006). Under a sliding encoding `ABCD` *is* `ABC -> BCD`
+  merged and comes apart into those, sharing the pivot; under a grouping encoding (`char:2:2`) the cut is exactly
+  `AB` and `CD`.
+* **A heavy weight scaled to the activation** (`w = S / f²`), so that the bridge's *score* were fixed. Brittle at
+  `f ≈ 0`, and unlike every other weight in the network, none of which is scaled to its endpoints. A fixed heavy
+  weight is as heavy as the activation allows, which is what every weight in the sine model is - and it stays a
+  learned weight, moved like any other when the data disagrees.
+* **A reward on the count model's bridge.** A reward is what a judge said (D-026); the bridge's count already says
+  everything the node ever saw, and a share of 1 needs no number added to it.
+* **The window as the encoding's `n`** - 32-grams halved into 16-grams. It would re-key the whole index at every
+  rung, and could not climb back: training at `n = 4` leaves node lengths that are not multiples of 32. The gram is
+  fixed for a graph's life (D-071); the window only decides how many of them a node holds.
+* **Stepping on corrections or ratings rather than epochs.** Feedback passes are epochs and step like any other; a
+  step tied to a judge would move the ladder at a rate the tutor, not the schedule, decides.
+
+**Consequences**
+* **Off is the old file to the bit**, on every kind, whether the window was never touched or switched on and off:
+  the block is written only while it is on, an epoch's record carries `splits` and `window` only when it stepped,
+  and the same unary halves merge back at the next compression once it is off - the graph is never left in a state
+  the old rules could not have produced.
+* **What changes.** On, the graph alternates between coarse and fine. Going down, the halves can learn apart: a
+  transition into the second half's first gram no longer needs a split, a child can attach to the first half
+  without one. Back at the top, what stayed unary is consolidated - one side's activation kept, the other's edges
+  rescaled, D-007's lossy merge made periodic - while a half that gained a branch stays a node. A step at the floor
+  turns a 30-unit corridor into eight nodes; the top turns them back into one.
+* **The bridge keeps the cut invisible to traversal.** The first half has one child, so the step across the bridge
+  is probability 1 and cost 0 - the deterministic step inside the merged node. The heaviness matters afterwards,
+  against a competitor: `8 · f²` against at most `1.5 · f · f'` in the sine model, decisive near `|f| = 1` and
+  modest at a small activation; a share of everything the node saw in the counting kinds.
+* **Two kinds count differently, and the bridge says so.** The phase model counts edges, not nodes, so its bridge
+  takes what passed through; the negative network counts nothing - its evidence is blame - so its bridge carries
+  none, honestly, and a `judge` over the halves finds the blame it found over the node.
+* **Nothing is graded.** Whether a model cycled 32 → 4 → 32 predicts better than one left alone, or only the same
+  with more edges in between, is the research question; the window makes it askable (Q-20).
+
+**Lives in** `radixnet/window.py`, `radixnet/graph.py::split_window / merge_child`,
+`radixnet/model.py::window_config / configure_window / window_step / _window_epoch`, `go/radixnet/window.go`,
+`rust/src/window.rs`, `frontend/src/components/DynamicWindowCard.jsx`, `SPEC-DynamicWindow.md`
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.
@@ -3829,3 +3916,11 @@ back to the last `n - 1` units, then the last one (`GraphModel._locate`); a blur
 reader would first try the known gram that agrees with it at the centre. That
 changes where a prediction starts - so what should it cost, and should the same
 blur govern both?
+
+**Q-20 — What does the cycle buy (D-087)?** The dynamic window cuts the long
+corridors so their halves can learn apart, and consolidates at the top what
+nothing branched into. Both halves of that are plausible and neither is
+measured: a model cycled 32 → 16 → 8 → 4 → 32 over the same corpus as one left
+alone, compared on its loss, on the branch points its halves grew and on what
+it predicts, is the experiment - and it decides whether the top should merge
+back at all, or whether the halves that learned to differ should be kept.

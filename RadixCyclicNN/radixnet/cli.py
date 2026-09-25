@@ -2311,6 +2311,60 @@ def _print_changes(console: Console, changes: list[dict]) -> None:
         ["change", "the network wrote", "the teacher wrote"],
         [[change["op"], change["wrong"] or "-", change["right"] or "-"] for change in changes],
     )
+
+
+def cmd_window(args: argparse.Namespace, console: Console) -> dict:
+    """The dynamic window: show it, set its ladder, switch it on or off, or step it by hand."""
+    settings = args.on or args.auto or args.manual or any(v is not None for v in (args.top, args.floor, args.size))
+    if args.off and settings:
+        raise CliError("--off takes no other setting: switching the window off is all it does")
+    if args.off and args.step is not None:
+        raise CliError("--off and --step contradict each other: a step needs the window on")
+    if args.auto and args.manual:
+        raise CliError("--auto and --manual contradict each other")
+    model, origin = open_model(args, console, required=True)
+    changes: dict = {}
+    stepped = None
+    saved = None
+    if settings or args.off:
+        try:
+            model.configure_window(
+                on=False if args.off else True, top=args.top, floor=args.floor, size=args.size,
+                auto=True if args.auto else False if args.manual else None,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        changes = model.graph.dynamic_window.to_dict() or {"on": False}
+    if args.step is not None:
+        try:
+            stepped = model.window_step(args.step)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+    if (changes or stepped) and not args.dry_run:
+        saved = save_model(model, args.out or args.model)
+    config = model.window_config()
+    window = model.graph.dynamic_window
+    units = units_of(model)
+    if stepped:
+        step_text = (
+            f"{stepped['steps']} step(s) at {', '.join(str(s) for s in stepped['sizes'])}: {stepped['merges']} "
+            f"merge(s), {stepped['splits']} split(s), nodes {stepped['nodes_before']} -> {stepped['nodes_after']}, "
+            f"edges {stepped['edges_before']} -> {stepped['edges_after']}"
+        )
+    else:
+        step_text = "-"
+    console.pairs([
+        ("model", origin.describe()),
+        ("window", window.describe(units)),
+        ("nodes", f"{config['nodes']} real node(s), the longest {config['longest']} {units}" + (
+            f", {config['longer']} longer than the window" if window.on else "")),
+        ("heavy", f"the bridge between two halves weighs {fmt(config['heavy'])}" if config["heavy"] is not None else
+                  "the bridge between two halves carries the node's whole count"),
+        ("changed", ", ".join(f"{k}={fmt(v)}" for k, v in changes.items()) if changes else "nothing"),
+        ("step", step_text),
+        ("saved", saved["path"] if saved else ("- (dry run)" if (changes or stepped) and args.dry_run else "-")),
+    ])
+    return {"model": origin.to_dict(), "window": config, "changed": changes, "step": stepped, "saved": saved}
 # --------------------------------------------------------------------------
 # the negative network (the failures, and why)
 # --------------------------------------------------------------------------
@@ -3097,6 +3151,7 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
                        f"{stats['feedback_passes']} feedback pass(es)")]
           if model.kind == "resonant" else []),
         *([("attention", model.graph.attention.describe(model.encoding.n))] if model.takes_corrections else []),
+        ("dynamic window", model.graph.dynamic_window.describe(units_of(model))),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -5123,6 +5178,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="change the band in memory only; nothing is saved")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_attention)
+    # window ---------------------------------------------------------------
+    p = command(
+        "window", "the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up",
+        "A merged node can hold a whole sentence, and a walk through it has nowhere to branch.  The dynamic\n"
+        "window is a ceiling on that length, sized in the binary number system: it starts at 32 units, then\n"
+        "moves to 16, then 8, then 4, and then goes back up to 32 and runs again.  One step merges what fits\n"
+        "the window, halves every node that is longer - both halves keep the node's state, activation and\n"
+        "count, joined by a heavy connection - and moves the window down the ladder.  It steps by itself at\n"
+        "the end of every training epoch (--auto, the default) or by hand (--manual, then --step).  Off (the\n"
+        "default), compression is unbounded and no node is halved.  Without options the window is shown; --on,\n"
+        "--top, --floor, --size, --auto / --manual and --off change it and save the model (--dry-run: in memory\n"
+        "only); --step [N] takes N steps and saves.",
+    )
+    state = p.add_mutually_exclusive_group()
+    state.add_argument("--on", action="store_true",
+                       help="switch the window on (at the ladder it had, else 32 down to 4, standing at the top)")
+    state.add_argument("--off", action="store_true",
+                       help="switch the window off: compression is unbounded again, the graph stays as it is")
+    p.add_argument("--top", type=int, metavar="N", help="the largest window, a power of two (default 32); switches it on")
+    p.add_argument("--floor", type=int, metavar="N",
+                   help="the smallest window before it goes back to the top, a power of two (default 4)")
+    p.add_argument("--size", type=int, metavar="N", help="where on the ladder the window stands now")
+    p.add_argument("--auto", action="store_true", help="step at the end of every training epoch (the default)")
+    p.add_argument("--manual", action="store_true", help="step only when --step asks")
+    p.add_argument("--step", type=int, nargs="?", const=1, metavar="N",
+                   help="take N steps (default 1): merge what fits, halve what is longer, move the window")
+    p.add_argument("--dry-run", action="store_true", help="change the window in memory only; nothing is saved")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_window)
     # negative -------------------------------------------------------------
     p = command(
         "negative", "the negative network: failures, why they failed, and the filter",
