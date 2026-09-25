@@ -138,6 +138,24 @@ func TestNegativeFilter(t *testing.T) {
 	if status, _ := e.post("/api/negative/filter", map[string]any{"over_sample": 0}); status != 400 {
 		t.Fatalf("an over-sample of zero is a 400: %d", status)
 	}
+	// the decisions alone, when the provenance is not wanted
+	status, doc = e.post("/api/negative/filter", map[string]any{"texts": []string{negFailures[0], "an unseen sentence"}, "provenance": false})
+	if status != 200 {
+		t.Fatalf("filter: %d %+v", status, doc)
+	}
+	for _, row := range doc["verdicts"].([]any) {
+		verdict := row.(map[string]any)
+		if len(verdict) != 3 {
+			t.Fatalf("a terse verdict is exactly {text, decision, rule}: %+v", verdict)
+		}
+		hasKeys(t, verdict, "text", "decision", "rule")
+	}
+	if doc["verdicts"].([]any)[0].(map[string]any)["decision"] != "reject" || len(doc["kept"].([]any)) != 1 {
+		t.Fatalf("the same decisions: %+v", doc)
+	}
+	if len(doc["rejected"].([]any)[0].(map[string]any)) != 3 || doc["pair"].(map[string]any)["config"].(map[string]any)["provenance"] != false {
+		t.Fatalf("the rejected ones are terse too, and the pair says so: %+v", doc)
+	}
 }
 
 func TestNegativeSettingsForgetResetAndSave(t *testing.T) {

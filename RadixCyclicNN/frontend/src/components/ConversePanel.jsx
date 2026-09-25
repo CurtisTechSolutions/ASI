@@ -105,6 +105,7 @@ export default function ConversePanel({ status }) {
   const [transcript, setTranscript] = useState(null);
   const [live, setLive] = useState(null); // the turn being spoken, while a streamed conversation runs
   const [guard, setGuard] = useStoredState("converse.guard", true);
+  const [provenance, setProvenance] = useStoredState("converse.provenance", true);
   const [guarded, setGuarded] = useState(null);
   const [notice, setNotice] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -152,6 +153,7 @@ export default function ConversePanel({ status }) {
       k: parseInteger(k, 5),
       speakers,
       guard,
+      provenance,
       avoid_word_repeats: avoidWordRepeats,
       explore: parseInteger(explore, 3),
       learn,
@@ -310,6 +312,13 @@ export default function ConversePanel({ status }) {
           hint="a reply it vetoes is left unsaid and the voice looks for another one"
           checked={guard}
           onChange={setGuard}
+        />
+        <CheckField
+          label="Say why it vetoed"
+          hint="the provenance of each veto: the rule, the reasons and the blamed fragments; off, the guard reports how many it stopped"
+          checked={provenance}
+          onChange={setProvenance}
+          disabled={!guard}
         />
         <CheckField
           label="Avoid repeated words"

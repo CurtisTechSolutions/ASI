@@ -19,6 +19,7 @@ func mcpModel(t *testing.T) *Model {
 	if err != nil {
 		t.Fatalf("new model: %v", err)
 	}
+	model.Exact = true // atomic counters: the racy default is deliberate, but the race detector runs here
 	if _, err := model.Train([]string{
 		"the cat sat on the mat", "the cat sat on the log", "the dog sat on the mat",
 	}, TrainOptions{Epochs: 2, AutoCompress: true}); err != nil {

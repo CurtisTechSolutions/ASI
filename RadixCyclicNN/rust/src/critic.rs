@@ -22,6 +22,16 @@
 //! from something outside the network that looked at an output and said it
 //! was wrong, and why.
 //!
+//! With `correct` on the reviewer is a **copy editor** instead: it writes
+//! each text out correctly with as few characters changed as it can
+//! ([`crate::review::correct_texts`]), and the diff between the two is the
+//! lesson - only the characters it changed are blamed, at `severity` per
+//! corrected text, and a text it handed back unchanged clears blame
+//! ([`crate::review::teach_corrections`]).  There is no mark and no pass
+//! mark in that mode; the change rate (the share of texts it had to change)
+//! takes the place of the mean rating in the round records and the report
+//! card.
+//!
 //! # The positive model is only read from
 //!
 //! Nothing here trains, rewards or inverts it, so the loop can run beside
@@ -48,7 +58,10 @@ use crate::json::Json;
 use crate::llm::fields::Fields;
 use crate::llm::{format_g, new_client, normalise_provider, seconds, LlmClient, CHATGPT, DEFAULT_PROVIDER, PROVIDERS};
 use crate::model::Model;
-use crate::review::{review_texts, sample_texts, summarise_reviews, teach_reviews, Review, DEFAULT_BATCH};
+use crate::review::{
+    correct_texts, review_texts, sample_texts, summarise_corrections, summarise_reviews, teach_corrections,
+    teach_reviews, CorrectionEntry, Review, DEFAULT_BATCH,
+};
 use crate::service::Service;
 
 /// What this module's own lines are filed under.
@@ -80,6 +93,12 @@ pub struct CriticConfig {
     pub epochs: usize,
     /// The seed of the first round's sampling; later rounds advance it.
     pub seed: Option<i64>,
+    /// Ask for letter-level corrections instead of marks: only the characters
+    /// the editor changed are blamed.
+    pub correct: bool,
+    /// How heavily one corrected text is blamed (`correct` mode; a marked
+    /// failure's severity comes from its mark).
+    pub severity: f64,
 }
 
 impl Default for CriticConfig {
@@ -99,6 +118,8 @@ impl Default for CriticConfig {
             clear_passes: true,
             epochs: 1,
             seed: None,
+            correct: false,
+            severity: 1.0,
         }
     }
 }
@@ -114,6 +135,9 @@ impl CriticConfig {
         }
         if !(0.0..=10.0).contains(&self.threshold) {
             return Err("threshold must lie in [0, 10]".to_string());
+        }
+        if self.severity.is_nan() || self.severity < 0.0 {
+            return Err("severity must be >= 0".to_string());
         }
         if normalise_provider(&self.provider).is_err() {
             return Err(format!("provider must be one of: {}", PROVIDERS.join(", ")));
@@ -136,6 +160,8 @@ impl CriticConfig {
             ("clear_passes", Json::Bool(self.clear_passes)),
             ("epochs", Json::Int(self.epochs as i64)),
             ("seed", self.seed.map(Json::Int).unwrap_or(Json::Null)),
+            ("correct", Json::Bool(self.correct)),
+            ("severity", Json::Num(self.severity)),
         ])
     }
 
@@ -176,6 +202,8 @@ impl CriticConfig {
             clear_passes: f.flag("clear_passes", d.clear_passes)?,
             epochs: f.count_or("epochs", d.epochs, 0)?,
             seed: f.integer("seed", None)?,
+            correct: f.flag("correct", d.correct)?,
+            severity: f.number_or("severity", d.severity, Some(0.0))?,
         };
         config.validate().map_err(ApiError::bad_request)?;
         Ok(config)
@@ -207,6 +235,8 @@ impl CriticConfig {
             clear_passes: !args.on("no-clear"),
             epochs: whole("epochs", d.epochs)?,
             seed: Some(ctx.seed),
+            correct: args.on("correct"),
+            severity: crate::llm::nonneg_flag(ctx, "severity", d.severity)?,
         };
         config.validate()?;
         Ok(config)
@@ -232,6 +262,16 @@ pub trait Networks {
         &mut self,
         reviews: &[Review],
         threshold: f64,
+        clear_passes: bool,
+        epochs: usize,
+    ) -> Result<(TeachReport, Json), String>;
+
+    /// The negative network learns from the copy editor's corrections: only
+    /// the changed characters are blamed, `severity` per corrected text.
+    fn teach_corrections(
+        &mut self,
+        corrections: &[CorrectionEntry],
+        severity: f64,
         clear_passes: bool,
         epochs: usize,
     ) -> Result<(TeachReport, Json), String>;
@@ -275,6 +315,24 @@ impl Networks for Owned<'_> {
         }
         Ok((report, negative_stats(self.negative)))
     }
+
+    fn teach_corrections(
+        &mut self,
+        corrections: &[CorrectionEntry],
+        severity: f64,
+        clear_passes: bool,
+        epochs: usize,
+    ) -> Result<(TeachReport, Json), String> {
+        let o = TeachOptions {
+            epochs,
+            ..Default::default()
+        };
+        let report = teach_corrections(self.negative, corrections, severity, clear_passes, "critic", &o)?;
+        if let Some(path) = &self.save_each_round {
+            self.negative.save(path)?;
+        }
+        Ok((report, negative_stats(self.negative)))
+    }
 }
 
 /// The two networks behind the server's locks: each is held for one step.
@@ -312,6 +370,24 @@ impl Networks for Shared<'_> {
         })
         .map_err(|err| err.message)?
     }
+
+    fn teach_corrections(
+        &mut self,
+        corrections: &[CorrectionEntry],
+        severity: f64,
+        clear_passes: bool,
+        epochs: usize,
+    ) -> Result<(TeachReport, Json), String> {
+        let o = TeachOptions {
+            epochs,
+            ..Default::default()
+        };
+        with_negative(self.svc, |negative| {
+            let report = teach_corrections(negative, corrections, severity, clear_passes, "critic", &o)?;
+            Ok((report, negative_stats(negative)))
+        })
+        .map_err(|err| err.message)?
+    }
 }
 
 /// The reviewer on a loop, keeping the negative network fed.
@@ -341,7 +417,8 @@ impl<'a> Critic<'a> {
         self.config.seed.map(|seed| seed + self.round_no as i64)
     }
 
-    /// Writes, reviews and blames once, and returns the round's record.
+    /// Writes, reviews (or corrects) and blames once, and returns the round's
+    /// record.
     pub fn run_round(&mut self, nets: &mut dyn Networks) -> Result<Json, String> {
         self.round_no += 1;
         let started = Instant::now();
@@ -349,6 +426,9 @@ impl<'a> Critic<'a> {
         let cfg = &self.config;
         // the model writes first, under whatever lock guards it
         let samples = nets.sample(cfg.count, &cfg.prefix, cfg.max_length, cfg.temperature, seed)?;
+        if cfg.correct {
+            return self.correct_round(nets, samples, started);
+        }
         // only the reviewer's thinking happens with nothing held
         let reviews = review_texts(
             self.client,
@@ -370,6 +450,7 @@ impl<'a> Critic<'a> {
             ("kind", Json::str("round")),
             ("round", Json::Int(self.round_no as i64)),
             ("reviewer", Json::str(review.model.clone())),
+            ("mode", Json::str("review")),
             ("threshold", Json::Num(cfg.threshold)),
             ("texts", Json::Int(review.texts.len() as i64)),
             (
@@ -395,6 +476,66 @@ impl<'a> Critic<'a> {
             self.round_no,
             review.bad.len(),
             review.texts.len(),
+            taught.blamed,
+            taught.edges,
+            taught.cleared
+        );
+        self.history.push(record.clone());
+        Ok(record)
+    }
+
+    /// The editor's round: every text is written out correctly and only the
+    /// diff is blamed.
+    fn correct_round(
+        &mut self,
+        nets: &mut dyn Networks,
+        samples: Vec<String>,
+        started: Instant,
+    ) -> Result<Json, String> {
+        let cfg = &self.config;
+        let corrections = correct_texts(self.client, &samples, &cfg.context, &cfg.reviewer_model, DEFAULT_BATCH)?;
+        let editor = if cfg.reviewer_model.is_empty() {
+            self.client.model()
+        } else {
+            cfg.reviewer_model.as_str()
+        };
+        let result = summarise_corrections("model", editor, samples, corrections);
+        let (taught, stats) =
+            nets.teach_corrections(&result.corrections, cfg.severity, cfg.clear_passes, cfg.epochs)?;
+        let taught_doc = taught.to_json();
+        let record = Json::obj([
+            ("kind", Json::str("round")),
+            ("round", Json::Int(self.round_no as i64)),
+            ("reviewer", Json::str(result.model.clone())),
+            ("mode", Json::str("correct")),
+            ("severity", Json::Num(cfg.severity)),
+            ("texts", Json::Int(result.texts.len() as i64)),
+            (
+                "corrections",
+                Json::Arr(result.corrections.iter().map(CorrectionEntry::to_json).collect()),
+            ),
+            ("change_rate", result.change_rate.map(Json::Num).unwrap_or(Json::Null)),
+            ("corrected", Json::Int(result.corrected.len() as i64)),
+            ("unchanged", Json::Int(result.unchanged.len() as i64)),
+            ("uncorrected", Json::Int(result.uncorrected.len() as i64)),
+            ("edits", Json::Int(result.edits as i64)),
+            ("wrong_chars", Json::Int(result.wrong_chars as i64)),
+            ("blamed", Json::Int(taught.blamed as i64)),
+            ("cleared", Json::Int(taught.cleared as i64)),
+            ("unmatched", Json::Int(taught.unmatched as i64)),
+            ("edges", Json::Int(taught.edges as i64)),
+            ("reasons", taught_doc.at("reasons").clone()),
+            ("severity_mean", Json::Num(taught.severity_mean)),
+            ("stats", stats),
+            ("seconds", Json::Num(started.elapsed().as_secs_f64())),
+        ]);
+        crate::log_info!(
+            LOG,
+            "round {}: {}/{} corrected ({} change(s)), blamed {} over {} edge(s), cleared {}",
+            self.round_no,
+            result.corrected.len(),
+            result.texts.len(),
+            result.edits,
             taught.blamed,
             taught.edges,
             taught.cleared
@@ -433,7 +574,11 @@ impl<'a> Critic<'a> {
 /// What a run of rounds came to: how much was reviewed, blamed and cleared,
 /// and why.  `mean_rating` is over the rounds that produced one, and `trend`
 /// is the last round's mean mark minus the first's - positive when the
-/// reviewer is marking the output better than it did at the start.
+/// reviewer is marking the output better than it did at the start.  Rounds
+/// run by the copy editor (`correct`) add `corrected`, `unchanged`,
+/// `uncorrected`, `edits`, `change_rate` and `change_trend` (the last
+/// round's change rate minus the first's - negative when the editor has less
+/// to put right than it had at the start).
 pub fn report_card(records: &[Json]) -> Json {
     let rounds: Vec<&Json> = records
         .iter()
@@ -451,6 +596,7 @@ pub fn report_card(records: &[Json]) -> Json {
     };
     let ratings = numbers("mean_rating");
     let rates = numbers("pass_rate");
+    let changes = numbers("change_rate");
     let total = |key: &str| -> i64 { rounds.iter().map(|r| r.at(key).as_i64().unwrap_or(0)).sum() };
     let mut reasons: Vec<(String, i64)> = Vec::new();
     for record in &rounds {
@@ -472,7 +618,14 @@ pub fn report_card(records: &[Json]) -> Json {
             Json::Num(values.iter().sum::<f64>() / values.len() as f64)
         }
     };
-    Json::obj([
+    let trend = |values: &[f64]| -> Json {
+        if values.len() > 1 {
+            Json::Num(values[values.len() - 1] - values[0])
+        } else {
+            Json::Null
+        }
+    };
+    let mut card = vec![
         ("kind", Json::str("report")),
         ("rounds", Json::Int(rounds.len() as i64)),
         ("reviewed", Json::Int(total("texts"))),
@@ -481,14 +634,7 @@ pub fn report_card(records: &[Json]) -> Json {
         ("edges", Json::Int(total("edges"))),
         ("mean_rating", mean(&ratings)),
         ("pass_rate", mean(&rates)),
-        (
-            "trend",
-            if ratings.len() > 1 {
-                Json::Num(ratings[ratings.len() - 1] - ratings[0])
-            } else {
-                Json::Null
-            },
-        ),
+        ("trend", trend(&ratings)),
         (
             "reasons",
             Json::Obj(reasons.into_iter().map(|(r, n)| (r, Json::Int(n))).collect()),
@@ -497,7 +643,19 @@ pub fn report_card(records: &[Json]) -> Json {
             "stats",
             rounds.last().map(|r| r.at("stats").clone()).unwrap_or(Json::Null),
         ),
-    ])
+    ];
+    if rounds.iter().any(|r| r.at("mode").as_str() == Some("correct")) {
+        // the editor's rounds: how often it had to change something, and how much
+        card.extend([
+            ("corrected", Json::Int(total("corrected"))),
+            ("unchanged", Json::Int(total("unchanged"))),
+            ("uncorrected", Json::Int(total("uncorrected"))),
+            ("edits", Json::Int(total("edits"))),
+            ("change_rate", mean(&changes)),
+            ("change_trend", trend(&changes)),
+        ]);
+    }
+    Json::obj(card)
 }
 
 // -- the command line ---------------------------------------------------------------------------
@@ -506,8 +664,10 @@ pub fn report_card(records: &[Json]) -> Json {
 /// into it.  `--rounds` (0: until the process is stopped - the negative network
 /// is then saved after every round), `--count`, `--prefix`, `--max-length`,
 /// `--temperature`, `--threshold`, `--context`, `--provider`,
-/// `--reviewer-model`, `--url`, `--timeout`, `--epochs`, `--no-clear`, and
-/// `--out` for where the negative network is saved (default: `--negative`).
+/// `--reviewer-model`, `--url`, `--timeout`, `--epochs`, `--no-clear`,
+/// `--correct` (the LLM is a copy editor: only the characters it changed are
+/// blamed, `--severity` per corrected text), and `--out` for where the
+/// negative network is saved (default: `--negative`).
 pub fn cli(ctx: &Ctx) -> Result<(), String> {
     let args = &ctx.args;
     let config = CriticConfig::from_args(ctx)?;
@@ -525,7 +685,8 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
     let out = args.str("out", &ctx.negative_path());
     crate::log_info!(
         LOG,
-        "reviewer {}: {} at {}; {} round(s) x {} text(s) of {} chars, pass at {}/10",
+        "{} {}: {} at {}; {} round(s) x {} text(s) of {} chars, {}",
+        if config.correct { "editor" } else { "reviewer" },
         config.provider,
         client.model(),
         client.url(),
@@ -536,7 +697,14 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         },
         config.count,
         config.max_length,
-        format_g(config.threshold)
+        if config.correct {
+            format!(
+                "letter-level corrections at {} blame per corrected text",
+                format_g(config.severity)
+            )
+        } else {
+            format!("pass at {}/10", format_g(config.threshold))
+        }
     );
     let mut critic = Critic::new(client.as_ref(), config.clone())?;
     let records = {
@@ -621,7 +789,9 @@ pub fn routes(server: &mut Server<Service>) {
 /// Starts a `critic` job: the model writes, the LLM reviews, the failures
 /// blame the negative network - `{rounds (0 = until stopped), count, prefix,
 /// max_length, temperature, threshold, context, provider: ollama|chatgpt,
-/// reviewer_model, url, timeout, clear_passes, epochs, seed}`.  Answers 202
+/// reviewer_model, url, timeout, clear_passes, epochs, seed, correct (the
+/// LLM is a copy editor: only the characters it changed are blamed),
+/// severity (blame per corrected text)}`.  Answers 202
 /// with the job, the settings and the reviewer; the rounds follow on
 /// `/api/job` and `/api/negative/auto/history`.
 fn auto_route(svc: &Arc<Service>, r: &Request) -> Answer {
@@ -720,6 +890,56 @@ mod tests {
         }
     }
 
+    /// Copy-edits every text: its third character becomes a `Q`, unless the
+    /// text contains `keep`, which comes back as it was.
+    struct Editor {
+        keep: &'static str,
+        prompts: Mutex<Vec<(String, LlmOptions)>>,
+    }
+
+    impl LlmClient for Editor {
+        fn provider(&self) -> &'static str {
+            "ollama"
+        }
+        fn url(&self) -> &str {
+            "http://scripted"
+        }
+        fn model(&self) -> &str {
+            "editor"
+        }
+        fn models(&self) -> Result<Vec<Json>, LlmError> {
+            Ok(Vec::new())
+        }
+        fn generate(&self, prompt: &str, o: &LlmOptions) -> Result<String, LlmError> {
+            self.prompts.lock().unwrap().push((prompt.to_string(), o.clone()));
+            let entries: Vec<String> = prompt
+                .lines()
+                .filter_map(|l| l.strip_prefix('['))
+                .filter_map(|l| l.split_once("] "))
+                .map(|(i, text)| {
+                    let (fixed, reason, note) = if !self.keep.is_empty() && text.contains(self.keep) {
+                        (text.to_string(), "none", "nothing")
+                    } else {
+                        let fixed: String = text
+                            .chars()
+                            .enumerate()
+                            .map(|(i, c)| if i == 2 { 'Q' } else { c })
+                            .collect();
+                        (fixed, "spelling", "a letter is wrong")
+                    };
+                    format!(
+                        "{{\"index\": {i}, \"correction\": {}, \"reason\": \"{reason}\", \"note\": \"{note}\"}}",
+                        Json::str(fixed).render(0)
+                    )
+                })
+                .collect();
+            Ok(format!("{{\"corrections\": [{}]}}", entries.join(",")))
+        }
+        fn chat(&self, _m: &[Json], _o: &LlmOptions) -> Result<String, LlmError> {
+            Ok(String::new())
+        }
+    }
+
     fn trained() -> Model {
         let corpus: Vec<String> = [
             "good sentences about the cat",
@@ -757,6 +977,7 @@ mod tests {
     fn the_defaults_review_with_ollama_and_nonsense_is_refused() {
         let d = CriticConfig::default();
         assert_eq!((d.provider.as_str(), d.rounds, d.clear_passes), ("ollama", 3, true));
+        assert_eq!((d.correct, d.severity), (false, 1.0));
         assert!(d.validate().is_ok());
         for bad in [
             CriticConfig {
@@ -779,12 +1000,21 @@ mod tests {
                 provider: "gemini".to_string(),
                 ..Default::default()
             },
+            CriticConfig {
+                severity: -0.5,
+                ..Default::default()
+            },
         ] {
             assert!(bad.validate().is_err(), "{bad:?}");
         }
         let doc = config(2).to_json();
         assert_eq!(doc.at("rounds").as_i64(), Some(2));
         assert_eq!(doc.at("seed").as_i64(), Some(1));
+        let keys: Vec<&str> = match &doc {
+            Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(&keys[keys.len() - 3..], &["seed", "correct", "severity"]);
     }
 
     #[test]
@@ -816,6 +1046,103 @@ mod tests {
         let log = &negative.neg.as_ref().unwrap().log;
         assert!(log.iter().all(|e| e.source == "critic"));
         assert!(log.iter().all(|e| e.note == "it repeats the same word over and over"));
+    }
+
+    #[test]
+    fn a_correcting_round_blames_only_the_changed_characters() {
+        let mut model = trained();
+        let mut negative = Model::new_negative(5, &NegativeOptions::default()).unwrap();
+        let before = model.g.num_nodes();
+        let editor = Editor {
+            keep: "good",
+            prompts: Mutex::new(Vec::new()),
+        };
+        let settings = CriticConfig {
+            correct: true,
+            severity: 2.0,
+            context: "plain English".to_string(),
+            ..config(1)
+        };
+        let mut critic = Critic::new(&editor, settings).unwrap();
+        let mut nets = Owned {
+            model: &mut model,
+            negative: &mut negative,
+            save_each_round: None,
+        };
+        let record = critic.run_round(&mut nets).unwrap();
+        let keys: Vec<&str> = match &record {
+            Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            keys,
+            vec![
+                "kind",
+                "round",
+                "reviewer",
+                "mode",
+                "severity",
+                "texts",
+                "corrections",
+                "change_rate",
+                "corrected",
+                "unchanged",
+                "uncorrected",
+                "edits",
+                "wrong_chars",
+                "blamed",
+                "cleared",
+                "unmatched",
+                "edges",
+                "reasons",
+                "severity_mean",
+                "stats",
+                "seconds"
+            ]
+        );
+        assert_eq!(record.at("mode").as_str(), Some("correct"));
+        assert_eq!(record.at("reviewer").as_str(), Some("editor"));
+        assert_eq!(record.at("severity").as_f64(), Some(2.0));
+        assert_eq!(record.at("texts").as_i64(), Some(4));
+        let corrected = record.at("corrected").as_i64().unwrap();
+        let unchanged = record.at("unchanged").as_i64().unwrap();
+        assert_eq!(corrected + unchanged, 4, "the editor answered every text");
+        assert_eq!(record.at("uncorrected").as_i64(), Some(0));
+        assert_eq!(record.at("blamed").as_i64(), Some(corrected));
+        assert_eq!(
+            record.at("edits").as_i64(),
+            Some(corrected),
+            "one change per corrected text"
+        );
+        assert_eq!(record.at("corrections").as_array().len(), 4);
+        assert!((record.at("change_rate").as_f64().unwrap() - corrected as f64 / 4.0).abs() < 1e-12);
+        if corrected > 0 {
+            assert_eq!(record.at("reasons").render(0), format!("{{\"spelling\":{corrected}}}"));
+            assert_eq!(record.at("severity_mean").as_f64(), Some(2.0));
+        }
+        assert_eq!(model.g.num_nodes(), before, "the positive model is only read from");
+        let log = &negative.neg.as_ref().unwrap().log;
+        assert_eq!(log.len(), corrected as usize);
+        assert!(log
+            .iter()
+            .all(|e| e.source == "critic" && e.note == "a letter is wrong"));
+        let prompts = editor.prompts.lock().unwrap();
+        let (prompt, o) = &prompts[0];
+        assert!(prompt.starts_with("Context: plain English\n\nCorrect these 4 texts:\n[0] "));
+        assert!(o.system.starts_with("You are a meticulous copy editor"));
+        assert_eq!(o.options, vec![("temperature".to_string(), Json::Num(0.0))]);
+        // a review round says which mode it ran in too
+        let reviewer = scripted("");
+        let mut critic = Critic::new(&reviewer, config(1)).unwrap();
+        let mut negative = Model::new_negative(5, &NegativeOptions::default()).unwrap();
+        let mut nets = Owned {
+            model: &mut model,
+            negative: &mut negative,
+            save_each_round: None,
+        };
+        let record = critic.run_round(&mut nets).unwrap();
+        assert_eq!(record.at("mode").as_str(), Some("review"));
+        assert!(record.get("corrections").is_none());
     }
 
     #[test]
@@ -899,6 +1226,50 @@ mod tests {
         assert_eq!(card.at("trend").as_f64(), Some(4.0));
         assert_eq!(card.at("reasons").render(0), "{\"a\":2,\"b\":1}");
         assert_eq!(card.at("stats").render(0), "{\"x\":2}");
+        assert!(
+            card.get("change_rate").is_none() && card.get("corrected").is_none(),
+            "a review's card says nothing about corrections"
+        );
+        // the editor's rounds add what it changed, and the way the change rate went
+        let edited = |texts: i64, rate: f64, corrected: i64| {
+            crate::json::parse(&format!(
+                "{{\"kind\": \"round\", \"mode\": \"correct\", \"texts\": {texts}, \"corrected\": {corrected}, \
+                 \"unchanged\": {}, \"uncorrected\": 1, \"edits\": {}, \"change_rate\": {rate}, \"blamed\": \
+                 {corrected}, \"cleared\": 0, \"edges\": 2, \"reasons\": {{\"spelling\": {corrected}}}, \
+                 \"stats\": {{}}}}",
+                texts - corrected - 1,
+                corrected * 2
+            ))
+            .unwrap()
+        };
+        let card = report_card(&[edited(4, 1.0, 3), edited(4, 0.5, 1)]);
+        assert_eq!(card.at("rounds").as_i64(), Some(2));
+        assert_eq!(card.at("reviewed").as_i64(), Some(8));
+        assert_eq!(card.at("blamed").as_i64(), Some(4));
+        assert!(card.at("mean_rating").is_null() && card.at("trend").is_null());
+        assert_eq!(card.at("corrected").as_i64(), Some(4));
+        assert_eq!(card.at("unchanged").as_i64(), Some(2));
+        assert_eq!(card.at("uncorrected").as_i64(), Some(2));
+        assert_eq!(card.at("edits").as_i64(), Some(8));
+        assert_eq!(card.at("change_rate").as_f64(), Some(0.75));
+        assert_eq!(card.at("change_trend").as_f64(), Some(-0.5));
+        assert_eq!(card.at("reasons").render(0), "{\"spelling\":4}");
+        let keys: Vec<&str> = match &card {
+            Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            &keys[keys.len() - 6..],
+            &[
+                "corrected",
+                "unchanged",
+                "uncorrected",
+                "edits",
+                "change_rate",
+                "change_trend"
+            ]
+        );
+        assert!(report_card(&[edited(4, 1.0, 3)]).at("change_trend").is_null());
         let empty = report_card(&[]);
         assert_eq!(empty.at("rounds").as_i64(), Some(0));
         assert!(empty.at("trend").is_null() && empty.at("stats").is_null());
@@ -911,7 +1282,8 @@ mod tests {
     #[test]
     fn a_request_body_is_read_as_python_reads_it() {
         let body = crate::json::parse(
-            "{\"rounds\": 1, \"count\": 3, \"provider\": \"OpenAI\", \"model\": \"gpt-x\", \"seed\": 4}",
+            "{\"rounds\": 1, \"count\": 3, \"provider\": \"OpenAI\", \"model\": \"gpt-x\", \"seed\": 4, \
+             \"correct\": true, \"severity\": 1.5}",
         )
         .unwrap();
         let config = CriticConfig::from_fields(&Fields::new(&body)).unwrap();
@@ -919,11 +1291,14 @@ mod tests {
             (config.provider.as_str(), config.reviewer_model.as_str(), config.seed),
             ("chatgpt", "gpt-x", Some(4))
         );
+        assert_eq!((config.correct, config.severity), (true, 1.5));
         for bad in [
             "{\"count\": 0}",
             "{\"provider\": \"gemini\"}",
             "{\"threshold\": 11}",
             "{\"rounds\": -1}",
+            "{\"severity\": -1}",
+            "{\"correct\": \"yes\"}",
         ] {
             let body = crate::json::parse(bad).unwrap();
             let err = CriticConfig::from_fields(&Fields::new(&body)).unwrap_err();

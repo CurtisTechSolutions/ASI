@@ -21,7 +21,7 @@ follow; `../../../README.md` documents what each panel actually *does*.
 | `TwoNRLPanel.jsx` | 2NRL | the three phases — train on the bad, invert, fine-tune on the good |
 | `NegativePanel.jsx` | Negative | the negative network: the failures, why they were failures, and the automatic reviewer loop |
 | `EvolvePanel.jsx` | Evolve | the self-upgrading loop |
-| `OllamaPanel.jsx` | Ollama | a corpus written from a prompt, adversarial review, and a thinking model's thinking taught to the network as thoughts (`POST /api/ollama/think`) |
+| `OllamaPanel.jsx` | Ollama | a corpus written from a prompt, adversarial review, letter-level correction whose diff teaches the negative network, and a thinking model's thinking taught to the network as thoughts (`POST /api/ollama/think`) |
 | `TutorPanel.jsx` | Tutor | the automated English lessons and the report card that plans the next batch |
 | `CodeGenPanel.jsx` | Code | the code-generation loop — problems, attempts, sandbox runs, the teacher selector |
 | `AgentPanel.jsx` | Agent | tool use: the network browses, an LLM judges, 2NRL follows |

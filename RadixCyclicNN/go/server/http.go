@@ -76,6 +76,19 @@ func (f fields) text(name string, def *string) (string, error) {
 
 func (f fields) optText(name, def string) (string, error) { return f.text(name, &def) }
 
+// optionalFlag is a boolean the request may leave out (or set to null): nil then.
+func optionalFlag(f fields, name string) (*bool, error) {
+	v, ok := f.lookup(name)
+	if !ok || v == nil {
+		return nil, nil
+	}
+	value, err := f.flag(name, false)
+	if err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
 func (f fields) flag(name string, def bool) (bool, error) {
 	v, ok := f.lookup(name)
 	if !ok {
@@ -252,11 +265,11 @@ func init() {
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures)}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures), provenance (false: the guard's report counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each; default: the server's setting)}")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure)}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure), provenance (default: the server's setting; false counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each)}")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were vetoed, not which nor why; default: the server's setting)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
 	route("POST", "/api/converse/stream", rConverseStream)
 	doc("POST", "/api/converse/stream", "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes it) are the answer and are never taken back; between them is the window a backtrack may still rewrite: look (from: the context it continues, \"\" for a fresh text), draft (text, cost: what it was about to say), caught (kind, noticed, cut: what it keeps), backtrack (step, cut, wider), found (text, cost, explored) or stuck (explored); the last line is {event: done, ...} with the /api/converse document; a failure after the first line is {event: error, error}")
 	route("POST", "/api/think", rThink)
@@ -757,7 +770,11 @@ func rPredict(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	p, report, err := rq.svc.Predict(prefix, o, guard)
+	provenance, err := optionalFlag(f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	p, report, err := rq.svc.Predict(prefix, o, guard, provenance)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -829,7 +846,11 @@ func rGenerate(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	results, report, err := rq.svc.Generate(o, guard)
+	provenance, err := optionalFlag(f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	results, report, err := rq.svc.Generate(o, guard, provenance)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -936,7 +957,11 @@ func rConverse(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	turns, report, err := rq.svc.Converse(opening, o, guard)
+	provenance, err := optionalFlag(rq.f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
+	turns, report, err := rq.svc.Converse(opening, o, guard, provenance)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -953,6 +978,10 @@ func rConverseStream(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	provenance, err := optionalFlag(rq.f, "provenance")
+	if err != nil {
+		return 0, nil, err
+	}
 	return 200, &streamResponse{run: func(write func(any) error) error {
 		// a client that goes away mid-conversation does not stop the conversation, which finishes under the
 		// model lock as it would have; its events are simply not written any more
@@ -962,7 +991,7 @@ func rConverseStream(rq *request) (int, any, error) {
 				gone = write(event)
 			}
 		}
-		turns, report, err := rq.svc.Converse(opening, o, guard)
+		turns, report, err := rq.svc.Converse(opening, o, guard, provenance)
 		if err != nil {
 			return err
 		}
