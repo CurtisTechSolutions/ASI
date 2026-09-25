@@ -34,6 +34,7 @@ import random
 from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K
+from .attention import AttentionBand
 from .backend import CSR, NodeParams
 from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
 from .encoding import (
@@ -147,6 +148,12 @@ class RadixCyclicGraph:
         Fixed here: every label, every index key and every offset below is
         measured in this encoding's units.  It travels with the model file."""
         self.encoding.validate()
+        self.attention = AttentionBand()
+        """Where inside a gram a correction's blame and credit land (:mod:`radixnet.attention`).
+
+        Off by default - each changed unit is charged to the step that wrote
+        it.  Unlike the encoding it changes nothing the graph holds, so it can
+        be switched at any time; it travels with the model file while it is on."""
         self.rng = random.Random(self.seed)
         self.labels: list[str] = []
         self.z: list[float] = []
@@ -1030,6 +1037,8 @@ class RadixCyclicGraph:
             # written only when it is not the character trigram of stride 1, so an
             # ordinary file is byte for byte what it always was
             **({} if self.encoding.is_default() else {"encoding": self.encoding.to_dict()}),
+            # the attention band, likewise only while it is on: a file without it was written with it off
+            **({"attention": self.attention.to_dict()} if self.attention.on else {}),
             "seed": self.seed,
             "inverted": self.inverted,
             "version": self.version.value,
@@ -1067,6 +1076,7 @@ class RadixCyclicGraph:
                 or labels[THINK] != THINK_LABEL:
             raise ValueError("graph document is missing the START/END/BACK/THINK sentinels")
         g = cls(seed=int(d.get("seed", 0)), encoding=Encoding.from_dict(d.get("encoding")))
+        g.attention = AttentionBand.from_dict(d.get("attention"))
         enc = g.encoding
         g.inverted = bool(d.get("inverted", False))
         g.labels = labels

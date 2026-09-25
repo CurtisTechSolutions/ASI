@@ -6,7 +6,7 @@ React hooks shared by the panels.
 |---|---|
 | `useJob.js` | the lifecycle of one asynchronous server job: start it, poll `GET /api/job` every second until it leaves the `running` state, stop it, and keep polling until the terminal state is actually observed |
 | `useStoredState.js` | `useState` that remembers its value in this browser (see `../storage.js`) — one panel's own setting, under its own name |
-| `useSiteSettings.jsx` | the settings **several** panels share, held once in a provider at the top of the app: the traversal (through `useNetworkSettings`), the sampling filters and the diversity, and how a run walks its texts. Edited on the Settings tab, and read (and written) by the Predict, Generate and Train tabs, which show the same controls. The rules are pure functions in `../settings.js` |
+| `useSiteSettings.jsx` | the settings **several** panels share, held once in a provider at the top of the app: the traversal (through `useNetworkSettings`), the sampling filters and the diversity, how a run walks its texts, and whether Predict and Generate ask the model backwards. Edited on the Settings tab, and read (and written) by the Predict, Generate and Train tabs, which show the same controls. The rules are pure functions in `../settings.js` and `../backwards.js` |
 | `useNetworkSettings.jsx` | the traversal a search runs and its two scales — one of the site-wide settings, under its original `network.*` names |
 
 ## Why `useJob` exists
@@ -50,13 +50,14 @@ the site rather than to a panel therefore lives **once**, in
 through `useSiteSettings()`: one source of truth, several doors into it.
 
 ```jsx
-const { network, search, training } = useSiteSettings();
+const { network, search, training, backwards } = useSiteSettings();
 
 network.set("traversal", "punishment");  // changes it everywhere at once
 search.set("topP", "0.9");
 await api.predict({ prefix, mode, ...network.body, ...search.body(mode) });  // only what `mode` reads, only what is on
 await api.train({ texts, ...training.body() });
 search.problems;                         // {topP: "Top-p must lie in (0, 1] ..."} while a field is out of range
+backwards.on;                            // ask a model trained backwards: turn the query around, and the answer back
 ```
 
 Outside the provider the hook returns the defaults with no-op setters, so a

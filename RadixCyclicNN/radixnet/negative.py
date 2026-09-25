@@ -221,32 +221,47 @@ class NegativeGraph(RadixCyclicGraph):
 
     # -- the tracked numbers -------------------------------------------------
 
-    def record_failure(self, edge_ids: Iterable[int], severity: float, reason: str | None) -> int:
-        """Blame every listed alive edge by ``severity`` for ``reason``; returns how many were blamed."""
+    def record_failure(
+        self, edge_ids: Iterable[int], severity: float, reason: str | None, shares: Sequence[float] | None = None
+    ) -> int:
+        """Blame every listed alive edge by ``severity`` for ``reason``; returns how many were blamed.
+
+        ``shares`` (one per listed edge) blames each by ``severity * share``
+        instead: the attention band's charges (:mod:`radixnet.attention`), so
+        a step that only glimpsed a change at the edge of its gram carries less
+        of it.  Every listed edge still counts one failure - it was part of one.
+        """
         amount = abs(float(severity))
         if not math.isfinite(amount):
             raise ValueError(f"severity must be finite, got {severity}")
+        edges = list(edge_ids)
+        if shares is not None and len(shares) != len(edges):
+            raise ValueError(f"shares has {len(shares)} entries for {len(edges)} edges")
         rid = self.reason_id(reason)
         blame, fails, reasons, alive = self.edge_blame, self.edge_fails, self.edge_reasons, self.edge_alive
         touched = 0
-        for e in edge_ids:
+        added = 0.0  # the blame laid, edge by edge, when the edges carry shares
+        for i, e in enumerate(edges):
             if not (0 <= e < len(blame)) or not alive[e]:
                 continue
-            blame[e] += amount
+            owed = amount if shares is None else amount * float(shares[i])
+            blame[e] += owed
             fails[e] += 1
-            if amount:
+            if owed:
                 by_reason = reasons[e]
-                by_reason[rid] = by_reason.get(rid, 0.0) + amount
+                by_reason[rid] = by_reason.get(rid, 0.0) + owed
                 if len(by_reason) > MAX_EDGE_REASONS:
                     # the weakest of the *others* goes: a reason just added carries the least blame of
                     # all by construction and would otherwise evict itself
                     weakest = min((r for r in by_reason if r != rid), key=lambda r: by_reason[r])
                     del by_reason[weakest]
+            added += owed
             touched += 1
         if touched:
-            self.total_blame += amount * touched
+            laid = amount * touched if shares is None else added
+            self.total_blame += laid
             self.total_fails += touched
-            self.reason_blame[rid] += amount * touched
+            self.reason_blame[rid] += laid
             self.reason_fails[rid] += 1
             self.recompute_weights()
         return touched
@@ -568,6 +583,7 @@ class NegativeNet(GraphModel):
     """
 
     kind = "negative"
+    takes_corrections = True
     format = NEGATIVE_MODEL_FORMAT
     label = "Negative / blame"
     description = (
@@ -824,8 +840,8 @@ class NegativeNet(GraphModel):
         """
         cfg = _resolve_config(config, overrides)
         return self._pass(
-            texts, cfg, blame=True, amount=abs(float(severity)), reason=_clean_reason(reason), source=source,
-            note=note, progress=progress, stop_event=stop_event, checkpoint_manager=checkpoint_manager,
+            self._read(texts, cfg), cfg, blame=True, amount=abs(float(severity)), reason=_clean_reason(reason),
+            source=source, note=note, progress=progress, stop_event=stop_event, checkpoint_manager=checkpoint_manager,
         )
 
     def punish(self, texts: Iterable[str] | str, *, epochs: int = 1, strength: float | None = 1.0,
@@ -1016,6 +1032,11 @@ class NegativeNet(GraphModel):
         * an edge the correction walks too is never blamed - the network wrote
           the right characters by another route.
 
+        With the attention band on (:mod:`radixnet.attention`) a step is
+        blamed ``severity * charge`` for the changed characters its grams see,
+        the gram with a change at its centre the most, rather than
+        ``severity`` for the characters it wrote.
+
         Returns ``{"changes", "edits", "blamed", "cleared", "reason",
         "severity", "wrong_chars", "right_chars"}``.
         """
@@ -1038,13 +1059,24 @@ class NegativeNet(GraphModel):
             return result
         self._register([grams])  # the failure joins the structure; the correction never does
         cleared = {e for _p, e in self._shared_edges(right)} if enc.encode(right) else set()
-        blamed = [
-            e for _prev, e in self._steps_over(grams, enc.length(wrong), wrong_spans) if e not in cleared
+        steps = [
+            (e, charge) for _prev, e, charge, _focus in self._charged_steps(grams, enc.length(wrong), wrong_spans)
+            if e not in cleared
         ]
+        blamed = [e for e, _charge in steps]
         if blamed and amount:
-            result["blamed"] = self.graph.record_failure(blamed, amount, tag)
+            graph = self.graph
+            if graph.attention.on:
+                shares = [charge for _e, charge in steps]
+                result["blamed"] = graph.record_failure(blamed, amount, tag, shares)
+                laid = 0.0  # what record_failure laid: every edge of a traced path is alive
+                for share in shares:
+                    laid += amount * share
+            else:
+                result["blamed"] = graph.record_failure(blamed, amount, tag)
+                laid = amount * result["blamed"]
             meta_add(self.meta, "failures_total", 1)
-            self.meta["blame_total"] += amount * result["blamed"]
+            self.meta["blame_total"] += laid
             meta_add(self.meta, "trained_texts", 1)
             meta_add(self.meta, "trained_chars", len(wrong))
             if source:
@@ -1313,6 +1345,7 @@ class NegativeNet(GraphModel):
             "units": self.encoding.units_name,
             "ngram": self.encoding.n,
             "stride": self.encoding.stride,
+            "attention_blur": g.attention.blur,
             "compression_ratio": g.compression_ratio(),
             "inverted": g.inverted,
             "backend": self.backend.name,

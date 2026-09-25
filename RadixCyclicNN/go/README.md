@@ -37,7 +37,7 @@ split or a merge) takes a write lock.
 
 | directory | what it is |
 |---|---|
-| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools, the LLM clients and the MCP server (`mcp.go`) |
+| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools, the LLM clients, the MCP server (`mcp.go`) and today's format (`assistant.go`) |
 | `server/` | the HTTP API — the same JSON contract as the Python server, so the prebuilt React frontend runs unchanged against it |
 | `cmd/radixnet-count/` | the CLI binary |
 | `go.mod` | the module — `github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, **no dependencies** |
@@ -65,6 +65,18 @@ is a prebuilt binary for convenience.
 `../README.md` § *Go implementation of the count / reward model* lists every
 command and every global flag, and says where the goroutines go.
 
+## Today's format
+
+`radixnet-count talk --message "tell me about the cat"` answers the way every
+language model is talked to now - the thinking first, line by line as the
+search takes each step, then the text one node of the walk at a time - and the
+server answers `POST /v1/chat/completions` (OpenAI's dialect) and `POST
+/v1/messages` (Anthropic's), streamed with `stream: true`, with `GET
+/v1/models` and `POST /v1/messages/count_tokens` beside them.  The same
+documents as the Python server's, held to them by
+`../tests/test_go_parity.py::TestGoAssistantParity`; `radixnet/assistant.go`,
+`server/assistant.go`, `cmd/radixnet-count/talk.go`.
+
 ## Search and training methods
 
 `predict` and `generate` take `--top-k`, `--top-p`, `--min-p` (what a sampled
@@ -75,6 +87,14 @@ The HTTP server takes the same names.  All off by default, and held to Python's
 graph, history and buffer by `../tests/test_go_parity.py::TestGoSearchAndTraining`
 (`../SPEC-SearchAndTraining.md`; `radixnet/training.go`).  A streaming source
 is read into memory when a run asks for an order, a curriculum or replay.
+
+`train --reverse` (`reverse` on `/api/train`, `Plan.Reverse`) reads every text
+backwards, in the model's units - its last character, or word, first - so the
+model learns what comes before (the spec's §9).  It streams: `ReversedSource`
+turns each text around as it is read, and keeps an archive's entries as parts,
+so `--parallel-parts` still streams them side by side.  The count model and the
+negative network (whose training is blaming) both read backwards; the count
+model is held to Python's file byte for byte, in characters and in words.
 
 ## The second traversal
 

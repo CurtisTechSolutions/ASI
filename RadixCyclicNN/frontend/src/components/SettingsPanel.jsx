@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { browserStorage, clearSettings, settingNames } from "../storage.js";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { fmtInt } from "../util.js";
+import BackwardsField from "./BackwardsField.jsx";
 import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
 import TrainingPlanFields from "./TrainingPlanFields.jsx";
@@ -65,14 +66,15 @@ function BrowserCard({ changed }) {
  * every training run starts from.
  *
  * The **traversal** (what a search looks for), the **sampling filters** and
- * the **diversity** (how a sampled walk and a beam choose), and **how a run
- * walks its texts** (the order, the curriculum, the replay and the early
- * stop). The Predict, Generate and Train tabs show the same controls, so a
- * change made there is a change made here. What belongs to the model instead -
+ * the **diversity** (how a sampled walk and a beam choose), whether a query is
+ * asked **backwards** (for a model trained backwards), and **how a run walks
+ * its texts** (the order, the curriculum, the replay and the early stop). The
+ * Predict, Generate and Train tabs show the same controls, so a change made
+ * there is a change made here. What belongs to the model instead -
  * its encoding and its score function - is on the Model settings tab.
  */
-export default function SettingsPanel() {
-  const { network, search, training } = useSiteSettings();
+export default function SettingsPanel({ status }) {
+  const { network, search, training, backwards } = useSiteSettings();
   return (
     <>
       <div className="card wide">
@@ -109,6 +111,11 @@ export default function SettingsPanel() {
         ) : null}
       </div>
 
+      <div className="card">
+        <h2>Backwards</h2>
+        <BackwardsField status={status} />
+      </div>
+
       <div className="card wide">
         <h2>How a run walks its texts</h2>
         <TrainingPlanFields />
@@ -121,7 +128,9 @@ export default function SettingsPanel() {
         ) : null}
       </div>
 
-      <BrowserCard changed={[network.traversal, network.penaltyScale, network.meritScale, search.values, training.values]} />
+      <BrowserCard
+        changed={[network.traversal, network.penaltyScale, network.meritScale, search.values, training.values, backwards.on]}
+      />
     </>
   );
 }

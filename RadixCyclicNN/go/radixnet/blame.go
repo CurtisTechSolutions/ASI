@@ -3,6 +3,7 @@ package radixnet
 import (
 	"math"
 	"strings"
+	"unicode"
 )
 
 // Where the negative network's data comes from: the tutor's verdicts, turned into blame.
@@ -18,6 +19,14 @@ import (
 //     written out in correct English.  The mistake is the reason, the mark is
 //     the severity, and the diff against the correction says which characters
 //     were wrong (FaultsFromLessons, Model.BlameCorrection);
+//   - the adversarial reviewer (review.go): an LLM rates the network's own
+//     texts 0-10, passes or fails each one and writes a one-sentence critique;
+//   - the copy editor (CorrectTexts): the same LLM writes each of the
+//     network's texts out correctly, changing as little as it can, and the diff
+//     between the two is the lesson - "Hi howe are you??" against "Hi, how are
+//     you?" blames the e and the second ?, not the sentence
+//     (FaultsFromCorrections, Model.BlameCorrection); a text it handed back
+//     unchanged clears blame;
 //   - a person blaming a text by hand (the CLI's `negative blame`, the API).
 //
 // A Fault is a text, a reason (the tutor's own error type, or one out of
@@ -53,6 +62,43 @@ var reasonPatterns = []reasonPattern{
 	{"incoherent", []string{"incoheren", "meaningless", "make no sense", "does not make sense", "doesn't make sense",
 		"nonsensical", "confusing", "unintelligible"}},
 	{"off-topic", []string{"off-topic", "off topic", "irrelevant", "unrelated", "does not answer", "ignores the prompt"}},
+}
+
+// CorrectionReasons are the reason tags of a corrected text: what the copy
+// editor's smallest change put right ("none": nothing).
+var CorrectionReasons = []string{
+	"spelling", "punctuation", "capitalisation", "spacing", "agreement", "tense", "article", "preposition",
+	"plural", "pronoun", "word-order", "vocabulary", "repetition", "fragment", "nonsense", "grammar", "none",
+}
+
+// CorrectionSeverity is how heavily one correction is blamed: one ordinary
+// failure per corrected text, placed only on its changed characters.
+const CorrectionSeverity = 1.0
+
+// correctionAliases are the editor's other words for the vocabulary's reasons.
+var correctionAliases = map[string]string{
+	"typo": "spelling", "misspelling": "spelling", "misspelt": "spelling", "spell": "spelling",
+	"capitalization": "capitalisation", "case": "capitalisation", "casing": "capitalisation",
+	"capital": "capitalisation", "uppercase": "capitalisation", "lowercase": "capitalisation",
+	"whitespace": "spacing", "space": "spacing", "spaces": "spacing",
+	"subject-verb": "agreement", "verb-agreement": "agreement", "conjugation": "agreement",
+	"articles": "article", "prepositions": "preposition", "plurals": "plural", "number": "plural",
+	"pronouns": "pronoun", "order": "word-order", "word order": "word-order", "syntax": "grammar",
+	"wording": "vocabulary", "word-choice": "vocabulary", "word choice": "vocabulary", "word": "vocabulary",
+	"repeat": "repetition", "repeated": "repetition", "duplicate": "repetition", "duplication": "repetition",
+	"incomplete": "fragment", "truncated": "fragment", "unfinished": "fragment",
+	"gibberish": "nonsense", "meaningless": "nonsense", "garbled": "nonsense",
+	"ok": "none", "correct": "none", "nothing": "none", "unchanged": "none", "no change": "none",
+}
+
+// isCorrectionReason reports whether word is one of CorrectionReasons.
+func isCorrectionReason(word string) bool {
+	for _, reason := range CorrectionReasons {
+		if reason == word {
+			return true
+		}
+	}
+	return false
 }
 
 // ClassifyOptions are what else is known about a critique.
@@ -103,6 +149,101 @@ func SeverityFromRating(rating *float64, threshold float64) float64 {
 	}
 	share := math.Max(0, math.Min(1, (limit-*rating)/limit))
 	return floor + (ceiling-floor)*share
+}
+
+// punctuation is what a change that only moves punctuation is made of.
+const punctuation = ".,;:!?'\"-()[]{}\u2018\u2019\u201c\u201d\u2013\u2014/&"
+
+func isPunctuation(r rune) bool { return strings.ContainsRune(punctuation, r) }
+
+// ReasonFromChanges is the reason a diff speaks for itself, from what its
+// edits touched ("none" when nothing changed).
+//
+// Every edit is read for what it moved and the widest kind wins: a whole word
+// inserted or struck out is grammar, a change that only turns a word into
+// another word is spelling, and one that only touches punctuation, letter case
+// or spaces is that.
+func ReasonFromChanges(changes []Change) string {
+	kinds := map[string]bool{}
+	for _, edit := range changes {
+		if edit.Op == "equal" || edit.Wrong == edit.Right {
+			continue
+		}
+		kinds[changeKind(edit.Wrong, edit.Right)] = true
+	}
+	for _, kind := range []string{"grammar", "spelling", "punctuation", "spacing", "capitalisation"} {
+		if kinds[kind] {
+			return kind
+		}
+	}
+	return "none"
+}
+
+// changeKind is what one edit moved: punctuation, spaces, letter case, the
+// letters of a word, or whole words.
+func changeKind(wrong, right string) string {
+	moved := wrong + right
+	if moved != "" && strings.IndexFunc(moved, func(r rune) bool { return !isPunctuation(r) }) < 0 {
+		return "punctuation"
+	}
+	if moved != "" && strings.TrimSpace(moved) == "" {
+		return "spacing"
+	}
+	if strings.ToLower(wrong) == strings.ToLower(right) {
+		return "capitalisation"
+	}
+	without := func(s string) string {
+		return strings.Map(func(r rune) rune {
+			if isPunctuation(r) || unicode.IsSpace(r) {
+				return -1
+			}
+			return r
+		}, s)
+	}
+	if without(wrong) == without(right) {
+		// only punctuation and spaces moved, however the letters were carried along
+		if strings.IndexFunc(moved, isPunctuation) >= 0 {
+			return "punctuation"
+		}
+		return "spacing"
+	}
+	if strings.IndexFunc(wrong, unicode.IsSpace) >= 0 || strings.IndexFunc(right, unicode.IsSpace) >= 0 {
+		return "grammar" // a space moved with the letters: a word was added, dropped or reordered
+	}
+	return "spelling" // letters changed inside one word
+}
+
+// CorrectionReason is the reason tag behind a copy editor's correction, out of
+// CorrectionReasons.
+//
+// The editor's own word wins when the vocabulary knows it (aliases such as
+// typo or capitalization are accepted); failing that its note is read the way
+// a critique is (Classify), and failing that the diff decides
+// (ReasonFromChanges).  "none" is only ever what the diff says about an
+// unchanged text, so a changed text is never tagged with it.
+func CorrectionReason(reason, note string, changes []Change) string {
+	word := strings.Trim(strings.ToLower(collapse(reason)), ".:;,\"'")
+	if alias, ok := correctionAliases[word]; ok {
+		word = alias
+	}
+	if word != "none" && isCorrectionReason(word) {
+		return word
+	}
+	if hyphenated := strings.ReplaceAll(word, " ", "-"); word != "none" && isCorrectionReason(hyphenated) {
+		return hyphenated
+	}
+	// the note is read as a critique; "other" (nothing recognised) is not a correction reason and falls through
+	spoken := Classify(note, ClassifyOptions{Default: DefaultReason})
+	if mapped, ok := map[string]string{"gibberish": "nonsense", "truncated": "fragment", "incoherent": "nonsense"}[spoken]; ok {
+		spoken = mapped
+	}
+	if isCorrectionReason(spoken) {
+		return spoken
+	}
+	if fromDiff := ReasonFromChanges(changes); fromDiff != "none" {
+		return fromDiff
+	}
+	return "grammar"
 }
 
 // Fault is one lesson for the negative network.
@@ -204,6 +345,12 @@ type TeachReport struct {
 	Source       string           `json:"source"`
 	Faults       []Fault          `json:"faults"`
 	Records      []map[string]any `json:"records"`
+	// Severity is the blame per corrected text (TeachCorrections); Edits the
+	// characters the editor changed over all corrections, in units of the
+	// network's encoding; Uncorrected the texts it said nothing usable about.
+	Severity    float64 `json:"severity"`
+	Edits       int     `json:"edits"`
+	Uncorrected int     `json:"uncorrected"`
 }
 
 // TeachOptions steer one Teach call.
@@ -254,6 +401,8 @@ func Teach(negative *Model, faults []Fault, passed []string, o TeachOptions) (*T
 				return nil, err
 			}
 			report.Edges += out.Blamed
+			report.Edits += out.Edits
+			report.Records = append(report.Records, correctionRecord(out))
 		} else {
 			records, err := negative.Blame([]string{fault.Text}, opts)
 			if err != nil {
@@ -291,6 +440,19 @@ func Teach(negative *Model, faults []Fault, passed []string, o TeachOptions) (*T
 		}
 	}
 	return report, nil
+}
+
+// correctionRecord is a taught correction as the report's records carry it
+// (the Python outcome dict, so both journals read the same).
+func correctionRecord(out *NegativeCorrection) map[string]any {
+	changes := out.Changes
+	if changes == nil {
+		changes = []Edit{}
+	}
+	return map[string]any{
+		"changes": changes, "edits": out.Edits, "blamed": out.Blamed, "cleared": out.Cleared, "reason": out.Reason,
+		"severity": out.Severity, "phase": out.Phase, "wrong_chars": out.WrongChars, "right_chars": out.RightChars,
+	}
 }
 
 // TeachLessons feeds a round of English lessons into the negative network.
@@ -359,6 +521,74 @@ func TeachReviews(negative *Model, reviews []Review, threshold float64, clearPas
 		return nil, err
 	}
 	report.Source, report.Threshold = source, threshold
+	return report, nil
+}
+
+// FaultsFromCorrections turns a copy editor's corrections into faults and the
+// texts that clear blame.
+//
+// Every text the editor changed becomes a fault that carries its correction,
+// so Teach routes it through Model.BlameCorrection and only the characters the
+// editor struck out or replaced are blamed; its reason is the editor's word for
+// the mistake (CorrectionReason) and its note the editor's sentence.  The
+// texts it handed back unchanged come back separately to clear blame.  A text
+// it gave no usable answer for ("uncorrected") is neither: nobody said
+// anything about it.
+func FaultsFromCorrections(corrections []CorrectionEntry, severity float64, source string) ([]Fault, []string) {
+	faults := []Fault{}
+	unchanged := []string{}
+	amount := math.Abs(severity)
+	for _, entry := range corrections {
+		if entry.Text == "" || entry.Correction == nil {
+			continue
+		}
+		correction := *entry.Correction
+		verdict := strings.ToLower(strings.TrimSpace(entry.Verdict))
+		if verdict == "unchanged" || (verdict == "" && correction == entry.Text) {
+			unchanged = append(unchanged, entry.Text)
+			continue
+		}
+		if correction == entry.Text {
+			continue
+		}
+		reason := strings.ToLower(strings.TrimSpace(entry.Reason))
+		if reason == "none" || !isCorrectionReason(reason) {
+			reason = CorrectionReason(reason, entry.Note, entry.Changes)
+		}
+		faults = append(faults, Fault{
+			Text: entry.Text, Reason: reason, Severity: amount, Note: entry.Note, Source: source,
+			Correction: correction,
+		})
+	}
+	return faults, unchanged
+}
+
+// TeachCorrections feeds a copy editor's corrections straight into the
+// negative network (see FaultsFromCorrections).
+//
+// The report is Teach's plus Source, Severity, Faults, Passed (the unchanged
+// texts), Edits (the characters the editor changed over all faults, in units
+// of the network's encoding) and Uncorrected.
+func TeachCorrections(negative *Model, corrections []CorrectionEntry, severity float64, clearPasses bool,
+	source string, o TeachOptions) (*TeachReport, error) {
+	if source == "" {
+		source = "correction"
+	}
+	faults, unchanged := FaultsFromCorrections(corrections, severity, source)
+	passed := unchanged
+	if !clearPasses {
+		passed = nil
+	}
+	report, err := Teach(negative, faults, passed, o)
+	if err != nil {
+		return nil, err
+	}
+	report.Source, report.Severity, report.Passed = source, math.Abs(severity), len(unchanged)
+	for _, entry := range corrections {
+		if entry.Verdict == "uncorrected" {
+			report.Uncorrected++
+		}
+	}
 	return report, nil
 }
 

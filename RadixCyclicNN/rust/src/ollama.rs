@@ -14,9 +14,9 @@
 //! model is `$RADIXNET_OLLAMA_MODEL`, else `llama3.2`.
 //!
 //! What is done *with* the answers - a corpus written to order, the
-//! adversarial review - is provider-independent and lives in
-//! [`crate::review`]; this module is the transport and the two front doors
-//! (the command line and the HTTP routes) onto it.  One thing is Ollama's
+//! adversarial review, the letter-level correction - is provider-independent
+//! and lives in [`crate::review`]; this module is the transport and the two
+//! front doors (the command line and the HTTP routes) onto it.  One thing is Ollama's
 //! own: a *thinking* model's reasoning (`think: true`, returned as
 //! `thinking`, or written inline between `<think>` tags by older models),
 //! which [`thoughts_from_prompt`] collects and the network is taught as its
@@ -38,7 +38,7 @@ use crate::llm::{
 };
 use crate::radix::{Feedback, TrainConfig};
 use crate::report::stats;
-use crate::review::{self, ReviewOptions};
+use crate::review::{self, CorrectionOptions, ReviewOptions};
 use crate::service::Service;
 
 /// What this module's own lines are filed under.
@@ -431,19 +431,21 @@ impl LlmClient for OllamaClient {
 
 // -- the command line ---------------------------------------------------------------------------
 
-/// `radixnet ollama <models | corpus | review>`: a corpus written to order,
-/// and an adversarial review of what the network itself writes.  `--url`,
-/// `--ollama-model` and `--timeout` override `$OLLAMA_HOST`,
-/// `$RADIXNET_OLLAMA_MODEL` and the 120 seconds one answer may take.
+/// `radixnet ollama <models | corpus | review | correct>`: a corpus written
+/// to order, an adversarial review of what the network itself writes, and a
+/// letter-level correction of it.  `--url`, `--ollama-model` and `--timeout`
+/// override `$OLLAMA_HOST`, `$RADIXNET_OLLAMA_MODEL` and the 120 seconds one
+/// answer may take.
 pub fn cli(ctx: &Ctx) -> Result<(), String> {
     match ctx.args.action() {
         "models" => models_cli(ctx),
         "corpus" => corpus_cli(ctx),
         "review" => review_cli(ctx),
+        "correct" => correct_cli(ctx),
         "think" => think_cli(ctx),
-        "" => Err("ollama needs an action: models, corpus, review or think".to_string()),
+        "" => Err("ollama needs an action: models, corpus, review, correct or think".to_string()),
         other => Err(format!(
-            "unknown ollama action {other:?}; expected models, corpus, review or think"
+            "unknown ollama action {other:?}; expected models, corpus, review, correct or think"
         )),
     }
 }
@@ -783,16 +785,87 @@ fn review_cli(ctx: &Ctx) -> Result<(), String> {
     Ok(())
 }
 
+/// `radixnet ollama correct`: the LLM plays the copy editor.  Every sample the
+/// network generates (`--count`, `--prefix`, `--max-length`, `--temperature`)
+/// or every given text (`--text`, `--data`) is written out correctly with as
+/// few characters changed as possible, and the diff between the two says
+/// which characters were the mistake.  With `--blame` only those characters
+/// are blamed in the negative network (`--negative`), under the editor's word
+/// for the mistake and at `--severity` per corrected text, and the texts it
+/// handed back unchanged clear blame.
+fn correct_cli(ctx: &Ctx) -> Result<(), String> {
+    let args = &ctx.args;
+    let client = client_of(ctx)?;
+    let given = args.all("text");
+    let texts = if !given.is_empty() {
+        Some(given)
+    } else if args.get("data").is_some() {
+        Some(read_named(args, "data")?)
+    } else {
+        None
+    };
+    let mut model = if texts.is_none() { Some(ctx.open(true)?) } else { None };
+    let o = CorrectionOptions {
+        count: count_flag(ctx, "count", 8, 1)?,
+        prefix: args.str("prefix", ""),
+        max_length: count_flag(ctx, "max-length", 60, 0)?,
+        temperature: nonneg_flag(ctx, "temperature", 1.0)?,
+        texts,
+        context: args.str("context", ""),
+        model: client.model.clone(),
+        seed: args.get("seed").map(|_| ctx.seed),
+        batch: 0,
+    };
+    let result = review::adversarial_correction(model.as_mut(), &client, &o)?;
+    let mut doc = match result.to_json() {
+        Json::Obj(pairs) => pairs,
+        _ => Vec::new(),
+    };
+    doc.push(("negative".to_string(), Json::Null));
+    if args.on("blame") {
+        let severity = nonneg_flag(ctx, "severity", crate::blame::CORRECTION_SEVERITY)?;
+        let path = ctx.negative_path();
+        let mut negative = ctx.open_negative(false)?;
+        let report = review::teach_corrections(
+            &mut negative,
+            &result.corrections,
+            severity,
+            true,
+            "correction",
+            &TeachOptions::default(),
+        )?;
+        negative.save(&path)?;
+        doc.last_mut().expect("the negative slot").1 = Json::obj([
+            ("blamed", Json::Int(report.blamed as i64)),
+            ("cleared", Json::Int(report.cleared as i64)),
+            ("edges", Json::Int(report.edges as i64)),
+            ("edits", Json::Int(report.edits.unwrap_or(0) as i64)),
+            ("reasons", review::reason_rows(&negative)),
+            (
+                "lessons",
+                Json::Arr(report.faults.iter().map(|f| f.to_json()).collect()),
+            ),
+            ("path", Json::str(path.clone())),
+            ("saved", saved(&path)),
+            ("stats", negative_stats(&mut negative)),
+        ]);
+    }
+    ctx.emit(Json::Obj(doc));
+    Ok(())
+}
+
 // -- the routes ---------------------------------------------------------------------------------
 
 /// This area's routes:
 /// `GET /api/ollama/models`
 /// `POST /api/ollama/corpus`
 /// `POST /api/ollama/review`
+/// `POST /api/ollama/correct`
 pub fn routes(server: &mut Server<Service>) {
     server.route("GET", "/api/ollama/models", models_route);
     server.route("POST", "/api/ollama/corpus", corpus_route);
     server.route("POST", "/api/ollama/review", review_route);
+    server.route("POST", "/api/ollama/correct", correct_route);
     server.route("POST", "/api/ollama/think", think_route);
 }
 
@@ -1232,6 +1305,71 @@ fn review_route(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(accepted(Json::Obj(doc)))
 }
 
+/// The copy editor over the model's samples or `{texts}`: `{count, prefix,
+/// max_length, temperature, seed, context, url, model, timeout, blame (teach
+/// the negative network: only the characters the editor changed are blamed),
+/// severity (blame per corrected text)}`.  The answer is the correction
+/// summary plus `source`, `url`, `severity` and `negative` (what was taught,
+/// or null).
+fn correct_route(svc: &Arc<Service>, r: &Request) -> Answer {
+    let f = Fields::of(r);
+    let given = f.texts_optional("texts", "text")?;
+    let client = client_of_request(svc, &f)?;
+    let severity = f.number_or("severity", crate::blame::CORRECTION_SEVERITY, Some(0.0))?;
+    let (samples, source) = if !given.is_empty() {
+        (given, "given")
+    } else {
+        let count = f.count_or("count", 8, 1)?;
+        let prefix = f.text_or("prefix", "")?;
+        let max_length = f.count_or("max_length", 60, 0)?;
+        let temperature = f.number_or("temperature", 1.0, Some(0.0))?;
+        let seed = f.integer("seed", None)?;
+        // the model writes under its lock; the editor thinks without it
+        let drawn = svc.with_model(|m| review::sample_texts(m, count, &prefix, max_length, temperature, seed))?;
+        (drawn, "model")
+    };
+    let context = f.text_or("context", "")?;
+    let corrections = review::correct_texts(&client, &samples, &context, &client.model, review::DEFAULT_BATCH)?;
+    let result = review::summarise_corrections(source, &client.model, samples, corrections);
+    let mut doc = match result.to_json() {
+        Json::Obj(pairs) => pairs,
+        _ => Vec::new(),
+    };
+    doc.push(("url".to_string(), Json::str(client.url.clone())));
+    doc.push(("severity".to_string(), Json::Num(severity)));
+    doc.push(("negative".to_string(), Json::Null));
+    if f.flag("blame", false)? {
+        let taught = crate::critic::with_negative(svc, |negative| -> Result<Json, String> {
+            let report = review::teach_corrections(
+                negative,
+                &result.corrections,
+                severity,
+                true,
+                "correction",
+                &TeachOptions::default(),
+            )?;
+            Ok(Json::obj([
+                ("blamed", Json::Int(report.blamed as i64)),
+                ("cleared", Json::Int(report.cleared as i64)),
+                ("unmatched", Json::Int(report.unmatched as i64)),
+                ("edges", Json::Int(report.edges as i64)),
+                ("edits", Json::Int(report.edits.unwrap_or(0) as i64)),
+                ("uncorrected", Json::Int(report.uncorrected.unwrap_or(0) as i64)),
+                ("reasons", report.to_json().at("reasons").clone()),
+                (
+                    "lessons",
+                    Json::Arr(report.faults.iter().map(|f| f.to_json()).collect()),
+                ),
+                ("severity_mean", Json::Num(report.severity_mean)),
+                ("stats", negative_stats(negative)),
+                ("reason_table", review::reason_rows(negative)),
+            ]))
+        })??;
+        doc.last_mut().expect("the negative slot").1 = taught;
+    }
+    Ok(Json::Obj(doc))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1300,6 +1438,17 @@ pub(crate) mod tests {
                 "{\"models\": [{\"name\": \"fake:latest\", \"size\": 123}, \"junk\", {\"name\": \"other:7b\"}]}"
                     .to_string(),
             ),
+            "/api/generate"
+                if body.at("format").as_str() == Some("json")
+                    && body.at("system").as_str().is_some_and(|s| s.contains("copy editor")) =>
+            {
+                (
+                    200,
+                    "{\"response\": \"{\\\"corrections\\\": [{\\\"index\\\": 0, \\\"correction\\\": \\\"a text.\\\", \
+                     \\\"reason\\\": \\\"punctuation\\\", \\\"note\\\": \\\"no full stop\\\"}]}\"}"
+                        .to_string(),
+                )
+            }
             "/api/generate"
                 if body
                     .at("system")
@@ -1493,5 +1642,26 @@ pub(crate) mod tests {
             Some("Review these 1 texts:\n[0] a text\n\nReturn the JSON now.")
         );
         assert_eq!(body.at("options").render(0), "{\"temperature\":0.2}");
+    }
+
+    #[test]
+    fn a_correction_goes_out_over_http() {
+        let server = fake(ollama_answers);
+        let client = OllamaClient::new(&server.url, "fake:latest", Some(Duration::from_secs(5))).unwrap();
+        let o = CorrectionOptions {
+            texts: Some(vec!["a text".to_string()]),
+            ..Default::default()
+        };
+        let result = review::adversarial_correction(None, &client, &o).unwrap();
+        assert_eq!(result.corrected, vec!["a text".to_string()]);
+        assert_eq!(result.corrections[0].correction.as_deref(), Some("a text."));
+        assert_eq!(result.corrections[0].reason, "punctuation");
+        let (_, body) = server.seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            body.at("prompt").as_str(),
+            Some("Correct these 1 texts:\n[0] a text\n\nReturn the JSON now.")
+        );
+        assert_eq!(body.at("options").render(0), "{\"temperature\":0.0}");
+        assert_eq!(body.at("format").as_str(), Some("json"));
     }
 }

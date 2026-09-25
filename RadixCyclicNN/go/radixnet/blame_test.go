@@ -235,3 +235,113 @@ func TestTutorTrainerTeachesTheNegativeNetwork(t *testing.T) {
 		t.Fatal("with the mistake the teacher named")
 	}
 }
+
+// -- the copy editor's reasons and faults ------------------------------------
+
+func TestReasonFromChanges(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+		edit []Change
+	}{
+		{"nothing", "none", nil},
+		{"equal run", "none", []Change{{Op: "equal", Wrong: "a", Right: "a"}}},
+		{"punctuation", "punctuation", []Change{{Op: "delete", Wrong: "?", Right: ""}}},
+		{"spacing", "spacing", []Change{{Op: "insert", Wrong: "", Right: " "}}},
+		{"case", "capitalisation", []Change{{Op: "replace", Wrong: "the", Right: "The"}}},
+		{"comma carried", "punctuation", []Change{{Op: "replace", Wrong: "Hi how", Right: "Hi, how"}}},
+		{"spelling", "spelling", []Change{{Op: "replace", Wrong: "howe", Right: "how"}}},
+		{"a word", "grammar", []Change{{Op: "insert", Wrong: "", Right: " the"}}},
+		{"widest wins", "grammar", []Change{{Op: "delete", Wrong: "?", Right: ""}, {Op: "replace", Wrong: "cat sat", Right: "cats"}}},
+		{"spelling over punctuation", "spelling", []Change{{Op: "delete", Wrong: "?", Right: ""}, {Op: "replace", Wrong: "e", Right: ""}}},
+	}
+	for _, c := range cases {
+		if got := ReasonFromChanges(c.edit); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestCorrectionReason(t *testing.T) {
+	spelling := []Change{{Op: "replace", Wrong: "howe", Right: "how"}}
+	cases := []struct {
+		reason, note, want string
+		changes            []Change
+	}{
+		{"spelling", "", "spelling", nil},                             // the editor's word wins
+		{" Typo. ", "", "spelling", nil},                              // aliases, however punctuated
+		{"capitalization", "", "capitalisation", nil},                 // and however spelt
+		{"word order", "", "word-order", nil},                         // spaces become hyphens
+		{"none", "it is cut off mid-sentence", "fragment", spelling},  // "none" never tags a changed text: the note is read
+		{"", "pure gibberish", "nonsense", spelling},                  // the critique vocabulary maps onto the editor's
+		{"", "the sentence contradicts itself", "spelling", spelling}, // a reason the editor has no word for: the diff
+		{"", "", "spelling", spelling},                                // no words at all: the diff
+		{"", "", "grammar", nil},                                      // and no diff either: grammar, never none
+		{"vibes", "", "spelling", spelling},                           // an unknown word: the diff
+	}
+	for _, c := range cases {
+		if got := CorrectionReason(c.reason, c.note, c.changes); got != c.want {
+			t.Errorf("(%q, %q): got %q, want %q", c.reason, c.note, got, c.want)
+		}
+	}
+}
+
+func TestFaultsFromCorrectionsAndTeach(t *testing.T) {
+	fixed, same, unread := "Hi, how are you?", "the cat sat on the mat", "the dog"
+	entries := []CorrectionEntry{
+		{Text: "Hi howe are you??", Correction: &fixed, Verdict: "corrected", Reason: "spelling", Note: "spelling fixed",
+			Changes: []Change{{Op: "replace", Wrong: "howe", Right: "how"}}},
+		{Text: same, Correction: &same, Verdict: "unchanged", Reason: "none", Note: "nothing"},
+		{Text: unread, Correction: nil, Verdict: "uncorrected", Note: "no correction returned"},
+		{Text: "", Correction: &fixed, Verdict: "corrected"},                          // nothing to blame
+		{Text: same, Correction: &same, Verdict: "corrected"},                         // the verdict lies: no change, no fault
+		{Text: "cat", Correction: &fixed, Verdict: "corrected", Reason: "none"},       // "none" on a changed text: reason from the note / diff
+		{Text: "as it was", Correction: strPtr("as it was"), Verdict: "", Reason: ""}, // no verdict, no change: unchanged
+	}
+	faults, unchanged := FaultsFromCorrections(entries, -1.5, "correction")
+	if len(faults) != 2 || len(unchanged) != 2 {
+		t.Fatalf("two faults, two unchanged: %+v %v", faults, unchanged)
+	}
+	if f := faults[0]; f.Correction != fixed || f.Reason != "spelling" || f.Severity != 1.5 || f.Note != "spelling fixed" || f.Source != "correction" {
+		t.Fatalf("the fault carries the correction, the editor's word and |severity|: %+v", f)
+	}
+	if faults[1].Reason != "grammar" {
+		t.Fatalf("\"none\" on a changed text is replaced: %+v", faults[1])
+	}
+	if unchanged[0] != same || unchanged[1] != "as it was" {
+		t.Fatalf("the unchanged texts: %v", unchanged)
+	}
+
+	negative, err := NewNegativeModel(1, DefaultNegativeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := TeachCorrections(negative, entries[:3], 1.5, true, "", TeachOptions{})
+	if err != nil {
+		t.Fatalf("TeachCorrections: %v", err)
+	}
+	if report.Blamed != 1 || report.Passed != 1 || report.Uncorrected != 1 || report.Source != "correction" || report.Severity != 1.5 {
+		t.Fatalf("the report: %+v", report)
+	}
+	if report.Edits == 0 || report.Edges == 0 || report.Reasons["spelling"] != 1 || report.SeverityMean != 1.5 {
+		t.Fatalf("the diff was blamed under the editor's word: %+v", report)
+	}
+	if len(report.Records) == 0 || report.Records[0]["phase"] != "correction" || report.Records[0]["edits"] != report.Edits {
+		t.Fatalf("the correction's outcome is on record: %+v", report.Records)
+	}
+	if verdict := negative.Judge(fixed, JudgeOptions{}); verdict.Verdict != "pass" {
+		t.Fatalf("the correction itself is clean: %+v", verdict)
+	}
+	verdict := negative.Judge("Hi howe are you??", JudgeOptions{})
+	if len(verdict.Reasons) == 0 || verdict.Reasons[0].Reason != "spelling" || verdict.Blamed == 0 {
+		t.Fatalf("the mistake is known, and why: %+v", verdict)
+	}
+	// passes do not clear when asked not to; the count of unchanged texts is still reported
+	fresh, _ := NewNegativeModel(1, DefaultNegativeOptions())
+	report, err = TeachCorrections(fresh, entries[:3], 0.5, false, "editor", TeachOptions{})
+	if err != nil || report.Cleared != 0 || report.Passed != 1 || report.Source != "editor" {
+		t.Fatalf("clear off: %v %+v", err, report)
+	}
+}
+
+func strPtr(s string) *string { return &s }

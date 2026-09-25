@@ -21,6 +21,17 @@
 //! The server puts the pair in the way of every answer it hands out
 //! ([`Service::guard`] and the predict, generate and converse routes), and
 //! serves the negative network itself under `/api/negative`.
+//!
+//! # A veto need not explain itself
+//!
+//! With `provenance` off ([`FilterConfig::provenance`]: `--no-provenance`,
+//! `"provenance": false` on a request, or `POST /api/negative/settings` for
+//! the whole server) the veto applies exactly as before, but every verdict
+//! the pair reports keeps only the text, the decision and the rule
+//! ([`FilterVerdict::terse_json`]), and the guard's report says how many
+//! candidates it judged and how many it stopped rather than listing them
+//! ([`guard_report`]) - so an answer is not followed by pages of judgement
+//! when all that was wanted was the answer.
 
 use std::sync::Arc;
 
@@ -57,11 +68,15 @@ pub struct FilterConfig {
     pub learn: bool,
     /// Recorded when `learn` is on.
     pub reason: String,
+    /// Say why each candidate was vetoed: the rule, the risk, the reasons and
+    /// the blamed fragments.  Off, the veto still applies, but every verdict
+    /// the pair reports keeps only the text, the decision and the rule.
+    pub provenance: bool,
 }
 
 impl Default for FilterConfig {
     /// The negative model's own thresholds, the ratio rule at 0, no peak rule,
-    /// three candidates per wanted text.
+    /// three candidates per wanted text, and every veto explained.
     fn default() -> FilterConfig {
         FilterConfig {
             threshold: None,
@@ -73,6 +88,7 @@ impl Default for FilterConfig {
             spans: 3,
             learn: false,
             reason: "filtered".to_string(),
+            provenance: true,
         }
     }
 }
@@ -200,13 +216,39 @@ impl FilterVerdict {
         ])
     }
 
+    /// The verdict without its provenance: `{"text", "decision", "rule"}` -
+    /// what was decided, not why (Python's `NegativeFilter.terse`).
+    pub fn terse_json(&self) -> Json {
+        Json::obj([
+            ("text", Json::str(self.text.clone())),
+            ("decision", Json::str(self.decision.clone())),
+            (
+                "rule",
+                match &self.rule {
+                    Some(rule) => Json::str(rule.clone()),
+                    None => Json::Null,
+                },
+            ),
+        ])
+    }
+
+    /// The verdict as the pair reports it: whole, or [`FilterVerdict::terse_json`]
+    /// when `provenance` is off.
+    pub fn report_json(&self, provenance: bool) -> Json {
+        if provenance {
+            self.to_json()
+        } else {
+            self.terse_json()
+        }
+    }
+
     fn rejected(&self) -> bool {
         self.decision == "reject"
     }
 }
 
 /// What a batch of candidates came to.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FilterOutcome {
     /// The texts handed back: every survivor of a judged batch, the `count`
     /// cleanest of a generated one.
@@ -220,6 +262,24 @@ pub struct FilterOutcome {
     pub candidates: usize,
     pub asked: usize,
     pub rate: Option<f64>,
+    /// Whether the verdicts are reported whole or terse
+    /// ([`FilterConfig::provenance`]).
+    pub provenance: bool,
+}
+
+impl Default for FilterOutcome {
+    fn default() -> FilterOutcome {
+        FilterOutcome {
+            texts: Vec::new(),
+            results: Vec::new(),
+            kept: Vec::new(),
+            verdicts: Vec::new(),
+            candidates: 0,
+            asked: 0,
+            rate: None,
+            provenance: true,
+        }
+    }
 }
 
 impl FilterOutcome {
@@ -229,18 +289,19 @@ impl FilterOutcome {
     }
 
     /// `{"texts", "kept", "rejected", "verdicts", "candidates", "asked",
-    /// "rate"}`, as the filter route answers.
+    /// "rate"}`, as the filter route answers; the verdicts (and the rejected
+    /// ones among them) are terse when `provenance` is off.
     pub fn to_json(&self) -> Json {
         Json::obj([
             ("texts", Json::strs(self.texts.clone())),
             ("kept", Json::strs(self.kept.clone())),
             (
                 "rejected",
-                Json::Arr(self.rejected().iter().map(|v| v.to_json()).collect()),
+                Json::Arr(self.rejected().iter().map(|v| v.report_json(self.provenance)).collect()),
             ),
             (
                 "verdicts",
-                Json::Arr(self.verdicts.iter().map(|v| v.to_json()).collect()),
+                Json::Arr(self.verdicts.iter().map(|v| v.report_json(self.provenance)).collect()),
             ),
             ("candidates", Json::Int(self.candidates as i64)),
             ("asked", Json::Int(self.asked as i64)),
@@ -261,9 +322,14 @@ pub struct FilterPrediction {
     pub candidates: usize,
     /// What the negative network predicts goes wrong from here.
     pub warning: Option<String>,
+    /// Whether the verdicts are reported whole or terse
+    /// ([`FilterConfig::provenance`]).
+    pub provenance: bool,
 }
 
 impl FilterPrediction {
+    /// `{"prefix", "text", "kept", "rejected", "verdicts", "candidates",
+    /// "warning"}`; the verdicts are terse when `provenance` is off.
     pub fn to_json(&self) -> Json {
         let text = |t: &Option<String>| t.clone().map(Json::str).unwrap_or(Json::Null);
         Json::obj([
@@ -276,13 +342,13 @@ impl FilterPrediction {
                     self.verdicts
                         .iter()
                         .filter(|v| v.rejected())
-                        .map(|v| v.to_json())
+                        .map(|v| v.report_json(self.provenance))
                         .collect(),
                 ),
             ),
             (
                 "verdicts",
-                Json::Arr(self.verdicts.iter().map(|v| v.to_json()).collect()),
+                Json::Arr(self.verdicts.iter().map(|v| v.report_json(self.provenance)).collect()),
             ),
             ("candidates", Json::Int(self.candidates as i64)),
             ("warning", text(&self.warning)),
@@ -410,6 +476,7 @@ impl<'a> Filter<'a> {
             verdicts,
             candidates: texts.len(),
             asked: texts.len(),
+            provenance: self.config.provenance,
         })
     }
 
@@ -439,7 +506,10 @@ impl<'a> Filter<'a> {
     /// error).
     pub fn generate(&mut self, count: usize, o: &GenerateOptions) -> Result<FilterOutcome, String> {
         if count == 0 {
-            return Ok(FilterOutcome::default());
+            return Ok(FilterOutcome {
+                provenance: self.config.provenance,
+                ..Default::default()
+            });
         }
         let asked = count * self.config.over_sample();
         let results = self.positive.generate(&GenerateOptions {
@@ -541,6 +611,7 @@ impl<'a> Filter<'a> {
             verdicts: outcome.verdicts,
             candidates: candidates.len(),
             warning: (!warning.best.text.is_empty()).then(|| enc.join(&[prefix, &warning.best.text])),
+            provenance: self.config.provenance,
         })
     }
 
@@ -582,6 +653,7 @@ pub fn describe(positive: &Model, negative: &Model, cfg: &FilterConfig) -> Json 
                 ("over_sample", Json::Int(cfg.over_sample() as i64)),
                 ("strict", Json::Bool(cfg.strict)),
                 ("learn", Json::Bool(cfg.learn)),
+                ("provenance", Json::Bool(cfg.provenance)),
             ]),
         ),
     ])
@@ -742,11 +814,18 @@ impl Service {
     /// Runs `f` on the pair guarding the running model, or returns `None`
     /// when there is nothing to guard with (see [`Service::guard_ready`]).
     /// Holds both locks, the model's first, for as long as `f` runs.
-    pub fn guard<T>(&self, f: impl FnOnce(&mut Filter) -> T) -> Result<Option<T>, ApiError> {
+    /// `provenance` overrides the server's own setting for this one answer
+    /// (`POST /api/negative/settings {"provenance": false}` sets it for every
+    /// answer): off, the vetoes still apply but the report says how many,
+    /// not which or why.
+    pub fn guard<T>(&self, provenance: Option<bool>, f: impl FnOnce(&mut Filter) -> T) -> Result<Option<T>, ApiError> {
         if !self.guard_ready() {
             return Ok(None);
         }
-        let config = self.guard.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut config = self.guard.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(provenance) = provenance {
+            config.provenance = provenance; // this answer's own choice
+        }
         let mut out = None;
         let mut failure = None;
         self.with_model(|positive| {
@@ -769,21 +848,46 @@ impl Service {
 
 /// What the guard did, for the caller to show: the vetoes, with the reason
 /// and the fragment behind each (Python's `_guard_report`).
+///
+/// Without provenance ([`FilterConfig::provenance`] off) the report is the
+/// counts alone - how many candidates were `judged` and how many `vetoed` -
+/// and neither the vetoes nor the verdicts are listed.
 pub fn guard_report(pair: &Filter, verdicts: &[FilterVerdict], extra: Vec<(&str, Json)>) -> Json {
     let rejected: Vec<Json> = verdicts.iter().filter(|v| v.rejected()).map(|v| v.to_json()).collect();
-    let mut pairs = vec![
-        ("on".to_string(), Json::Bool(true)),
-        ("vetoed".to_string(), Json::Int(rejected.len() as i64)),
-        ("rejected".to_string(), Json::Arr(rejected)),
-        (
-            "verdicts".to_string(),
-            Json::Arr(verdicts.iter().map(|v| v.to_json()).collect()),
-        ),
-        ("negative".to_string(), crate::report::stats(pair.negative)),
-        ("config".to_string(), pair.describe().at("config").clone()),
-    ];
+    let mut pairs = if pair.config.provenance {
+        vec![
+            ("on".to_string(), Json::Bool(true)),
+            ("vetoed".to_string(), Json::Int(rejected.len() as i64)),
+            ("rejected".to_string(), Json::Arr(rejected)),
+            (
+                "verdicts".to_string(),
+                Json::Arr(verdicts.iter().map(|v| v.to_json()).collect()),
+            ),
+            ("negative".to_string(), crate::report::stats(pair.negative)),
+            ("config".to_string(), pair.describe().at("config").clone()),
+        ]
+    } else {
+        vec![
+            ("on".to_string(), Json::Bool(true)),
+            ("provenance".to_string(), Json::Bool(false)),
+            ("judged".to_string(), Json::Int(verdicts.len() as i64)),
+            ("vetoed".to_string(), Json::Int(rejected.len() as i64)),
+            ("negative".to_string(), crate::report::stats(pair.negative)),
+            ("config".to_string(), pair.describe().at("config").clone()),
+        ]
+    };
     pairs.extend(extra.into_iter().map(|(k, v)| (k.to_string(), v)));
     Json::Obj(pairs)
+}
+
+/// A flag that may be absent (`null` or missing): `None` then, and a 400 when
+/// it is there but not a boolean (Python's `Fields.flag(name, None)`).
+pub fn maybe_flag(r: &Request, key: &str) -> Result<Option<bool>, ApiError> {
+    match r.body.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Bool(b)) => Ok(Some(*b)),
+        Some(_) => Err(ApiError::bad_request(format!("{key:?} must be a boolean"))),
+    }
 }
 
 // -- the routes ---------------------------------------------------------------------------------
@@ -856,7 +960,9 @@ fn weights_json(m: &Model) -> Json {
     Json::Obj(pairs)
 }
 
-fn settings_json(m: &Model) -> Json {
+/// `{"threshold", "min_coverage", "provenance"}`: how strictly the negative
+/// network judges, and whether the guard's vetoes say why.
+fn settings_json(m: &Model, provenance: bool) -> Json {
     let neg = m.neg.as_ref();
     Json::obj([
         ("threshold", neg.map(|n| Json::Num(n.threshold)).unwrap_or(Json::Null)),
@@ -864,11 +970,13 @@ fn settings_json(m: &Model) -> Json {
             "min_coverage",
             neg.map(|n| Json::Num(n.min_coverage)).unwrap_or(Json::Null),
         ),
+        ("provenance", Json::Bool(provenance)),
     ])
 }
 
 fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
     let path = svc.negative_path();
+    let provenance = svc.guard.lock().unwrap_or_else(|e| e.into_inner()).provenance;
     svc.with_negative(|m| {
         Json::obj([
             (
@@ -884,7 +992,7 @@ fn status(svc: &Arc<Service>, _r: &Request) -> Answer {
             ("reasons", Json::Arr(m.reasons().iter().map(|r| r.to_json()).collect())),
             ("journal", Json::Arr(m.recent(20).iter().map(|e| e.to_json()).collect())),
             ("weights", weights_json(m)),
-            ("settings", settings_json(m)),
+            ("settings", settings_json(m, provenance)),
         ])
     })
 }
@@ -976,6 +1084,7 @@ fn filter_config(r: &Request) -> Result<FilterConfig, ApiError> {
         spans: r.usize("spans", 3)?,
         learn: r.flag("learn", false),
         reason: r.text("reason", "filtered"),
+        provenance: r.flag("provenance", true),
     };
     config.validate()?;
     Ok(config)
@@ -1067,6 +1176,10 @@ fn forget(svc: &Arc<Service>, r: &Request) -> Answer {
     .map_err(ApiError::bad_request)
 }
 
+/// Changes how strictly the negative network judges (`threshold`,
+/// `min_coverage`), its weight scales, and whether the guard's vetoes carry
+/// their `provenance` (the rule, the reasons and the fragments behind each)
+/// or only their count.
 fn settings(svc: &Arc<Service>, r: &Request) -> Answer {
     let threshold = maybe_number(r, "threshold", Some(0.0))?;
     let min_coverage = maybe_number(r, "min_coverage", Some(0.0))?;
@@ -1076,6 +1189,13 @@ fn settings(svc: &Arc<Service>, r: &Request) -> Answer {
             scales.push((name.to_string(), v));
         }
     }
+    let provenance = {
+        let mut guard = svc.guard.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(on) = maybe_flag(r, "provenance")? {
+            guard.provenance = on;
+        }
+        guard.provenance
+    };
     svc.with_negative(|m| -> Result<Json, String> {
         {
             let neg = m.neg.as_mut().expect("a negative network");
@@ -1090,7 +1210,7 @@ fn settings(svc: &Arc<Service>, r: &Request) -> Answer {
             m.g.configure_negative(&scales)?;
         }
         Ok(Json::obj([
-            ("settings", settings_json(m)),
+            ("settings", settings_json(m, provenance)),
             ("weights", weights_json(m)),
             ("stats", crate::report::stats(m)),
         ]))
@@ -1258,6 +1378,95 @@ mod tests {
         let (ranked, verdicts) = filter.rank("the ", &found);
         assert_eq!(verdicts.len(), found.top.len());
         assert_eq!(ranked.best.expanded, found.best.expanded);
+    }
+
+    #[test]
+    fn without_provenance_the_decisions_stand_and_the_reasons_are_kept_back() {
+        let (mut positive, mut negative) = pair();
+        let texts = ["the the the the cat".to_string(), "an unseen line".to_string()];
+        let (said, said_doc, whole_config, whole_report) = {
+            let mut whole = Filter::new(&mut positive, &mut negative, FilterConfig::default()).unwrap();
+            let said = whole.filter(&texts).unwrap();
+            let doc = said.to_json();
+            let config = whole.describe().at("config").clone();
+            let report = guard_report(&whole, &said.verdicts, vec![]);
+            (said, doc, config, report)
+        };
+        let config = FilterConfig {
+            provenance: false,
+            ..Default::default()
+        };
+        let mut terse = Filter::new(&mut positive, &mut negative, config).unwrap();
+        let outcome = terse.filter(&texts).unwrap();
+        assert_eq!(
+            outcome.verdicts.iter().map(|v| v.decision.clone()).collect::<Vec<_>>(),
+            said.verdicts.iter().map(|v| v.decision.clone()).collect::<Vec<_>>(),
+            "the decisions are the same"
+        );
+        assert_eq!(outcome.kept, said.kept);
+        let doc = outcome.to_json();
+        assert_eq!(
+            doc.at("verdicts").as_array()[0].render(0),
+            "{\"text\":\"the the the the cat\",\"decision\":\"reject\",\"rule\":\"blame\"}"
+        );
+        assert_eq!(
+            doc.at("rejected").as_array()[0].render(0),
+            "{\"text\":\"the the the the cat\",\"decision\":\"reject\",\"rule\":\"blame\"}"
+        );
+        assert!(doc.at("verdicts").as_array()[1].at("rule").is_null());
+        assert!(said_doc.at("verdicts").as_array()[0].get("why").is_some());
+        assert_eq!(terse.describe().at("config").at("provenance").as_bool(), Some(false));
+        assert_eq!(whole_config.at("provenance").as_bool(), Some(true));
+        // the guard's report: the counts alone
+        let report = guard_report(&terse, &outcome.verdicts, vec![("candidates", Json::Int(2))]);
+        let keys: Vec<&str> = match &report {
+            Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            keys,
+            vec![
+                "on",
+                "provenance",
+                "judged",
+                "vetoed",
+                "negative",
+                "config",
+                "candidates"
+            ]
+        );
+        assert_eq!(report.at("judged").as_i64(), Some(2));
+        assert_eq!(report.at("vetoed").as_i64(), Some(1));
+        let keys: Vec<&str> = match &whole_report {
+            Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(keys, vec!["on", "vetoed", "rejected", "verdicts", "negative", "config"]);
+        // a prediction through the terse pair reports terse verdicts too
+        let predicted = terse
+            .predict(
+                "the ",
+                &PredictOptions {
+                    length: 8,
+                    k: 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for verdict in predicted.to_json().at("verdicts").as_array() {
+            assert!(verdict.get("risk").is_none() && verdict.get("decision").is_some());
+        }
+        let body = crate::json::parse("{\"provenance\": \"no\"}").unwrap();
+        let request = Request {
+            method: "POST".to_string(),
+            path: "/api/negative/settings".to_string(),
+            query: Vec::new(),
+            body,
+            raw: Vec::new(),
+            headers: Vec::new(),
+        };
+        assert_eq!(maybe_flag(&request, "provenance").unwrap_err().status, 400);
+        assert_eq!(maybe_flag(&request, "other").unwrap(), None);
     }
 
     #[test]

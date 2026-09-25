@@ -44,6 +44,47 @@ impl Edit {
             ("right", Json::str(self.right.clone())),
         ])
     }
+
+    /// `{"op", "wrong", "right", "at": [a0, a1], "to": [b0, b1]}`, as the
+    /// copy editor's `changes` carry it (Python's `_correction_entry`): the
+    /// lesson record's three fields and where the change sits on each side.
+    pub fn to_json_with_spans(&self) -> Json {
+        Json::obj([
+            ("op", Json::str(self.op)),
+            ("wrong", Json::str(self.wrong.clone())),
+            ("right", Json::str(self.right.clone())),
+            ("at", Json::ints([self.a0 as i64, self.a1 as i64])),
+            ("to", Json::ints([self.b0 as i64, self.b1 as i64])),
+        ])
+    }
+
+    /// An edit as a record carries it (the inverse of
+    /// [`Edit::to_json_with_spans`]); an unknown `op` reads as `replace`, and
+    /// a missing span as empty.
+    pub fn from_json(doc: &Json) -> Edit {
+        let op = match doc.at("op").as_str() {
+            Some("equal") => "equal",
+            Some("delete") => "delete",
+            Some("insert") => "insert",
+            _ => "replace",
+        };
+        let span = |key: &str| -> (usize, usize) {
+            let pair = doc.at(key).as_array();
+            let at = |i: usize| pair.get(i).and_then(|v| v.as_i64()).unwrap_or(0).max(0) as usize;
+            (at(0), at(1))
+        };
+        let (a0, a1) = span("at");
+        let (b0, b1) = span("to");
+        Edit {
+            op,
+            a0,
+            a1,
+            b0,
+            b1,
+            wrong: doc.at("wrong").as_str().unwrap_or("").to_string(),
+            right: doc.at("right").as_str().unwrap_or("").to_string(),
+        }
+    }
 }
 
 /// A half-open range of unit positions.
@@ -313,6 +354,30 @@ mod tests {
             ("replace", "go", "goes")
         );
         assert_eq!((changes[0].a0, changes[0].a1), (1, 2));
+    }
+
+    #[test]
+    fn a_change_carries_its_spans_when_asked() {
+        let changes = summary("Hi howe are you??", "Hi, how are you?", 0, &Encoding::default());
+        let docs: Vec<String> = changes.iter().map(|e| e.to_json_with_spans().render(0)).collect();
+        assert_eq!(
+            docs,
+            vec![
+                "{\"op\":\"insert\",\"wrong\":\"\",\"right\":\",\",\"at\":[2,2],\"to\":[2,3]}",
+                "{\"op\":\"delete\",\"wrong\":\"e\",\"right\":\"\",\"at\":[6,7],\"to\":[7,7]}",
+                "{\"op\":\"delete\",\"wrong\":\"?\",\"right\":\"\",\"at\":[15,16],\"to\":[15,15]}",
+            ]
+        );
+        assert_eq!(
+            changes[0].to_json().render(0),
+            "{\"op\":\"insert\",\"wrong\":\"\",\"right\":\",\"}",
+            "the lesson record's shape is untouched"
+        );
+        for edit in &changes {
+            assert_eq!(&Edit::from_json(&edit.to_json_with_spans()), edit);
+        }
+        let bare = Edit::from_json(&crate::json::parse("{\"op\": \"odd\", \"wrong\": \"x\"}").unwrap());
+        assert_eq!((bare.op, bare.a0, bare.a1, bare.wrong.as_str()), ("replace", 0, 0, "x"));
     }
 
     #[test]

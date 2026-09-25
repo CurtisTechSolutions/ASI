@@ -282,26 +282,47 @@ pub fn inspect(path: &Path, workers: usize) -> ArchiveSummary {
     summary
 }
 
+/// What [`summary`] remembers: an archive's summary by its path, stamped with
+/// the file version (size and modification time) it describes.
+type Cache = Mutex<HashMap<PathBuf, (Version, ArchiveSummary)>>;
+
+/// A file's size and modification time: the version of it a summary describes.
+type Version = (u64, Option<SystemTime>);
+
+fn cache() -> &'static Cache {
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn version(path: &Path) -> Version {
+    std::fs::metadata(path)
+        .map(|m| (m.len(), m.modified().ok()))
+        .unwrap_or((0, None))
+}
+
 /// [`inspect`], remembered per file version (size and modification time), so
 /// listing the uploads does not inflate every archive every time.
 pub fn summary(path: &Path, workers: usize) -> ArchiveSummary {
-    type Cache = Mutex<HashMap<PathBuf, ((u64, Option<SystemTime>), ArchiveSummary)>>;
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let key = std::fs::metadata(path)
-        .map(|m| (m.len(), m.modified().ok()))
-        .unwrap_or((0, None));
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some((version, found)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
-        if *version == key {
+    let key = version(path);
+    if let Some((stamp, found)) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(path) {
+        if *stamp == key {
             return found.clone();
         }
     }
     let found = inspect(path, workers);
-    cache
+    remember(path, found.clone());
+    found
+}
+
+/// Keeps `found` as what the archive at `path` holds, as the file is now: the
+/// upload route hands over the pass it made while validating an archive, so
+/// the listing's record of it does not make a second one.
+pub fn remember(path: &Path, found: ArchiveSummary) {
+    let key = version(path);
+    cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(path.to_path_buf(), (key, found.clone()));
-    found
+        .insert(path.to_path_buf(), (key, found));
 }
 
 /// The listing record of an upload that is a ZIP archive - its text entries'

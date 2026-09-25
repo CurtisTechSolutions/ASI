@@ -94,6 +94,10 @@ from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
 from .llm import PROVIDERS, LLMClient, LLMError, normalise_provider
 from .beam import Prediction, path_probability
+from .assistant import (
+    ANTHROPIC, OPENAI, AnthropicStream, Ask, AskError, OpenAIStream, Reply, input_units as assistant_input_units,
+    kind_of_id, model_id, parse_request, respond as assistant_respond, to_format,
+)
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
 from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS, think, think_on
 from .duo import FilterConfig, NegativeFilter
@@ -114,6 +118,7 @@ from .ollama import (
     STYLES as OLLAMA_STYLES,
     OllamaClient,
     OllamaError,
+    adversarial_correction,
     adversarial_review,
     corpus_from_prompt,
     normalise_url,
@@ -121,7 +126,7 @@ from .ollama import (
     think_value,
     thoughts_from_prompt,
 )
-from .blame import teach_reviews
+from .blame import teach_corrections, teach_reviews
 from .schedule import ScheduleError
 from .schedule import describe as describe_schedules
 from .schedule import preview_points
@@ -193,12 +198,13 @@ _READER_YIELD_SECONDS = 1.0
 _CORS_HEADERS = (
     ("Access-Control-Allow-Origin", "*"),
     ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
-    ("Access-Control-Allow-Headers", "Content-Type, Accept"),
+    ("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization, X-API-Key, anthropic-version, anthropic-beta"),
     ("Access-Control-Max-Age", "86400"),
 )
 
 _JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 _HTML_CONTENT_TYPE = "text/html; charset=utf-8"
+_NDJSON_CONTENT_TYPE = "application/x-ndjson; charset=utf-8"
 
 _MIME_TYPES = {
     ".html": _HTML_CONTENT_TYPE,
@@ -238,10 +244,28 @@ class ApiError(Exception):
 
     __slots__ = ("status", "message")
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, param: str | None = None) -> None:
         super().__init__(message)
         self.status = int(status)
         self.message = message
+        self.param = param  # the request field to blame, when one is (named by the /v1 error shapes)
+
+
+class StreamedResponse:
+    """A route's answer that is written as it happens: one JSON object per line (``application/x-ndjson``).
+
+    ``run(write)`` does the work and hands every event to ``write``; the handler
+    sends the headers with the first one and chunks the rest out as they come,
+    so a client reads the events while the model is still talking.  A request
+    refused *before* the first event is an ordinary 4xx JSON error; a failure
+    after it is the stream's last event, ``{"event": "error", "error": ...}``,
+    because the status line has already gone.
+    """
+
+    __slots__ = ("run",)
+
+    def __init__(self, run: Callable[[Callable[[Any], None]], None]) -> None:
+        self.run = run
 
 
 class Job:
@@ -372,6 +396,7 @@ class ModelService:
         self._discriminator: GraphModel | None = None
         self._discriminator_seed: int | None = None
         self._parked: dict[str, GraphModel] = {}  # models of the other kinds, kept while another one is active
+        self._born = int(time.time())  # what /v1/models reports as every model's ``created``
         self.guard_config = FilterConfig()  # how strictly the negative network guards the output paths
         self._path_kind = model_class(kind).kind  # the kind ``model_path`` belongs to
         if self.model_path and os.path.isfile(self.model_path):
@@ -536,6 +561,7 @@ class ModelService:
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
             "in_memory": sorted({self.kind, *self._parked}),
             "weights": self.model.weight_config() if hasattr(self.model, "weight_config") else None,
+            "attention": self.model.attention_config(),
         }
 
     def select_kind(self, kind: str) -> dict:
@@ -726,8 +752,13 @@ class ModelService:
         )
         return stats
 
-    def guard(self, model: GraphModel | None = None) -> NegativeFilter | None:
+    def guard(self, model: GraphModel | None = None, provenance: bool | None = None) -> NegativeFilter | None:
         """The pair on the way out: the negative network guarding ``model``'s output, or ``None``.
+
+        ``provenance`` overrides the server's own setting for this one answer
+        (``POST /api/negative/settings {"provenance": false}`` sets it for
+        every answer): off, the vetoes still apply but the report says how
+        many, not which or why.
 
         Every answer this service hands out - :meth:`generate`,
         :meth:`predict`, :meth:`converse` - goes through this filter, so the
@@ -754,13 +785,31 @@ class ModelService:
             negative = self.negative_model()  # loads it from that file and parks it
         if negative is model:
             return None
-        pair = NegativeFilter(model, negative, self.guard_config)
+        config = self.guard_config
+        if provenance is not None and bool(provenance) != config.provenance:
+            config = dataclasses.replace(config, provenance=bool(provenance))  # this answer's own choice
+        pair = NegativeFilter(model, negative, config)
         return pair if pair.ready else None
 
     @staticmethod
     def _guard_report(pair: NegativeFilter, verdicts: list[dict], **extra: Any) -> dict:
-        """What the guard did, for the caller to show: the vetoes, with the reason and the fragment behind each."""
+        """What the guard did, for the caller to show: the vetoes, with the reason and the fragment behind each.
+
+        Without provenance (``FilterConfig.provenance`` off) the report is the
+        counts alone - how many candidates were judged and how many vetoed -
+        and neither the vetoes nor the verdicts are listed.
+        """
         rejected = [v for v in verdicts if v["decision"] == "reject"]
+        if not pair.config.provenance:
+            return {
+                "on": True,
+                "provenance": False,
+                "judged": len(verdicts),
+                "vetoed": len(rejected),
+                "negative": pair.negative.stats(),
+                "config": pair.describe()["config"],
+                **extra,
+            }
         return {
             "on": True,
             "vetoed": len(rejected),
@@ -771,7 +820,7 @@ class ModelService:
             **extra,
         }
 
-    def predict(self, prefix: str, *, guard: bool = True, **options: Any) -> dict:
+    def predict(self, prefix: str, *, guard: bool = True, provenance: bool | None = None, **options: Any) -> dict:
         """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each).
 
         The negative network guards the answer (:meth:`guard`): the best
@@ -782,7 +831,7 @@ class ModelService:
         """
         with self.session() as model:
             result = model.predict(prefix, **options)
-            pair = self.guard(model) if guard else None
+            pair = self.guard(model, provenance) if guard else None
             report = None
             if pair is not None:
                 result, verdicts = pair.rank(prefix, result)  # the survivors, best first
@@ -809,7 +858,7 @@ class ModelService:
             )
         return payload
 
-    def generate(self, guard: bool = True, **options: Any) -> dict:
+    def generate(self, guard: bool = True, provenance: bool | None = None, **options: Any) -> dict:
         """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path.
 
         The negative network guards them (:meth:`guard`): the model is asked
@@ -820,7 +869,7 @@ class ModelService:
         ``guard=False`` returns what the positive model wrote, unfiltered.
         """
         with self.session() as model:
-            pair = self.guard(model) if guard else None
+            pair = self.guard(model, provenance) if guard else None
             if pair is None:
                 return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
             count = options.pop("count", 1)
@@ -862,7 +911,8 @@ class ModelService:
         return self._start_job("train", work)
 
     def converse(
-        self, opening: str = "", turns: int = 6, partner: str | None = None, *, guard: bool = True, **options: Any,
+        self, opening: str = "", turns: int = 6, partner: str | None = None, *, guard: bool = True,
+        provenance: bool | None = None, **options: Any,
     ) -> dict:
         """The active model converses with itself, or with the model of another kind kept in memory (``partner``).
 
@@ -883,7 +933,7 @@ class ModelService:
                     raise ApiError(
                         400, f"no {kind} model in memory to converse with; select that kind once to load it"
                     )
-            pair = self.guard(model) if guard else None
+            pair = self.guard(model, provenance) if guard else None
             report = None
             try:
                 if pair is None:
@@ -907,6 +957,108 @@ class ModelService:
             "repeats": dialogue_repeats(spoken),
             "guard": report,
         }
+
+    # -- today's format: messages in, an assistant message out ----------------
+
+    def voice_for(self, name: str) -> GraphModel:
+        """The model a request's ``model`` names: the active one, or a kind kept in memory (:func:`kind_of_id`).
+
+        ``""``, ``radixnet`` and the active kind's id answer with the active
+        model; another kind answers with the model of that kind in memory -
+        which is what ``partner`` does for ``/api/converse`` - and one that is
+        not there is a 404 saying so.  Call it with the model lock held.
+        """
+        kind = kind_of_id(name)
+        if not kind or kind == self.model.kind:
+            return self.model
+        if kind == "word":
+            for candidate in (self.model, *self._parked.values()):
+                if candidate.kind == "count" and candidate.encoding.unit == WORDS:
+                    return candidate
+        else:
+            found = self._parked.get(kind)
+            if found is not None:
+                return found
+        raise ApiError(
+            404, f"the model {name!r} is not in memory; the models here are {', '.join(self.model_ids())} "
+                 "(select a kind once to load it)", param="model",
+        )
+
+    def model_ids(self) -> list[str]:
+        """The ids of every model in memory, the active one first."""
+        return [model_id(m) for m in (self.model, *self._parked.values())]
+
+    def list_models(self) -> dict:
+        """``GET /v1/models``: the models in memory as an OpenAI model list, ``radixnet-<kind>`` each."""
+        with self.session():
+            models = [self.model, *self._parked.values()]
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": model_id(m), "object": "model", "created": self._born, "owned_by": "radixnet",
+                        "kind": m.kind, "label": type(m).label, "encoding": str(m.encoding),
+                        "units": m.encoding.units_name, "active": m is self.model,
+                    }
+                    for m in models
+                ],
+            }
+
+    def count_input(self, ask: Ask) -> dict:
+        """``POST /v1/messages/count_tokens``: the units of the model's encoding a request holds."""
+        with self.session():
+            voice = self.voice_for(ask.model)
+            return {"input_tokens": assistant_input_units(voice.encoding, ask)}
+
+    def respond(self, ask: Ask) -> Reply:
+        """Answer a request in today's format (:mod:`radixnet.assistant`), the guard on the way out.
+
+        The negative network vetoes candidates before they are spoken, as it
+        does for every other answer here (:meth:`guard`), and every veto is a
+        line of the thinking with the reason; ``ask.guard`` off hands out what
+        the positive model wrote.  With ``ask.learn`` (the default) a rethink
+        teaches the graph where it goes round, so a conversation changes the
+        model, exactly as ``/api/converse`` does.
+        """
+        with self.session():
+            voice = self.voice_for(ask.model)
+            pair = self.guard(voice) if ask.guard else None
+            try:
+                return assistant_respond(voice, ask, pair=pair)
+            except (TypeError, ValueError) as exc:
+                raise ApiError(400, str(exc)) from exc
+
+    def respond_stream(self, ask: Ask, dialect: str) -> "EventStream":
+        """:meth:`respond` as server-sent events in ``dialect``'s shape, written as the search produces them.
+
+        The frames go out from inside the search: every line of the thinking
+        the moment the search takes that step, every chunk of the text as the
+        walk is decoded.  The model lock is held for the whole stream.
+        """
+        def run(write: Callable[[str], None]) -> None:
+            with self.session():
+                voice = self.voice_for(ask.model)
+                pair = self.guard(voice) if ask.guard else None
+                renderer: list = []
+
+                def on_event(event: dict) -> None:
+                    if event["type"] == "start" and not renderer:
+                        if dialect == OPENAI:
+                            renderer.append(OpenAIStream(
+                                event["id"], event["model"], event["created"], include_usage=ask.include_usage,
+                                thinking=ask.thinking,
+                            ))
+                        else:
+                            renderer.append(AnthropicStream(
+                                event["id"], event["model"], event["created"], input_units=event["input_units"],
+                                thinking=ask.thinking,
+                            ))
+                    for frame in renderer[0].frames(event):
+                        write(frame)
+
+                assistant_respond(voice, ask, pair=pair, on_event=on_event)
+
+        return EventStream(run, OpenAIStream.error if dialect == OPENAI else AnthropicStream.error)
 
     def score(self, text: str) -> dict:
         with self.session() as model:
@@ -1105,7 +1257,10 @@ class ModelService:
                 "reasons": model.reasons(),
                 "journal": model.recent(20),
                 "weights": model.weight_config(),
-                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+                "settings": {
+                    "threshold": model.threshold, "min_coverage": model.min_coverage,
+                    "provenance": self.guard_config.provenance,
+                },
             }
 
     def _negative_result(self, model: NegativeNet, records: list[dict], **extra: Any) -> dict:
@@ -1198,13 +1353,17 @@ class ModelService:
             return self._negative_result(model, [], **result)
 
     def negative_settings(self, **options: Any) -> dict:
-        """Change how strictly the negative network judges (``threshold``, ``min_coverage``) and its weight scales."""
+        """Change how strictly the negative network judges (``threshold``, ``min_coverage``), its weight scales,
+        and whether the guard's vetoes carry their ``provenance`` (the rule, the reasons and the fragments behind
+        each) or only their count."""
         with self.mutating():
             model = self.negative_model()
             for name in ("threshold", "min_coverage"):
                 value = options.get(name)
                 if value is not None:
                     setattr(model, name, float(value))
+            if options.get("provenance") is not None:
+                self.guard_config.provenance = bool(options["provenance"])
             scales = {k: options.get(k) for k in ("share_scale", "blame_scale", "clear_scale")}
             if any(v is not None for v in scales.values()):
                 try:
@@ -1212,7 +1371,10 @@ class ModelService:
                 except ValueError as exc:
                     raise ApiError(400, str(exc)) from exc
             return {
-                "settings": {"threshold": model.threshold, "min_coverage": model.min_coverage},
+                "settings": {
+                    "threshold": model.threshold, "min_coverage": model.min_coverage,
+                    "provenance": self.guard_config.provenance,
+                },
                 "weights": model.weight_config(),
                 "stats": model.stats(),
             }
@@ -1246,7 +1408,22 @@ class ModelService:
             report = teach_reviews(model, reviews, threshold=threshold, source=source)
             return {
                 "blamed": report["blamed"], "cleared": report["cleared"], "unmatched": report["unmatched"],
-                "edges": report["edges"], "reasons": report["reasons"], "lessons": report["lessons"],
+                "edges": report["edges"], "reasons": report["reasons"], "lessons": report["faults"],
+                "severity_mean": report["severity_mean"], "stats": model.stats(),
+                "reason_table": model.reasons(),
+            }
+
+    def negative_teach_corrections(
+        self, corrections: list[dict], severity: float = 1.0, source: str = "correction"
+    ) -> dict:
+        """Hand a copy editor's corrections to the negative network: only the characters it changed are blamed."""
+        with self.mutating():
+            model = self.negative_model()
+            report = teach_corrections(model, corrections, severity=severity, source=source)
+            return {
+                "blamed": report["blamed"], "cleared": report["cleared"], "unmatched": report["unmatched"],
+                "edges": report["edges"], "edits": report["edits"], "uncorrected": report["uncorrected"],
+                "reasons": report["reasons"], "lessons": report["faults"],
                 "severity_mean": report["severity_mean"], "stats": model.stats(),
                 "reason_table": model.reasons(),
             }
@@ -1427,6 +1604,28 @@ class ModelService:
             except ValueError as exc:
                 raise ApiError(400, str(exc)) from exc
             return {"weights": config, "stats": model.stats()}
+
+    def attention(self) -> dict:
+        """The active model's attention band: where inside a gram its corrections land (:mod:`radixnet.attention`)."""
+        with self.session() as model:
+            return {"kind": model.kind, "attention": model.attention_config()}
+
+    def configure_attention(self, on: bool | None = None, blur: float | None = None) -> dict:
+        """Switch the active model's band on (at ``blur``) or off; 400 for a kind that is never corrected."""
+        with self.mutating() as model:
+            try:
+                config = model.configure_attention(on=on, blur=blur)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"kind": model.kind, "attention": config, "stats": model.stats()}
+
+    def attention_preview(self, wrong: str, right: str, blur: float | None = None) -> dict:
+        """Where one correction would land, gram by gram, under the writer rule and a band; changes nothing."""
+        with self.session() as model:
+            try:
+                return {"kind": model.kind, **model.attention_preview(wrong, right, blur=blur)}
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
 
     def _replace_model(self, model: GraphModel) -> dict:
         """Install ``model``; a model of another kind that was active is kept in memory (see :meth:`select_kind`)."""
@@ -2111,6 +2310,10 @@ class Fields:
     def present(self, name: str) -> bool:
         return self._lookup(name) is not _MISSING
 
+    def body(self) -> dict:
+        """The body as it arrived, for a request read as one document (the ``/v1`` dialects)."""
+        return self._body
+
     @staticmethod
     def _default(name: str, default: Any, kind: str) -> Any:
         if default is _MISSING:
@@ -2402,6 +2605,81 @@ def _train_overrides(fields: Fields) -> dict:
 RouteFn = Callable[[ModelService, Fields, dict[str, list[str]]], tuple[int, Any]]
 
 
+class EventStream:
+    """An answer streamed as server-sent events: ``run(write)`` writes every frame the moment it is produced.
+
+    A route returns one in place of a JSON document.  The handler sends the
+    headers, calls ``run`` with a function that writes one frame, and closes
+    the connection when it returns; ``error(message)`` is the frame a failure
+    after the headers went out is reported with, in the dialect's own shape.
+    """
+
+    content_type = "text/event-stream; charset=utf-8"
+
+    def __init__(self, run: Callable[[Callable[[str], None]], None], error: Callable[[str], str]) -> None:
+        self.run = run
+        self.error = error
+
+
+def _v1_dialect(path: str) -> str | None:
+    """Which dialect a ``/v1`` path speaks (``None`` for the API's own routes)."""
+    if not (path == "/v1" or path.startswith("/v1/")):
+        return None
+    return ANTHROPIC if path.startswith("/v1/messages") else OPENAI
+
+
+def _shape_error(dialect: str | None, status: int, message: str, param: str | None = None) -> dict:
+    """An error as the client expects it: the API's ``{"error": "..."}``, or the dialect's own envelope."""
+    if dialect is None:
+        return {"error": message}
+    if dialect == OPENAI:
+        kind = "server_error" if status >= 500 else "invalid_request_error"
+        code = "model_not_found" if status == 404 and param == "model" else None
+        return {"error": {"message": message, "type": kind, "param": param, "code": code}}
+    if status >= 500:
+        kind = "api_error"
+    elif status == 404:
+        kind = "not_found_error"
+    elif status == 413:
+        kind = "request_too_large"
+    else:
+        kind = "invalid_request_error"
+    return {"type": "error", "error": {"type": kind, "message": message}}
+
+
+def _v1_ask(f: Fields, dialect: str) -> Ask:
+    try:
+        return parse_request(f.body(), dialect)
+    except AskError as exc:
+        raise ApiError(400, exc.message, param=exc.param) from exc
+
+
+def _r_v1_chat_completions(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    ask = _v1_ask(f, OPENAI)
+    if ask.stream:
+        with svc.session():
+            svc.voice_for(ask.model)  # a model that is not here is a 404 before any frame goes out
+        return 200, svc.respond_stream(ask, OPENAI)
+    return 200, to_format(svc.respond(ask), OPENAI)
+
+
+def _r_v1_messages(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    ask = _v1_ask(f, ANTHROPIC)
+    if ask.stream:
+        with svc.session():
+            svc.voice_for(ask.model)
+        return 200, svc.respond_stream(ask, ANTHROPIC)
+    return 200, to_format(svc.respond(ask), ANTHROPIC)
+
+
+def _r_v1_count_tokens(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.count_input(_v1_ask(f, ANTHROPIC))
+
+
+def _r_v1_models(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.list_models()
+
+
 def _r_health(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, {"ok": True, "version": __version__}
 
@@ -2472,9 +2750,10 @@ def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 def _train_config(f: Fields) -> TrainConfig:
     """The optional training settings of a request body, defaults from :class:`TrainConfig`.
 
-    ``order``, ``curriculum``, ``replay``, ``replay_size``, ``patience`` and
-    ``min_delta`` are the training methods of ``../SPEC-SearchAndTraining.md``;
-    a value out of range is a 400, before any job starts.
+    ``order``, ``curriculum``, ``replay``, ``replay_size``, ``patience``,
+    ``min_delta`` and ``reverse`` are the training methods of
+    ``../SPEC-SearchAndTraining.md``; a value out of range is a 400, before any
+    job starts.
     """
     config = TrainConfig(
         epochs=f.integer("epochs", TrainConfig.epochs, minimum=0),
@@ -2494,6 +2773,7 @@ def _train_config(f: Fields) -> TrainConfig:
         replay_size=f.integer("replay_size", None, minimum=0),
         patience=f.integer("patience", TrainConfig.patience, minimum=0),
         min_delta=f.number("min_delta", TrainConfig.min_delta, minimum=0.0),
+        reverse=f.flag("reverse", TrainConfig.reverse),
     )
     try:
         check_plan(config.order, config.curriculum, config.replay, config.replay_size, config.patience,
@@ -2574,6 +2854,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.predict(
         prefix,
         guard=f.flag("guard", True),
+        provenance=f.flag("provenance", None),
         length=f.integer("length", 20, minimum=0),
         mode=f.text("mode", "dijkstra"),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
@@ -2590,6 +2871,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.generate(
         guard=f.flag("guard", True),
+        provenance=f.flag("provenance", None),
         count=f.integer("count", 1, minimum=0),
         max_length=f.integer("max_length", 60, minimum=0),
         mode=f.text("mode", "sample"),
@@ -2603,13 +2885,15 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     )
 
 
-def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+def _converse_fields(f: Fields) -> dict:
+    """The one conversation ``POST /api/converse`` and ``POST /api/converse/stream`` both read from a body."""
     partner = f.text("partner", None)
-    return 200, svc.converse(
+    return dict(
         opening=f.text("opening", ""),
         turns=f.integer("turns", 6, minimum=0),
         partner=partner or None,
         guard=f.flag("guard", True),
+        provenance=f.flag("provenance", None),
         mode=f.text("mode", "beam"),
         max_length=f.integer("max_length", 60, minimum=0),
         context=f.integer("context", 12, minimum=0),
@@ -2643,6 +2927,23 @@ def _r_think(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         max_questions=f.integer("questions", THINK_QUESTIONS, minimum=0),
         learn=f.flag("learn", True),
     )
+
+
+def _r_converse(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.converse(**_converse_fields(f))
+
+
+def _r_converse_stream(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The same conversation, streamed as it happens (:class:`radixnet.dialogue.StreamFn`): every event is one
+    JSON line, ``turn`` events are the answer and the rest is the window a backtrack may still rewrite, and
+    the last line is ``{"event": "done", ...}`` carrying the document ``POST /api/converse`` answers with."""
+    options = _converse_fields(f)
+
+    def run(write: Callable[[Any], None]) -> None:
+        document = svc.converse(stream=write, **options)
+        write({"event": "done", **document})
+
+    return 200, StreamedResponse(run)
 
 
 def _r_score(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -2772,6 +3073,18 @@ def _r_model_weights(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.configure_weights(**_weight_options(f))
 
 
+def _r_attention(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.attention()
+
+
+def _r_attention_set(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.configure_attention(on=f.flag("on", None), blur=f.number("blur", None))
+
+
+def _r_attention_preview(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.attention_preview(f.text("wrong", "") or "", f.text("right", "") or "", blur=f.number("blur", None))
+
+
 def _r_encoding(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.encoding()
 
@@ -2846,6 +3159,7 @@ def _r_negative_filter(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]
         strict=f.flag("strict", False),
         spans=f.integer("spans", 3, minimum=0),
         learn=f.flag("learn", False),
+        provenance=f.flag("provenance", True),
         reason=f.text("reason", "filtered"),
         mode=f.text("mode", "sample"),
         max_length=f.integer("max_length", 60, minimum=0),
@@ -2868,6 +3182,7 @@ def _r_negative_settings(svc: ModelService, f: Fields, q: dict) -> tuple[int, An
         share_scale=f.number("share_scale", None),
         blame_scale=f.number("blame_scale", None),
         clear_scale=f.number("clear_scale", None),
+        provenance=f.flag("provenance", None),
     )
 
 
@@ -2893,6 +3208,8 @@ def _critic_config(f: Fields) -> Any:
         clear_passes=f.flag("clear_passes", d.clear_passes),
         epochs=f.integer("epochs", d.epochs, minimum=0),
         seed=f.integer("seed", d.seed),
+        correct=f.flag("correct", d.correct),
+        severity=f.number("severity", d.severity, minimum=0.0),
     )
     try:
         config.validate()
@@ -3496,6 +3813,35 @@ def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 202, result
 
 
+def _r_ollama_correct(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The copy editor: the model's samples (or given texts) written out correctly; the diff can blame."""
+    given = f.texts_optional("texts", "text")
+    client = _ollama_client(svc, f)
+    severity = f.number("severity", 1.0, minimum=0.0)
+    if given:
+        samples, source = given, "given"
+    else:
+        samples = svc.sample_texts(
+            f.integer("count", 8, minimum=1), prefix=f.text("prefix", ""),
+            max_length=f.integer("max_length", 60, minimum=0), temperature=f.number("temperature", 1.0, minimum=0.0),
+            seed=f.integer("seed", None),
+        )
+        source = "model"
+    try:
+        result = adversarial_correction(
+            None, client, texts=samples, context=f.text("context", None), ollama_model=client.model,
+        )
+    except OllamaError as exc:
+        raise ApiError(502, str(exc)) from exc
+    result["source"] = source
+    result["url"] = client.url
+    result["severity"] = severity
+    result["negative"] = None
+    if f.flag("blame", False):
+        result["negative"] = svc.negative_teach_corrections(result["corrections"], severity=severity, source="correction")
+    return 200, result
+
+
 def _problems_from(svc: ModelService, f: Fields) -> list[Problem]:
     """``problems`` (strings / objects), ``problems_text`` (one per line) and ``problem_files`` (uploads)."""
     items: list[Any] = []
@@ -4056,6 +4402,18 @@ def _r_tutor_plan(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("GET", "/api/health", _r_health, "liveness check and package version"),
+    ("POST", "/v1/chat/completions", _r_v1_chat_completions,
+     "today's format, OpenAI's dialect: {model, messages, max_tokens, temperature, stop, n, stream, stream_options, "
+     "tools, thinking, and the dialogue's dials (mode, context, k, explore, avoid_repeats, learn, guard, seed)} -> a "
+     "chat.completion whose message carries the thinking as reasoning_content, or chat.completion.chunk events "
+     "with stream: true; a token is one unit of the model's encoding"),
+    ("POST", "/v1/messages", _r_v1_messages,
+     "today's format, Anthropic's dialect: {model, system, messages, max_tokens, stop_sequences, stream, tools, "
+     "thinking, and the same dials} -> a message of thinking, text and tool_use blocks, or the message_start / "
+     "content_block_* / message_delta / message_stop events with stream: true"),
+    ("POST", "/v1/messages/count_tokens", _r_v1_count_tokens,
+     "{system, messages} -> {input_tokens}: the units of the model's encoding the request holds"),
+    ("GET", "/v1/models", _r_v1_models, "the models in memory as an OpenAI model list: radixnet-<kind>, the active one first"),
     ("GET", "/api/status", _r_status,
      "model stats (with the active kind), current job, backend availability, paths, replay (the model's replay "
      "buffer: {size, texts, seen} or null)"),
@@ -4068,7 +4426,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay "
      "(the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the "
      "buffer's capacity from now on; 0 drops it), patience, min_delta (stop after `patience` full epochs without "
-     "the loss improving by `min_delta`; 0 = off)}"),
+     "the loss improving by `min_delta`; 0 = off), reverse (read every text backwards, in the model's units - its "
+     "last character or word first - so the model learns what comes before; off by default)}"),
     ("GET", "/api/schedule", _r_schedule, "what a learning-rate schedule expression may use: variables, functions, helpers, presets"),
     ("POST", "/api/schedule/preview", _r_schedule_preview,
      "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr, "
@@ -4083,13 +4442,15 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at "
      "least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations spread out - "
      "a path pays diversity times its overlap with one already picked; off at 0), guard "
-     "(default on: the negative network vetoes the continuations it recognises as failures)}"),
+     "(default on: the negative network vetoes the continuations it recognises as failures), provenance (false: "
+     "the guard reports how many it vetoed, not which or why)}"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
      "dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, "
      "penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), "
      "guard (default on: the model over-samples and the "
-     "negative network vetoes what it recognises as failure)}"),
+     "negative network vetoes what it recognises as failure), provenance (default: the server's setting; false "
+     "reports how many candidates the guard vetoed, not which or why)}"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
@@ -4100,8 +4461,17 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "round - a conversation with this on changes the model), think (default on: a voice that caught itself "
      "repeating thinks about it before it backs up, and the thought rides on the turn's rethink), think_depth "
      "(how deep a thought may question itself), "
-     "guard (default on: a reply the negative network vetoes is left unsaid)} "
+     "guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were "
+     "vetoed, not which or why)} "
      "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
+    ("POST", "/api/converse/stream", _r_converse_stream,
+     "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON "
+     "object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes "
+     "it) are the answer and are never taken back; between them is the window a backtrack may still rewrite: "
+     "look (from: the context it continues, \"\" for a fresh text), draft (text, cost: what it was about to say), "
+     "caught (kind, noticed, cut: what it keeps), backtrack (step, cut, wider), found (text, cost, explored) or "
+     "stuck (explored); the last line is {event: done, ...} with the /api/converse document; a failure after the "
+     "first line is {event: error, error}"),
     ("POST", "/api/think", _r_think,
      "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught "
      "(POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this "
@@ -4147,6 +4517,20 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
      "path_scale, window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, "
      "concentration} -> {weights, stats}"),
+    ("GET", "/api/model/attention", _r_attention,
+     "the active model's attention band - where inside a gram a correction's blame and credit land: {kind, "
+     "attention: {on, blur, weights (the band over one gram, 1 at the centre, 1 - blur at both ends; null while "
+     "off), ngram, stride, unit, units, applies (does this kind learn from corrections), default_blur}}"),
+    ("POST", "/api/model/attention", _r_attention_set,
+     "switch the band: {on, blur} - blur (0..1) alone switches it on, on: true without a blur uses the one it had "
+     "(else default_blur), on: false switches it off (each changed unit charged to the step that wrote it); "
+     "400 for a kind that is never corrected -> {kind, attention, stats}"),
+    ("POST", "/api/model/attention/preview", _r_attention_preview,
+     "where one correction would land, gram by gram, and nothing changes: {wrong, right, blur (default the "
+     "model's, else default_blur)} -> {kind, attention, blur, weights, changes, wrong, right}, each side {text, "
+     "units, grams, spans, writer (the gram writes a changed unit: the rule with the band off), charges (its "
+     "share under the band, at most 1), focus (it sees a change most sharply), end (the step into END answers "
+     "for the position after the last unit)}"),
     ("GET", "/api/negative", _r_negative,
      "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
      "filter settings"),
@@ -4161,11 +4545,12 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the reasons and the fragments to blame"),
     ("POST", "/api/negative/filter", _r_negative_filter,
      "the pair: the positive model writes, the negative one vetoes - {count, prefix, mode, max_length, temperature, "
-     "over_sample, threshold, min_coverage, ratio, no_ratio, peak (blame on a single fragment), strict, learn} or "
-     "{texts} to judge given texts"),
+     "over_sample, threshold, min_coverage, ratio, no_ratio, peak (blame on a single fragment), strict, learn, "
+     "provenance (false: verdicts carry the decision and the rule alone)} or {texts} to judge given texts"),
     ("POST", "/api/negative/forget", _r_negative_forget, "drop or fade the blame behind a reason: {reason, factor}"),
     ("POST", "/api/negative/settings", _r_negative_settings,
-     "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale}"),
+     "how strictly it judges: {threshold, min_coverage, share_scale, blame_scale, clear_scale, provenance (whether "
+     "the guard's vetoes on every answer say why - the rule, the reasons, the blamed fragments - or only how many)}"),
     ("POST", "/api/negative/reset", _r_negative_reset, "forget every failure: {seed} -> a fresh negative network"),
     ("POST", "/api/chat/start", _r_chat_start,
      "start a chat job - an LLM converses with the model and marks every reply: {conversations (0 = until "
@@ -4181,7 +4566,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the Negative tab, automatic: start a job that has the model write texts, an LLM reviewer mark them and every "
      "failure blame the negative network - {rounds (0 = until stopped), count, prefix, max_length, temperature, "
      "threshold, context (what the texts are meant to be), provider: ollama|chatgpt, reviewer_model, url, timeout, "
-     "clear_passes, epochs, seed}; the positive model is only read from"),
+     "clear_passes, epochs, seed, correct (letter-level corrections instead of marks: only the characters the editor "
+     "changed are blamed), severity (blame per corrected text)}; the positive model is only read from"),
     ("GET", "/api/negative/auto/history", _r_negative_auto_history, "round / report records of all automatic runs"),
     ("POST", "/api/negative/save", _r_negative_save, "save the negative network: {path} (default: beside the model path)"),
     ("GET", "/api/checkpoints", _r_checkpoints, "list checkpoints and the latest pointer"),
@@ -4242,6 +4628,11 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/ollama/review", _r_ollama_review,
      "adversarial LLM review of the model's samples or {texts}: {count, prefix, max_length, threshold, apply: none|2nrl, "
      "good, good_files, blame (teach the negative network what failed and why)}"),
+    ("POST", "/api/ollama/correct", _r_ollama_correct,
+     "letter-level LLM correction of the model's samples or {texts}: {count, prefix, max_length, temperature, seed, "
+     "context, model, url, timeout, blame (blame only the characters the editor changed in the negative network; "
+     "the unchanged texts clear blame), severity} -> {corrections: [{text, correction, verdict, reason, note, "
+     "changes}], corrected, unchanged, uncorrected, edits, change_rate}"),
     ("GET", "/api/chatgpt/models", _r_chatgpt_models,
      "is ChatGPT usable as a tutor here (server-side OPENAI_API_KEY) and which models the key has (?url=); never fails"),
     ("POST", "/api/codegen/start", _r_codegen_start,
@@ -4449,6 +4840,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._send(204, b"", None, method)
         if path == "/api" or path.startswith("/api/"):
             return self._handle_api(method, path.rstrip("/") or "/api", query, body)
+        if path == "/v1" or path.startswith("/v1/"):
+            return self._handle_api(method, path.rstrip("/") or "/v1", query, body)
         if method in ("GET", "HEAD"):
             return self._handle_static(method, path)
         return self._send_json(405, {"error": f"method {method} is not allowed for {path}"}, method, allow="GET, HEAD, OPTIONS")
@@ -4456,15 +4849,18 @@ class ApiHandler(BaseHTTPRequestHandler):
     # -- API -----------------------------------------------------------------
 
     def _handle_api(self, method: str, path: str, query: str, body: bytes) -> int:
+        dialect = _v1_dialect(path)  # a /v1 route answers its errors in its dialect's envelope
         route = _ROUTES.get(path)
         if route is None:
-            return self._send_json(404, {"error": f"unknown API endpoint {path}"}, method)
+            return self._send_json(404, _shape_error(dialect, 404, f"unknown API endpoint {path}"), method)
         lookup = "GET" if method == "HEAD" else method
         fn = route.get(lookup)
         if fn is None:
             allow = ", ".join(sorted(route) + ["OPTIONS"])
-            return self._send_json(405, {"error": f"method {method} is not allowed for {path}; use {allow}"}, method, allow=allow)
+            message = f"method {method} is not allowed for {path}; use {allow}"
+            return self._send_json(405, _shape_error(dialect, 405, message), method, allow=allow)
         service = self.server.service
+        param: str | None = None
         try:
             params = parse_qs(query, keep_blank_values=True)
             if lookup == "POST" and path in _BINARY_ROUTES:
@@ -4473,7 +4869,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 fields = Fields(parse_body(body) if lookup == "POST" else {})
             status, payload = fn(service, fields, params)
         except ApiError as exc:
-            status, payload = exc.status, {"error": exc.message}
+            status, payload, param = exc.status, {"error": exc.message}, exc.param
         except FileNotFoundError as exc:
             status, payload = 404, {"error": _os_error_text(exc)}
         except (ValueError, TypeError) as exc:
@@ -4483,7 +4879,50 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - reported to the client, logged here
             self._log_exception(f"{method} {path} failed")
             status, payload = 500, {"error": f"{type(exc).__name__}: {exc}"}
+        if isinstance(payload, EventStream):
+            return self._send_sse(status, payload, method)
+        if isinstance(payload, StreamedResponse):
+            return self._send_stream(payload, method, path)
+        if dialect is not None and status >= 400 and isinstance(payload, dict) and isinstance(payload.get("error"), str):
+            payload = _shape_error(dialect, status, payload["error"], param)
         return self._send_json(status, payload, method)
+
+    def _send_sse(self, status: int, stream: EventStream, method: str) -> int:
+        """Write a streamed answer: the headers, then every frame as it is produced, then close the connection.
+
+        No ``Content-Length`` can be known in advance, so the response is
+        delimited by closing the connection (``Connection: close``), which
+        every client of these formats handles.  A failure after the headers
+        went out is written as the dialect's error frame.
+        """
+        self.send_response(status)
+        for name, value in _CORS_HEADERS:
+            self.send_header(name, value)
+        self.send_header("Content-Type", stream.content_type)
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        if method == "HEAD":
+            return status
+
+        def write(frame: str) -> None:
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
+
+        try:
+            stream.run(write)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            pass  # the client went away; nothing to tell it
+        except ApiError as exc:
+            with contextlib.suppress(OSError):
+                write(stream.error(exc.message))
+        except Exception as exc:  # noqa: BLE001 - reported to the client in the stream, logged here
+            self._log_exception("streaming failed")
+            with contextlib.suppress(OSError):
+                write(stream.error(f"{type(exc).__name__}: {exc}"))
+        return status
 
     # -- static files ----------------------------------------------------------
 
@@ -4539,6 +4978,55 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise ApiError(400, "incomplete request body")
         return data
+
+    def _send_stream(self, streamed: StreamedResponse, method: str, path: str) -> int:
+        """Write a :class:`StreamedResponse`: chunked ``application/x-ndjson``, one event per line, each flushed
+        as it is written.  The headers wait for the first event, so a request refused before anything was
+        streamed still gets its 4xx JSON; a failure after that is the stream's last event."""
+        started = False
+
+        def write(event: Any) -> None:
+            nonlocal started
+            try:
+                line = json.dumps(event, ensure_ascii=False, allow_nan=False) + "\n"
+            except (TypeError, ValueError) as exc:
+                line = json.dumps({"event": "error", "error": f"event is not JSON-serialisable: {exc}"}) + "\n"
+            data = line.encode("utf-8")
+            if not started:
+                started = True
+                self.send_response(200)
+                for name, value in _CORS_HEADERS:
+                    self.send_header(name, value)
+                self.send_header("Content-Type", _NDJSON_CONTENT_TYPE)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
+
+        try:
+            streamed.run(write)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True  # the client went away mid-conversation
+            return 200
+        except ApiError as exc:
+            if not started:
+                return self._send_json(exc.status, {"error": exc.message}, method)
+            write({"event": "error", "error": exc.message})
+        except (ValueError, TypeError) as exc:
+            if not started:
+                return self._send_json(400, {"error": str(exc) or type(exc).__name__}, method)
+            write({"event": "error", "error": str(exc) or type(exc).__name__})
+        except Exception as exc:  # noqa: BLE001 - reported to the client, logged here
+            self._log_exception(f"{method} {path} failed")
+            if not started:
+                return self._send_json(500, {"error": f"{type(exc).__name__}: {exc}"}, method)
+            write({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
+        if not started:
+            return self._send(200, b"", _NDJSON_CONTENT_TYPE, method)
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
+        return 200
 
     def _send_json(self, status: int, payload: Any, method: str, allow: str | None = None) -> int:
         try:

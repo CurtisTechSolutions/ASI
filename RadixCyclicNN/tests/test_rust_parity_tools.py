@@ -340,11 +340,89 @@ class TestRustCorrectionParity(unittest.TestCase):
                 self.assertEqual(a[key], b[key], f"{key} for {wrong!r} -> {right!r}")
         strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
         self.assertEqual(strip(load_json(py_path)), strip(load_json(rs_path)))
-        # A sentence that stopped too early is blamed on its step into END.  Python's count model passes
-        # len(wrong) - characters - where the word positions are meant, so under a word encoding it never
-        # blames that step; the Rust port measures in units, as Go and Python's own negative network do.
+        # A sentence that stopped too early is blamed on its step into END: an insertion at its *word* count.
+        # Python's count model used to pass len(wrong) - characters - and never blamed that step under a word
+        # encoding; every implementation measures in units now.
+        a = py("correct", "--wrong", "the cat sat", "--right", "the cat sat on the mat", model=py_path)
         b = rust("correct", "--wrong", "the cat sat", "--right", "the cat sat on the mat", model=rs_path)
+        self.assertEqual((a["penalised"], a["marked_incorrect"]), (1, 1))
         self.assertEqual((b["penalised"], b["marked_incorrect"]), (1, 1))
+        self.assertEqual(strip(load_json(py_path)), strip(load_json(rs_path)))
+
+    def test_the_attention_band_lands_a_correction_on_the_same_steps(self):
+        """With the band on (../SPEC-AttentionBand.md) both sides share every changed unit out over the same
+        grams: the same preview, the same edges moved by the same doubles, the same verdicts - the same file."""
+        py_path = os.path.join(tmpdir(), "band_py.count.json")
+        rs_path = os.path.join(tmpdir(), "band_rs.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.rs_model, rs_path)
+        a = py("attention", "--blur", 0.3, model=py_path)
+        b = rust("attention", "--blur", 0.3, model=rs_path)
+        self.assertEqual(a["attention"], b["attention"])
+        self.assertEqual(a["changed"], b["changed"])
+        for wrong, right in self.PAIRS:
+            with self.subTest(wrong=wrong):
+                x = py("attention", "--wrong", wrong, "--right", right, model=py_path)["preview"]
+                y = rust("attention", "--wrong", wrong, "--right", right, model=rs_path)["preview"]
+                self.assertEqual(x, y)
+        for wrong, right in self.PAIRS:
+            a = py("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=py_path)
+            b = rust("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=rs_path)
+            for key in ("edits", "penalised", "rewarded", "kept", "marked_correct", "marked_incorrect",
+                        "penalty", "reward"):
+                self.assertEqual(a[key], b[key], f"{key} for {wrong!r} -> {right!r}")
+        a_doc, b_doc = load_json(py_path), load_json(rs_path)
+        strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
+        self.assertEqual(strip(a_doc), strip(b_doc))
+        self.assertEqual(list(a_doc["graph"])[:3], ["format", "format_version", "attention"])
+        for key in ("rewards_total", "penalties_total", "feedback_passes"):
+            self.assertEqual(a_doc["meta"][key], b_doc["meta"][key], key)
+        self.assertEqual(py("info", model=py_path)["stats"]["attention_blur"], 0.3)
+        self.assertEqual(rust("info", model=rs_path)["stats"]["attention_blur"], 0.3)
+        # each reads the other's band
+        self.assertEqual(rust("attention", model=py_path)["attention"]["blur"], 0.3)
+        self.assertEqual(py("attention", model=rs_path)["attention"]["blur"], 0.3)
+
+    def test_a_word_model_under_the_band_writes_the_same_file(self):
+        py_path = os.path.join(tmpdir(), "band_words_py.word.json")
+        rs_path = os.path.join(tmpdir(), "band_words_rs.word.json")
+        for path in (py_path, rs_path):
+            if os.path.exists(path):
+                os.remove(path)
+        py("--kind", "count", "--encoding", "word:3:1", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2,
+           model=py_path)
+        rust("--encoding", "word:3:1", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=rs_path)
+        py("attention", "--on", model=py_path)
+        rust("attention", "--on", model=rs_path)
+        for wrong, right in (("a cat sat on the mat", "the cat sat on the mat"), ("the cat sat", "the cat sat on the mat"),
+                             ("the dog run to the park", "the dog ran to the park")):
+            a = py("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, model=py_path)
+            b = rust("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, model=rs_path)
+            for key in ("penalised", "rewarded", "kept", "marked_correct", "marked_incorrect", "penalty", "reward"):
+                self.assertEqual(a[key], b[key], f"{key} for {wrong!r} -> {right!r}")
+        a_doc, b_doc = load_json(py_path), load_json(rs_path)
+        strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
+        self.assertEqual(strip(a_doc), strip(b_doc))
+        self.assertEqual(list(a_doc["graph"])[:4], ["format", "format_version", "encoding", "attention"])
+
+    def test_the_negative_network_is_blamed_by_the_band(self):
+        py_path = os.path.join(tmpdir(), "band_blame_py.count.json")
+        rs_path = os.path.join(tmpdir(), "band_blame_rs.count.json")
+        for path, run in ((py_path, py), (rs_path, rust)):
+            negative = path.replace(".count.json", ".count.negative.json")
+            if os.path.exists(negative):
+                os.remove(negative)
+            shutil.copy(self.py_model if run is py else self.rs_model, path)
+            run("negative", "blame", "--text", "the cat sat here", "--reason", "other", model=path)
+            run("attention", "--blur", 0.5, model=negative)
+            for wrong, right in (("the cat sit on the mat", "the cat sits on the mat"), ("a apple a day", "an apple a day")):
+                run("correct", "--wrong", wrong, "--right", right, "--blame", "--reason", "agreement", model=path)
+        a_doc = load_json(py_path.replace(".count.json", ".count.negative.json"))
+        b_doc = load_json(rs_path.replace(".count.json", ".count.negative.json"))
+        strip = lambda doc: compact({k: v for k, v in doc["graph"].items() if k != "version"})  # noqa: E731
+        self.assertEqual(strip(a_doc), strip(b_doc))
+        self.assertEqual(a_doc["meta"]["blame_total"], b_doc["meta"]["blame_total"])
+        self.assertTrue(any(0 < blame < 1 for blame in a_doc["graph"]["edges"]["blame"]))  # a share of a failure
 
     def test_the_cli_refuses_the_same_way(self):
         a = py("correct", "--wrong", " ", "--right", "", model=self.py_model, expect=1)
@@ -352,6 +430,56 @@ class TestRustCorrectionParity(unittest.TestCase):
         self.assertEqual(a["error"].replace("radixnet: error: ", ""), b["error"].replace("radixnet: ", ""))
         b = rust("correct", "--wrong", "a", "--right", "b", "--strength", -1, model=self.rs_model, expect=1)
         self.assertIn("--strength", b["error"])
+
+
+class TestRustAttentionRoutes(unittest.TestCase):
+    """The attention band's three routes, Rust's `radixnet serve` against Python's server: the same documents."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.test_api import start_server
+
+        cls.rs = serve(cls, os.path.join(tmpdir(), "routes_band.count.json"))
+        cls.py_client, _server, _service = start_server(
+            cls.addClassCleanup, model_path=os.path.join(tmpdir(), "routes_band_py", "model.json")
+        )
+
+    def both(self, method, path, body=None):
+        py_answer = self.py_client.get(path) if method == "GET" else self.py_client.post(path, body or {})
+        rs_answer = self.rs.get(path) if method == "GET" else self.rs.post(path, body or {})
+        return py_answer[:2], rs_answer[:2]
+
+    def test_the_same_band_through_both_servers(self):
+        for client in (self.py_client, self.rs):
+            self.assertEqual(client.post("/api/model/select", {"kind": "count"})[0], 200)
+        (ps, pd), (rs_, rd) = self.both("GET", "/api/model/attention")
+        self.assertEqual((ps, rs_), (200, 200))
+        self.assertEqual(pd, rd)
+        for body in ({"on": True}, {"blur": 0.2}, {"on": False, "blur": 0.9}, {"blur": 0.75}):
+            with self.subTest(body=body):
+                (ps, pd), (rs_, rd) = self.both("POST", "/api/model/attention", body)
+                self.assertEqual((ps, rs_), (200, 200), (pd, rd))
+                self.assertEqual((pd["kind"], pd["attention"]), (rd["kind"], rd["attention"]))
+                self.assertEqual(pd["stats"]["attention_blur"], rd["stats"]["attention_blur"])
+        for body in ({"blur": 3}, {"on": "yes"}, {"blur": "x"}):
+            with self.subTest(refused=body):
+                (ps, _pd), (rs_, _rd) = self.both("POST", "/api/model/attention", body)
+                self.assertEqual((ps, rs_), (400, 400))
+        body = {"wrong": "the cat sat on the mat", "right": "the bat sat on the mat", "blur": 1}
+        (ps, pd), (rs_, rd) = self.both("POST", "/api/model/attention/preview", body)
+        self.assertEqual((ps, rs_), (200, 200))
+        self.assertEqual(pd, rd)
+        self.assertEqual(pd["wrong"]["charges"][2:5], [0.0, 1.0, 0.0])
+        self.assertEqual(self.both("GET", "/api/model")[0][1]["attention"], self.both("GET", "/api/model")[1][1]["attention"])
+        # a kind that is never corrected refuses on both
+        for client in (self.py_client, self.rs):
+            self.assertEqual(client.post("/api/model/select", {"kind": "radix"})[0], 200)
+        (ps, pd), (rs_, rd) = self.both("POST", "/api/model/attention", {"blur": 0.5})
+        self.assertEqual((ps, rs_), (400, 400))
+        self.assertEqual(pd["error"], rd["error"])
+        (ps, pd), (rs_, rd) = self.both("GET", "/api/model/attention")
+        self.assertEqual(pd, rd)
+        self.assertFalse(rd["attention"]["applies"])
 
 
 class TestRustToolRoutes(unittest.TestCase):

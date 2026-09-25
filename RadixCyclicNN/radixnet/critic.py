@@ -23,6 +23,15 @@ Then it does it again.  Nothing is invented: every failure still arrives from
 something outside the network that looked at an output and said it was wrong,
 and why - the only change is that nobody has to sit there doing it.
 
+With ``correct=True`` the reviewer is a **copy editor** instead: it writes each
+text out correctly with as few characters changed as it can
+(:func:`radixnet.ollama.correct_texts`), and the diff between the two is the
+lesson - only the characters it changed are blamed, at one failure per
+corrected text, and a text it handed back unchanged clears blame
+(:func:`radixnet.blame.teach_corrections`).  There is no mark and no pass
+mark in that mode; ``change_rate`` (the share of texts it had to change) takes
+the place of the mean rating in the round records and the report card.
+
 The loop touches the *negative* network only.  It never trains, rewards or
 inverts the positive model, so it can be left running beside anything else that
 is teaching it.
@@ -69,6 +78,10 @@ class CriticConfig:
     """Blame epochs per round."""
     seed: int | None = None
     """Seed of the first round's sampling; later rounds advance it, so rounds differ."""
+    correct: bool = False
+    """Ask for letter-level corrections instead of marks: only the characters the editor changed are blamed."""
+    severity: float = 1.0
+    """How heavily one corrected text is blamed (``correct`` mode; a marked failure's severity comes from its mark)."""
 
     def validate(self) -> None:
         if self.rounds < 0:
@@ -83,6 +96,8 @@ class CriticConfig:
             raise ValueError("threshold must lie in [0, 10]")
         if self.epochs < 0:
             raise ValueError("epochs must be >= 0")
+        if self.severity < 0:
+            raise ValueError("severity must be >= 0")
         if normalise_provider(self.provider) not in PROVIDERS:
             raise ValueError(f"provider must be one of: {', '.join(PROVIDERS)}")
 
@@ -130,7 +145,7 @@ class Critic:
         return int(self.config.seed) + self.round_no
 
     def run_round(self) -> dict:
-        """Write, review, blame - one round, returning its record."""
+        """Write, review (or correct), blame - one round, returning its record."""
         from . import blame as blame_module
         from .ollama import review_texts, sample_texts, summarise_reviews
 
@@ -143,6 +158,8 @@ class Critic:
             self.model, cfg.count, prefix=cfg.prefix, max_length=cfg.max_length,
             temperature=cfg.temperature, seed=self._seed(),
         )
+        if cfg.correct:
+            return self._correct_round(samples, started)
         with self._external():  # only the reviewer's thinking happens outside the lock
             reviews = review_texts(
                 self.client, samples, context=cfg.context or None,
@@ -159,6 +176,7 @@ class Critic:
             "kind": "round",
             "round": self.round_no,
             "reviewer": review.get("model"),
+            "mode": "review",
             "threshold": float(cfg.threshold),
             "texts": len(review.get("texts") or []),
             "reviews": review.get("reviews") or [],
@@ -166,6 +184,47 @@ class Critic:
             "pass_rate": review.get("pass_rate"),
             "passed": len(review.get("good") or []),
             "failed": len(review.get("bad") or []),
+            "blamed": taught["blamed"],
+            "cleared": taught["cleared"],
+            "unmatched": taught["unmatched"],
+            "edges": taught["edges"],
+            "reasons": taught["reasons"],
+            "severity_mean": taught["severity_mean"],
+            "stats": self.negative.stats(),
+            "seconds": time.perf_counter() - started,
+        }
+        self.history.append(record)
+        return record
+
+    def _correct_round(self, samples: list[str], started: float) -> dict:
+        """The editor's round: every text is written out correctly and only the diff is blamed."""
+        from . import blame as blame_module
+        from .ollama import correct_texts, summarise_corrections
+
+        cfg = self.config
+        with self._external():
+            corrections = correct_texts(
+                self.client, samples, context=cfg.context or None, model=cfg.reviewer_model or None,
+            )
+        result = summarise_corrections("model", cfg.reviewer_model or self.client.model, samples, corrections)
+        taught = blame_module.teach_corrections(
+            self.negative, result, severity=cfg.severity, clear_passes=cfg.clear_passes,
+            source="critic", epochs=cfg.epochs,
+        )
+        record = {
+            "kind": "round",
+            "round": self.round_no,
+            "reviewer": result.get("model"),
+            "mode": "correct",
+            "severity": float(cfg.severity),
+            "texts": len(result.get("texts") or []),
+            "corrections": result.get("corrections") or [],
+            "change_rate": result.get("change_rate"),
+            "corrected": len(result.get("corrected") or []),
+            "unchanged": len(result.get("unchanged") or []),
+            "uncorrected": len(result.get("uncorrected") or []),
+            "edits": result.get("edits"),
+            "wrong_chars": result.get("wrong_chars"),
             "blamed": taught["blamed"],
             "cleared": taught["cleared"],
             "unmatched": taught["unmatched"],
@@ -219,16 +278,21 @@ def report_card(records: list[dict]) -> dict:
 
     ``mean_rating`` is over the rounds that produced one, and ``trend`` is the
     last round's mean rating minus the first's - positive when the reviewer is
-    marking the model's output better than it did at the start.
+    marking the model's output better than it did at the start.  Rounds run by
+    the copy editor (``correct=True``) add ``corrected``, ``unchanged``,
+    ``uncorrected``, ``edits``, ``change_rate`` and ``change_trend`` (the last
+    round's change rate minus the first's - negative when the editor has less
+    to put right than it had at the start).
     """
     rounds = [r for r in records if r.get("kind") == "round"]
     ratings = [float(r["mean_rating"]) for r in rounds if isinstance(r.get("mean_rating"), (int, float))]
     rates = [float(r["pass_rate"]) for r in rounds if isinstance(r.get("pass_rate"), (int, float))]
+    changes = [float(r["change_rate"]) for r in rounds if isinstance(r.get("change_rate"), (int, float))]
     reasons: dict[str, int] = {}
     for record in rounds:
         for reason, count in (record.get("reasons") or {}).items():
             reasons[reason] = reasons.get(reason, 0) + int(count)
-    return {
+    card = {
         "kind": "report",
         "rounds": len(rounds),
         "reviewed": sum(int(r.get("texts") or 0) for r in rounds),
@@ -241,3 +305,14 @@ def report_card(records: list[dict]) -> dict:
         "reasons": dict(sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))),
         "stats": rounds[-1].get("stats") if rounds else None,
     }
+    if any(r.get("mode") == "correct" for r in rounds):
+        # the editor's rounds: how often it had to change something, and how much
+        card.update(
+            corrected=sum(int(r.get("corrected") or 0) for r in rounds),
+            unchanged=sum(int(r.get("unchanged") or 0) for r in rounds),
+            uncorrected=sum(int(r.get("uncorrected") or 0) for r in rounds),
+            edits=sum(int(r.get("edits") or 0) for r in rounds),
+            change_rate=(sum(changes) / len(changes)) if changes else None,
+            change_trend=(changes[-1] - changes[0]) if len(changes) > 1 else None,
+        )
+    return card

@@ -912,6 +912,7 @@ class ResonantNet(GraphModel):
 
         ``origin=THINK`` trains the texts as thoughts (:mod:`radixnet.thinking`)."""
         cfg = _resolve_config(config, overrides)
+        texts = self._read(texts, cfg)
         cleaned, _ = self._clean_texts(texts)
         records = self._passes(
             texts, cfg, count=True, reward=0.0, strength=1.0, phase=phase,

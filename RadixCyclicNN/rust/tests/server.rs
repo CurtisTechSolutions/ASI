@@ -93,17 +93,84 @@ fn serve(model: Model, path: &str) -> u16 {
 
 /// One request; returns `(status, body)`.
 fn request(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, Json) {
+    send(port, method, path, "application/json", body.unwrap_or("").as_bytes())
+}
+
+/// One request with any body: `(status, body)`.
+fn send(port: u16, method: &str, path: &str, content_type: &str, body: &[u8]) -> (u16, Json) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the server");
-    let payload = body.unwrap_or("");
     let head = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\
-         Content-Type: application/json\r\nConnection: close\r\n\r\n",
-        payload.len()
+         Content-Type: {content_type}\r\nConnection: close\r\n\r\n",
+        body.len()
     );
     stream.write_all(head.as_bytes()).expect("the request head");
-    stream.write_all(payload.as_bytes()).expect("the request body");
-    let mut answer = String::new();
-    stream.read_to_string(&mut answer).expect("the answer");
+    // a server that refuses the body unread may have answered and hung up already
+    let _ = stream.write_all(body);
+    answer(stream)
+}
+
+/// A request that announces its body with `Expect: 100-continue` and sends
+/// it only once the server has nodded, as curl does with a large file.
+fn send_expecting(port: u16, path: &str, content_type: &str, body: &[u8]) -> (u16, Json) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the server");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\
+         Content-Type: {content_type}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("the request head");
+    // the nod, before a byte of the body goes
+    let mut nod = Vec::new();
+    let mut byte = [0u8; 1];
+    while !nod.ends_with(b"\r\n\r\n") {
+        assert_eq!(
+            stream.read(&mut byte).expect("the nod"),
+            1,
+            "the connection closed before the nod"
+        );
+        nod.push(byte[0]);
+    }
+    assert!(
+        nod.starts_with(b"HTTP/1.1 100 Continue"),
+        "{}",
+        String::from_utf8_lossy(&nod)
+    );
+    stream.write_all(body).expect("the request body");
+    answer(stream)
+}
+
+/// A request whose body stops short of the length it declared: the client
+/// hangs up after `body`.
+fn send_short(port: u16, path: &str, content_type: &str, body: &[u8], declared: usize) -> (u16, Json) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the server");
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {declared}\r\n\
+         Content-Type: {content_type}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).expect("the request head");
+    stream.write_all(body).expect("the request body");
+    stream.shutdown(std::net::Shutdown::Write).expect("half a close");
+    answer(stream)
+}
+
+/// The status and the JSON body of what the server wrote back.
+fn answer(mut stream: TcpStream) -> (u16, Json) {
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            // a reset after the answer arrived is the server hanging up on what it did not read
+            Err(err) if !raw.is_empty() => {
+                eprintln!("the connection ended after the answer: {err}");
+                break;
+            }
+            Err(err) => panic!("no answer: {err}"),
+        }
+    }
+    let answer = String::from_utf8_lossy(&raw);
     let status: u16 = answer
         .split_whitespace()
         .nth(1)
@@ -113,8 +180,124 @@ fn request(port: u16, method: &str, path: &str, body: Option<&str>) -> (u16, Jso
     (status, parse(body).unwrap_or(Json::Null))
 }
 
+/// Waits for the running job to end; `true` when it ended done.
+fn job_done(port: u16) -> bool {
+    for _ in 0..6000 {
+        match get(port, "/api/job").1.at("state").as_str() {
+            Some("running") => std::thread::sleep(std::time::Duration::from_millis(10)),
+            Some("done") => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A browser's `FormData` with one file in it.
+fn multipart_body(boundary: &str, filename: &str, data: &[u8]) -> Vec<u8> {
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+         Content-Type: application/octet-stream\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(data);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
+}
+
+/// A ZIP archive of stored (uncompressed) members, written out the plain way:
+/// the local headers, the central directory and the end record, with the
+/// CRC-32 the reader checks each member against.
+fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in members {
+        let crc = radixnet::gzip::crc32(data);
+        let offset = out.len() as u32;
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]); // version, flags, stored, time, date
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        central.extend_from_slice(&[20, 0, 20, 0, 0x00, 0x08, 0, 0, 0, 0, 0, 0]); // made by, needed, UTF-8 names, stored, time, date
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&[0u8; 12]); // extra, comment, disk, attributes
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let directory = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(members.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&directory.to_le_bytes());
+    out.extend_from_slice(&[0, 0]);
+    out
+}
+
+/// Lines enough to fill `bytes`, numbered so that no two are alike.
+fn lines_of(bytes: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes + 64);
+    let mut i = 0usize;
+    while out.len() < bytes {
+        out.extend_from_slice(format!("the cat number {i} sat on mat {}\n", (i * 7) % 61).as_bytes());
+        i += 1;
+    }
+    out
+}
+
 fn get(port: u16, path: &str) -> (u16, Json) {
     request(port, "GET", path, None)
+}
+
+/// One request; returns the status, the headers and the raw body (for a stream).
+fn request_raw(port: u16, method: &str, path: &str, body: &str) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the server");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\
+         Content-Type: application/json\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).expect("the request head");
+    stream.write_all(body.as_bytes()).expect("the request body");
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).expect("the answer");
+    let status: u16 = answer
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0);
+    let (headers, body) = answer.split_once("\r\n\r\n").unwrap_or(("", ""));
+    (status, headers.to_string(), body.to_string())
+}
+
+/// The frames of a server-sent event stream: `(event name, data)`, the data parsed where it is JSON.
+fn sse_frames(body: &str) -> Vec<(String, Json)> {
+    body.split("\n\n")
+        .filter(|frame| !frame.trim().is_empty())
+        .map(|frame| {
+            let mut event = String::new();
+            let mut data = Vec::new();
+            for line in frame.lines() {
+                if let Some(name) = line.strip_prefix("event: ") {
+                    event = name.to_string();
+                } else if let Some(text) = line.strip_prefix("data: ") {
+                    data.push(text.to_string());
+                }
+            }
+            let text = data.join("\n");
+            (event, parse(&text).unwrap_or(Json::Str(text)))
+        })
+        .collect()
 }
 
 fn post(port: u16, path: &str, body: &str) -> (u16, Json) {
@@ -506,4 +689,385 @@ fn every_kind_is_selected_trained_and_reset() {
     let (status, error) = post(port, "/api/schedule/preview", r#"{"lr_schedule":"lr0 +"}"#);
     assert_eq!(status, 400);
     assert!(error.at("error").as_str().unwrap_or("").contains("invalid syntax"));
+}
+
+#[test]
+fn todays_format_answers_in_both_dialects_and_streams() {
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("assistant")));
+
+    let (status, models) = get(port, "/v1/models");
+    assert_eq!(status, 200);
+    assert_eq!(models.at("object").as_str(), Some("list"));
+    let first = &models.at("data").as_array()[0];
+    assert_eq!(first.at("id").as_str(), Some("radixnet-count"));
+    assert_eq!(first.at("active").as_bool(), Some(true));
+
+    let body = r#"{"model": "radixnet-count", "messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 30, "learn": false}"#;
+    let (status, doc) = post(port, "/v1/chat/completions", body);
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("object").as_str(), Some("chat.completion"));
+    let message = doc.at("choices").as_array()[0].at("message").clone();
+    let said = message.at("content").as_str().unwrap_or("").to_string();
+    assert!(!said.is_empty(), "{doc:?}");
+    assert!(message
+        .at("reasoning_content")
+        .as_str()
+        .unwrap_or("")
+        .starts_with("answering \"tell me about the cat\""));
+    assert_eq!(
+        doc.at("usage").at("prompt_tokens").as_i64(),
+        Some("tell me about the cat".len() as i64)
+    );
+    assert_eq!(
+        doc.at("radixnet").at("choices").as_array()[0]
+            .at("turn")
+            .at("text")
+            .as_str(),
+        Some(said.as_str())
+    );
+
+    let (status, msg) = post(
+        port,
+        "/v1/messages",
+        r#"{"system": "be brief", "messages": [{"role": "user", "content": "the dog sat"}], "max_tokens": 30, "learn": false}"#,
+    );
+    assert_eq!(status, 200, "{msg:?}");
+    assert_eq!(msg.at("type").as_str(), Some("message"));
+    let blocks = msg.at("content").as_array();
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].at("type").as_str(), Some("thinking"));
+    assert!(blocks[0]
+        .at("thinking")
+        .as_str()
+        .unwrap_or("")
+        .contains("a system prompt was given"));
+    assert_eq!(blocks[1].at("type").as_str(), Some("text"));
+    let (status, counted) = post(
+        port,
+        "/v1/messages/count_tokens",
+        r#"{"system": "be brief", "messages": [{"role": "user", "content": "the dog sat"}]}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        counted.at("input_tokens").as_i64(),
+        Some(("be brief".len() + "the dog sat".len()) as i64)
+    );
+
+    // the errors take the dialect's shape
+    let (status, bad) = post(port, "/v1/chat/completions", r#"{"messages": "no"}"#);
+    assert_eq!(status, 400);
+    assert_eq!(bad.at("error").at("param").as_str(), Some("messages"));
+    assert_eq!(bad.at("error").at("type").as_str(), Some("invalid_request_error"));
+    let (status, bad) = post(
+        port,
+        "/v1/chat/completions",
+        r#"{"model": "radixnet-radix", "messages": [{"role": "user", "content": "x"}]}"#,
+    );
+    assert_eq!(status, 404, "{bad:?}");
+    assert_eq!(bad.at("error").at("code").as_str(), Some("model_not_found"));
+    let (status, bad) = post(
+        port,
+        "/v1/messages",
+        r#"{"model": "radix", "messages": [{"role": "user", "content": "x"}]}"#,
+    );
+    assert_eq!(status, 404);
+    assert_eq!(bad.at("type").as_str(), Some("error"));
+    assert_eq!(bad.at("error").at("type").as_str(), Some("not_found_error"));
+    let (status, bad) = get(port, "/v1/nothing");
+    assert_eq!(status, 404);
+    assert_eq!(bad.at("error").at("type").as_str(), Some("invalid_request_error"));
+
+    // the same reply, streamed: chunks that join into the text, then [DONE]
+    let (status, headers, body) = request_raw(
+        port,
+        "POST",
+        "/v1/chat/completions",
+        r#"{"messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 30, "learn": false, "stream": true, "stream_options": {"include_usage": true}}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(headers.contains("Content-Type: text/event-stream"), "{headers}");
+    let frames = sse_frames(&body);
+    assert_eq!(frames.last().map(|(_, d)| d.as_str()), Some(Some("[DONE]")));
+    let mut streamed = String::new();
+    for (_, chunk) in &frames[..frames.len() - 1] {
+        assert_eq!(chunk.at("object").as_str(), Some("chat.completion.chunk"));
+        for choice in chunk.at("choices").as_array() {
+            if let Some(text) = choice.at("delta").at("content").as_str() {
+                streamed.push_str(text);
+            }
+        }
+    }
+    assert_eq!(streamed, said);
+    assert_eq!(
+        frames[frames.len() - 2].1.at("usage").at("prompt_tokens").as_i64(),
+        Some(21)
+    );
+    let (status, _headers, body) = request_raw(
+        port,
+        "POST",
+        "/v1/messages",
+        r#"{"messages": [{"role": "user", "content": "tell me about the cat"}], "max_tokens": 30, "learn": false, "stream": true}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    let frames = sse_frames(&body);
+    let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names[0], "message_start");
+    assert_eq!(&names[names.len() - 2..], ["message_delta", "message_stop"]);
+    let mut streamed = String::new();
+    for (name, data) in &frames {
+        if name == "content_block_delta" && data.at("delta").at("type").as_str() == Some("text_delta") {
+            streamed.push_str(data.at("delta").at("text").as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(streamed, said);
+    // a model that is not here is a 404 document, not a stream
+    let (status, headers, _body) = request_raw(
+        port,
+        "POST",
+        "/v1/messages",
+        r#"{"model": "nope", "messages": [{"role": "user", "content": "x"}], "stream": true}"#,
+    );
+    assert_eq!(status, 404);
+    assert!(headers.contains("application/json"), "{headers}");
+}
+
+/// `reverse` reads every text of a run backwards - the inline texts and the
+/// uploads alike - so the model learns what comes before: its continuation of
+/// a text's end, read backwards, is the whole text.  Anything but a boolean is
+/// refused, as the Python and Go servers refuse it.
+#[test]
+fn a_reversed_run_learns_what_comes_before() {
+    let dir = temp_dir("reverse");
+    let empty = Model::new(0, GraphOptions::default()).expect("a model");
+    let port = serve(empty, &format!("{dir}/model.count.json"));
+
+    let (status, error) = post(port, "/api/train", r#"{"texts":["the cat sat"],"reverse":"yes"}"#);
+    assert_eq!(status, 400);
+    assert!(error
+        .at("error")
+        .as_str()
+        .unwrap_or("")
+        .contains("'reverse' must be a boolean"));
+
+    let (status, _) = post(
+        port,
+        "/api/uploads",
+        r#"{"name":"fox.txt","content":"quick brown fox\n"}"#,
+    );
+    assert_eq!(status, 200);
+    let (status, _) = post(
+        port,
+        "/api/train",
+        r#"{"texts":["lazy dog sleeps"],"files":["fox.txt"],"reverse":true,"epochs":2}"#,
+    );
+    assert_eq!(status, 202);
+    for _ in 0..200 {
+        if get(port, "/api/job").1.at("state").as_str() != Some("running") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("done"));
+
+    let enc = Encoding::default();
+    for (end, whole) in [("fox", "quick brown fox"), ("sleeps", "lazy dog sleeps")] {
+        let body = format!(
+            r#"{{"prefix":"{}","length":1,"to_end":true,"guard":false}}"#,
+            enc.reverse(end)
+        );
+        let (status, found) = post(port, "/api/predict", &body);
+        assert_eq!(status, 200, "{found:?}");
+        let full = found.at("full_text").as_str().unwrap_or("").to_string();
+        assert_eq!(enc.reverse(&full), whole, "backwards from {end:?}");
+    }
+}
+
+/// The uploads route streams its body to disk rather than reading it whole,
+/// so an archive is not held to the cap the JSON routes keep - the old 16 MiB
+/// limit, which one source tree passes at once (D-035).  Multipart, a raw
+/// body and the JSON form all take an archive larger than that, the listing
+/// describes it, it trains, a body cut short leaves nothing behind, and the
+/// cap still holds where a body is read whole.
+#[test]
+fn an_upload_of_any_size_streams_to_disk() {
+    let dir = temp_dir("big-uploads");
+    let port = serve(trained(false), &format!("{dir}/model.count.json"));
+    let uploads = std::path::Path::new(&dir).join("uploads");
+    let over_the_cap = radixnet::http::MAX_BODY + (1 << 20);
+
+    let big = lines_of(over_the_cap);
+    let big_lines = big.iter().filter(|&&b| b == b'\n').count();
+    let zip = stored_zip(&[
+        ("corpus/big.txt", &big),
+        ("corpus/small.txt", b"a bird sang in the tree\n"),
+        ("corpus/.DS_Store", b"\0\0"),
+    ]);
+    assert!(zip.len() > radixnet::http::MAX_BODY);
+
+    // as multipart, what the browser sends
+    let (status, doc) = send(
+        port,
+        "POST",
+        "/api/uploads",
+        "multipart/form-data; boundary=q",
+        &multipart_body("q", "corpus.zip", &zip),
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    let record = doc.at("uploads").as_array()[0].clone();
+    assert_eq!(record.at("name").as_str(), Some("corpus.zip"));
+    assert_eq!(record.at("archive").as_bool(), Some(true));
+    assert_eq!(record.at("bytes").as_i64(), Some(zip.len() as i64));
+    assert_eq!(record.at("files").as_i64(), Some(2));
+    assert_eq!(record.at("lines").as_i64(), Some(big_lines as i64 + 1));
+    assert_eq!(record.at("skipped").as_i64(), Some(1));
+    assert_eq!(record.at("replaced").as_bool(), Some(false));
+    let archive = doc.at("archives").as_array()[0].clone();
+    assert_eq!(archive.at("extracted").as_i64(), Some(2));
+    assert_eq!(archive.at("entries").as_i64(), Some(3));
+    assert_eq!(archive.at("bytes").as_i64(), Some(zip.len() as i64));
+    assert_eq!(
+        archive.at("skipped").as_array()[0].at("reason").as_str(),
+        Some("system file")
+    );
+    assert_eq!(
+        std::fs::read(uploads.join("corpus.zip")).unwrap(),
+        zip,
+        "kept whole, byte for byte"
+    );
+
+    // as a raw body, announced with Expect: 100-continue as curl announces a large file
+    let (status, doc) = send_expecting(port, "/api/uploads?name=raw", "application/zip", &zip);
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("uploads").as_array()[0].at("name").as_str(), Some("raw.zip"));
+    assert_eq!(std::fs::read(uploads.join("raw.zip")).unwrap(), zip);
+
+    // and as the JSON form, which carries the file inline and is read whole
+    let json = format!(
+        r#"{{"name":"inline.zip","content_base64":"{}"}}"#,
+        radixnet::multipart::base64::encode(&zip)
+    );
+    assert!(json.len() > radixnet::http::MAX_BODY);
+    let (status, doc) = post(port, "/api/uploads", &json);
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("uploads").as_array()[0].at("files").as_i64(), Some(2));
+    assert_eq!(std::fs::read(uploads.join("inline.zip")).unwrap(), zip);
+
+    // a text file over the cap streams too, converted on the way: the byte-order mark goes
+    let mut text = vec![0xef, 0xbb, 0xbf];
+    text.extend_from_slice(&big);
+    let (status, doc) = send(port, "POST", "/api/uploads?name=big.txt", "text/plain", &text);
+    assert_eq!(status, 200, "{doc:?}");
+    let record = doc.at("uploads").as_array()[0].clone();
+    assert_eq!(record.at("lines").as_i64(), Some(big_lines as i64));
+    assert_eq!(record.at("chars").as_i64(), Some(big.len() as i64));
+    assert_eq!(record.at("bytes").as_i64(), Some(big.len() as i64));
+    assert_eq!(std::fs::read(uploads.join("big.txt")).unwrap(), big);
+
+    // the listing describes them all, and nothing half-written is in it
+    let (status, listing) = get(port, "/api/uploads");
+    assert_eq!(status, 200);
+    let rows = listing.at("uploads").as_array();
+    let names: Vec<&str> = rows.iter().filter_map(|u| u.at("name").as_str()).collect();
+    assert_eq!(names, vec!["big.txt", "corpus.zip", "inline.zip", "raw.zip"]);
+    let listed = rows.iter().find(|u| u.at("name").as_str() == Some("big.txt")).unwrap();
+    assert_eq!(listed.at("lines").as_i64(), Some(big_lines as i64));
+    assert_eq!(listed.at("chars").as_i64(), Some(big.len() as i64));
+    assert!(listed.get("modified").is_some());
+    let listed = rows
+        .iter()
+        .find(|u| u.at("name").as_str() == Some("corpus.zip"))
+        .unwrap();
+    assert_eq!(listed.at("lines").as_i64(), Some(big_lines as i64 + 1));
+
+    // and an archive that came in this way trains, every line of every entry
+    // (a small one: the big one takes a debug build most of a minute)
+    let small = stored_zip(&[
+        ("a/one.txt", b"the cat sat on the mat\nthe cat ran to the door\n"),
+        ("two.txt", b"the dog sat on the log\n"),
+    ]);
+    let (status, doc) = send(
+        port,
+        "POST",
+        "/api/uploads",
+        "multipart/form-data; boundary=q",
+        &multipart_body("q", "small.zip", &small),
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    let before = get(port, "/api/status").1.at("trained_texts").as_i64().unwrap_or(0);
+    let (status, _) = post(port, "/api/train", r#"{"files":["small.zip"],"epochs":1}"#);
+    assert_eq!(status, 202);
+    assert!(job_done(port));
+    let after = get(port, "/api/status").1.at("trained_texts").as_i64().unwrap_or(0);
+    assert_eq!(after - before, 3);
+
+    // a body shorter than its Content-Length is refused, and leaves nothing behind
+    let (status, doc) = send_short(
+        port,
+        "/api/uploads?name=short.zip",
+        "application/zip",
+        &zip[..4096],
+        zip.len(),
+    );
+    assert_eq!(status, 400, "{doc:?}");
+    assert_eq!(doc.at("error").as_str(), Some("incomplete request body"));
+    let left: Vec<String> = std::fs::read_dir(&uploads)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        !left.iter().any(|n| n == "short.zip" || n.ends_with(".part")),
+        "{left:?}"
+    );
+
+    // an archive that is not one, and one with nothing to train on, are refused the same way
+    let (status, doc) = send(
+        port,
+        "POST",
+        "/api/uploads?name=broken.zip",
+        "application/zip",
+        b"PK\x03\x04 and nothing else",
+    );
+    assert_eq!(status, 400);
+    assert!(
+        doc.at("error")
+            .as_str()
+            .unwrap_or("")
+            .starts_with("broken.zip: not a valid ZIP archive"),
+        "{doc:?}"
+    );
+    let empty = stored_zip(&[("only.png", b"\x89PNG\r\n\x1a\n\0\0")]);
+    let (status, doc) = send(port, "POST", "/api/uploads?name=empty.zip", "application/zip", &empty);
+    assert_eq!(status, 400);
+    assert_eq!(
+        doc.at("error").as_str(),
+        Some("empty.zip holds no text files to train on (only.png: binary)")
+    );
+    assert!(!uploads.join("broken.zip").exists() && !uploads.join("empty.zip").exists());
+
+    // a chunked body has no length to stream by: refused as the Python server refuses it
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("the server");
+    stream
+        .write_all(
+            b"POST /api/uploads?name=chunked.txt HTTP/1.1\r\nHost: localhost\r\n\
+              Transfer-Encoding: chunked\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n\
+              5\r\nhello\r\n0\r\n\r\n",
+        )
+        .expect("the request");
+    let (status, doc) = answer(stream);
+    assert_eq!(status, 411, "{doc:?}");
+    assert!(
+        doc.at("error").as_str().unwrap_or("").contains("Content-Length"),
+        "{doc:?}"
+    );
+    assert!(!uploads.join("chunked.txt").exists());
+
+    // the cap still holds where a body is read whole: a JSON route
+    let padding = "x".repeat(radixnet::http::MAX_BODY);
+    let (status, doc) = post(port, "/api/predict", &format!(r#"{{"prefix":"{padding}"}}"#));
+    assert_eq!(status, 400);
+    assert!(
+        doc.at("error").as_str().unwrap_or("").contains("larger than"),
+        "{doc:?}"
+    );
 }

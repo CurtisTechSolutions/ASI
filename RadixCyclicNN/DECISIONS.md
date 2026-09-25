@@ -70,7 +70,8 @@ D-055 chat with an LLM
 D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
 
 **Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood ·
-D-068 the BACK sentinel: where it goes round, learned
+D-068 the BACK sentinel: where it goes round, learned · D-080 the THINK sentinel: a thought is a walk that begins
+there · D-081 the stream: turns commit, the window streams apart
 
 **Part XIII — Counters** · D-064 the odometer
 
@@ -86,7 +87,16 @@ D-073 words as symbols (superseded by it)
 D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 
 **Part XVIII — More ways to search and to train** · D-078 every method off by default, and none draws a random
-number · D-079 a setting's home is decided by who keeps it
+number · D-079 a setting's home is decided by who keeps it · D-080 thinking is a fourth sentinel that faces both
+ways, and a thought is a walk that begins there · D-084 a model is taught backwards by its run, and asked
+backwards by its caller
+
+**Part XIX — The copy editor** · D-082 a correction is a diff, and the LLM is asked for the smallest one ·
+D-083 the veto can keep its provenance to itself
+
+**Part XX — Today's format** · D-085 the format is a rendering of the search, and the thinking is its trace
+
+**Part XXI — Attention** · D-086 the attention band: a correction lands where the gram looks, not where it wrote
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -1348,12 +1358,17 @@ against a threat model that does not apply, at the cost of the use case.
 * Removing the cap forced the streaming work (D-043) — an unbounded archive
   cannot be held in memory, so the Go engine reads entries on demand and trains
   in chunks.
-* JSON upload forms, which must be parsed whole, are still capped (512 MB in
-  the Go server).
+* The JSON upload forms, which carry the file inline, are read whole - held in
+  memory while they are parsed, on every server - but not capped either. The
+  Go server's 512 MB cap on them went on 2026-09-24, the day the Rust port's
+  16 MiB request cap was lifted from `/api/uploads` (its multipart and raw
+  uploads stream to disk, as the Go server's do). No server refuses an upload
+  for its size; what holds a corpus is the memory its *training* takes.
 * If this were ever exposed beyond localhost, this decision would need
   revisiting first. See Q-6.
 
-**Lives in** `radixnet/archive.py`, `radixnet/api.py`
+**Lives in** `radixnet/archive.py`, `radixnet/api.py`, `go/server/http.go`, `go/server/uploads.go`,
+`rust/src/http.rs`, `rust/src/multipart.rs`
 
 ---
 
@@ -2276,6 +2291,61 @@ property of the graph.
 
 ---
 
+### D-081 — A streamed conversation commits by the **turn**, and streams the window apart from it
+
+**Status** Accepted · 2026-09-24 · **Layer** inference / transport · **Extends** D-062, D-063, D-080
+
+**Context** The conversation was answered whole: `converse` returned its turns when the last one was spoken, and
+nothing could be watched before that - neither the turns as they came nor the one thing this model does that a
+plain generator does not, backing out of a repeat (D-062).  Streaming the text as it is produced, the way a
+language model streams tokens, runs into the backtrack: text already shown would have to be taken back.  The
+obvious fix - stream the text but hold back a window of the last few words for the backtracking to rewrite -
+rests on the tail being the only thing that changes.
+
+**Decision** Two layers, split by what is certain.  A `turn` is streamed the moment it is spoken and is
+never taken back: `converse` only ever adds turns, so the turn events *are* the answer and a client appends
+them as they arrive.  Everything between two turns is the **window** - what the voice does before it commits
+and what a backtrack may still rewrite - and it is streamed apart, as its own events: `look` (the context it
+continues, losing a word at a time), `draft` (what it was about to say), `caught` (the words it caught itself
+on and what it keeps), `backtrack` (each step back and the cut it explores from), `found` or `stuck`.  The
+window is the whole turn being spoken, not a fixed number of words, because a draft is not only rewritten at
+its tail: a stutter is cut wherever the walk went round, a heard line is cut a word further back per step, and
+a voice that finds nothing from any cut drops the draft altogether for a shorter context or a fresh text.
+Nothing in a draft is certain until the turn is spoken, so nothing in it is streamed as the answer.
+
+The stream is a view, not a second procedure: the events are emitted from inside the one search `converse`
+always ran, the turns returned are the turns streamed, and a streamed conversation teaches the graph what a
+silent one does.  The same events, with the same fields, come out of Python, Go and Rust (`StreamFn`,
+`Stream func(map[string]any)`, `dyn FnMut(Json)`), and the parity tests hold the three to one stream.
+
+**Transport** `converse --stream` on the three CLIs (the window dimmed and indented above the turn it belongs
+to; with `--json`, JSON Lines with the usual document last), `POST /api/converse/stream` on the three servers
+(`application/x-ndjson`, chunked, the headers waiting for the first event so a refused request is still an
+ordinary 400, a failure after the first line the stream's last event) and the Converse tab's "Stream" (the
+draft with what it backed out of struck through and the way on underlined, then the turn committed).
+
+**Alternatives rejected**
+* **A hold-back window of N words.** It commits text that a rethink can still discard: the draft's beginning
+  is not safe either, and a client would need a retraction event for the "committed" text, which is the
+  problem the window was meant to remove.
+* **Streaming the walk step by step** (a node at a time inside the search).  The sample walk could, the beam
+  cannot without inventing a second search, and either way the repeat check runs on the whole candidate, so the
+  steps would be retracted as often as shown.  What a reader wants to see is the backing up, and that is what
+  the window shows.
+* **A `stream: true` flag on `/api/converse`.** Three route tables that map a path to a document; a route that
+  writes to the socket is a different kind of route, and a path of its own says so.
+
+**Consequences** A client that wants only the answer ignores everything but `turn` and loses nothing; one that
+wants to see the model think reads the window.  The conversation holds the model lock while it streams, as it
+did while it did not.  One rethink per turn (D-062) keeps the window short.
+
+**Lives in** `radixnet/dialogue.py` (`StreamFn`, `STREAM_EVENTS`), `radixnet/api.py` (`StreamedResponse`,
+`_send_stream`, `/api/converse/stream`), `radixnet/cli.py` (`ConversePrinter`), `go/radixnet/dialogue.go`,
+`go/server/http.go` (`streamResponse`, `writeStream`), `rust/src/dialogue.rs`, `rust/src/http.rs` (`Sink`,
+`stream_route`), `frontend/src/stream.js`, `frontend/src/components/ConversePanel.jsx`
+
+---
+
 ### D-063 — The metacognition is a record, not a mood
 
 **Status** Accepted · 2026-09-14 (`414bd1d`) · **Layer** observability
@@ -3137,6 +3207,52 @@ encoder card being read-only is history: the encoding is chosen on the New model
 **Lives in** `frontend/src/components/SettingsPanel.jsx`, `frontend/src/components/ModelSettingsPanel.jsx`,
 `frontend/src/hooks/useSiteSettings.jsx`, `frontend/src/settings.js`
 
+### D-084 — A model is taught backwards by its training run, and asked backwards by its caller
+
+**Status** Accepted · 2026-09-25 · **Layer** training, frontend · **Extends** D-078, D-079
+
+**Context** The request: train on a file in reverse, or send the queries in reverse from the frontend. A model of
+this kind learns what *follows*: a text is a chain of grams from START to END, and every search continues a prefix
+along it. A model that has read its texts backwards has learned what *precedes* them instead - but only a query
+turned around the same way meets what it read, and only an answer turned back round reads as text.
+
+**Decision** Both halves, each where it belongs. **Training**: `reverse` is a training setting beside the methods
+of D-078 (`TrainConfig.reverse`, Go `Plan.Reverse`, Rust `Plan.reverse`, `reverse` on `/api/train`, `train
+--reverse`), off by default. Every text of the run is turned around in the encoding's units - code points, or whole
+words - as the first thing the training call does, so a reversed run is exactly a run over the reversed texts: the
+same graph, history, counters and replay block in all three ports, byte for byte, on every kind, the negative
+network included. **Asking**: the servers do not change; the caller turns the query around and the answer back.
+The frontend does it (`frontend/src/backwards.js`) with a *Query backwards* setting the browser keeps (D-079),
+shared by Predict and Generate; a thumbs up or down sends the model's own text, the backwards one, because that is
+what feedback trains on. The spec's §9 is the contract.
+
+**Alternatives rejected**
+* **Also reverse the order of the texts** - the file from its last line to its first. For a model that learns
+  every text on its own, the order only decides what the count model's sliding window remembers; `order` already
+  owns that (D-078), one flag doing two things would be harder to read, and the streaming readers would have to
+  hold the whole corpus to start from its end. With each file as one text, the file *is* read from its end.
+* **Reverse on the frontend only**, turning the typed texts around before they are sent. It cannot reach an
+  uploaded file - files live on the server, and a file is what was asked about.
+* **A backwards model**: a flag saved in the file that makes every route turn its texts around. It would make the
+  model self-describing, but every route that takes a text (predict, generate, score, converse, chat, feedback,
+  2NRL, the negative network's judgements) would have to honour it in three ports, the file format would change,
+  and it would rule out what a per-run setting allows: one graph taught both ways and asked either way.
+* **Characters reversed on a word model.** Its symbols are words; turning their letters around would make every
+  word a new symbol and teach it nothing about the order of words.
+
+**Consequences** A reversed run costs no more memory than a plain one: Go wraps its streaming source
+(`ReversedSource`, which keeps an archive's entries as parts that stream side by side). The replay buffer keeps the
+texts as they were read, so a reversed text is rehearsed reversed. Nothing marks a model as trained backwards, so
+the two halves are paired by the person: the Train tab's note and the Settings card say how. The n-gram's short
+context shows through backwards as it does forwards: from "the lazy dog" a trigram model cannot tell the *the*
+before *lazy* from the one that starts the sentence, and may answer that nothing came before it - the full sentence
+is then among the others the beam returns.
+
+**Lives in** `radixnet/encoding.py` (`Encoding.reverse`), `radixnet/model.py` (`TrainConfig.reverse`,
+`GraphModel._read`), `go/radixnet/training.go` (`Plan.Reverse`, `ReversedSource`), `rust/src/training.rs`
+(`Plan.reverse`, `read`), `frontend/src/backwards.js`, `frontend/src/components/BackwardsField.jsx`,
+`SPEC-SearchAndTraining.md` §9
+
 ---
 
 ### D-080 — Thinking is a fourth sentinel that faces both ways, and a thought is a walk that begins there
@@ -3189,6 +3305,242 @@ teaching the network where to question.
 **Lives in** `radixnet/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
 `radixnet/dialogue.py::think_back`, `radixnet/ollama.py::thoughts_from_prompt`, `go/radixnet/thinking.go`,
 `rust/src/thinking.rs`
+
+---
+
+# Part XIX — The copy editor
+
+### D-082 — A correction is a diff, and the LLM is asked for the smallest one
+
+**Status** Accepted · 2026-09-24 · **Layer** feedback, negative network · **Beside** D-029, D-026
+
+**Context** The adversarial reviewer (D-029) fails a *text*: its mark sets how
+badly and its critique says roughly why, and every transition of the text is
+blamed alike. The English tutor already knew better - it writes the sentence out
+correctly and only the characters it changed are blamed (`NegativeNet.correct`,
+`radixnet/diff.py`) - but that path was reachable only through a lesson. A
+model that writes `"Hi howe are you??"` has one letter and one mark wrong; a
+verdict on the sentence blames `"Hi "`, `" are "` and `"you"` too, and teaches
+the negative network that greetings are failures.
+
+**Decision** The LLM can be asked to be a **copy editor** instead of a critic
+(`ollama correct`, `negative auto --correct`, `POST /api/ollama/correct`): it
+returns each text written out correctly with the *smallest possible change*, and
+the diff between the two is what the negative network learns. Only the
+characters the editor struck out or replaced are blamed, at one failure per
+corrected text (`--severity`); the correction itself never joins the failure
+structure and clears blame where it is already known; a text handed back
+unchanged clears blame; a text the editor said nothing usable about is neither
+blamed nor cleared. The editor names the mistake in one word out of a fixed
+vocabulary, with aliases the models actually use (`typo`, `capitalization`);
+when it names none, the shape of the diff decides - punctuation, spacing, case,
+letters inside a word, or words moved - so a reason is never invented from
+nothing, and it is never `none` for a text that changed.
+
+**Rejected**
+* *Asking for the rating and the correction in one call.* Two jobs in one
+  prompt is two chances to drift: a model asked to rate tends to rewrite, and
+  one asked to rewrite stops rating. The reviewer and the editor are two modes,
+  and the same loop runs either.
+* *Scaling the severity by how much changed.* The diff already does that:
+  more changed characters blame more edges. A per-text severity keeps the two
+  numbers apart - how heavy a lesson, and how wide.
+
+**Rationale** The negative network's value is *where* text goes wrong (D-026's
+edge-level blame); a reviewer's verdict is the coarsest signal that can feed it
+and a correction the finest. Asking for the smallest change keeps the diff an
+honest map of the mistake rather than of the editor's taste.
+
+**Consequences**
+* The same prompt, the same parsing and the same reason rules in all three
+  ports (`radixnet/ollama.py`, `rust/src/review.rs`, `go/radixnet/review.go`),
+  held to Python byte for byte by the parity suites.
+* The Automatic card and the report card grow an editor's vocabulary -
+  `corrected`, `unchanged`, `uncorrected`, `edits`, `change_rate` - beside the
+  reviewer's marks, and a round record says which mode ran it.
+* An LLM that rewrites freely produces a wide diff and a wide lesson; the
+  prompt forbids it, and the `changes` on every entry show what it did.
+
+**Lives in** `radixnet/ollama.py` (`correct_texts`), `radixnet/blame.py`
+(`faults_from_corrections`, `correction_reason`, `reason_from_changes`),
+`radixnet/critic.py`, `radixnet/cli.py`, `radixnet/api.py`,
+`frontend/src/components/OllamaPanel.jsx`, `rust/src/review.rs`,
+`go/radixnet/review.go`
+
+---
+
+### D-083 — The veto can keep its provenance to itself
+
+**Status** Accepted · 2026-09-24 · **Layer** negative network, output paths · **Beside** D-026, D-029
+
+**Context** The guard (README, *The guard: both networks on every answer*)
+was built so that nothing is filtered silently: every answer carries every
+verdict - rule, risk, peak, ratio, reasons, blamed fragments, a sentence of
+why - for every candidate it judged. That is right when the question is *why
+was this dropped*, and wrong when the question was the answer: three texts
+asked for come back with nine judgements, and a conversation with one per
+candidate reply considered.
+
+**Decision** The provenance of a veto is a setting, on by default and off on
+request: `FilterConfig.provenance`, `--no-provenance` on the guard flags and
+on `negative filter`, `{"provenance": false}` on `generate`, `predict`,
+`converse` and `negative/filter` for one answer, and
+`POST /api/negative/settings {"provenance": false}` for every answer a server
+gives. Off, the veto applies exactly as before - the same candidates are
+stopped, `learn` still blames them - but the pair reports each verdict as its
+text, decision and rule alone, and the guard's report is the counts alone:
+how many were judged, how many vetoed. Nothing is filtered silently still -
+the count is always there - but nothing is explained unasked.
+
+**Rejected** *A verbosity knob on the verdict (fewer spans, no `why`).* The
+cost is the list itself, not the width of its rows; and a half-explained veto
+is worse than a counted one, because it looks complete.
+
+**Rationale** The judgement is computed either way (the decision needs it),
+so the setting is about what is *reported*, which is the caller's business
+and nobody else's - which is also why it is a per-answer field with a
+server-wide default rather than a flag the negative network carries.
+
+**Consequences**
+* The guard report has two shapes, told apart by `provenance: false` and the
+  presence of `judged`; the frontend's guard notice shows a count-only report
+  without a *why* to open, and its verdict card renders a terse verdict.
+* The same setting in all three ports, held to Python by the parity suites
+  (`tests/test_rust_parity_negative.py`, `tests/test_go_parity.py`).
+
+**Lives in** `radixnet/duo.py` (`FilterConfig.provenance`,
+`NegativeFilter.terse` / `report`), `radixnet/api.py` (`guard`,
+`_guard_report`, `negative_settings`), `radixnet/cli.py` (`add_guard_flags`,
+`_guard_doc`), `frontend/src/components/GuardNotice.jsx`, `rust/src/duo.rs`,
+`go/radixnet/duo.go`
+
+---
+
+# Part XX — Today's format
+
+### D-085 — Today's format is a rendering of the search, and the thinking is its trace
+
+**Status** Accepted · 2026-09-24 · **Layer** surface · **Beside** D-032, D-055, D-062, D-063, D-068
+
+**Context** Every language model is talked to through one shape now - a conversation of messages in, an assistant
+message out, its thinking first and then the text, streamed - and every client, SDK and front end speaks it. This
+model had a conversation (D-032), a reply function one call deep (D-055) and a record of its second thoughts (D-062,
+D-063), and none of it was reachable by a client that speaks the format. What was missing was not a capability but a
+rendering - and a rendering is exactly where a system built to say what it did could start to pretend.
+
+**Decision** Serve the two dialects that cover the ecosystem - OpenAI's Chat Completions and Anthropic's Messages - as
+one area, `assistant`, under three rules:
+
+1. **A reply is `dialogue.reply`.** No prompt template, no instruction following: the last line is picked up and
+   continued as the Converse and Chat tabs continue it, everything said on both sides is heard, a trailing assistant
+   message is continued as a prefill. A system prompt is *accepted and not read*, and the thinking says so.
+2. **The thinking is the search's own trace**, streamed as the search takes each step through a `trace` hook in
+   `reply`, in fixed lines every port writes character for character - never generated prose, and checkable against
+   the turn record that rides beside the answer (D-063: the metacognition is a record).
+3. **The text streams one node of the walk at a time**, and a token is one unit of the encoding.
+
+The dialogue's dials travel in the same body by their `/api/converse` names, and `learn` stays on by default, as in
+every conversation here (D-068).
+
+**Alternatives rejected**
+* **A prompt template that makes the network "follow" a system prompt.** It cannot; the format merely invites the
+  pretence. Refusing it costs one honest line of thinking per request.
+* **Thinking written by an LLM about the walk.** Not the model's, and the trace already exists.
+* **One dialect only.** OpenAI's is what most clients speak; Anthropic's is where the thinking block comes from. The
+  internal event stream is one, and each dialect is a renderer of about a hundred lines.
+* **Learn off by default for a "stateless" endpoint.** A conversation changes the model here; a client that wants it
+  read-only says `learn: false`, as the Converse tab's checkbox does.
+* **A native `/api/talk` route of the project's own.** The point is interoperability: an off-the-shelf client must work
+  by pointing at the server, so the routes are `/v1/...` and the errors take each dialect's envelope.
+
+**Consequences**
+* `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens` and `/v1/models` on all three servers, the same
+  documents from each, streamed from inside the search (the model lock is held for the stream; Python and Rust close the
+  connection to end it, Go chunks it). The Rust server gained a streaming route kind (`Streamed`).
+* `dialogue.reply` gained the `trace` hook in all three ports; without one it is exactly what it was.
+* `talk` in every CLI, the Talk tab, and two parity suites that hold the ports to Python's thinking and text.
+* The thinking's lines are a contract (DESIGN §37.3): a change to one is a change to three ports and two suites.
+
+**Lives in** `radixnet/assistant.py`, `radixnet/dialogue.py` (`Trace`), `radixnet/api.py`, `radixnet/cli.py`,
+`frontend/src/components/TalkPanel.jsx`, `frontend/src/sse.js`, `go/radixnet/assistant.go`, `go/server/assistant.go`,
+`go/cmd/radixnet-count/talk.go`, `rust/src/assistant.rs`, `rust/src/http.rs` (`Streamed`)
+
+---
+
+# Part XXI — Attention
+
+### D-086 — A correction lands where a gram *looks*, not where it wrote: the attention band
+
+**Status** Research claim · 2026-09-25 · **Layer** learning · **Extends** D-006, D-046 ·
+**Specified in** `SPEC-AttentionBand.md`
+
+**Context — my reason** When the eye reads, it fixes on one point of a line: that point is sharp, and the letters
+to the left and the right of it - and the lines above and below - blur with the distance. D-006 already reads the
+trigram as a fixation - the shared character is the pivot, with context either side - and the claim here is that
+the rest of the analogy holds too: a gram should *attend* to its centre more than to its ends. So each n-gram gets
+an **attention adjustment band** that rewards the centre of the window more than its beginning and its end.
+
+What the model had instead was the opposite. A correction's diff (D-046) marks the units the teacher changed, and
+each marked unit was charged, in full, to the step that **wrote** it - the step whose gram *ends* on it. That is a
+band too, in the limit: all of the attention on the newest unit of the window, the one the eye has only just
+reached, at the very edge of its focus. The gram that had the mistake squarely at its centre - the one that saw it
+best - was never charged at all.
+
+**Decision** A band over each gram's `n` positions, 1 at the centre and falling in a straight line to `1 - blur` at
+the first and the last unit, and one rule for what it does. With the band on, **each unit a correction marks hands
+out exactly one charge**, shared among the grams that see it in proportion to how sharply each sees it; a step is
+charged what its grams collected, capped at one full charge (a step is one decision, however much of it was
+wrong); the judged-path verdict - a count, which cannot be shared - goes to the **focus**, the step that sees a
+marked unit most sharply. The step into END is not a gram: it answers for the position after the last unit, in
+full, as it always did. The count model's penalty becomes `strength * weight * charge` and the fix's reward
+`strength * reward * (charge + (1 - charge) * keep)`; the negative network blames `severity * charge`.
+
+It is a setting of the **model** (D-079): off by default, written into the graph document beside the encoding only
+while it is on, switchable at any time because it changes nothing the graph holds - `radixnet attention --blur X`,
+`POST /api/model/attention`, and an *Attention band* card on the Model settings tab that draws the band and shows,
+for a correction the user types, where both rules would put the blame. All three implementations carry it.
+
+**Alternatives rejected**
+* **Charging every gram that sees a marked unit, each by its band weight.** Louder corrections - a unit that one
+  step answered for is answered for by up to `n` - and no gradation: a gram wholly inside a changed word and one
+  whose centre merely touches it are charged alike. Sharing keeps a correction as loud as it was.
+* **A gram's charge as the band-weighted *fraction* of its window that is marked.** Inert on a whole text and
+  centre-weighted, but it under-charges the ends of a text: the first and the last unit are only ever seen at an
+  edge, so a mistake there would teach at a quarter of its strength under the default blur. Sharing per unit gives
+  a unit only one gram sees to that gram in full - the first and last units, and every unit of a grouping encoding.
+* **A Gaussian band.** Closer to a lens, but `exp` is not bit-identical across Go's `math.Exp` and the C library
+  Python and Rust call, and D-039 holds the ports to the same bits. The tent needs nothing but correctly rounded
+  `+ - * /` - and the one multiply-add in it is rounded explicitly in Go, which may otherwise fuse it.
+* **Applying it to whole-text feedback.** A thumbs up or down marks every unit alike; every gram then sees only
+  marked units and no band can tell one from another. Any rule honest about that is inert there, and this one is
+  by construction - not by a switch.
+* **Making it part of the encoding.** The encoding is fixed for a graph's life because every label is written in
+  it (D-071). The band writes nothing into the graph.
+* **Blurring *recognition* as well** - reading an unknown gram as the known one that agrees with it at the centre.
+  The other half of the analogy, and a different feature: it changes where a prediction starts, not where a
+  correction lands. Left open as Q-19.
+
+**Consequences**
+* **Off is the old rule to the bit** - but for the one fix below. Both kinds, seven encodings and a run of
+  corrections write the model files they wrote before this existed, whether the band was never touched or switched
+  on and back off; a file without the block reads as off.
+* **Where it changes anything.** Only a correction that marks *part* of a text, under an encoding whose grams
+  overlap - a sliding window of three or more units. A grouping encoding, a gram of one, and the edges of a text
+  give each unit one viewer, who takes it all; a gram of two has no centre, so its two viewers share evenly.
+* **Every correction, from any teacher.** The tutor's, the CLI's and the copy editor's (D-082: `ollama correct`,
+  `negative auto --correct`) all reach the graph through the same `correct`, so all of them land through the band
+  when it is on - the copy editor's smallest diffs are exactly the partial judgements it exists for.
+* **What it cost to get right.** Python's count model measured a correction's END position in characters where the
+  spans are in units, so a word model's sentence that stopped too early was never blamed; the Rust port had
+  documented the gap in a parity test. It is fixed, and both parity suites now hold all three ports to it.
+* **A text is one line.** The band has a left and a right; the eye's "above and below" has no counterpart in a
+  one-dimensional gram.
+* **Nothing is graded.** Whether the centre is where the blame belongs, and which blur, is the research question -
+  the band makes it askable (`--wrong/--right` shows both rules side by side), not answered.
+
+**Lives in** `radixnet/attention.py`, `radixnet/model.py::_charged_steps`, `radixnet/countnet.py::correct`,
+`radixnet/negative.py::correct`, `go/radixnet/attention.go`, `rust/src/attention.rs`,
+`frontend/src/components/AttentionBandCard.jsx`, `SPEC-AttentionBand.md`
 
 ---
 
@@ -3342,3 +3694,11 @@ and the output a judge sees are systematically different. That is deliberate and
 well argued. But it also means the quality a user experiences is partly the
 filter's, and no measurement currently separates "the model got better" from
 "the filter got better at hiding it". Should there be one?
+
+**Q-19 — Should the band blur recognition too (D-086)?** The band decides where a
+correction lands. The eye's blur also does something else: it *recognises* a word
+whose edges it cannot quite see. The model reads a prefix by exact grams and falls
+back to the last `n - 1` units, then the last one (`GraphModel._locate`); a blurred
+reader would first try the known gram that agrees with it at the centre. That
+changes where a prediction starts - so what should it cost, and should the same
+blur govern both?

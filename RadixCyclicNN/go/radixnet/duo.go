@@ -1,6 +1,7 @@
 package radixnet
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -53,13 +54,21 @@ type FilterConfig struct {
 	Learn bool
 	// Reason is recorded when Learn is on.
 	Reason string
+	// Provenance says why each candidate was vetoed: the rule, the risk, the
+	// reasons and the blamed fragments.  Off, the veto still applies exactly
+	// as before, but every verdict the pair reports keeps only the text, the
+	// decision and the rule (FilterVerdict.Terse), so an answer is not
+	// followed by pages of judgement when all that was wanted was the answer.
+	// DefaultFilterConfig turns it on, as the Python pair does.
+	Provenance bool
 }
 
 // DefaultFilterConfig: the negative model's own thresholds, the ratio rule at
-// 0, no peak rule, three candidates per wanted text.
+// 0, no peak rule, three candidates per wanted text, the provenance of every
+// veto reported.
 func DefaultFilterConfig() FilterConfig {
 	ratio := 0.0
-	return FilterConfig{Ratio: &ratio, OverSample: 3, Spans: 3, Reason: "filtered"}
+	return FilterConfig{Ratio: &ratio, OverSample: 3, Spans: 3, Reason: "filtered", Provenance: true}
 }
 
 // Validate rejects settings the filter cannot run with.
@@ -128,7 +137,9 @@ func (f *Filter) Ready() bool {
 	return f.Negative.G.Neg != nil && f.Negative.G.Neg.TotalBlame > 0
 }
 
-// FilterVerdict is the pair's verdict on one text.
+// FilterVerdict is the pair's verdict on one text.  A terse one (Terse, what
+// the pair reports when Config.Provenance is off) carries the text, the
+// decision and the rule alone, and serialises as exactly those three.
 type FilterVerdict struct {
 	Text           string       `json:"text"`
 	Decision       string       `json:"decision"`
@@ -147,6 +158,43 @@ type FilterVerdict struct {
 	Reasons        []ReasonRow  `json:"reasons"`
 	Spans          []BlamedSpan `json:"spans"`
 	Why            string       `json:"why"`
+	terse          bool
+}
+
+// Terse is the verdict without its provenance: {text, decision, rule} - what
+// was decided, not why.
+func (v *FilterVerdict) Terse() *FilterVerdict {
+	return &FilterVerdict{Text: v.Text, Decision: v.Decision, Rule: v.Rule, terse: true}
+}
+
+// IsTerse reports whether the verdict was stripped of its provenance.
+func (v *FilterVerdict) IsTerse() bool { return v.terse }
+
+// MarshalJSON writes a terse verdict as {text, decision, rule} and a whole
+// one with every field.
+func (v *FilterVerdict) MarshalJSON() ([]byte, error) {
+	if v.terse {
+		return json.Marshal(struct {
+			Text     string  `json:"text"`
+			Decision string  `json:"decision"`
+			Rule     *string `json:"rule"`
+		}{v.Text, v.Decision, v.Rule})
+	}
+	type whole FilterVerdict // no MarshalJSON of its own, so this does not recurse
+	return json.Marshal((*whole)(v))
+}
+
+// Report is the verdicts as the pair reports them: whole, or Terse when
+// Config.Provenance is off.
+func (f *Filter) Report(verdicts []*FilterVerdict) []*FilterVerdict {
+	if f.Config.Provenance {
+		return verdicts
+	}
+	out := make([]*FilterVerdict, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		out = append(out, verdict.Terse())
+	}
+	return out
 }
 
 // Judge is the pair's verdict on one text: the negative network's blame, the
@@ -236,8 +284,20 @@ type FilterOutcome struct {
 }
 
 // Filter judges every text; with Config.Learn the rejected ones are blamed as
-// new failures.
+// new failures.  Verdicts (and Rejected) are whole, or terse when
+// Config.Provenance is off.
 func (f *Filter) Filter(texts []string) (*FilterOutcome, error) {
+	out, err := f.filter(texts)
+	if err != nil {
+		return nil, err
+	}
+	out.Verdicts, out.Rejected = f.Report(out.Verdicts), f.Report(out.Rejected)
+	return out, nil
+}
+
+// filter is Filter with the whole verdicts, for the output paths that rank by
+// them.
+func (f *Filter) filter(texts []string) (*FilterOutcome, error) {
 	out := &FilterOutcome{Texts: []string{}, Results: []*PathResult{}, Kept: []string{}, Rejected: []*FilterVerdict{},
 		Verdicts: []*FilterVerdict{}, Candidates: len(texts), Asked: len(texts)}
 	for _, text := range texts {
@@ -300,7 +360,7 @@ func (f *Filter) Generate(count int, o GenerateOptions) (*FilterOutcome, error) 
 		paths[result.Text] = result
 		candidates = append(candidates, result.Text)
 	}
-	outcome, err := f.Filter(candidates)
+	outcome, err := f.filter(candidates)
 	if err != nil {
 		return nil, err
 	}
@@ -323,6 +383,7 @@ func (f *Filter) Generate(count int, o GenerateOptions) (*FilterOutcome, error) 
 		walks = append(walks, paths[verdict.Text])
 	}
 	outcome.Texts, outcome.Results = texts, walks
+	outcome.Verdicts, outcome.Rejected = f.Report(outcome.Verdicts), f.Report(outcome.Rejected)
 	return outcome, nil
 }
 
@@ -334,7 +395,7 @@ func (f *Filter) Generate(count int, o GenerateOptions) (*FilterOutcome, error) 
 // and no second search.  Top keeps the survivors in the search's own order
 // and the best of them becomes the prediction itself; when none survives, the
 // prediction is the prefix and nothing else (Expanded still reports the
-// search that was run).
+// search that was run).  The verdicts are terse when Config.Provenance is off.
 func (f *Filter) Rank(prefix string, result *Prediction) (*Prediction, []*FilterVerdict) {
 	offered := result.Top
 	if len(offered) == 0 {
@@ -359,7 +420,7 @@ func (f *Filter) Rank(prefix string, result *Prediction) (*Prediction, []*Filter
 	ranked.PathResult = *best
 	ranked.Expanded = expanded
 	ranked.Top = kept
-	return &ranked, verdicts
+	return &ranked, f.Report(verdicts)
 }
 
 // ConverseOutcome is a conversation held through the pair.
@@ -376,7 +437,8 @@ type ConverseOutcome struct {
 // The conversation is the positive model's (Model.Converse); the filter only
 // supplies the veto, so a turn whose every candidate is vetoed falls back
 // exactly as a dead end does - a shorter context, then a fresh text - and the
-// conversation stops when there is nothing left that may be said.
+// conversation stops when there is nothing left that may be said.  Rejected and
+// Verdicts are terse when Config.Provenance is off; the vetoes are the same.
 func (f *Filter) Converse(opening string, o ConverseOptions) (*ConverseOutcome, error) {
 	verdicts := []*FilterVerdict{}
 	seen := map[string]bool{} // the same candidate can be offered again after a shorter context
@@ -423,7 +485,7 @@ func (f *Filter) Converse(opening string, o ConverseOptions) (*ConverseOutcome, 
 	for _, turn := range spoken {
 		vetoed += turn.Vetoed
 	}
-	return &ConverseOutcome{Turns: spoken, Rejected: rejected, Verdicts: verdicts, Vetoed: vetoed}, nil
+	return &ConverseOutcome{Turns: spoken, Rejected: f.Report(rejected), Verdicts: f.Report(verdicts), Vetoed: vetoed}, nil
 }
 
 // FilterPrediction is a filtered continuation of a prefix.
@@ -439,7 +501,7 @@ type FilterPrediction struct {
 
 // Predict continues a prefix through the pair: the positive model's top-K
 // continuations, minus the vetoed ones, plus what the negative network expects
-// to go wrong from here.
+// to go wrong from here.  The verdicts are terse when Config.Provenance is off.
 func (f *Filter) Predict(prefix string, o PredictOptions) (*FilterPrediction, error) {
 	found, err := f.Positive.Predict(prefix, o)
 	if err != nil {
@@ -493,7 +555,7 @@ func (f *Filter) Describe() map[string]any {
 		"negative": f.Negative.Stats(),
 		"config": map[string]any{
 			"threshold": threshold, "min_coverage": minCoverage, "ratio": cfg.Ratio, "peak": cfg.Peak,
-			"over_sample": cfg.overSample(), "strict": cfg.Strict, "learn": cfg.Learn,
+			"over_sample": cfg.overSample(), "strict": cfg.Strict, "learn": cfg.Learn, "provenance": cfg.Provenance,
 		},
 	}
 }

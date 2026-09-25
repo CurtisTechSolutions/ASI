@@ -7,6 +7,9 @@
  * panels only ever deal with one error shape (`err.message`).
  */
 
+import { EventStreamParser } from "./sse.js";
+import { LineParser } from "./stream.js";
+
 /** Base URL prefix; empty by default so relative /api URLs work when the Python server serves dist. */
 export const API_BASE = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
@@ -58,6 +61,64 @@ async function request(method, path, body) {
 const get = (path) => request("GET", path);
 const post = (path, body = {}) => request("POST", path, body);
 
+/**
+ * POST to a route that streams its answer as JSON Lines (application/x-ndjson): every line is one event,
+ * handed to `onEvent` as it arrives, except the last - `{"event": "done", ...}` - which is the document the
+ * plain route answers with, and is what this resolves to. A request refused before anything was streamed is an
+ * ordinary 4xx (an ApiError, as everywhere else); a server without the route answers 404 the same way, so a
+ * caller can fall back to the plain route. An `{"event": "error"}` line - a failure after the stream began -
+ * rejects with its message.
+ */
+async function stream(path, body, onEvent) {
+  const init = {
+    method: "POST",
+    headers: { Accept: "application/x-ndjson, application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  };
+  let response;
+  try {
+    response = await fetch(API_BASE + path, init);
+  } catch (err) {
+    throw new ApiError(`Network error: ${err && err.message ? err.message : "request failed"}`);
+  }
+  const type = response.headers.get("Content-Type") || "";
+  if (!response.ok || !type.startsWith("application/x-ndjson")) {
+    const text = await response.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    const detail = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+    const serverError = data && typeof data === "object" && typeof data.error === "string" ? data.error : null;
+    throw new ApiError(serverError || (response.ok ? `the answer is not a stream (${detail})` : detail), response.status, data);
+  }
+  const parser = new LineParser();
+  let done = null;
+  const handle = (event) => {
+    if (!event || typeof event !== "object") return;
+    if (event.event === "error") throw new ApiError(String(event.error || "the stream failed"), response.status, event);
+    if (event.event === "done") done = event;
+    else onEvent(event);
+  };
+  if (response.body && typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { value, done: finished } = await reader.read();
+      if (finished) break;
+      for (const event of parser.feed(decoder.decode(value, { stream: true }))) handle(event);
+    }
+    for (const event of parser.feed(decoder.decode())) handle(event);
+  } else {
+    for (const event of parser.feed(await response.text())) handle(event);
+  }
+  for (const event of parser.end()) handle(event);
+  if (done === null) throw new ApiError("the stream ended before its last line");
+  return done;
+}
+
 /** Blob / File -> base64, in chunks so a long recording cannot blow the argument stack. */
 async function toBase64(blob) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -91,6 +152,58 @@ async function sendAudio(path, audio, options = {}) {
 }
 
 /**
+ * Today's format, streamed (see TalkPanel): `POST /v1/messages` with `stream: true`,
+ * one `onEvent(name, data)` per server-sent event until the server closes the
+ * stream. Resolves when it ends; rejects with an ApiError when the request was
+ * refused (the dialect's own error envelope, `{type: "error", error: {message}}`)
+ * or the connection broke, and with the fetch's AbortError when `signal` fires.
+ */
+async function talkStream(body, onEvent, signal) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal,
+    });
+  } catch (err) {
+    if (err && err.name === "AbortError") throw err;
+    throw new ApiError(`Network error: ${err && err.message ? err.message : "request failed"}`);
+  }
+  if (!response.ok) {
+    const text = await response.text();
+    let message = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+    try {
+      const data = JSON.parse(text);
+      if (data && data.error && typeof data.error.message === "string") message = data.error.message;
+      else if (data && typeof data.error === "string") message = data.error;
+    } catch {
+      // not JSON: the status line is the message
+    }
+    throw new ApiError(message, response.status);
+  }
+  const parser = new EventStreamParser();
+  const deliver = (frames) => {
+    for (const frame of frames) onEvent(frame.event, frame.data);
+  };
+  if (!response.body || typeof response.body.getReader !== "function") {
+    deliver(parser.push(await response.text()));
+    deliver(parser.end());
+    return;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    deliver(parser.push(decoder.decode(value, { stream: true })));
+  }
+  deliver(parser.push(decoder.decode()));
+  deliver(parser.end());
+}
+
+/**
  * Normalise a job payload. Job-starting endpoints answer {"job": {...}}, while
  * GET /api/job and the stop endpoints answer with the job status itself; both
  * may carry null when no job exists yet.
@@ -109,6 +222,12 @@ export const api = {
   selectModel: (kind) => post("/api/model/select", { kind }),
   /** Count model: change the dual frequency weight function (scales and the sliding window). */
   modelWeights: (body) => post("/api/model/weights", body),
+  /** The attention band: where inside a gram a correction's blame and credit land (count and negative models). */
+  attention: () => get("/api/model/attention"),
+  /** Switch the band: {on, blur} - a blur alone switches it on, on: false switches it off. */
+  setAttention: (body) => post("/api/model/attention", body),
+  /** Where one correction would land, gram by gram, under the writer rule and a band ({wrong, right, blur}). */
+  attentionPreview: (body) => post("/api/model/attention/preview", body),
   /** The text encoding every kind shares: the sliding window, its stride and the sentinels (read-only). */
   encoding: () => get("/api/encoding"),
   /** One text through the encoder and back, and through the graph's own (possibly merged) node labels. */
@@ -124,10 +243,23 @@ export const api = {
   /** The model converses with itself (or with the other kind in memory): turns of a dialogue. */
   converse: (body) => post("/api/converse", body),
   /**
+   * The same conversation as it happens: `onEvent` gets every event but the last (look, draft, caught,
+   * backtrack, found, stuck - the window a backtrack may still rewrite - and turn, the answer), and the
+   * promise resolves to the `done` document, which is what `converse` answers with.
+   */
+  converseStream: (body, onEvent) => stream("/api/converse/stream", body, onEvent),
+  /**
    * The model thinks (see ThinkPanel): one thought from the THINK sentinel, questioning itself where it has
    * learned to. Body: about, mode, k, beam, max_length, temperature, step_penalty, seed, depth, questions, learn.
    */
   think: (body) => post("/api/think", body),
+  /**
+   * Today's format (see TalkPanel): a Messages request in, one whole message out - thinking, text and
+   * tool_use blocks. `talkStream` is the same request streamed; `models` lists the models in memory.
+   */
+  talk: (body) => post("/v1/messages", body),
+  talkStream,
+  models: () => get("/v1/models"),
   score: (body) => post("/api/score", body),
   twoNrl: (body) => post("/api/2nrl", body),
   /** Rated texts -> 2NRL (both kinds), reward (thumbs up only) or punish (thumbs down only). */
@@ -192,6 +324,8 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /** Letter-level corrections of the model's samples or `texts`; `blame` teaches the negative network the diff. */
+  ollamaCorrect: (body) => post("/api/ollama/correct", body),
   /**
    * A thinking model thinks about a prompt: questions, the thinking behind each answer, and - with `train` -
    * a job teaching that thinking to the network as thoughts. Body: prompt, lines, think, temperature, url,
