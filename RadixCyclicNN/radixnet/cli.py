@@ -770,7 +770,7 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
         auto_compress=not args.no_compress, checkpoint_every=every,
         lr_schedule=args.lr_schedule, act_lr_schedule=args.act_lr_schedule, reverse_schedule=args.reverse_schedule,
         order=args.order, curriculum=args.curriculum, replay=args.replay, replay_size=args.replay_size,
-        patience=args.patience, min_delta=args.min_delta,
+        patience=args.patience, min_delta=args.min_delta, reverse=args.reverse,
     )
     try:
         config.validate()
@@ -789,7 +789,8 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
     console.pairs([
         ("model", origin.describe()),
         ("backend", backend_label(model)),
-        ("data", f"{len(texts)} texts, {chars} chars from {', '.join(args.data)}"),
+        ("data", f"{len(texts)} texts, {chars} chars from {', '.join(args.data)}"
+                 + (", every text read backwards" if config.reverse else "")),
         ("config", f"epochs={config.epochs} lr={config.lr} act_lr={config.act_lr} batch={config.batch_size} "
                    f"compress={'yes' if config.auto_compress else 'no'}" + schedule_note),
         ("checkpoints", f"{manager.directory} every {every} epoch(s), keep {manager.keep}" if manager else "off"),
@@ -3812,6 +3813,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="training text files, one text per line (blank lines are skipped); a .zip archive contributes "
                         "every text file inside it")
     p.add_argument("--whole-file", action="store_true", help="treat each file as a single text")
+    p.add_argument("--reverse", action="store_true",
+                   help="read every text backwards, in the model's units (its last character, or word, first), so the "
+                        "model learns what comes before; with --whole-file a file is read from its end to its start")
     p.add_argument("--epochs", type=nonneg_int, default=TrainConfig.epochs, help="training epochs")
     p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="learning rate for edge weights and node states")
     p.add_argument("--act-lr", type=nonneg_float, default=TrainConfig.act_lr,

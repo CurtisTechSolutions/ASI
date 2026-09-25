@@ -173,6 +173,7 @@ cargo run --release --bin radixnet -- --model model.count.json predict --prefix 
 cargo run --release --bin radixnet -- --model model.count.json --seed 7 generate --mode sample --top-p 0.9 --seeded
 cargo run --release --bin radixnet -- --model model.count.json generate --mode beam --count 5 --diversity 2
 cargo run --release --bin radixnet -- --model model.count.json train --data ../data/sample_corpus.txt --order shortest-first --curriculum 0.3 --replay-size 256
+cargo run --release --bin radixnet -- --model model.backwards.json train --data ../data/sample_corpus.txt --reverse   # every text read backwards
 cargo run --release --bin radixnet -- --encoding word:3:1 --model model.word.json train --data ../data/sample_corpus.txt
 cargo run --release --bin radixnet -- --model model.word.json words --limit 20    # the alphabet its grams are made of
 cargo run --release --bin radixnet -- --model model.count.json serve --port 8000 --frontend-dir ../frontend/dist
@@ -204,9 +205,10 @@ judged paths and node ratios — and each side must load and continue the other'
 file, gzipped or not.
 
 `../tests/test_rust_parity_methods.py` does the same for the search and training
-methods on the count, sine and phase models: six training plans, the same graph,
-history and `replay` block byte for byte, and the same texts from the filters and
-the diverse beam.
+methods on the count, sine and phase models: eight training plans - two of them
+read backwards (`--reverse`, `Plan.reverse`), in characters and in words - the
+same graph, history and `replay` block byte for byte, and the same texts from the
+filters and the diverse beam.
 
 One thing it asks for that the Go suite does not: **the graph document has to be
 Python's byte for byte**, but for the `version` cache stamp that every load

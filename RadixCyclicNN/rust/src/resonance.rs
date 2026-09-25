@@ -1289,6 +1289,8 @@ impl Model {
         on_epoch: &mut dyn FnMut(&EpochRecord) -> bool,
     ) -> Result<Vec<EpochRecord>, String> {
         let enc = self.g.enc;
+        let read = crate::training::read(&enc, texts, plan);
+        let texts: &[String] = &read;
         let cleaned: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
         let pass = Pass {
             epochs,

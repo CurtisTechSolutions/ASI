@@ -366,7 +366,10 @@ pub fn train(
                 epochs: s.config.epochs,
                 no_compress: !s.config.auto_compress,
             };
-            model.blame_with(texts, &o, on_epoch)
+            // blaming takes no plan, so the failures are read backwards here
+            let enc = model.g.enc;
+            let read = crate::training::read(&enc, texts, &s.config.plan);
+            model.blame_with(&read, &o, on_epoch)
         }
         _ => {
             let opts = crate::model::TrainOptions {

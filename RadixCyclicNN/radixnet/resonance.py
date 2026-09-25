@@ -894,6 +894,7 @@ class ResonantNet(GraphModel):
     ) -> list[dict]:
         """Learn from texts: count every traversal at its phase, and the cycle decisions beside it."""
         cfg = _resolve_config(config, overrides)
+        texts = self._read(texts, cfg)
         cleaned, _ = self._clean_texts(texts)
         records = self._passes(
             texts, cfg, count=True, reward=0.0, strength=1.0, phase=phase,

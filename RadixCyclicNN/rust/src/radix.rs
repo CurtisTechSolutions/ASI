@@ -786,6 +786,8 @@ impl Model {
     ) -> Result<Vec<EpochRecord>, String> {
         cfg.validate()?;
         let enc = self.g.enc;
+        let read = crate::training::read(&enc, texts, &cfg.plan);
+        let texts: &[String] = &read;
         let mut skipped_short = 0usize;
         let kept: Vec<&String> = texts
             .iter()

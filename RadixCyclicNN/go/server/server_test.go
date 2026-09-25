@@ -1049,3 +1049,36 @@ func TestEncodingPreviewSaysWhyATextDoesNotWalk(t *testing.T) {
 		t.Fatalf("empty preview: %d %v", status, preview)
 	}
 }
+
+// reverse reads every text of a run backwards - the inline texts and the
+// uploads alike - so the model learns what comes before: its continuation of
+// a text's end, read backwards, is the whole text.
+func TestTrainReadsTheTextsBackwards(t *testing.T) {
+	e := newEnv(t, true)
+	if status, doc := e.post("/api/train", map[string]any{"texts": []string{"the cat sat"}, "reverse": "yes"}); status != 400 {
+		t.Fatalf("a reverse that is not a boolean: %d %v", status, doc)
+	}
+	if status, doc := e.post("/api/uploads", map[string]any{"name": "fox.txt", "content": "quick brown fox\n"}); status != 201 {
+		t.Fatalf("upload: %d %v", status, doc)
+	}
+	status, doc := e.post("/api/train", map[string]any{
+		"texts": []string{"lazy dog sleeps"}, "files": []string{"fox.txt"}, "reverse": true, "epochs": 2,
+	})
+	if status != 202 {
+		t.Fatalf("train: %d %v", status, doc)
+	}
+	if job := e.waitJob(); job["state"] != "done" {
+		t.Fatalf("job: %v", job)
+	}
+	enc := radixnet.DefaultEncoding()
+	for _, c := range []struct{ end, whole string }{{"fox", "quick brown fox"}, {"sleeps", "lazy dog sleeps"}} {
+		status, pred := e.post("/api/predict", map[string]any{"prefix": enc.Reverse(c.end), "length": 1, "to_end": true, "guard": false})
+		if status != 200 {
+			t.Fatalf("predict: %d %v", status, pred)
+		}
+		full, _ := pred["full_text"].(string)
+		if got := enc.Reverse(full); got != c.whole {
+			t.Errorf("backwards from %q: %q, want %q", c.end, got, c.whole)
+		}
+	}
+}

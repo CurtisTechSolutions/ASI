@@ -152,6 +152,9 @@ class TrainConfig:
     """Stop after this many full epochs without the loss improving by ``min_delta`` (0 = off)."""
     min_delta: float = 0.0
     """How much an epoch's loss must fall below the best so far to count as an improvement."""
+    reverse: bool = False
+    """Read every text backwards, in the encoding's units: its last character (word) first, so the model
+    learns what comes *before* (``../SPEC-SearchAndTraining.md`` §9).  Off: the texts as given."""
 
     def rates(self) -> list[tuple[float, float]]:
         """``(lr, act_lr)`` for every epoch of this config, schedules applied (constant when none are set)."""
@@ -353,6 +356,19 @@ class GraphModel:
     replay: ReplayBuffer | None = None
     """The replay buffer: a uniform sample of every text this model was trained on, rehearsed by a run with
     ``replay > 0`` - or ``None``, and then the file does not mention it (``../SPEC-SearchAndTraining.md`` §4)."""
+
+    def _read(self, texts: Iterable[str] | str, cfg: TrainConfig) -> Iterable[str] | str:
+        """The texts of one ``train`` call as ``cfg`` reads them: each backwards, unit by unit, with ``reverse``.
+
+        Every kind calls this first, so everything after it - the short texts
+        dropped, the plan, the structure pass, the counters, the replay buffer -
+        sees the reversed texts, exactly as if they had been given reversed.
+        Anything that is not a string is left for the kind to refuse.
+        """
+        if not cfg.reverse:
+            return texts
+        items = [texts] if isinstance(texts, str) else texts
+        return [self.encoding.reverse(t) if isinstance(t, str) else t for t in items]
 
     def _plan(self, texts: list[str], cfg: TrainConfig) -> TrainingPlan:
         """How one ``train`` call walks ``texts``: the order, the curriculum, the rehearsal, the stop."""
@@ -984,7 +1000,7 @@ class RadixNet(GraphModel):
         a punished text is not one to rehearse.
         """
         cfg = _resolve_config(config, overrides)
-        texts, skipped_short = self._clean_texts(texts)
+        texts, skipped_short = self._clean_texts(self._read(texts, cfg))
         plan = self._plan(texts, cfg) if phase is None else None
         rehearsed = plan.replayed() if plan is not None else []
         graph = self.graph

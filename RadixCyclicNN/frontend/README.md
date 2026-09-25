@@ -143,6 +143,9 @@ whichever model is loaded, and never saved with one.
   further apart (`../SPEC-SearchAndTraining.md` sections 1-2);
 * **how a run walks its texts** - the order, the curriculum, the rehearsal of
   the model's replay buffer and its size, and early stopping (sections 3-6);
+* **query backwards** - for a model trained backwards (below), Predict and
+  Generate turn the query around before it is sent and the answer back when it
+  comes (section 9);
 * how many settings this browser remembers, and a button that forgets them.
 
 Predict, Generate and Train show the same controls, and each is one setting
@@ -150,6 +153,17 @@ Predict, Generate and Train show the same controls, and each is one setting
 An action tab shows only what its mode reads - the filters for `sample`, the
 diversity for `beam` - sends a setting only when it is on, and refuses to send
 a value out of range, with the reason beside the field.
+
+**Training in reverse.** The Train tab's **Read every text backwards** sends
+`reverse` with the run, for every kind: the server reads every text - the typed
+ones and the selected files alike - from its last character (word, on a word
+model) to its first, so the model learns what comes *before* a text. Such a
+model is asked with **Query backwards** on: type the *end* of a text on
+Predict, and the answer comes back the right way round with what the model says
+came before it highlighted; on Generate the prefix becomes every text's ending.
+The turning is done here (`src/backwards.js`, in the model's units exactly as
+the servers turn a training text), and a thumbs up or down sends the model's
+own, backwards, text, since that is what feedback trains on.
 
 **Model settings** is the model's: what is saved in its file and changes when
 another model is loaded.
@@ -194,6 +208,7 @@ The old `#network` link opens Model settings.
     src/styles.css              all styling (responsive; single column under 800 px)
     src/hooks/useJob.js         async job lifecycle (start, poll /api/job, stop)
     src/settings.js             the site-wide settings' rules: ranges, what a mode reads, request bodies (pure)
-    src/hooks/useSiteSettings.jsx     the settings several panels share, held once (search and training)
+    src/backwards.js            turning a query and an answer around for a model trained backwards (pure)
+    src/hooks/useSiteSettings.jsx     the settings several panels share, held once (search, training, backwards)
     src/hooks/useNetworkSettings.jsx  the traversal, one of them
     src/components/*.jsx        StatusBar, panels, GraphView, LineChart, shared widgets

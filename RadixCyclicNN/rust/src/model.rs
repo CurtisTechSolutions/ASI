@@ -708,6 +708,8 @@ impl Model {
         let mut skipped_short = 0;
         // a text too short to hold one gram of this encoding is skipped
         let enc = self.g.enc;
+        let read = crate::training::read(&enc, texts, &opts.plan);
+        let texts: &[String] = &read;
         let usable: Vec<&String> = texts
             .iter()
             .filter(|t| {

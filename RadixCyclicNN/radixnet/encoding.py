@@ -195,6 +195,20 @@ class Encoding:
             return text.startswith(prefix)
         return text == prefix or text.startswith(prefix + " ")
 
+    def reverse(self, text: str) -> str:
+        """The text read backwards, unit by unit: its last character first, or its last word.
+
+        Characters are reversed code point by code point, so reading a text
+        backwards twice gives it back exactly.  A word encoding reverses the
+        order of the words and writes them with single spaces - the layout it
+        keeps anyway - and each word keeps its letters in their order.  This is
+        what training with ``reverse`` reads (``../SPEC-SearchAndTraining.md``
+        §9), and what a query to a model trained that way must be turned into.
+        """
+        if self.unit != WORDS:
+            return text[::-1]
+        return " ".join(reversed(split_words(text)))
+
     # -- encoder -------------------------------------------------------------
 
     def covered(self, units: int) -> int:

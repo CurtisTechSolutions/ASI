@@ -234,7 +234,7 @@ func init() {
 	route("POST", "/api/encoding/preview", rEncodingPreview)
 	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}")
 	route("POST", "/api/train", rTrain)
-	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts, order: corpus | shortest-first | longest-first | shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay (the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the buffer's capacity from now on; 0 drops it), patience, min_delta (stop after patience full epochs without the loss improving by min_delta; 0 = off)}; uploads stream through in chunks, whatever their size - unless an order, a curriculum or a replay buffer needs the whole list first")
+	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts, order: corpus | shortest-first | longest-first | shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay (the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the buffer's capacity from now on; 0 drops it), patience, min_delta (stop after patience full epochs without the loss improving by min_delta; 0 = off), reverse (read every text backwards, in the model's units - its last character or word first - so the model learns what comes before; off by default)}; uploads stream through in chunks, whatever their size - reversed or not - unless an order, a curriculum or a replay buffer needs the whole list first")
 	route("GET", "/api/job", rJob)
 	doc("GET", "/api/job", "status of the current / last job")
 	route("POST", "/api/job/stop", rJobStop)
@@ -627,7 +627,7 @@ func traversalFields(f fields) (name string, penaltyScale, meritScale float64, e
 
 // planFields reads how a training run walks its texts: order, curriculum,
 // replay, replay_size, patience and min_delta (../../SPEC-SearchAndTraining.md
-// §3-6), each off when it is not given.
+// §3-6), and reverse (§9), each off when it is not given.
 func planFields(f fields) (radixnet.Plan, error) {
 	var p radixnet.Plan
 	var err error
@@ -657,6 +657,9 @@ func planFields(f fields) (radixnet.Plan, error) {
 		return p, err
 	}
 	if p.MinDelta, _, err = f.number("min_delta", 0, floatp(0)); err != nil {
+		return p, err
+	}
+	if p.Reverse, err = f.flag("reverse", false); err != nil {
 		return p, err
 	}
 	if err := p.Check(); err != nil {

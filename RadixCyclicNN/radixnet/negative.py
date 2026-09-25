@@ -824,8 +824,8 @@ class NegativeNet(GraphModel):
         """
         cfg = _resolve_config(config, overrides)
         return self._pass(
-            texts, cfg, blame=True, amount=abs(float(severity)), reason=_clean_reason(reason), source=source,
-            note=note, progress=progress, stop_event=stop_event, checkpoint_manager=checkpoint_manager,
+            self._read(texts, cfg), cfg, blame=True, amount=abs(float(severity)), reason=_clean_reason(reason),
+            source=source, note=note, progress=progress, stop_event=stop_event, checkpoint_manager=checkpoint_manager,
         )
 
     def punish(self, texts: Iterable[str] | str, *, epochs: int = 1, strength: float | None = 1.0,

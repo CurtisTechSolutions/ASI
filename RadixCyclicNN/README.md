@@ -199,7 +199,7 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 
 | Command | Main options |
 |---|---|
-| `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--order corpus\|shortest-first\|longest-first\|shuffle`, `--curriculum C`, `--replay R`, `--replay-size N`, `--patience N`, `--min-delta X` (how the run walks its texts, see [Search and training methods](#search-and-training-methods)), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
+| `train --data FILE [FILE...]` | `--whole-file`, `--epochs`, `--lr`, `--act-lr`, `--lr-schedule EXPR`, `--act-lr-schedule EXPR` (graph functions of the epoch, see below), `--reverse-schedule`, `--batch-size`, `--no-compress`, `--order corpus\|shortest-first\|longest-first\|shuffle`, `--curriculum C`, `--replay R`, `--replay-size N`, `--patience N`, `--min-delta X` (how the run walks its texts, see [Search and training methods](#search-and-training-methods)), `--reverse` (read every text backwards, so the model learns what came before - see [Training in reverse](#training-in-reverse)), `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume`, `--out`; a `.zip` in `--data` contributes every text file inside it |
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
 | `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|kbest\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`, `--traversal reward\|punishment` with `--penalty-scale` / `--merit-scale` (what the search looks for, see below); `--top-k`, `--top-p`, `--min-p` (what a sampled step draws from) and `--diversity` (how far apart the beam's K are picked), all off by default; `--mode beam` (every kind; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N`; the guard flags below. `--mode kbest` is the resonant model's default: the exact K cheapest walks over `(node, chars, phase)`, metacognitive layer included; its `dijkstra` is the same search with one label per state, and so cycle-blind |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra\|kbest`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`, `--traversal reward\|punishment` with `--penalty-scale` / `--merit-scale`, `--top-k` / `--top-p` / `--min-p` (sample) and `--diversity` (beam); `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; `kbest` (the resonant model's default) returns the same list *exactly* and stops as soon as it has it; the guard flags below |
@@ -251,7 +251,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/model/select` | `{"kind": "radix"\|"count"\|"word"\|"resonant"}` -> the same document plus `origin` (`memory`, `file`, `new`, `active`) and `stats`; the previous model stays in memory |
 | `GET /api/encoding` | how the active model reads text: `{"encoding": "char:3:1", "unit", "ngram", "stride", "overlap", "start_label", "end_label", "back_label", "configurable": true, "note"}` (`window` is `ngram` under its old name). The encoding is chosen when a model is made - `POST /api/reset` with an `encoding` - and fixed for its life |
 | `POST /api/encoding/preview` | `{"text"}` -> the same document plus `{"chars", "windows", "count", "decoded", "round_trip", "unknown_windows", "kind", "path": {"known", "reason", "labels", "node_ids", "decoded", "nodes", "compressed"}}`: one text through the encoder, back through the decoder, and through the graph's own (possibly merged) node labels. `path.known` is false with the reason - a window never seen, or a text that cannot be walked from START to END as it stands |
-| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress`, and how the run walks its texts: `order`, `curriculum`, `replay`, `replay_size`, `patience`, `min_delta` (each off when left out; a value out of range is a 400) -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used, and the one that stopped the run early `"early_stop": true` |
+| `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress`, and how the run walks its texts: `order`, `curriculum`, `replay`, `replay_size`, `patience`, `min_delta` (each off when left out; a value out of range is a 400), and `reverse` (read every text backwards, in the model's units - [Training in reverse](#training-in-reverse)) -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used, and the one that stopped the run early `"early_stop": true` |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
 | `POST /api/schedule/preview` | `{"lr_schedule", "act_lr_schedule", "epochs": 5, "lr": 0.05, "act_lr": 0.005, "reverse_schedule": false}` -> `{"points": [{"epoch","lr","act_lr"}], ...}` (400 with the reason for a bad expression) |
 | `GET /api/uploads` | uploaded training files: `{"uploads": [{"name","bytes","chars","lines","modified"} (+ `archive`, `files`, `skipped` for a ZIP)], "upload_dir"}` |
@@ -1422,6 +1422,38 @@ Thumbs up and down, 2NRL, the agent's punishment and the negative network's
 blame walk their texts as they always have, and never touch the buffer. In the
 frontend they are on the **Settings** tab, and the Predict, Generate and Train
 tabs show the same controls; the Model settings tab shows the buffer.
+
+### Training in reverse
+
+`--reverse` (`reverse` on `/api/train`, **Read every text backwards** on the
+Train tab) reads every text of a run backwards, in the model's units - its last
+character first, or its last word on a word model - so the model learns what
+comes *before* a text rather than what follows it. With `--whole-file` a file is
+read from its end to its start; one text per line turns every line around, in
+the order the lines came. Everything after the turn sees the reversed texts: the
+order and the curriculum, the counters, and the replay buffer, which keeps them
+as they were read. It works on every kind, the negative network included, and
+the three ports write the same file, byte for byte (`SPEC-SearchAndTraining.md`
+§9).
+
+```bash
+python -m radixnet --model backwards.json train --data book.txt --reverse --epochs 5
+```
+
+A model trained backwards is asked backwards: the query turned around, the
+answer turned back. The frontend does both - turn on **Query backwards** (on the
+Settings tab, and beside the traversal on Predict and Generate), type the *end*
+of a text, and the answer reads the right way round, with what the model says
+came before it highlighted; Generate's prefix becomes the text's ending. A
+thumbs up or down sends the model's own, backwards, text, since that is what
+feedback trains on. From the command line, turn the query around yourself -
+`Encoding.reverse` does it in the model's units, and on a character model so
+does `rev` - and read the answer the same way, since it comes back as the model
+reads it (`"enin sevas emit ni hctits a"` is *a stitch in time saves nine*):
+
+```bash
+python -m radixnet --model backwards.json predict --prefix "$(echo 'saves nine' | rev)" --to-end
+```
 
 ## Learning-rate schedules (graph functions)
 
