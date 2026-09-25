@@ -58,6 +58,13 @@ type Correction struct {
 //
 // An edge both sentences walk over a changed span - the network wrote the
 // right characters by another route - is rewarded, never penalised.
+//
+// With the attention band on (attention.go) a step is charged not for the
+// characters it wrote but for the ones its grams see, each by how centrally:
+// the penalty is Strength * Weight * charge, the fix earns
+// Strength * Reward * (charge + (1 - charge) * Keep), and the judged-path
+// verdicts go to the steps that saw a change most sharply.  Off, every charge
+// is 1 and this is the rule above.
 func (m *Model) Correct(wrong, right string, o CorrectOptions) (*Correction, error) {
 	// the encoding aligns the two: character by character by default, word by
 	// word under a word encoding (Encoding.Edits), so there is nothing to
@@ -97,22 +104,22 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 			}
 		}
 	}
-	penalties := map[int]float64{}
+	charges := map[int]float64{} // edge -> the largest charge any of its steps took
 	order := []int{}
-	blamed := []PathKey{}
+	blamed := []ChargedStep{}
 	if wrongGrams != nil && len(wrongSpans) > 0 && base*o.Weight > 0 {
-		blamed = m.stepsOver(wrongGrams, enc.Len(wrong), wrongSpans)
+		blamed = m.chargedSteps(wrongGrams, enc.Len(wrong), wrongSpans)
 		for _, step := range blamed {
-			if _, seen := penalties[step.Edge]; !seen {
+			if _, seen := charges[step.Edge]; !seen {
 				order = append(order, step.Edge)
 			}
-			penalties[step.Edge] = -base * o.Weight
+			charges[step.Edge] = math.Max(charges[step.Edge], step.Charge)
 		}
 	}
 	rewards := map[int]float64{}
 	rewardOrder := []int{}
-	fixed := map[int]bool{}
-	taught := []PathKey{}
+	fixed := map[int]float64{} // edge -> the largest charge any of its steps took
+	taught := []ChargedStep{}
 	if rightGrams != nil {
 		transitions, err := g.ObserveSequence(rightGrams, !o.NoCount)
 		if err != nil {
@@ -125,15 +132,17 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 			m.metaAddInt("trained_chars", int64(enc.Len(right)))
 		}
 		if len(rightSpans) > 0 {
-			taught = m.stepsOver(rightGrams, enc.Len(right), rightSpans)
+			taught = m.chargedSteps(rightGrams, enc.Len(right), rightSpans)
 			for _, step := range taught {
-				fixed[step.Edge] = true
+				fixed[step.Edge] = math.Max(fixed[step.Edge], step.Charge)
 			}
 		}
 		for _, t := range transitions {
-			share := o.Keep
-			if fixed[t.E] {
-				share = 1
+			share := o.Keep // the rest of the correction
+			if c := fixed[t.E]; c >= 1 {
+				share = 1 // the whole fix
+			} else if c > 0 {
+				share = c + float64((1-c)*o.Keep) // part of the fix, and what the rest keeps (rounded: no FMA)
 			}
 			amount := base * o.Reward * share
 			if amount <= 0 {
@@ -151,28 +160,36 @@ func (m *Model) correct(wrong, right string, o CorrectOptions) (*Correction, err
 		if _, both := rewards[e]; both { // the teacher wrote it too: it is not the mistake
 			continue
 		}
-		g.AddReward([]int{e}, penalties[e])
+		penalty := float64(-base * o.Weight * charges[e])
+		g.AddReward([]int{e}, penalty)
 		out.Penalised++
-		out.Penalty += -penalties[e]
+		out.Penalty += -penalty
 	}
 	for _, e := range rewardOrder {
 		g.AddReward([]int{e}, rewards[e])
-		if fixed[e] {
+		if _, fix := fixed[e]; fix {
 			out.Rewarded++
 		} else {
 			out.Kept++
 		}
 		out.Reward += rewards[e]
 	}
-	// the counters follow the reward: what was blamed is a wrong path here, what was taught a right one
-	stillBlamed := blamed[:0:0]
+	// the counters follow the reward: what was blamed is a wrong path here, what was taught a right one -
+	// a count, so it goes to the steps that saw the change most sharply (every charged step, band off)
+	stillBlamed := []PathKey{}
 	for _, step := range blamed {
-		if _, both := rewards[step.Edge]; !both {
-			stillBlamed = append(stillBlamed, step)
+		if _, both := rewards[step.Edge]; !both && step.Focus {
+			stillBlamed = append(stillBlamed, step.PathKey)
+		}
+	}
+	taughtKeys := []PathKey{}
+	for _, step := range taught {
+		if step.Focus {
+			taughtKeys = append(taughtKeys, step.PathKey)
 		}
 	}
 	out.MarkedIncorrect = g.MarkSteps(stillBlamed, false)
-	out.MarkedCorrect = g.MarkSteps(taught, true)
+	out.MarkedCorrect = g.MarkSteps(taughtKeys, true)
 	if out.Penalised > 0 || out.Rewarded > 0 || out.Kept > 0 {
 		m.metaAddInt("feedback_passes", 1)
 		m.metaAddFloat("rewards_total", out.Reward)

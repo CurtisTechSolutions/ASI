@@ -478,6 +478,47 @@ class TestGoParity(unittest.TestCase):
         for key in ("rewards_total", "penalties_total", "edge_reward_positive", "edge_reward_negative"):
             self.assertLessEqual(abs(a_stats[key] - b_stats[key]), 1e-9, key)
 
+    def test_the_attention_band_lands_a_correction_on_the_same_steps(self):
+        """With the band on, both sides share every changed unit out over the same grams, move the same edges by
+        the same bits and give the verdicts to the same steps - and each reads the other's band from its file."""
+        pairs = [
+            ("the cat sit on the mat", "the cat sits on the mat"),
+            ("the dogs run in the mat", "the dogs run in the park"),
+            ("a apple a day", "an apple a day"),
+            ("the cat sat", "the cat sat on the mat"),
+            ("the mat on sat cat", "the cat sat on the mat"),
+        ]
+        py_path = os.path.join(TMP.name, "band_py.count.json")
+        go_path = os.path.join(TMP.name, "band_go.count.json")
+        shutil.copy(self.py_model, py_path)
+        shutil.copy(self.go_model, go_path)
+        a = py("attention", "--blur", 0.3, model=py_path)
+        b = go("attention", "--blur", 0.3, model=go_path)
+        self.assertEqual(a["attention"], b["attention"])
+        self.assertEqual(a["attention"]["weights"], [0.7, 1.0, 0.7])
+        for wrong, right in pairs:  # the preview: the same grams, the same shares, to the bit
+            with self.subTest(wrong=wrong):
+                a = py("attention", "--wrong", wrong, "--right", right, model=py_path)["preview"]
+                b = go("attention", "--wrong", wrong, "--right", right, model=go_path)["preview"]
+                self.assertEqual(a, b)
+        for wrong, right in pairs:
+            a = py("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=py_path)
+            b = go("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, "--strength", 0.5, model=go_path)
+            for key in ("edits", "penalised", "rewarded", "kept", "wrong_chars", "right_chars", "changes"):
+                self.assertEqual(a[key], b[key], f"{key} for {wrong!r} -> {right!r}")
+            for key in ("penalty", "reward", "loss"):
+                self.assertLessEqual(abs(a[key] - b[key]), 1e-9, key)
+        a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
+        self.assertEqual((a_doc["attention"], b_doc["attention"]), ({"blur": 0.3}, {"blur": 0.3}))
+        self.assertEqual(a_doc["edges"]["reward"], b_doc["edges"]["reward"])
+        assert_close(self, a_doc["edges"]["w"], b_doc["edges"]["w"], 1e-12)
+        for column in ("prev", "edge", "seen", "correct", "incorrect"):
+            self.assertEqual(a_doc["paths"][column], b_doc["paths"][column], column)
+        # a reward that is not a whole multiple of the strength only comes from a shared charge
+        self.assertTrue(any(abs(r * 2 - round(r * 2)) > 1e-9 for r in a_doc["edges"]["reward"]))
+        self.assertEqual(go("attention", model=py_path)["attention"]["blur"], 0.3)
+        self.assertEqual(py("attention", model=go_path)["attention"]["blur"], 0.3)
+
     def test_zip_corpus_streams_through_identically(self):
         """Both sides train from the same ZIP archive: Python unpacks it, Go streams it in chunks."""
         import io
@@ -584,6 +625,35 @@ class TestGoWordParity(unittest.TestCase):
         self.assertEqual(self.py_doc["format"], "radixnet-count")
         self.assertEqual(self.go_doc["format"], "radixnet-count")
         self.assertEqual((self.py_doc["kind"], self.go_doc["kind"]), ("count", "count"))
+
+    def test_corrections_over_words_move_the_same_steps_with_and_without_the_band(self):
+        """A word model's corrections, off the band and on it.  A sentence that stopped too early is an
+        insertion at its *word* count, and both sides blame the step into END for it."""
+        pairs = [
+            ("the cat sat", "the cat sat on the mat"),
+            ("the dog run to the park", "the dog ran to the park"),
+            ("a cat sat on the mat", "the cat sat on the mat"),
+        ]
+        for blur in (None, 0.5):
+            py_path = os.path.join(TMP.name, f"words_py_{blur}.count.json")
+            go_path = os.path.join(TMP.name, f"words_go_{blur}.count.json")
+            shutil.copy(self.py_model, py_path)
+            shutil.copy(self.go_model, go_path)
+            if blur is not None:
+                py("attention", "--blur", blur, model=py_path)
+                go("attention", "--blur", blur, model=go_path)
+            for wrong, right in pairs:
+                with self.subTest(blur=blur, wrong=wrong):
+                    a = py("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, model=py_path)
+                    b = go("correct", "--wrong", wrong, "--right", right, "--keep", 0.25, model=go_path)
+                    for key in ("edits", "penalised", "rewarded", "kept", "wrong_chars", "right_chars"):
+                        self.assertEqual(a[key], b[key], key)
+                    if wrong == "the cat sat":
+                        self.assertEqual(a["penalised"], 1)  # the step into END, on both sides
+            a_doc, b_doc = load_json(py_path)["graph"], load_json(go_path)["graph"]
+            self.assertEqual(a_doc["edges"]["reward"], b_doc["edges"]["reward"], blur)
+            for column in ("prev", "edge", "seen", "correct", "incorrect"):
+                self.assertEqual(a_doc["paths"][column], b_doc["paths"][column], column)
 
     def test_the_same_graph_over_words(self):
         p, g = self.py_doc["graph"], self.go_doc["graph"]
@@ -932,6 +1002,24 @@ class TestGoNegativeParity(unittest.TestCase):
         self.assertEqual([s["reason"] for s in a["spans"]], [s["reason"] for s in b["spans"]])
         self.assertAlmostEqual(a["risk"], b["risk"], places=9)
         self.assertEqual(a["why"], b["why"])
+
+    def test_a_correction_blames_by_the_attention_band(self):
+        """The negative network with the band on: the same shares of blame on the same edges, on both sides."""
+        for model, negative, runner in ((self.py_model, self.py_negative, py), (self.go_model, self.go_negative, go)):
+            runner("negative", "blame", "--text", "the cat sat here", "--reason", "other", model=model)
+            if runner is py:
+                runner("--kind", "count", "train", "--data", CORPUS, "--epochs", 1, model=model)
+            else:
+                runner("train", "--data", CORPUS, "--epochs", 1, model=model)
+            runner("attention", "--blur", 0.5, model=negative)
+            for wrong, right in (("the cat sit on the mat", "the cat sits on the mat"), ("a apple a day", "an apple a day")):
+                runner("correct", "--wrong", wrong, "--right", right, "--blame", "--reason", "agreement", model=model)
+        p, g = load_json(self.py_negative)["graph"], load_json(self.go_negative)["graph"]
+        self.assertEqual((p["attention"], g["attention"]), ({"blur": 0.5}, {"blur": 0.5}))
+        self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+        self.assertEqual(p["edges"]["blame"], g["edges"]["blame"])
+        self.assertEqual(p["edges"]["fails"], g["edges"]["fails"])
+        self.assertTrue(any(0 < b < 1 for b in p["edges"]["blame"]))  # a share, not a whole failure
 
     def test_each_side_reads_the_other_s_negative_model(self):
         self.teach(self.py_model)

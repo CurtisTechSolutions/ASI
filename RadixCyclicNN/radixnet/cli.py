@@ -2149,6 +2149,65 @@ def cmd_correct(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def cmd_attention(args: argparse.Namespace, console: Console) -> dict:
+    """The attention band: show it, switch it, or show where one correction would land through it."""
+    if args.off and args.blur is not None:
+        raise CliError("--off and --blur contradict each other: a blur switches the band on")
+    if (args.wrong is None) != (args.right is None):
+        raise CliError("a preview needs both --wrong (what the network wrote) and --right (what it should say)")
+    model, origin = open_model(args, console, required=True)
+    changes: dict = {}
+    saved = None
+    if args.on or args.off or args.blur is not None:
+        try:
+            model.configure_attention(on=True if args.on else False if args.off else None, blur=args.blur)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        changes = {"on": model.graph.attention.on, "blur": model.graph.attention.blur}
+        if not args.dry_run:
+            saved = save_model(model, args.out or args.model)
+    config = model.attention_config()
+    band = model.graph.attention
+    unit = "word" if config["unit"] == WORDS else "character"
+    console.pairs([
+        ("model", origin.describe()),
+        ("band", band.describe()),
+        ("over one gram", " ".join(fmt(w) for w in config["weights"]) if config["weights"] else
+                          f"- (off: each changed {unit} is charged to the step that wrote it)"),
+        ("gram", f"{config['ngram']} {unit}s, stride {config['stride']}"),
+        ("applies", "yes: this kind learns from corrections" if config["applies"] else
+                    f"no: the {kind_label(model)} model is never corrected"),
+        ("changed", ", ".join(f"{k}={fmt(v)}" for k, v in changes.items()) if changes else "nothing"),
+        ("saved", saved["path"] if saved else ("- (dry run)" if changes and args.dry_run else "-")),
+    ])
+    preview = None
+    if args.wrong is not None:
+        preview = model.attention_preview(args.wrong, args.right)
+        _print_changes(console, preview["changes"])
+        for side, title in (("wrong", "the network wrote"), ("right", "the teacher wrote")):
+            _print_attention_side(console, preview[side], title, preview["blur"])
+    return {"model": origin.to_dict(), "attention": config, "changed": changes, "saved": saved, "preview": preview}
+
+
+def _print_attention_side(console: Console, side: dict, title: str, blur: float) -> None:
+    """The grams of one side of a correction that either rule charges: the writer's mark beside the band's share."""
+    rows = [
+        [g, quote(gram), "1" if writes else "-", fmt(charge) if charge else "-", "*" if focus and charge else ""]
+        for g, (gram, writes, charge, focus) in enumerate(
+            zip(side["grams"], side["writer"], side["charges"], side["focus"])
+        )
+        if writes or charge
+    ]
+    if side["end"]:
+        rows.append(["end", "(after the last unit)", "1", "1", "*"])
+    console.say()
+    console.say(f"{title}: {quote(side['text'])}")
+    if not rows:
+        console.say("  nothing in it changed")
+        return
+    console.table(["gram", "text", "writer (off)", f"band (blur {fmt(blur)})", "focus"], rows)
+
+
 def _print_changes(console: Console, changes: list[dict]) -> None:
     if not changes:
         console.say("the two sentences are the same: nothing to teach")
@@ -2943,6 +3002,7 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
            ("rewards", f"+{fmt(stats['rewards_total'])} / -{fmt(stats['penalties_total'])} over "
                        f"{stats['feedback_passes']} feedback pass(es)")]
           if model.kind == "resonant" else []),
+        *([("attention", model.graph.attention.describe(model.encoding.n))] if model.takes_corrections else []),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -4895,6 +4955,34 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"negative model file for --blame (default: {DEFAULT_NEGATIVE_MODEL}, i.e. beside --model)")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_correct)
+
+    # attention ------------------------------------------------------------
+    p = command(
+        "attention", "the attention band: where inside a gram a correction's blame and credit land",
+        "Read a gram the way an eye reads a line: sharp at its centre, blurred towards its first and last\n"
+        "unit.  With the band on, every unit a correction changes hands out one charge, shared among the grams\n"
+        "that see it by how centrally each sees it: the gram with the change at its centre takes the most, the\n"
+        "grams that only glimpse it at an edge take less, and the verdict goes to the centre.  Off (the\n"
+        "default), each changed unit is charged in full to the step that wrote it.  --blur is how blurred the\n"
+        "ends are: the band is 1 at the centre and 1 - blur at both ends (0 = every position seen alike, 1 =\n"
+        "the ends see nothing).  A judgement of a whole text - a thumbs up, a thumbs down, a training pass -\n"
+        "marks every unit alike, and no band changes it.  The count and negative models take a band.\n"
+        "Without options the band is shown; --on / --blur / --off change it and save the model; --wrong and\n"
+        "--right show where one correction would land, gram by gram, under both rules.",
+    )
+    state = p.add_mutually_exclusive_group()
+    state.add_argument("--on", action="store_true",
+                       help="switch the band on (at --blur, else the blur it had, else 0.5)")
+    state.add_argument("--off", action="store_true",
+                       help="switch the band off: each changed unit is charged to the step that wrote it")
+    p.add_argument("--blur", type=float, metavar="X",
+                   help="how blurred the ends of a gram are, 0..1: the band is 1 at the centre and 1 - X at both "
+                        "ends (switches the band on)")
+    p.add_argument("--wrong", metavar="TEXT", help="preview a correction: what the network wrote")
+    p.add_argument("--right", metavar="TEXT", help="preview a correction: what it should have written")
+    p.add_argument("--dry-run", action="store_true", help="change the band in memory only; nothing is saved")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_attention)
     # negative -------------------------------------------------------------
     p = command(
         "negative", "the negative network: failures, why they failed, and the filter",

@@ -184,6 +184,15 @@ type GraphDoc struct {
 	// was - and so the Python implementation, which only speaks that one,
 	// never meets a file it would misread.
 	Encoding *Encoding `json:"encoding,omitempty"`
+
+	// Attention is the attention band, written only while it is on: a file
+	// without it was written with the band off (attention.go).
+	Attention *attentionDoc `json:"attention,omitempty"`
+}
+
+// attentionDoc is the "attention" block of a graph document.
+type attentionDoc struct {
+	Blur *float64 `json:"blur"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -206,6 +215,10 @@ func (g *Graph) ToDoc() *GraphDoc {
 		Traversals: g.Traversals.Value, TraversalsResets: g.Traversals.Resets}
 	if enc := g.Enc.WithDefaults(); !enc.IsDefault() {
 		doc.Encoding = &enc
+	}
+	if g.Attention.On {
+		blur := g.Attention.Blur
+		doc.Attention = &attentionDoc{Blur: &blur}
 	}
 	n := len(order)
 	doc.Nodes = nodesDoc{Labels: make([]string, n), Z: make([]float64, n), A: make([]float64, n), B: make([]float64, n),
@@ -466,6 +479,12 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 	g, err := NewGraph(d.Seed, opts)
 	if err != nil {
 		return nil, err
+	}
+	if d.Attention != nil && d.Attention.Blur != nil {
+		if err := CheckBlur(*d.Attention.Blur); err != nil {
+			return nil, fmt.Errorf("graph attention: %v", err)
+		}
+		g.Attention = AttentionBand{On: true, Blur: *d.Attention.Blur}
 	}
 	enc := g.Enc
 	g.Inverted = d.Inverted

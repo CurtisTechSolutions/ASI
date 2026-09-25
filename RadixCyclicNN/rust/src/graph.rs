@@ -225,6 +225,12 @@ pub struct Graph {
     pub res: Option<Box<crate::resonance::ResonantData>>,
     /// How a text becomes grams; fixed when the graph is created.
     pub enc: Encoding,
+    /// Where inside a gram a correction's blame and credit land
+    /// ([`crate::attention`]): off by default - each changed unit is charged
+    /// to the step that wrote it.  Unlike `enc` it changes nothing the graph
+    /// holds, so it can be switched at any time; it travels with the file
+    /// while it is on.
+    pub attention: crate::attention::AttentionBand,
     pub inverted: bool,
 
     pub(crate) version: Counter,
@@ -307,6 +313,7 @@ impl Graph {
             costs_version: INVALID_STAMP,
             workers: 0,
             enc: opts.encoding,
+            attention: crate::attention::AttentionBand::default(),
         };
         g.new_node(START_LABEL.to_string(), 0, 0);
         g.new_node(END_LABEL.to_string(), 0, 0);

@@ -48,6 +48,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/duo.rs` | the pair on the way out: the positive model writes, the negative one vetoes; the guard on every answer and the `/api/negative` routes |
 | `src/blame.rs`, `src/diff.rs` | where the negative network's data comes from - verdicts turned into faults - and the unit diff that blames only what a teacher changed |
 | `src/correct.rs` | `Model::correct` and `radixnet correct`: teach one correction, only what changed moves |
+| `src/attention.rs` | the attention band and `radixnet attention`: where inside a gram a correction lands, the charges shared out as Python shares them (`../SPEC-AttentionBand.md`) |
 | `src/dialogue.rs` | the model converses with itself: skipping what was heard, backing out of a repeat, and teaching the graph where it goes round; `converse --stream` and `POST /api/converse/stream` watch it happen, the turns as they are spoken and the backing up between them (a `Stream`, the same events as Python and Go); `reply` hears a `trace` |
 | `src/assistant.rs` | today's format: messages in, an assistant message out - the search's trace as the thinking, the text one node of the walk at a time - in OpenAI's and Anthropic's dialects, `radixnet talk`, `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` |
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |

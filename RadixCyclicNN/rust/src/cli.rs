@@ -125,7 +125,9 @@ pub const SWITCHES: &[&str] = &[
     "no-to-end",
     "no-waveform",
     "normalise",
+    "off",
     "offline",
+    "on",
     "pair",
     "parallel-parts",
     "python-tool",
@@ -358,6 +360,11 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
         "correct",
         crate::correct::cli,
         "teach one correction: only what changed moves",
+    ),
+    (
+        "attention",
+        crate::attention::cli,
+        "the attention band: where inside a gram a correction's blame and credit land",
     ),
     (
         "evolve",

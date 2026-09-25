@@ -23,6 +23,7 @@ A few cover a behaviour rather than a module:
 | file | covers |
 |---|---|
 | `__init__.py` | puts the project root on `sys.path` so `radixnet` imports from a checkout |
+| `test_attention.py` | the **attention band** (`../radixnet/attention.py`, `../SPEC-AttentionBand.md`): the band's shape; the rule's three properties (one charge per changed unit, a whole text left alone, a unit one gram sees charged to it in full) over eight encodings; the charged steps; both kinds' corrections under the band, and off to the bit; the file block; the refusals; the CLI and the HTTP API |
 | `test_go_parity.py` | **the cross-language contract.** Trains the same corpus on both implementations and compares structure, counts, rewards, window, RNG state, predictions, generated texts, scores and conversations; blames the same failures and corrections and compares the verdicts character for character; and has each side read the other's model files. Skipped when `go` is not on `PATH`, and when `go build` of the CLI fails. |
 | `test_guard.py` | what the negative network stops on the way out, on every answer path |
 | `test_feedback.py` | ratings and the 2NRL phases they drive |

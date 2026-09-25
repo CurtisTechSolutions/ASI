@@ -34,6 +34,16 @@ use crate::weights::SMOOTHING;
 pub const MODEL_FORMAT: &str = "radixnet-count";
 /// The model document version this port writes.
 pub const MODEL_FORMAT_VERSION: i64 = 1;
+/// The attention band a graph document carries: off unless an `attention`
+/// block with a blur says otherwise - a file without one was written with the
+/// band off, which is every file from before it existed.
+fn read_attention(doc: &Json) -> Result<crate::attention::AttentionBand, String> {
+    match doc.get("attention").and_then(|block| block.at("blur").as_f64()) {
+        Some(blur) => crate::attention::AttentionBand::on(blur).map_err(|e| format!("graph attention: {e}")),
+        None => Ok(crate::attention::AttentionBand::default()),
+    }
+}
+
 /// The encoding a graph document carries.
 ///
 /// A document without an `encoding` block is the character trigram of stride 1,
@@ -285,26 +295,34 @@ impl Graph {
             }
             (false, other) => other,
         };
-        if self.enc.is_default() {
+        if self.enc.is_default() && !self.attention.is_on() {
             return graph; // an ordinary file is byte for byte what it always was
         }
-        // the encoding sits third, right after format_version, which is exactly
-        // where Python and Go write it: the document is one document
         let mut pairs = match graph {
             Json::Obj(pairs) => pairs,
             other => return other,
         };
-        pairs.insert(
-            2,
-            (
-                "encoding".to_string(),
-                Json::obj([
-                    ("unit", Json::str(self.enc.unit.name())),
-                    ("n", Json::Int(self.enc.n as i64)),
-                    ("stride", Json::Int(self.enc.stride as i64)),
-                ]),
-            ),
-        );
+        let mut at = 2;
+        if !self.enc.is_default() {
+            // the encoding sits third, right after format_version, which is exactly
+            // where Python and Go write it: the document is one document
+            pairs.insert(
+                at,
+                (
+                    "encoding".to_string(),
+                    Json::obj([
+                        ("unit", Json::str(self.enc.unit.name())),
+                        ("n", Json::Int(self.enc.n as i64)),
+                        ("stride", Json::Int(self.enc.stride as i64)),
+                    ]),
+                ),
+            );
+            at += 1;
+        }
+        if let Some(blur) = self.attention.blur {
+            // the attention band right after it, only while it is on - where Python writes it
+            pairs.insert(at, ("attention".to_string(), Json::obj([("blur", Json::Num(blur))])));
+        }
         Json::Obj(pairs)
     }
 
@@ -389,6 +407,7 @@ impl Graph {
             Graph::new(doc.at("seed").as_i64().unwrap_or(0), opts)?
         };
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
+        g.attention = read_attention(doc)?;
 
         // the three sentinels are already there; the rest of the file's nodes follow
         let counts = nodes.at("count").to_i64s();

@@ -56,6 +56,7 @@
 
 pub mod agent;
 pub mod assistant;
+pub mod attention;
 pub mod beam;
 pub mod bench;
 pub mod blame;

@@ -222,6 +222,12 @@ export const api = {
   selectModel: (kind) => post("/api/model/select", { kind }),
   /** Count model: change the dual frequency weight function (scales and the sliding window). */
   modelWeights: (body) => post("/api/model/weights", body),
+  /** The attention band: where inside a gram a correction's blame and credit land (count and negative models). */
+  attention: () => get("/api/model/attention"),
+  /** Switch the band: {on, blur} - a blur alone switches it on, on: false switches it off. */
+  setAttention: (body) => post("/api/model/attention", body),
+  /** Where one correction would land, gram by gram, under the writer rule and a band ({wrong, right, blur}). */
+  attentionPreview: (body) => post("/api/model/attention/preview", body),
   /** The text encoding every kind shares: the sliding window, its stride and the sentinels (read-only). */
   encoding: () => get("/api/encoding"),
   /** One text through the encoder and back, and through the graph's own (possibly merged) node labels. */

@@ -46,6 +46,7 @@ RadixCyclicNN/
     __main__.py             `python -m radixnet` -> cli.main()
     activation.py           sine activation (parametric sine + derivatives)
     encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 34)
+    attention.py            the attention band: where inside a gram a correction's blame and credit land (section 38)
     counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 28)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
@@ -735,6 +736,9 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/score` | `{"text"}` | score dict |
 | GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","think_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
 | POST `/api/encoding/preview` | `{"text"}` | the same document plus `{"chars","windows","count","decoded","round_trip","unknown_windows","kind","path": {"known","reason","labels","node_ids","decoded","nodes","compressed"}}` — one text through the encoder, back through `Decoder.decode_trigrams`, and through the graph's own (possibly merged) node labels with `Decoder.decode_path`. `path.known` is false with the reason: shorter than one window, windows never seen (listed in `unknown_windows`), or a text every window of which is known that still does not run from START to END |
+| GET `/api/model/attention` | | `{"kind","attention": {"on","blur","weights","ngram","stride","unit","units","applies","default_blur"}}` — the active model's attention band (section 38); `weights` is the band over one gram, null while it is off; `applies` is false for a kind that is never corrected |
+| POST `/api/model/attention` | `{"on","blur"}` | `{"kind","attention","stats"}` — a blur alone switches the band on, `on: true` without one uses the blur it had (else `default_blur`), `on: false` switches it off; 400 for a blur outside `[0, 1]` and for a kind that is never corrected |
+| POST `/api/model/attention/preview` | `{"wrong","right","blur"}` | `{"kind","attention","blur","weights","changes","wrong","right"}`, each side `{"text","units","grams","spans","writer","charges","focus","end"}` — where one correction would land, gram by gram, under the writer rule and under a band (`blur`, else the model's, else the default); changes nothing |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
 | POST `/api/invert` | | `stats()` |
@@ -790,7 +794,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
 * `SettingsPanel.jsx` — **Settings** (section 31.4): the site-wide settings of this browser, what every search and every run starts from. Five cards: the **traversal** (`TraversalFields.jsx`), **sampling and diversity** (`SearchFields.jsx`), **how a run walks its texts** (`TrainingPlanFields.jsx`) - each with a button back to its defaults - **backwards** (`BackwardsField.jsx`: whether Predict and Generate ask the model backwards), and **this browser** (how many settings are remembered, and a two-click button that forgets them all).
-* `ModelSettingsPanel.jsx` — **Model settings** (section 31.4): what belongs to the model and is saved with it. Four cards: **this model** (kind, encoding, size, file, and the replay buffer from `/api/status` `replay`), a **new model** in any kind and encoding (`POST /api/reset {kind, encoding, seed}`, two clicks, the encoding checked before it is sent), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), and the **encoder / decoder** (`GET /api/encoding` for the unit, the n, the stride, the overlap and the four sentinels, each with what it means - asked again whenever the model changes - and `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the grams the model has never seen marked and a label longer than one gram shown as the merged chain it is).
+* `ModelSettingsPanel.jsx` — **Model settings** (section 31.4): what belongs to the model and is saved with it. Five cards: **this model** (kind, encoding, size, file, and the replay buffer from `/api/status` `replay`), a **new model** in any kind and encoding (`POST /api/reset {kind, encoding, seed}`, two clicks, the encoding checked before it is sent), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), the **attention band** (`AttentionBandCard.jsx`, section 38: `GET` / `POST /api/model/attention`, the band drawn over one gram, and a correction previewed under both rules with `POST /api/model/attention/preview`), and the **encoder / decoder** (`GET /api/encoding` for the unit, the n, the stride, the overlap and the four sentinels, each with what it means - asked again whenever the model changes - and `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the grams the model has never seen marked and a label longer than one gram shown as the merged chain it is).
 * `TraversalFields.jsx` — the traversal and its two scales, reading and writing the shared setting, so the Settings, Predict and Generate tabs show one control in three places; `compact` drops the explanation for the action tabs.
 * `SearchFields.jsx` — the sampling filters (top-K, top-p, min-p) and the beam's diversity (`SPEC-SearchAndTraining.md` sections 1-2), over the shared `useSiteSettings().search`. Given the `mode` the search will really run in, the compact version shows only what that mode reads - the filters for `sample`, the diversity for `beam`, nothing for the exact searches - and an out-of-range value as an error the tab refuses to send.
 * `TrainingPlanFields.jsx` — the order, the curriculum, the replay and the early stop (sections 3-6), over `useSiteSettings().training`; on the Train tab it previews how many texts each epoch walks and how many buffered texts it rehearses, and says what the model's buffer holds.
@@ -1304,6 +1308,13 @@ old whole-sentence thumbs up); an edge both sentences walk is rewarded, never pe
 correction once, as a training pass does. One `add_reward` call per distinct amount, so the weights are recomputed
 three times at most. Returns `{edits, changes, penalised, rewarded, kept, penalty, reward, loss, wrong_chars,
 right_chars}`.
+
+**Where a step's charge comes from** is the attention band's to say (section 38). Off - the default - it is the
+rule above: a step answers, in full, for the units it writes. On, every changed unit hands out one charge, shared
+among the grams that *see* it by how centrally each sees it, so the penalty is `strength * weight * charge`, the
+fix earns `strength * reward * (charge + (1 - charge) * keep)`, and the path verdicts go to the step that saw the
+change most sharply. The spans and the length are both in the encoding's units, so under a word encoding a
+sentence that stopped too early is an insertion at its word count.
 
 CLI `radixnet correct --wrong ... --right ...` (and `radixnet-count correct`) teaches one correction by hand and
 `--dry-run` prints the alignment alone. Tests: `tests/test_countnet.py::TestCorrections` and
@@ -3464,7 +3475,7 @@ setting**.
 | tab | what it holds | kept by |
 |---|---|---|
 | **Settings** (`SettingsPanel.jsx`) | the traversal and its scales; the sampling filters and the diversity; whether a query is asked backwards; the order, the curriculum, the replay and the early stop; the browser's own store | this browser (`useSiteSettings`, section 13.1) - never saved with a model, the same whichever model is loaded |
-| **Model settings** (`ModelSettingsPanel.jsx`) | this model (kind, encoding, size, replay buffer); a new model in any kind and encoding; the score function; the encoder / decoder | the model - saved in its file, gone when another model is loaded |
+| **Model settings** (`ModelSettingsPanel.jsx`) | this model (kind, encoding, size, replay buffer); a new model in any kind and encoding; the score function; the attention band; the encoder / decoder | the model - saved in its file, gone when another model is loaded |
 
 | card | what it sets | how |
 |---|---|---|
@@ -3475,6 +3486,7 @@ setting**.
 | **This model** | nothing: it reports | `/api/status` - the kind, the encoding, the size, the file and `replay` (`{size, texts, seen}` or null, all three servers) |
 | **New model** | a fresh model | `POST /api/reset {kind, encoding, seed}` - two clicks, since it replaces the model of that kind in memory; the encoding presets and the three dials by hand, checked (`encodingSpec`) before anything is sent |
 | **Score function** | the active kind's weight function | `GET /api/model` → `weights` on mount and after every change, `POST /api/model/weights` to apply. The count model's `global_scale / window_scale / reward_scale / count_scale / path_scale / window`, the resonant model's `buckets / period / kick_scale / resonance_scale / amp_scale / reward_scale / concentration`. A kind without one - the sine model, whose score is learned rather than set, and the negative network, whose blame function is on its own tab - gets the sentence saying so and where to look instead |
+| **Attention band** | where inside a gram a correction's blame and credit land (section 38) | `GET /api/model/attention` on mount and whenever the model changes, `POST /api/model/attention {on, blur}` to apply; the band drawn over one gram - a bar per position, and a gram's units blurred as the band sees them - redrawn from `src/attention.js` while the slider moves, and `POST /api/model/attention/preview` for a correction the user types, both rules side by side at the slider's blur, before anything is applied. A kind that is never corrected gets the sentence saying so |
 | **Encoder / decoder** | nothing: it reports | `GET /api/encoding` for the unit, the n, the stride, the overlap and the four sentinels; `POST /api/encoding/preview` for a text the user types - the grams it becomes (the ones this model has never seen marked), the text the decoder reads back off them, and the walk through the graph's own labels, where a label longer than one gram is a merged radix chain |
 
 The decisions worth stating:
@@ -4047,3 +4059,68 @@ documents, the streams, the trace), `tests/test_api.py::TestTodaysFormat`, `test
 and `tests/server.rs` in Rust, and the parity suites `tests/test_rust_parity_assistant.py` and
 `tests/test_go_parity.py::TestGoAssistantParity` (the same thinking, text, stop reason and units from the CLIs and the
 servers; ids and timestamps aside, the turn's floats to 1e-9).
+
+## 38. The attention band (`radixnet/attention.py`, `go/radixnet/attention.go`, `rust/src/attention.rs`) — where inside a gram a correction lands
+
+`SPEC-AttentionBand.md` is the specification and D-086 the decision. A gram is read the way an eye reads a line:
+sharp at its centre, blurred towards its first and last unit. The **band** is that, as `n` numbers - 1 at the
+centre, `1 - blur` at both ends, linear between (`band_weights(n, blur)`; `n = 1` and `n = 2` are flat, being all
+centre and all ends) - and it decides one thing: **which steps of a path answer for the units a correction
+changed**.
+
+### 38.1 The rule
+
+`AttentionBand(blur)` - `None` for off, else a blur in `[0, 1]` - lives on the graph (`RadixCyclicGraph.attention`,
+Go `Graph.Attention`, Rust `Graph::attention`) beside the encoding, but unlike it may change at any time: it
+changes nothing the graph holds. `GraphModel._charged_steps(grams, length, spans)` returns `(prev, edge, charge,
+focus)` per step of the traced text, in path order:
+
+* **Off**: `_steps_over`'s steps, each `charge = 1`, each the focus - the writer rule of section 16.4.
+* **On**: `spread(n, stride, grams, length, spans, weights)` first shares every marked unit out over the grams
+  that see it (gram `g` covers `[g * stride, g * stride + n)` and sees unit `u` at weight `weights[u - g *
+  stride]`): each takes `weight / total` of it - an even split when `total` is 0 - so every marked unit hands out
+  exactly one charge, and a gram is the **focus** of a unit when no gram sees it more sharply. A step is then
+  charged the sum of its node's grams' shares (`(label_len - n) / stride + 1` of them), capped at 1, and is the
+  focus when one of them is. A unit no gram covers - the tail a grouping encoding drops - is charged to no one;
+  the position after the last unit (`length`) is the END step's, in full, band or no band.
+
+The marked units are every unit of every span, and an empty span - an insertion - marks the unit it stands in
+front of (`judged_units`). The order is part of the definition - units ascending, the grams that see one
+ascending, every sum left to right - so the three implementations write the same doubles.
+
+Three properties the tests pin, over eight encodings and four blurs: a single marked unit's shares add up to 1; a
+whole-text span leaves every gram at a full charge (so the cap makes the band inert on whole-text feedback); a unit
+one gram sees is charged to it in full.
+
+### 38.2 What it moves
+
+* `CountRewardNet.correct`: an edge's charge is the largest any of its steps took. The penalty is `-strength *
+  weight * charge`, one `add_reward` per distinct amount (first seen first, which is how Rust groups them too);
+  the correction's own steps earn `strength * reward * factor` with `factor` 1 for a full charge, `charge + (1 -
+  charge) * keep` for a partial one and `keep` for none; `mark_steps` gets only the focus steps. With the band off
+  every charge is 1 and every number is what it was.
+* `NegativeNet.correct`: `record_failure(edges, severity, reason, shares)` blames each edge `severity * share` and
+  still counts one failure per edge; `blame_total` adds what was laid.
+* Nothing else: `reward`, `punish`, 2NRL and training mark every unit of their texts alike.
+
+### 38.3 The file, the CLI, the API, the frontend
+
+* **File**: `"attention": {"blur": 0.5}` in the graph document, written only while the band is on, right after
+  `encoding` (or `format_version`) - where Rust writes it too, byte for byte. A file without it is off.
+  `stats()` reports `attention_blur` (null while off) for the count and negative kinds.
+* **CLI**: `radixnet attention` shows the band; `--on`, `--blur X`, `--off` change it and save the model (not with
+  `--dry-run`); `--wrong TEXT --right TEXT` prints where that correction lands, gram by gram, under both rules.
+  `info` has an `attention` row. The same command in `radixnet-count` and in the Rust `radixnet`.
+* **API**: `GET` / `POST /api/model/attention` and `POST /api/model/attention/preview` (section 12), on all
+  three servers; `GET /api/model` carries `attention`. A kind that is never corrected - the sine and phase models -
+  reports `applies: false` and refuses a band (400), as the CLI refuses it.
+* **Frontend**: the Attention band card on Model settings (`AttentionBandCard.jsx`, section 31.4), with its
+  display helpers in `src/attention.js` (`bandWeights` computes the same doubles as the servers, for drawing the
+  band while the slider moves; where a correction lands is always the server's answer).
+
+Tests: `tests/test_attention.py` (the band, `spread`'s three properties, the charged steps, both kinds'
+corrections, off to the bit, the file, the refusals, the CLI and the API), `go/radixnet/attention_test.go`,
+`go/server/attention_test.go`, the unit tests in `rust/src/attention.rs`, `frontend/test/attention.test.mjs`, and
+the parity cases: `TestGoParity` / `TestGoWordParity` / `TestGoNegativeParity` in `test_go_parity.py` and
+`TestRustCorrectionParity` / `TestRustAttentionRoutes` in `test_rust_parity_tools.py`, which hold both ports to
+Python's previews, rewards, blame and - for Rust - model files byte for byte.

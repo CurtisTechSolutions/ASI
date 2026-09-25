@@ -86,6 +86,7 @@ takes a write lock.**
 | `negative.go` | the negative network — the failures, and why |
 | `blame.go` | the tutor's verdicts turned into blame |
 | `correct.go`, `diff.go` | corrections, and the character diff that decides which steps to blame |
+| `attention.go` | the attention band: where inside a gram a correction's blame and credit land (`BandWeights`, `SpreadCharges`, `chargedSteps`, the preview) |
 | `duo.go` | the positive model writes, the negative one vetoes |
 | `gan.go` | the self-upgrading loop |
 | `critic.go` | the reviewer on a loop — the negative network feeding itself |

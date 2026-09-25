@@ -561,6 +561,7 @@ class ModelService:
             "paths": {k["kind"]: self.model_path_for(k["kind"]) for k in kinds},
             "in_memory": sorted({self.kind, *self._parked}),
             "weights": self.model.weight_config() if hasattr(self.model, "weight_config") else None,
+            "attention": self.model.attention_config(),
         }
 
     def select_kind(self, kind: str) -> dict:
@@ -1603,6 +1604,28 @@ class ModelService:
             except ValueError as exc:
                 raise ApiError(400, str(exc)) from exc
             return {"weights": config, "stats": model.stats()}
+
+    def attention(self) -> dict:
+        """The active model's attention band: where inside a gram its corrections land (:mod:`radixnet.attention`)."""
+        with self.session() as model:
+            return {"kind": model.kind, "attention": model.attention_config()}
+
+    def configure_attention(self, on: bool | None = None, blur: float | None = None) -> dict:
+        """Switch the active model's band on (at ``blur``) or off; 400 for a kind that is never corrected."""
+        with self.mutating() as model:
+            try:
+                config = model.configure_attention(on=on, blur=blur)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"kind": model.kind, "attention": config, "stats": model.stats()}
+
+    def attention_preview(self, wrong: str, right: str, blur: float | None = None) -> dict:
+        """Where one correction would land, gram by gram, under the writer rule and a band; changes nothing."""
+        with self.session() as model:
+            try:
+                return {"kind": model.kind, **model.attention_preview(wrong, right, blur=blur)}
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
 
     def _replace_model(self, model: GraphModel) -> dict:
         """Install ``model``; a model of another kind that was active is kept in memory (see :meth:`select_kind`)."""
@@ -3050,6 +3073,18 @@ def _r_model_weights(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.configure_weights(**_weight_options(f))
 
 
+def _r_attention(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.attention()
+
+
+def _r_attention_set(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.configure_attention(on=f.flag("on", None), blur=f.number("blur", None))
+
+
+def _r_attention_preview(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.attention_preview(f.text("wrong", "") or "", f.text("right", "") or "", blur=f.number("blur", None))
+
+
 def _r_encoding(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.encoding()
 
@@ -4482,6 +4517,20 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
      "path_scale, window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, "
      "concentration} -> {weights, stats}"),
+    ("GET", "/api/model/attention", _r_attention,
+     "the active model's attention band - where inside a gram a correction's blame and credit land: {kind, "
+     "attention: {on, blur, weights (the band over one gram, 1 at the centre, 1 - blur at both ends; null while "
+     "off), ngram, stride, unit, units, applies (does this kind learn from corrections), default_blur}}"),
+    ("POST", "/api/model/attention", _r_attention_set,
+     "switch the band: {on, blur} - blur (0..1) alone switches it on, on: true without a blur uses the one it had "
+     "(else default_blur), on: false switches it off (each changed unit charged to the step that wrote it); "
+     "400 for a kind that is never corrected -> {kind, attention, stats}"),
+    ("POST", "/api/model/attention/preview", _r_attention_preview,
+     "where one correction would land, gram by gram, and nothing changes: {wrong, right, blur (default the "
+     "model's, else default_blur)} -> {kind, attention, blur, weights, changes, wrong, right}, each side {text, "
+     "units, grams, spans, writer (the gram writes a changed unit: the rule with the band off), charges (its "
+     "share under the band, at most 1), focus (it sees a change most sharply), end (the step into END answers "
+     "for the position after the last unit)}"),
     ("GET", "/api/negative", _r_negative,
      "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
      "filter settings"),
