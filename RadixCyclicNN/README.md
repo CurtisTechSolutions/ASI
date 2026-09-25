@@ -238,7 +238,7 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 | `agent --tasks FILE` | `--phase model\|teacher\|both`, `--rounds`, `--twonrl-per task\|round`, `--agent-model`, `--judge-model`, `--url`, `--timeout`, `--criteria 4`, `--lenient`, `--no-judge`, `--mediation repair\|always\|never`, `--no-teach`, `--max-steps 6`, `--model-attempts 2`, `--teacher-attempts 1`, `--sample-first`, `--temperature`, `--max-length 200`, `--observation-chars 600`, `--read-reward`, `--no-replay`, `--blatant-mode fail_invert\|activation\|state\|none`, `--blatant-margin 0.5`, `--blatant-boost 4`, `--blame` (teach the negative network from every failure), `--no-avoid`, `--negative PATH`, 2NRL options, checkpoint options, tool options, `--out`, `--report FILE` |
 | `explore` | the network picks its own tasks: `--steps 10` (0 = until Ctrl-C), `--seed-url URL` (repeatable), and every `agent` option. `agent` and `explore` are in the Go CLI too (`--strength` in place of the learning rates) |
 | `mcp` | serve the tools and the network over the Model Context Protocol (stdio): `--no-model`, `--no-solve`, `--blame`, `--negative PATH`, `--agent-model`, `--url`, tool options |
-| tool options (`tools`, `agent`, `explore`, `mcp`, `serve`) | `--offline` (no browsing), `--allow-private` (allow loopback / private addresses), `--search-url URL` (`{query}` is substituted), `--web-timeout 20`, `--max-bytes 2000000`, `--browser` (draw pages in a real headless Chrome), `--no-headless`, `--page-timeout 30`, `--python-tool` (offer the sandboxed `python` tool), `--sandbox-timeout`, `--no-network-isolation`, `--upload-dir DIR` (offer `read_file` over it) |
+| tool options (`tools`, `agent`, `explore`, `mcp`, `serve`) | `--offline` (no browsing), `--allow-private` (allow loopback / private addresses), `--search-url URL` (`{query}` is substituted; several, separated by spaces, are tried in turn - the default is DuckDuckGo, then Wikipedia's search API), `--web-timeout 20`, `--max-bytes 2000000`, `--browser` (draw pages in a real headless Chrome), `--no-headless`, `--page-timeout 30`, `--python-tool` (offer the sandboxed `python` tool), `--sandbox-timeout`, `--no-network-isolation`, `--upload-dir DIR` (offer `read_file` over it) |
 
 Every command has `--help`. Exit code 1 with a message on stderr on errors.
 
@@ -1080,6 +1080,25 @@ python -m radixnet explore --steps 0                           # until Ctrl-C
 
 Task files: one question per line (`.txt`, `#` comments), or `.json` / `.jsonl`
 objects `{"id", "prompt", "criteria", "answer", "seeds"}` (`data/sample_tasks.*`).
+
+**What a page reads as.** An observation is clipped to its first few hundred
+characters (`--observation-chars`), so `web_fetch` puts what the page is about
+first: what is never shown (`<head>`, scripts, `hidden` and `display: none`
+elements) and the page's own chrome (navigation, the banner, the footer,
+sidebars, buttons, menus) are dropped, and menus the markup does not label as
+such — runs of lines that are nothing but links, like a language list — move
+after the text, as does whatever lies outside the page's `<main>`. The links
+(`web_links`, and the `links` an exploration follows) come in the same order,
+the ones in the running text first, each address once and none back into the
+same page. All three ports read a page the same way, character for character.
+
+**Searching.** `web_search` tries DuckDuckGo's HTML page, then its lite page,
+then Wikipedia's own search API, and stops at the first that has results: a
+search engine that takes the client for a bot answers with an HTTP `202` or a
+CAPTCHA instead, and that is passed over rather than read as "no results".
+`--search-url` (or `$RADIXNET_SEARCH_URL`) replaces the list — one endpoint, or
+several separated by spaces; a JSON API such as SearxNG, MediaWiki or an
+OpenSearch endpoint is understood as well as an engine's HTML.
 
 **Safety.** The web tools accept `http` and `https` only, refuse URLs with
 credentials, refuse any address that resolves into a private, loopback,

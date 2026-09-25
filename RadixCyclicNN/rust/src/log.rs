@@ -310,7 +310,9 @@ mod tests {
     #[test]
     fn a_line_carries_its_level_target_and_time() {
         let _guard = settings();
-        configure("trace").expect("a good spec");
+        // only this test's own target: a test browsing in parallel logs its requests at debug, and under a
+        // global trace those lines would be counted here too
+        configure("warn,test=trace").expect("a good spec");
         let (written_before, _) = stats();
         log("test", Level::Info, "a message");
         let (written_after, _) = stats();
