@@ -43,9 +43,16 @@ commands:
   eval                    the rules against the full dictionary (PHONETOK_LEXICON)
   say TEXT...             speak: the formant synthesizer to a WAV (--out), a player (--play) or stdout (--raw);
                           tokens on stdin when no text is given (--rate, --pitch, --tempo, --gain)
+  hear WAV...             the acoustic units of recordings: sounds learned, nothing written down (--frames)
+  learn WAV...            learn a codebook of acoustic units from recordings (--units, --seed, --iterations,
+                          --note, --out FILE)
+  replay UNIT...          units spoken back through the vocoder (--out, --play, --raw, --polish, --pitch, --gain);
+                          units on stdin when none are given
+  codebook [FILE]         what a codebook holds (the bundled one when no file is named)
 
 options (after the command):
-  --level L  --no-stress  --no-boundaries  --no-pauses  --core  --lexicon FILE  --json`)
+  --level L  --no-stress  --no-boundaries  --no-pauses  --core  --lexicon FILE  --json
+  --codebook FILE         the codebook of acoustic units (hear, replay; the bundled one otherwise)`)
 }
 
 func main() {
@@ -78,7 +85,13 @@ func run(args []string) int {
 	rate := fs.Int("rate", phonetok.Rate, "the sample rate (say)")
 	pitch := fs.Float64("pitch", 120, "the base pitch in Hz (say)")
 	tempo := fs.Float64("tempo", 1, "the pace, 1 = the table's (say)")
-	gain := fs.Float64("gain", 0.5, "the peak level as a share of full scale (say)")
+	gain := fs.Float64("gain", 0.5, "the peak level as a share of full scale (say); a multiplier (replay, default 1)")
+	codebookPath := fs.String("codebook", "", "the codebook of acoustic units (hear, replay; the bundled one otherwise)")
+	frames := fs.Bool("frames", false, "a unit per frame, runs not collapsed (hear)")
+	units := fs.Int("units", 64, "units to learn (learn)")
+	iterations := fs.Int("iterations", 50, "Lloyd iterations at most (learn)")
+	note := fs.String("note", "", "a line to keep in the codebook about where the audio came from (learn)")
+	polish := fs.Int("polish", 0, "Griffin-Lim iterations over the whole utterance (replay; 0 = streamed)")
 	// options may follow the positional arguments, as in the Python CLI
 	var positional []string
 	var flags []string
@@ -106,6 +119,22 @@ func run(args []string) int {
 	}
 	if *seed == -1 && command == "eval" {
 		*seed = 7
+	}
+	if *seed == -1 && command == "learn" {
+		*seed = 1
+	}
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+	if !visited["out"] {
+		switch command {
+		case "learn":
+			*out = "codebook.tsv"
+		case "replay":
+			*out = "replay.wav"
+		}
+	}
+	if command == "replay" && !visited["gain"] {
+		*gain = 1.0
 	}
 	tok, err := newTokenizer(o)
 	if err != nil {
@@ -373,6 +402,206 @@ func run(args []string) int {
 			emit(map[string]any{"path": *out, "seconds": seconds, "rate": *rate, "bytes": len(pcm) + 44},
 				[]string{fmt.Sprintf("%.2f s of speech written to %s (%d Hz)", seconds, *out, *rate)})
 		}
+	case "hear":
+		book, err := loadBook(*codebookPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		tok, err := phonetok.NewAcousticTokenizer(book, !*frames)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		type heardDoc struct {
+			Path    string   `json:"path"`
+			Units   []string `json:"units"`
+			Frames  int      `json:"frames"`
+			Seconds float64  `json:"seconds"`
+			Codes   []int    `json:"codes"`
+		}
+		docs := []heardDoc{}
+		var lines []string
+		for _, path := range positional {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			h, err := tok.ListenWAV(data)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %s: %v\n", path, err)
+				return 1
+			}
+			docs = append(docs, heardDoc{path, h.Units, h.Frames, h.Seconds, h.Codes})
+			lines = append(lines, h.Text())
+		}
+		emit(docs, lines)
+	case "learn":
+		analysis := phonetok.DefaultAnalysis()
+		var recordings [][]float64
+		seconds := 0.0
+		for _, path := range positional {
+			samples, rate, err := phonetok.LoadWAV(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %s: %v\n", path, err)
+				return 1
+			}
+			if samples, err = phonetok.Resample(samples, rate, analysis.Rate); err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %s: %v\n", path, err)
+				return 1
+			}
+			seconds += float64(len(samples)) / float64(analysis.Rate)
+			recordings = append(recordings, samples)
+		}
+		if *note == "" {
+			*note = fmt.Sprintf("learned from %d recording(s), %.0f s", len(positional), seconds)
+		}
+		book, err := phonetok.Learn(recordings, *units, int64(*seed), *iterations, analysis, *note)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		if err := book.Dump(*out); err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		total := 0
+		for _, c := range book.Counts {
+			total += c
+		}
+		emit(map[string]any{"path": *out, "units": book.K(), "frames": total, "seconds": seconds, "inertia": book.Inertia,
+			"seed": *seed, "note": *note},
+			[]string{fmt.Sprintf("%d units learned from %d frames (%.1f s of audio), inertia %.1f: written to %s",
+				book.K(), total, seconds, book.Inertia, *out)})
+	case "replay":
+		book, err := loadBook(*codebookPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		tok, err := phonetok.NewAcousticTokenizer(book, true)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		var units []string
+		if len(positional) > 0 {
+			if units, err = tok.UnitsOf(text); err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+		} else {
+			sc := bufio.NewScanner(os.Stdin)
+			for sc.Scan() {
+				units = append(units, strings.Fields(sc.Text())...)
+			}
+		}
+		rate := book.Analysis.Rate
+		stream := func(w func([]byte)) error {
+			voc, err := tok.Vocoder(*gain, *pitch)
+			if err != nil {
+				return err
+			}
+			for _, u := range units {
+				chunk, err := voc.Feed(u)
+				if err != nil {
+					return err
+				}
+				w(chunk)
+			}
+			w(voc.End())
+			return nil
+		}
+		switch {
+		case *play:
+			player := phonetok.FindPlayer()
+			if player == nil {
+				fmt.Fprintln(os.Stderr, "phonetok: no player found (aplay, paplay, ffplay, play or afplay)")
+				return 2
+			}
+			cmd := exec.Command(player[0], player[1:]...)
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			if err := cmd.Start(); err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			stdin.Write(phonetok.WavHeader(rate, -1))
+			total := 0
+			err = stream(func(chunk []byte) { stdin.Write(chunk); total += len(chunk) })
+			stdin.Close()
+			cmd.Wait()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			seconds := float64(total) / 2 / float64(rate)
+			emit(map[string]any{"seconds": seconds, "player": player[0]},
+				[]string{fmt.Sprintf("%.2f s replayed through %s", seconds, player[0])})
+		case *raw:
+			w := bufio.NewWriter(os.Stdout)
+			err := stream(func(chunk []byte) { w.Write(chunk); w.Flush() })
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+		default:
+			pcm, err := tok.Synthesize(units, *polish, *gain, *pitch)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			if err := os.WriteFile(*out, phonetok.WavBytes(pcm, rate), 0o644); err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			seconds := float64(len(pcm)) / 2 / float64(rate)
+			emit(map[string]any{"path": *out, "seconds": seconds, "rate": rate, "bytes": len(pcm) + 44, "polish": *polish},
+				[]string{fmt.Sprintf("%.2f s of speech written to %s (%d Hz)", seconds, *out, rate)})
+		}
+	case "codebook":
+		path := ""
+		if len(positional) > 0 {
+			path = positional[0]
+		}
+		book, err := loadBook(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		if path == "" {
+			path = "(bundled)"
+		}
+		a := book.Analysis
+		total := 0
+		for _, c := range book.Counts {
+			total += c
+		}
+		lines := []string{
+			fmt.Sprintf("%d units over %d log-mel bands (%g-%g Hz), %d ms frames every %d ms at %d Hz: %s", book.K(), a.Bands,
+				a.Fmin, a.Fmax, a.Frame*1000/a.Rate, a.Hop*1000/a.Rate, a.Rate, path),
+			fmt.Sprintf("learned from %d frames (%.1f s), seed %d, inertia %.1f", total, float64(total*a.Hop)/float64(a.Rate),
+				book.Seed, book.Inertia),
+		}
+		if book.Note != "" {
+			lines = append(lines, book.Note)
+		}
+		lines = append(lines, "", fmt.Sprintf("%-6s %7s %6s %5s", "unit", "frames", "share", "run"))
+		for i := 0; i < book.K(); i++ {
+			share := 0.0
+			if total > 0 {
+				share = float64(book.Counts[i]) / float64(total) * 100
+			}
+			lines = append(lines, fmt.Sprintf("%-6s %7d %5.1f%% %5.1f", book.Name(i), book.Counts[i], share, book.Runs[i]))
+		}
+		emit(map[string]any{"path": path, "units": book.K(), "frames": total, "seed": book.Seed, "inertia": book.Inertia,
+			"note": book.Note, "analysis": map[string]any{"rate": a.Rate, "frame": a.Frame, "hop": a.Hop, "fft": a.FFT,
+				"bands": a.Bands, "fmin": a.Fmin, "fmax": a.Fmax, "preemphasis": a.Preemphasis, "normalize": a.Normalize},
+			"counts": book.Counts, "runs": book.Runs}, lines)
 	case "eval":
 		path := os.Getenv(phonetok.EnvLexicon)
 		if path == "" {
@@ -419,11 +648,20 @@ func run(args []string) int {
 	return 0
 }
 
+// loadBook is the codebook at path, or the bundled one when path is empty.
+func loadBook(path string) (*phonetok.Codebook, error) {
+	if path == "" {
+		return phonetok.DefaultCodebook()
+	}
+	return phonetok.LoadCodebook(path)
+}
+
 var valueGiven = map[string]bool{}
 
 func takesValue(flag string) bool {
 	switch strings.TrimLeft(flag, "-") {
-	case "level", "lexicon", "limit", "count", "seed", "syllables", "out", "rate", "pitch", "tempo", "gain":
+	case "level", "lexicon", "limit", "count", "seed", "syllables", "out", "rate", "pitch", "tempo", "gain",
+		"codebook", "units", "iterations", "note", "polish":
 		return true
 	}
 	return false

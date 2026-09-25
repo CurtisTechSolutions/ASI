@@ -53,6 +53,9 @@ could not breathe.
 other levels number tokens as they are read, and there is nothing to train before
 training. This is the constraint RadixCyclicNN's D-006 placed on any tokenizer
 the project would accept, and it is met: the only tables are the language's.
+(The acoustic units of section 5 are the one exception, and they are learned
+from audio, where no table of the language's exists; see there for why that is
+a different question.)
 
 **The lexicon first, the rules last.** A pronouncing dictionary is right; rules
 are a guess. The bundled core (some 2 000 entries: the common words, numbers,
@@ -106,7 +109,8 @@ an utterance ends the moment the walk reaches its END.
 
 * **A learned sub-word tokenizer** (BPE over phones, say). It would need a corpus
   before anything could start and would freeze an alphabet that is an accident
-  of that corpus; D-006's reasons hold for sounds as for letters.
+  of that corpus; D-006's reasons hold for sounds as for letters. (They do not
+  hold for audio, which has no alphabet to begin with: section 5.)
 * **`espeak`, `phonemizer`, a neural G2P.** Each is a dependency with its own
   build, its own phone set and its own drift; none can be made byte-identical in
   three languages. The rules are weaker than a neural G2P on rare words and
@@ -131,3 +135,89 @@ an utterance ends the moment the walk reaches its END.
 * The voice is intelligible, not natural.
 * The transcriber's memory of what it read makes `decode` better and the object
   stateful; a fresh process spells only what the lexicon knows.
+
+## 5. The acoustic units: the one thing that is learned
+
+### 5.1 The claim
+
+Everything above starts from text. Speech starts from sound, and no rule table
+maps a waveform to units: there is no dictionary of waveforms and no alphabet of
+them, so for audio the question is not *learned or rule-based* but *what is
+learned, and what the units should be*. The claim is that a model whose symbols
+are a small inventory of learned acoustic units can be trained on recordings
+alone - no transcript, no recogniser - with the same machinery that trains it on
+phones, and can be heard back through a vocoder.
+
+### 5.2 What was decided
+
+**Log-mel frames.** 25 ms every 10 ms, 40 triangular filters on the mel scale,
+the log of each band's energy, and the utterance's mean subtracted from every
+band. This is the front end of forty years of speech recognition, for the same
+reasons: the mel scale spends its bands where hearing does, the log makes the
+level additive, and the subtraction removes the level and the channel so the
+same word in a quiet room and a loud one is the same frames. It is plain
+arithmetic - a Hann window, a radix-2 FFT, a table of filters - that three ports
+compute in the same order, so a frame is the same frame everywhere.
+
+**k-means, a small inventory, runs collapsed.** The units are the centroids of a
+k-means over the frames of the recordings (k-means++ seeding, Lloyd until the
+assignments settle), 64 of them by default, and a run of one unit is one token.
+A count graph learns exact repetitions: it needs symbols that recur, at a rate
+close to the rate at which sounds change. Forty-odd phones at ten to fifteen a
+second recur; a thousand-way codec token at fifty a second never does. Sixty-four
+units with runs collapsed sit where the phones do, which is why an acoustic
+model can use the graph, the search and the voice the phone model uses.
+
+**A codebook is a data file that carries its analysis.** `data/acoustic.tsv`
+holds the settings that made the frames, the centroids, each unit's count and
+typical run, and the mean log-mel of the training audio. A codebook learned in
+any port is read by every port, the same seed learns the same codebook in every
+port (the k-means draws come from the same Mersenne Twister the coiner uses),
+and a model's units mean nothing without the codebook that made them, so the
+two travel together.
+
+**Decoding is a vocoder, not a codec.** A unit is its centroid held for its
+typical run; the mel frame is spread back over the linear spectrum through the
+same triangles (adjacent filters sum to one, so nothing is invented at the
+seams); a pulse train at a chosen pitch, mixed with noise by how voiced the
+frame looks, lends its phases; the frames are overlap-added as they come. Nothing
+is stored but the codebook, the output is speech-like rather than a copy, and it
+streams - a model is heard as it walks - with Griffin-Lim iterations as an
+optional polish once the utterance is whole.
+
+**The bundled codebook is a bootstrap.** The package ships no recordings, so its
+default codebook is learned from the synthesizer's own speech of a small corpus.
+That makes everything work out of the box and makes the parity fixture possible
+(every port synthesizes the same audio); it also means the default units are
+the synthesizer's voice, and a codebook for real speech is learned from real
+speech, which `learn` does from nothing but WAV files.
+
+### 5.3 Alternatives rejected
+
+* **Neural codec tokens** (EnCodec, SoundStream). The best reconstruction there
+  is, and the wrong shape for this model: a framework and pretrained weights in
+  every port, and a stream of high-entropy tokens at 50-75 a second that a count
+  graph cannot generalise over.
+* **Self-supervised units** (HuBERT or wav2vec features under k-means). Closer to
+  phones than log-mel units, and again a network to run; the front end here is
+  the part of that recipe that needs no network, and the k-means is the same.
+* **MFCCs with deltas.** The cepstral transform mostly decorrelates for the sake
+  of diagonal Gaussians, which k-means does not need; deltas double the
+  dimension for a modest gain and would be the first thing to add if the
+  units prove too static.
+* **Units that carry duration** (`q7x3`). They would multiply the inventory and
+  thin the graph; the typical run stored per unit gives decoding what it needs.
+
+### 5.4 Costs
+
+* The units are a recording's own: a codebook learned on one voice or one
+  microphone fits others less well, and the bundled one, learned on synthetic
+  speech, fits real speech least well of all.
+* Pitch is not in the units (a mean-normalised log-mel frame carries little of
+  it), so a replay is spoken at one pitch of the listener's choosing.
+* Per-utterance normalisation needs the whole utterance before the first unit
+  is known; a running mean would make hearing streamable at the cost of the first
+  second, and is not done yet.
+* Pure Python hears at about ten times real time and learns a 64-unit codebook
+  from three minutes of audio in about three minutes; the ports do both in
+  seconds.

@@ -33,24 +33,51 @@ type SpeakOptions struct {
 type Speaker struct {
 	enc         Encoding
 	synth       *phonetok.Synthesizer
+	vocoder     *phonetok.Vocoder // acoustic units are spoken through their codebook's vocoder instead
 	letters     string
 	spokenWords int
-	// Tokens is every token that reached the synthesizer, for the record.
+	// Rate is the sample rate of the PCM: the synthesizer's, or the codebook's for acoustic units.
+	Rate int
+	// Tokens is every token that reached the voice, for the record.
 	Tokens []string
 }
 
 // NewSpeaker makes a speaker for a model's encoding.
 func NewSpeaker(enc Encoding, rate int, pitch, tempo, gain float64) (*Speaker, error) {
+	if enc.Unit == Acoustic {
+		tok, err := acousticTokenizer()
+		if err != nil {
+			return nil, err
+		}
+		// the vocoder's gain is a multiplier on the level the units were learned at, so the
+		// voice's default of half scale is the codebook's own level
+		voc, err := phonetok.NewVocoder(tok.Book, gain*2.0, pitch)
+		if err != nil {
+			return nil, err
+		}
+		return &Speaker{enc: enc, vocoder: voc, Rate: tok.Book.Analysis.Rate}, nil
+	}
 	if _, err := phoneticTokenizer(Phones); err != nil { // the words of a word or letter model are read through it
 		return nil, err
 	}
 	voice := phonetok.DefaultVoice()
 	voice.Pitch, voice.Tempo, voice.Gain = pitch, tempo, gain
-	return &Speaker{enc: enc, synth: phonetok.NewSynthesizer(rate, voice)}, nil
+	return &Speaker{enc: enc, synth: phonetok.NewSynthesizer(rate, voice), Rate: rate}, nil
 }
 
 // Feed takes one emitted piece (the units a step added) and returns the PCM that is ready.
+// A token that is not a unit of the codebook (which a model over its units never emits) is skipped.
 func (s *Speaker) Feed(piece string) []byte {
+	if s.vocoder != nil {
+		var out []byte
+		for _, unit := range strings.Fields(piece) {
+			s.Tokens = append(s.Tokens, unit)
+			if chunk, err := s.vocoder.Feed(unit); err == nil {
+				out = append(out, chunk...)
+			}
+		}
+		return out
+	}
 	if s.enc.Unit.Phonetic() {
 		return s.feedTokens(strings.Fields(phoneticText(s.enc.Unit, piece)))
 	}
@@ -114,8 +141,11 @@ func (s *Speaker) feedTokens(tokens []string) []byte {
 
 // End is the final sentinel: the utterance is closed, and what was pending is spoken.
 func (s *Speaker) End() []byte {
-	out := s.flushLetters()
 	s.Tokens = append(s.Tokens, "</s>")
+	if s.vocoder != nil {
+		return s.vocoder.End()
+	}
+	out := s.flushLetters()
 	out = append(out, s.synth.End()...)
 	s.spokenWords = 0
 	return out

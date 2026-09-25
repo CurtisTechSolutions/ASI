@@ -3653,3 +3653,28 @@ sentinel closes each utterance.
 **Costs.** A text of sounds keeps no letters and no layout (the word unit's cost); an unread word is sounded out by
 rules, which are a guess; a model means the sounds its lexicon gave it, so the same lexicon must serve training and
 prediction. The frontend still names the units of a model of sounds *characters* - a gap for the next frontend build.
+
+### The acoustic unit: learned from audio (D-082)
+
+`Encoding(unit=ACOUSTIC)` is the same dial over the tokenizer's **acoustic
+units** - a codebook learned from recordings by k-means over log-mel frames
+(`../PhoneticTokenizer/DESIGN.md` §5), with nothing written down. Three things
+differ from the phonetic units, and nothing else does:
+
+* **What a text is.** A unit text is whitespace-separated tokens taken as they
+  come (`q2 q28 q55`), so the acoustic unit behaves as the word unit does for
+  every slice, join, prefix and length; `spell` returns the text itself, there
+  being no words behind it. `validate` still imports the tokenizer, so
+  `--encoding acoustic` fails early where the package is missing.
+* **Where a text comes from.** `read_texts` hears a `.wav` (`is_audio_file`)
+  through the codebook (`hear_audio`): one recording is one utterance, one
+  text, runs of a unit collapsed. Everything downstream - the graph, the
+  index, the file, the searches - sees a text like any other.
+* **How it is heard back.** `Speaker` speaks acoustic units through the
+  codebook's vocoder instead of the formant synthesizer, at the codebook's
+  rate (`output_rate`), a unit's frames as the unit arrives, the END sentinel
+  flushing the tail as for every other unit.
+
+The codebook is the bundled one or the file `PHONETOK_CODEBOOK` names; it is
+part of what a model means and is not written into the model file, which is
+the cost noted in D-082.

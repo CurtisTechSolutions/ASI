@@ -2116,6 +2116,31 @@ A model that is not `char:3:1` writes an `encoding` block into its file, and
 trains the same corpus on both sides under nine encodings and holds them to the
 same graph, the same file and the same predictions.
 
+### The acoustic units: a model that learns from sound alone
+
+`--encoding acoustic:3:1` makes the model's symbols the tokenizer's **acoustic
+units**: sounds learned from recordings by k-means over log-mel frames, with
+nothing written down (D-082; `../PhoneticTokenizer/README.md`, *The acoustic
+units*). A `.wav` file given to `train --data` is heard as one text of units -
+`q2 q28 q55 q5 q60 ...` - and the graph is built over those exactly as it is
+built over phones or words, so the model learns from the recordings alone: no
+transcript, no recogniser. `speak` gives a walk back through the vocoder, each
+unit's centroid turned into sound as the walk takes it, and the END sentinel
+closes the utterance as ever.
+
+```bash
+python -m radixnet --model ears.json --encoding acoustic:3:1 train --data recordings/*.wav --epochs 3
+python -m radixnet --model ears.json predict --prefix "q2 q28 q55" --k 5       # continuations, in units
+python -m radixnet --model ears.json speak --count 3 --out heard.wav           # and spoken back
+```
+
+As text the units are tokens taken as they come, like words; there are no words
+to spell back (`spelled` is the units themselves). The units mean nothing without
+the codebook that made them: the bundled codebook was learned from the
+synthesizer's own speech, and `PHONETOK_CODEBOOK=mine.tsv` points every command
+at one learned from real recordings (`phonetok learn recordings/*.wav --out
+mine.tsv`), which is what real speech needs.
+
 ## Go implementation of the count / reward model
 
 `go/` holds a Go port of the count / reward model (`CountRewardNet`) **and of

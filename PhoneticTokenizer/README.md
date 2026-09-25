@@ -3,8 +3,9 @@
 A tokenizer that reads text as **the sounds it is made of**, and the phonotactics
 that say which sounds go well together to build words. Three ports of one design
 - Python (`phonetok/`), Go (`go/`) and Rust (`rust/`) - that read the same data
-files and turn the same text into the same tokens, sample for sample; and a voice
-that speaks the tokens back, as they arrive.
+files and turn the same text into the same tokens, sample for sample; a voice
+that speaks the tokens back, as they arrive; and **acoustic units** that read
+audio as sounds of their own, learned from recordings with nothing written down.
 
 ```
 $ phonetok tokenize "The cat sat on the mat."
@@ -20,6 +21,9 @@ $ phonetok blend smoke fog
 smoke + fog = smog  (S M AA1 G, /smˈɑɡ/)
 
 $ phonetok say "Hello world." --play
+
+$ phonetok hear speech.wav
+q2 q28 q55 q5 q60 q3 q31 q41 q23 q6 q2 q16 q0 ...
 ```
 
 Standard library only, in every port. The full CMU Pronouncing Dictionary is
@@ -181,6 +185,60 @@ phonetok say "The cat sat." --play               # aplay / paplay / ffplay / pla
 echo "DH AH0 # K AE1 T ." | phonetok say --raw | aplay -r 16000 -f S16_LE   # tokens on stdin, PCM out
 ```
 
+## The acoustic units: sounds learned from audio, with nothing written down
+
+Everything above reads *text* as sounds. `acoustic.py` (and `acoustic.go`,
+`acoustic.rs`) reads *audio* as sounds, and the sounds are its own: a codebook
+learned from recordings by k-means, with no transcript, no dictionary and no rule.
+
+Every 10 ms of audio becomes a frame of 40 log-mel energies (a 25 ms Hann window,
+a 512-point FFT, triangular filters spaced evenly on the mel scale between 20 Hz
+and 8 kHz, and the utterance's mean taken out of every band, so the recording's
+level and channel go with it); every frame goes to its nearest codebook entry; a
+run of one entry is one unit. A unit is a token like `q17` - `q` for quantised,
+then the codebook index - and a text of them (`q2 q28 q55 ...`) is what a model
+over sounds can be trained on straight from a microphone, with the same machinery
+that trains it on phones.
+
+```bash
+phonetok hear speech.wav                                   # q2 q28 q55 q5 q60 q3 ...
+phonetok learn recordings/*.wav --units 64 --out mine.tsv  # a codebook of your own, unsupervised
+phonetok hear speech.wav --codebook mine.tsv
+phonetok replay q2 q28 q55 q5 --out back.wav               # units spoken back; --play, --raw, --polish 32
+phonetok codebook                                          # what the bundled codebook holds
+```
+
+**Learning** is unsupervised: the frames of any number of recordings, k-means++
+seeding drawn from the Mersenne Twister every port implements, Lloyd's iterations
+until the assignments settle. The codebook is a data file (`data/acoustic.tsv`)
+that carries its own analysis settings, each unit's count and typical run, and the
+mean log-mel of what it was learned from; the ports read it and hear the same
+units, and learn the same codebook from the same recordings, to the last digit.
+
+**Decoding** is the reverse path: a unit is its centroid held for its typical run,
+the mel frame is spread back over the linear spectrum, and a vocoder with
+continuous phase - a pulse train at the voice's pitch, noise where the frame looks
+unvoiced - turns the magnitudes into a waveform frame by frame, so a model walking
+its graph is heard as it walks; `--polish N` runs Griffin-Lim iterations over the
+whole utterance once it is known. What comes back is speech-like and recognisably
+the recording's sounds, not the recording: a frame heard again after the round
+trip is the same unit about 86 % of the time streamed, 92 % polished.
+
+**The bundled codebook was learned from the synthesizer's own speech** (28
+sentences in two voices, `tests/make_codebook.py`), because the package ships no
+recordings. It is the synthesizer's voice, not a person's: for real speech, learn
+a codebook from real recordings - a few minutes of audio is enough, and `learn`
+needs nothing but the WAV files.
+
+```python
+from phonetok import AcousticTokenizer
+tok = AcousticTokenizer()                                  # the bundled codebook, or a path to one
+units = tok.hear(open("speech.wav", "rb").read())          # ['q2', 'q28', 'q55', ...]
+tok.text("q2 q2 q28")                                      # 'q2 q28': the text form, idempotent
+pcm = tok.synthesize(units, polish=8)                      # 16-bit PCM at 16 kHz
+for chunk in tok.stream(units): ...                        # as the units come
+```
+
 ## In RadixCyclicNN
 
 The tokenizer is an option of the encoding dial of the sibling project: a model
@@ -203,9 +261,10 @@ sounds through this package. See `../RadixCyclicNN/README.md`, *The encoding*.
 | `phonetok/phonotactics.py` | affinities, well-formedness, building and blending words |
 | `phonetok/tokenizer.py` | the four levels, the text form, the ids, the way back |
 | `phonetok/synth.py` | the voice |
+| `phonetok/acoustic.py` | the acoustic units: log-mel frames, the k-means codebook, the vocoder |
 | `phonetok/cli.py` | the command line |
-| `phonetok/data/` | `core.dict`, `rules.lts`, `voice.tsv`, the CMU licence |
-| `tests/` | the suite, `make_parity.py` and `parity.json` |
+| `phonetok/data/` | `core.dict`, `rules.lts`, `voice.tsv`, `acoustic.tsv`, the CMU licence |
+| `tests/` | the suite, `make_parity.py` and `parity.json`, `make_codebook.py` |
 | `go/`, `rust/` | the ports |
 
 Licensed under the repository's source-available licence (`../LICENSE`); the

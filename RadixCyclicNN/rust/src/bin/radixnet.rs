@@ -161,7 +161,7 @@ fn run() -> Result<(), String> {
     let mut encoding = parse_encoding(&args.str("encoding", ""))?;
     if let Some(name) = args.get("units") {
         encoding.unit = Unit::parse(name)
-            .ok_or_else(|| format!("--units must be char, word, phone or syllable, got {name:?}"))?;
+            .ok_or_else(|| format!("--units must be char, word, phone, syllable or acoustic, got {name:?}"))?;
     }
     if args.get("ngram").is_some() {
         encoding.n = args.usize("ngram", encoding.n)?;
@@ -369,13 +369,15 @@ fn run() -> Result<(), String> {
             // utterance ([`radixnet::voice`])
             let mut model = open(true)?;
             let max_length = args.int("max-length", 60)?;
+            // acoustic units are spoken at their codebook's rate
+            let rate = radixnet::phonetic::output_rate(model.g.enc, args.usize("rate", phonetok::synth::RATE as usize)? as u32)?;
             let opts = SpeakOptions {
                 prefix: args.str("prefix", ""),
                 count: args.usize("count", 1)?,
                 max_length: (max_length >= 0).then_some(max_length as usize),
                 temperature: args.float("temperature", 1.0)?,
                 seed: args.on("seeded").then_some(seed),
-                rate: args.usize("rate", phonetok::synth::RATE as usize)? as u32,
+                rate,
                 pitch: args.float("pitch", 120.0)?,
                 tempo: args.float("tempo", 1.0)?,
                 gain: args.float("gain", 0.5)?,

@@ -10,10 +10,52 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use phonetok::acoustic::{AcousticTokenizer, Codebook};
 use phonetok::lexicon::Lexicon;
 use phonetok::tokenizer::{Level, Tokenizer};
 
-use crate::encoding::Unit;
+use crate::encoding::{Encoding, Unit};
+
+// -- the acoustic units ------------------------------------------------------------
+
+static ACOUSTIC: OnceLock<Result<AcousticTokenizer, String>> = OnceLock::new();
+
+/// The acoustic units' tokenizer over its codebook - the bundled one, or the
+/// file `PHONETOK_CODEBOOK` names - made once; a model's units mean nothing
+/// without the codebook that made them, so the two travel together.
+pub fn acoustic_tokenizer() -> Result<&'static AcousticTokenizer, String> {
+    ACOUSTIC
+        .get_or_init(|| {
+            let book = match std::env::var("PHONETOK_CODEBOOK") {
+                Ok(path) if !path.is_empty() => Codebook::load(&path)
+                    .map_err(|e| format!("the acoustic unit's codebook (PHONETOK_CODEBOOK): {e}"))?,
+                _ => Codebook::bundled().map_err(|e| format!("the acoustic unit needs its codebook: {e}"))?,
+            };
+            AcousticTokenizer::new(book, true)
+        })
+        .as_ref()
+        .map_err(|e| e.clone())
+}
+
+/// A WAV file's bytes as a text of acoustic units - `"q2 q28 q55 ..."`, runs
+/// collapsed.  One recording is one utterance, and so one text.
+pub fn hear_audio(data: &[u8]) -> Result<String, String> {
+    Ok(acoustic_tokenizer()?.listen_wav(data)?.text())
+}
+
+/// Whether a file is a WAV, by its name: something to hear rather than read.
+pub fn is_audio_file(path: &str) -> bool {
+    path.to_lowercase().ends_with(".wav")
+}
+
+/// The sample rate a model is heard at: `rate` for the synthesizer, the
+/// codebook's for acoustic units.
+pub fn output_rate(enc: Encoding, rate: u32) -> Result<u32, String> {
+    if enc.unit != Unit::Acoustic {
+        return Ok(rate);
+    }
+    Ok(acoustic_tokenizer()?.book.analysis.rate)
+}
 
 type Bridge = Result<Mutex<Tokenizer>, String>;
 

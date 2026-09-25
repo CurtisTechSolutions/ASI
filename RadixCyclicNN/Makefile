@@ -93,7 +93,7 @@ DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
-        phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play phone-go phone-rust phone-parity \
+        phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play acoustic-train acoustic-speak phone-go phone-rust phone-parity \
         rust-build rust-test rust-parity bench-compare train resume predict generate score 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
@@ -341,6 +341,14 @@ speak: ## Hear the model walk: COUNT utterances from PHONE_PREFIX, synthesized a
 
 speak-play: ## The same, streamed to a player (aplay, paplay, ffplay, play or afplay) as the walk goes
 	$(RADIXNET) --model $(MODEL_PHONE) --seed $(SEED) speak --prefix "$(PHONE_PREFIX)" --count $(COUNT) --max-length $(MAX_LENGTH) --play
+
+WAVS ?= recordings/*.wav
+MODEL_EARS ?= model.acoustic.json
+acoustic-train: ## Train a model on recordings alone: WAVS heard as acoustic units (--encoding acoustic:3:1) into MODEL_EARS
+	$(RADIXNET) --model $(MODEL_EARS) --encoding acoustic:3:1 --seed $(SEED) train --data $(WAVS) --epochs $(EPOCHS)
+
+acoustic-speak: ## Hear the acoustic model walk: COUNT utterances through the vocoder, into SPEECH
+	$(RADIXNET) --model $(MODEL_EARS) --seed $(SEED) speak --count $(COUNT) --max-length $(MAX_LENGTH) --out $(SPEECH)
 
 phone-go: ## The Go port over sounds: train on DATA and continue PHONE_PREFIX (needs `make go-build`)
 	go/bin/radixnet-count --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)

@@ -22,7 +22,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable, Iterator
 
-from .encoding import Encoding, phonetic_tokenizer, phonetok_module
+from .encoding import ACOUSTIC, Encoding, acoustic_tokenizer, phonetic_tokenizer, phonetok_module
 from .graph import END, FIRST, START, RadixCyclicGraph
 from .penalty import DEFAULT_TRAVERSAL, traversal_costs
 from .search import sample_walk
@@ -46,18 +46,35 @@ class Speaker:
 
     def __init__(self, encoding: Encoding, rate: int = RATE, pitch: float = 120.0, tempo: float = 1.0,
                  gain: float = 0.5) -> None:
-        synth = _synth_module()
         self.encoding = encoding
+        self.tokens: list[str] = []
+        """Every token that reached the voice, for the record."""
+        self._letters = ""  # the letters of the word being spelled out by a character model
+        self._spoken_words = 0
+        if encoding.unit == ACOUSTIC:
+            # acoustic units are spoken through the codebook's vocoder, at the codebook's rate;
+            # its gain is a multiplier on the level the units were learned at, so the voice's
+            # default of half scale is the codebook's own level
+            book = acoustic_tokenizer().codebook
+            self.vocoder = phonetok_module("acoustic", "speaking").Vocoder(book, gain=gain * 2.0, pitch=pitch)
+            self.rate = book.analysis.rate
+            self.synth = None
+            self.tokenizer = None
+            return
+        synth = _synth_module()
+        self.vocoder = None
         self.rate = rate
         self.synth = synth.Synthesizer(rate=rate, voice_settings=synth.Voice(pitch=pitch, tempo=tempo, gain=gain))
         self.tokenizer = phonetic_tokenizer("phone")  # the words of a word or letter model are read through it
-        self._letters = ""  # the letters of the word being spelled out by a character model
-        self._spoken_words = 0
-        self.tokens: list[str] = []
-        """Every token that reached the synthesizer, for the record."""
 
     def feed(self, piece: str) -> bytes:
         """One emitted piece: the units a step added.  Returns the PCM that is ready."""
+        if self.vocoder is not None:
+            out = bytearray()
+            for unit in self.encoding.units(piece):
+                self.tokens.append(unit)
+                out += self.vocoder.feed(unit)
+            return bytes(out)
         if self.encoding.phonetic:
             return self._feed_tokens(self.encoding.units(piece))
         if self.encoding.unit == "word":
@@ -100,11 +117,20 @@ class Speaker:
 
     def end(self) -> bytes:
         """The final sentinel: the utterance is closed, and what was pending is spoken."""
-        out = bytearray(self._flush_letters())
         self.tokens.append("</s>")
+        if self.vocoder is not None:
+            return self.vocoder.end()
+        out = bytearray(self._flush_letters())
         out += self.synth.end()
         self._spoken_words = 0
         return bytes(out)
+
+
+def output_rate(encoding: Encoding, rate: int = RATE) -> int:
+    """The sample rate a model is heard at: ``rate`` for the synthesizer, the codebook's for acoustic units."""
+    if encoding.unit == ACOUSTIC:
+        return acoustic_tokenizer().codebook.analysis.rate
+    return rate
 
 
 def speak_walks(

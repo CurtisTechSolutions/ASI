@@ -16,6 +16,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from phonetok import PhoneticTokenizer, Lexicon, Phonotactics, LEVELS, letter_to_sound, respell  # noqa: E402
+from phonetok.acoustic import AcousticTokenizer, default_codebook, frames_of, learn, pcm_samples, synthesize  # noqa: E402
+from phonetok.synth import Synthesizer, Voice  # noqa: E402
 from phonetok.g2p import Transcriber  # noqa: E402
 from phonetok.phones import SYMBOLS, features, to_ipa  # noqa: E402
 from phonetok.syllables import syllabify  # noqa: E402
@@ -123,11 +125,48 @@ def main() -> None:
         t.word(w)
     for phones in (["T", "UW1"], ["T", "UW0"], ["R", "AY1", "T"], ["Z", "EH1", "B", "R", "AH0"], ["K", "AE1", "T", "S"]):
         doc["transcriber_spell"][" ".join(phones)] = t.spell(phones)
+    doc["acoustic"] = acoustic_block(tok)
     path = os.path.join(ROOT, "tests", "parity.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=1, sort_keys=True)
         f.write("\n")
     print(f"wrote {path}: {os.path.getsize(path)} bytes, {len(TEXTS)} texts, {len(LEVELS)} levels")
+
+
+ACOUSTIC_TEXTS = ["the cat sat on the mat", "a bird in the hand"]
+ACOUSTIC_VOICE = {"pitch": 130.0, "tempo": 1.0, "gain": 0.5}
+
+
+def acoustic_block(tok: PhoneticTokenizer) -> dict:
+    """The acoustic units: two utterances every port can synthesize bit-identically (their tokens are
+    written down so no port needs the text tokenizer for this), their frames, their units under the bundled
+    codebook, a small codebook learned from them, and slices of their resynthesis."""
+    clips = []
+    tokens = []
+    for text in ACOUSTIC_TEXTS:
+        toks = tok.tokens(text)
+        tokens.append(toks)
+        clips.append(pcm_samples(Synthesizer(voice_settings=Voice(**ACOUSTIC_VOICE)).speak(toks)))
+    book = default_codebook()
+    heard = AcousticTokenizer(book).listen(clips[0])
+    frames = frames_of(clips[0], book.analysis)
+    small = learn(clips, k=4, seed=3, iterations=10, note="parity")
+    replay_units = heard.units[:12]
+
+    def slice_of(pcm: bytes, at: int = 4000, count: int = 200) -> dict:
+        import struct
+        values = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+        return {"samples": len(values), "at": at, "values": list(values[at:at + count])}
+
+    return {
+        "voice": ACOUSTIC_VOICE, "texts": ACOUSTIC_TEXTS, "tokens": tokens, "samples": [len(c) for c in clips],
+        "frames": {"count": len(frames), "rows": {"0": frames[0], "50": frames[50], "last": frames[-1]}},
+        "units": heard.units, "codes": heard.codes,
+        "learn": {"k": 4, "seed": 3, "iterations": 10, "centroids": small.centroids, "counts": small.counts,
+                  "runs": small.runs, "mean": small.mean, "inertia": small.inertia},
+        "replay": {"units": replay_units, "polish": 0, **slice_of(synthesize(replay_units, book))},
+        "polished": {"units": replay_units, "polish": 2, **slice_of(synthesize(replay_units, book, polish=2))},
+    }
 
 
 if __name__ == "__main__":

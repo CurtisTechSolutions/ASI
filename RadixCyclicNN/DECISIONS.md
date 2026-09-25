@@ -3214,6 +3214,52 @@ words is read through the tokenizer word by word, so every model can be heard; `
 
 ---
 
+### D-082 — Acoustic units: the tokenizer learns, from audio, and the model learns from sound alone
+
+**Status** Accepted · 2026-09-25 · **Layer** representation · **Extends** D-080, D-081 · **Reopens** D-006 (for audio)
+
+**Context** D-006 rejected a learned tokenizer, and D-080 admitted the phonetic units on the condition that the
+tokenizer learns nothing: the alphabet of a language's sounds is the language's. Both are about *text*. Speech
+starts from sound, and no table of the language's maps a waveform to units: there is no dictionary of waveforms
+and no alphabet of them. Until now the model met audio as base64 of 8-bit samples (D-036's images-as-text trick
+applied to sound), which a count graph cannot generalise over because a waveform never repeats, and as words that
+a large recogniser it does not own had written down. If speech is the focus, the question is not *learned or
+rule-based* but *what is learned and what the units should be*.
+
+**Decision** The tokenizer package gains **acoustic units**: a codebook learned from recordings by k-means over
+log-mel frames (25 ms every 10 ms, 40 mel bands, the utterance's mean taken out), with no transcript, no
+dictionary and no rule. Every frame goes to its nearest centroid, a run of one centroid is one unit, and a unit is
+a token (`q17`) that a text can hold. `Encoding(unit=ACOUSTIC)` (`--encoding acoustic:3:1`) makes those the
+model's symbols: a WAV given to `train --data` is heard as one text of units, the graph is built over the units
+exactly as it is built over phones or words, and `speak` gives a walk back through a vocoder that turns each
+unit's centroid into sound as the walk takes it, closed by the END sentinel as D-081 says. **What is learned is
+learned from audio and stored as a data file** (`acoustic.tsv`: the centroids, each unit's count and typical run,
+the analysis settings and the mean of the training audio) that all three ports read and can produce, to the last
+digit, from the same recordings and seed. **What is not learned** stays not learned: the inventory is small (64
+units) so that symbols recur the way phones do, and the phone and syllable units are untouched.
+
+**Alternatives rejected**
+* **Neural codec tokens or self-supervised units** (EnCodec, SoundStream, HuBERT under k-means). Better units,
+  and a framework with pretrained weights in every port, and a token stream too dense and too varied for a count
+  graph to learn from.
+* **Learning the units inside the model** (a codebook that moves as the graph grows). A unit that changes its
+  meaning changes every label that holds it; the codebook is fixed for a model's life, like its encoding.
+* **Keeping audio as text of samples.** It is what D-036 does for images, and it never generalised for sound.
+* **A learned grapheme-to-phoneme model** instead. Worth doing for text, and beside the point once audio is the
+  input.
+
+**Consequences** A model can be trained on recordings alone (`--data *.wav`) and heard back; the units are a
+recording's own, so a codebook learned on one voice or channel fits others less well, and the bundled codebook,
+learned from the synthesizer's speech, fits real speech least well - a codebook for real speech is learned from
+real speech (`phonetok learn`). A model's units mean nothing without the codebook that made them
+(`PHONETOK_CODEBOOK` names one other than the bundled); `tests/test_acoustic_units.py`.
+
+**Lives in** `../PhoneticTokenizer/phonetok/acoustic.py` (and `go/phonetok/acoustic.go`, `rust/src/acoustic.rs`),
+`../PhoneticTokenizer/DESIGN.md` §5, `radixnet/encoding.py` (`ACOUSTIC`, `hear_audio`), `radixnet/voice.py`,
+`radixnet/cli.py` (`read_texts`, `speak`)
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.

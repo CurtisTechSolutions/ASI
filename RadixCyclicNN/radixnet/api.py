@@ -946,7 +946,7 @@ class ModelService:
                 raise ApiError(
                     400,
                     f"this model counts in {encoding.units_name}, so it has no words to list; "
-                    f"an alphabet needs a word, phone or syllable encoding (--encoding word:{encoding.n}:{encoding.stride})",
+                    f"an alphabet needs a word, phone, syllable or acoustic encoding (--encoding word:{encoding.n}:{encoding.stride})",
                 )
             rows = word_rows(encoding, model.graph.trigram_index)
             return {

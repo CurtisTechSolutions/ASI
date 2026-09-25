@@ -21,6 +21,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from phonetok import LEVELS, PhoneticTokenizer, Lexicon, Phonotactics  # noqa: E402
+from phonetok.acoustic import (  # noqa: E402
+    AcousticTokenizer, Codebook, default_codebook, frames_of, learn, pcm_samples, read_wav, synthesize,
+)
+from phonetok.synth import Synthesizer, Voice  # noqa: E402
 from phonetok.g2p import Transcriber  # noqa: E402
 from phonetok.phones import SYMBOLS  # noqa: E402
 from phonetok.rules import letter_to_sound  # noqa: E402
@@ -83,6 +87,52 @@ class TestPythonHoldsToTheFixture(unittest.TestCase):
 
 
 # -- the ports' command lines ---------------------------------------------------------
+
+def assert_close(test, got, want, tolerance=1e-9):
+    """Floats within tolerance of each other, relative to their size."""
+    got, want = list(got), list(want)
+    test.assertEqual(len(got), len(want))
+    for g, w in zip(got, want):
+        test.assertLessEqual(abs(g - w), tolerance * max(1.0, abs(w)), (g, w))
+
+
+class TestPythonHoldsToTheAcousticFixture(unittest.TestCase):
+    """The acoustic units: what the file says the synthesized utterances are heard as, Python hears now."""
+
+    def test_acoustic(self):
+        import struct
+
+        doc = fixture()["acoustic"]
+        tok = PhoneticTokenizer(lexicon=Lexicon.core())
+        clips = []
+        for text, tokens in zip(doc["texts"], doc["tokens"]):
+            self.assertEqual(tok.tokens(text), tokens)
+            clips.append(pcm_samples(Synthesizer(voice_settings=Voice(**doc["voice"])).speak(tokens)))
+        self.assertEqual([len(c) for c in clips], doc["samples"])
+        book = default_codebook()
+        frames = frames_of(clips[0], book.analysis)
+        self.assertEqual(len(frames), doc["frames"]["count"])
+        for key, row in (("0", frames[0]), ("50", frames[50]), ("last", frames[-1])):
+            assert_close(self, row, doc["frames"]["rows"][key])
+        heard = AcousticTokenizer(book).listen(clips[0])
+        self.assertEqual(heard.units, doc["units"])
+        self.assertEqual(heard.codes, doc["codes"])
+        want = doc["learn"]
+        small = learn(clips, k=want["k"], seed=want["seed"], iterations=want["iterations"])
+        for got, w in zip(small.centroids, want["centroids"]):
+            assert_close(self, got, w)
+        self.assertEqual(small.counts, want["counts"])
+        self.assertEqual(small.runs, want["runs"])
+        assert_close(self, small.mean, want["mean"])
+        assert_close(self, [small.inertia], [want["inertia"]])
+        for key in ("replay", "polished"):
+            spec = doc[key]
+            pcm = synthesize(spec["units"], book, polish=spec["polish"])
+            values = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+            self.assertEqual(len(values), spec["samples"], key)
+            got = values[spec["at"]:spec["at"] + len(spec["values"])]
+            self.assertLessEqual(max(abs(g - w) for g, w in zip(got, spec["values"])), 2, key)
+
 
 def _build_go():
     if shutil.which("go") is None:
@@ -204,6 +254,59 @@ class PortParity(unittest.TestCase):
                              env=dict(os.environ, PHONETOK_LEXICON=""), timeout=600)
         self.assertEqual(raw.returncode, 0, raw.stderr)
         self.assertEqual(raw.stdout, theirs)
+
+
+    def test_hear_learn_and_replay_agree(self):
+        """The acoustic units: the port hears a recording as the same units, learns the same codebook from
+        the same recordings, and speaks units back as the same samples."""
+        if not self.exe:
+            self.skipTest(f"no {self.name} toolchain, or the build failed")
+        import struct
+        import tempfile
+
+        from phonetok.synth import write_wav
+
+        tok = PhoneticTokenizer(lexicon=Lexicon.core())
+        with tempfile.TemporaryDirectory() as tmp:
+            wavs = []
+            for i, text in enumerate(("the cat sat on the mat", "a bird in the hand")):
+                path = os.path.join(tmp, f"{i}.wav")
+                write_wav(path, Synthesizer(voice_settings=Voice(pitch=130.0)).speak(tok.tokens(text)))
+                wavs.append(path)
+            book = default_codebook()
+            ours = AcousticTokenizer(book)
+            with open(wavs[0], "rb") as fh:
+                heard = ours.listen(fh.read())
+            self.assertEqual(self.run_cli("hear", wavs[0]).split(), heard.units)
+            theirs = json.loads(self.run_cli("hear", "--json", "--frames", *wavs))
+            self.assertEqual([d["path"] for d in theirs], wavs)
+            self.assertEqual(theirs[0]["codes"], heard.codes)
+            self.assertEqual(theirs[0]["frames"], heard.frames)
+            path = os.path.join(tmp, "theirs.tsv")
+            self.run_cli("learn", *wavs, "--units", "5", "--seed", "4", "--iterations", "15", "--out", path)
+            theirs_book = Codebook.load(path)
+            recordings = []
+            for w in wavs:
+                with open(w, "rb") as fh:
+                    recordings.append(ours.samples(fh.read()))
+            ours_book = learn(recordings, k=5, seed=4, iterations=15)
+            self.assertEqual(theirs_book.k, 5)
+            for got, want in zip(theirs_book.centroids, ours_book.centroids):
+                assert_close(self, got, want)
+            self.assertEqual((theirs_book.counts, theirs_book.runs), (ours_book.counts, ours_book.runs))
+            assert_close(self, theirs_book.mean, ours_book.mean)
+            back = os.path.join(tmp, "back.wav")
+            units = heard.units[:15]
+            for polish in (0, 2):
+                self.run_cli("replay", *units, "--out", back, "--polish", str(polish))
+                with open(back, "rb") as fh:
+                    samples, rate = read_wav(fh.read())
+                pcm = synthesize(units, book, polish=polish)
+                want = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+                self.assertEqual((rate, len(samples)), (16000, len(want)), polish)
+                self.assertLessEqual(max(abs(s * 32768 - w) for s, w in zip(samples, want)), 2, polish)
+            # and the port's codebook file is read back the same
+            self.assertEqual(Codebook.loads(theirs_book.dumps()).centroids, theirs_book.centroids)
 
 
 class TestGoParity(PortParity):

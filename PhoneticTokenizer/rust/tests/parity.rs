@@ -269,3 +269,117 @@ fn save_and_load() {
     assert!(other.load_json(&tok.to_json()).is_err());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+fn nums(j: &Json) -> Vec<f64> {
+    j.as_arr().iter().map(|v| v.as_f64().unwrap()).collect()
+}
+
+fn close_enough(what: &str, got: &[f64], want: &[f64], tolerance: f64) {
+    assert_eq!(got.len(), want.len(), "{what}: length");
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        assert!(
+            (g - w).abs() <= tolerance * w.abs().max(1.0),
+            "{what}: value {i} is {g}, want {w}"
+        );
+    }
+}
+
+/// The acoustic units: the utterances Python synthesized are heard as the same
+/// units, learn the same codebook, and are spoken back as the same samples.
+#[test]
+fn acoustic() {
+    use phonetok::acoustic::{
+        frames_of, learn, pcm_samples, synthesize, AcousticTokenizer, Analysis, Codebook,
+    };
+    use phonetok::synth::{Synthesizer, VoiceSettings};
+
+    let doc = fixture();
+    let doc = doc.get("acoustic");
+    let voice = doc.get("voice");
+    let mut clips = Vec::new();
+    for (i, tokens) in doc.get("tokens").as_arr().iter().enumerate() {
+        let settings = VoiceSettings {
+            pitch: voice.get("pitch").as_f64().unwrap(),
+            tempo: voice.get("tempo").as_f64().unwrap(),
+            gain: voice.get("gain").as_f64().unwrap(),
+            ..VoiceSettings::default()
+        };
+        let clip = pcm_samples(&Synthesizer::new(16000, settings).speak(&tokens.strings()));
+        assert_eq!(
+            clip.len() as f64,
+            doc.get("samples").as_arr()[i].as_f64().unwrap(),
+            "clip {i}"
+        );
+        clips.push(clip);
+    }
+    let book = Codebook::bundled().unwrap();
+    let frames = frames_of(&clips[0], &book.analysis).unwrap();
+    assert_eq!(
+        frames.len() as f64,
+        doc.get("frames").get("count").as_f64().unwrap()
+    );
+    let rows = doc.get("frames").get("rows");
+    for (key, row) in [
+        ("0", &frames[0]),
+        ("50", &frames[50]),
+        ("last", frames.last().unwrap()),
+    ] {
+        close_enough(&format!("frame {key}"), row, &nums(rows.get(key)), 1e-9);
+    }
+    let tok = AcousticTokenizer::new(book.clone(), true).unwrap();
+    let heard = tok.listen(&clips[0], 0).unwrap();
+    assert_eq!(heard.units, doc.get("units").strings());
+    let codes: Vec<f64> = heard.codes.iter().map(|&c| c as f64).collect();
+    assert_eq!(codes, nums(doc.get("codes")));
+    let want = doc.get("learn");
+    let small = learn(
+        &clips,
+        want.get("k").as_f64().unwrap() as usize,
+        want.get("seed").as_f64().unwrap() as i64,
+        want.get("iterations").as_f64().unwrap() as usize,
+        &Analysis::default(),
+        "",
+    )
+    .unwrap();
+    for (c, w) in want.get("centroids").as_arr().iter().enumerate() {
+        close_enough(
+            &format!("centroid {c}"),
+            &small.centroids[c],
+            &nums(w),
+            1e-9,
+        );
+    }
+    let counts: Vec<f64> = small.counts.iter().map(|&c| c as f64).collect();
+    assert_eq!(counts, nums(want.get("counts")));
+    assert_eq!(small.runs, nums(want.get("runs")));
+    close_enough("mean", &small.mean, &nums(want.get("mean")), 1e-9);
+    close_enough(
+        "inertia",
+        &[small.inertia],
+        &[want.get("inertia").as_f64().unwrap()],
+        1e-9,
+    );
+    for key in ["replay", "polished"] {
+        let spec = doc.get(key);
+        let polish = spec.get("polish").as_f64().unwrap() as usize;
+        let pcm = synthesize(&spec.get("units").strings(), &book, polish, 1.0, 120.0).unwrap();
+        let values: Vec<i64> = pcm
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]) as i64)
+            .collect();
+        assert_eq!(
+            values.len() as f64,
+            spec.get("samples").as_f64().unwrap(),
+            "{key}"
+        );
+        let at = spec.get("at").as_f64().unwrap() as usize;
+        for (i, w) in nums(spec.get("values")).iter().enumerate() {
+            let got = values[at + i];
+            assert!(
+                (got - *w as i64).abs() <= 2,
+                "{key}: sample {} is {got}, want {w}",
+                at + i
+            );
+        }
+    }
+}

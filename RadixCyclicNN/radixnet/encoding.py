@@ -12,6 +12,9 @@ gram holds, and how far apart consecutive grams start:
 * ``Encoding(unit=PHONES)`` is the trigram of *sounds*: the text is read through
   the phonetic tokenizer (``../PhoneticTokenizer``), and ``Encoding(unit=SYLLABLES)``
   the trigram of syllables.
+* ``Encoding(unit=ACOUSTIC)`` is the trigram of *acoustic units*: sounds learned
+  from recordings with nothing written down (``q2 q28 q55``), heard from WAV
+  files through the same tokenizer's codebook and spoken back through its vocoder.
 
 :class:`Encoder` and :class:`Decoder` are the two halves of it kept as objects,
 because that is how the rest of the package holds them; ``Encoder(window=5)``
@@ -51,10 +54,22 @@ sounds rather than letters.  A label is that text, so a model file stays readabl
 """
 SYLLABLES = "syllable"
 """One unit is one syllable (``K.AE1.T``), the ``#`` between two words, or a pause."""
+ACOUSTIC = "acoustic"
+"""One unit is one *acoustic unit*: a sound learned from audio (``q17``), with nothing written down.
+
+The units are the phonetic tokenizer's acoustic units (``phonetok.acoustic``): a codebook learned from
+recordings by k-means over log-mel frames - the bundled one, or the file ``PHONETOK_CODEBOOK`` names.
+A recording (``--data speech.wav``) is heard as a text of units, ``q2 q28 q55 ...``, and that text is
+what the graph is built over, so a model learns from sound alone.  As text the units behave like
+words (whitespace-separated tokens, any token accepted); there are no words to spell back, and what
+the model says is spoken through the vocoder (``radixnet speak``).
+"""
 PHONETIC_UNITS = (PHONES, SYLLABLES)
-UNIT_KINDS = (CHARS, WORDS, PHONES, SYLLABLES)
-_UNITS_NAMES = {CHARS: "chars", WORDS: "words", PHONES: "phones", SYLLABLES: "syllables"}
-_UNIT_WORDS = {CHARS: "character", WORDS: "word", PHONES: "phone", SYLLABLES: "syllable"}
+TOKEN_UNITS = (WORDS, ACOUSTIC)
+"""The units that are whitespace-separated tokens taken as they come."""
+UNIT_KINDS = (CHARS, WORDS, PHONES, SYLLABLES, ACOUSTIC)
+_UNITS_NAMES = {CHARS: "chars", WORDS: "words", PHONES: "phones", SYLLABLES: "syllables", ACOUSTIC: "units"}
+_UNIT_WORDS = {CHARS: "character", WORDS: "word", PHONES: "phone", SYLLABLES: "syllable", ACOUSTIC: "unit"}
 
 START_LABEL = "<s>"
 END_LABEL = "</s>"
@@ -124,6 +139,39 @@ def phonetic_tokenizer(unit: str):
     return tok
 
 
+_ACOUSTIC: list = []
+
+
+def acoustic_tokenizer():
+    """The acoustic units' tokenizer: ``phonetok.acoustic`` over its codebook, made once.
+
+    The codebook is the bundled one, or the file ``PHONETOK_CODEBOOK`` names; a
+    model's units mean nothing without the codebook that made them, so the two
+    travel together.  It hears recordings (:func:`hear_audio`) and lends the
+    voice its vocoder; the text form of the acoustic unit needs no tokenizer at
+    all (a unit text is whitespace-separated tokens taken as they come).
+    """
+    if not _ACOUSTIC:
+        acoustic = phonetok_module("acoustic", "the acoustic unit")
+        _ACOUSTIC.append(acoustic.AcousticTokenizer(os.environ.get("PHONETOK_CODEBOOK") or None))
+    return _ACOUSTIC[0]
+
+
+def hear_audio(data: bytes) -> str:
+    """A WAV file's bytes as a text of acoustic units: ``"q2 q28 q55 ..."``, runs collapsed.
+
+    One recording is one utterance, and so one text; a model over the
+    acoustic unit is trained on these the way a phone model is trained on its
+    sounds.
+    """
+    return acoustic_tokenizer().listen(data).text
+
+
+def is_audio_file(path: str) -> bool:
+    """Is the file a WAV (by its name) - something to hear rather than read?"""
+    return path.lower().endswith(".wav")
+
+
 @dataclass(frozen=True)
 class Encoding:
     """How a text becomes grams, and how labels become text again.
@@ -154,6 +202,8 @@ class Encoding:
             raise ValueError(f"unit must be one of {UNIT_KINDS}, got {self.unit!r}")
         if self.unit in PHONETIC_UNITS:
             phonetic_tokenizer(self.unit)  # a phonetic unit needs its tokenizer: better refused now than mid-run
+        if self.unit == ACOUSTIC:
+            acoustic_tokenizer()  # and the acoustic unit its codebook, to hear recordings and be heard
         if self.n < 1:
             raise ValueError(f"n must be >= 1, got {self.n}")
         if self.stride < 1:
@@ -219,7 +269,7 @@ class Encoding:
         """
         if self.unit == CHARS:
             return text
-        if self.unit == WORDS:
+        if self.unit in TOKEN_UNITS:
             return split_words(text)
         return split_words(phonetic_tokenizer(self.unit).text(text))
 
@@ -227,7 +277,7 @@ class Encoding:
         """How many units a text holds."""
         if self.unit == CHARS:
             return len(text)
-        if self.unit == WORDS:
+        if self.unit in TOKEN_UNITS:
             return len(split_words(text))
         return len(self.units(text))
 
@@ -387,6 +437,7 @@ _UNIT_NAMES = {
     "word": WORDS, "words": WORDS,
     "phone": PHONES, "phones": PHONES, "phoneme": PHONES, "phonemes": PHONES, "sound": PHONES, "sounds": PHONES,
     "syllable": SYLLABLES, "syllables": SYLLABLES, "syl": SYLLABLES,
+    "acoustic": ACOUSTIC, "acoustics": ACOUSTIC, "audio": ACOUSTIC, "unit": ACOUSTIC, "units": ACOUSTIC,
 }
 
 
@@ -404,7 +455,7 @@ def parse_encoding(spec: str) -> Encoding:
     if len(parts) > 3:
         raise ValueError(f"encoding {spec!r}: expected unit[:n[:stride]]")
     if parts[0] not in _UNIT_NAMES:
-        raise ValueError(f"encoding {spec!r}: unit must be char, word, phone or syllable, got {parts[0]!r}")
+        raise ValueError(f"encoding {spec!r}: unit must be char, word, phone, syllable or acoustic, got {parts[0]!r}")
     unit = _UNIT_NAMES[parts[0]]
     n = WINDOW
     if len(parts) > 1 and parts[1]:

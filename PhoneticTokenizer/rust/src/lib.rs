@@ -5,6 +5,7 @@
 //! letter-to-sound rules), so that the three ports turn the same text into the
 //! same sounds, token for token.  No dependencies.
 
+pub mod acoustic;
 pub mod g2p;
 pub mod json;
 pub mod lexicon;
@@ -17,6 +18,7 @@ pub mod syllables;
 pub mod synth;
 pub mod tokenizer;
 
+pub use acoustic::{AcousticTokenizer, Codebook, Vocoder};
 pub use g2p::{respell, Transcriber};
 pub use lexicon::Lexicon;
 pub use phonotactics::{violations, well_formed, Phonotactics};

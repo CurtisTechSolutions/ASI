@@ -10,11 +10,71 @@ package radixnet
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
 	"github.com/CurtisTechSolutions/ASI/PhoneticTokenizer/go/phonetok"
 )
+
+// -- the acoustic units ---------------------------------------------------------------
+
+var (
+	acousticOnce sync.Once
+	acousticTok  *phonetok.AcousticTokenizer
+	acousticErr  error
+)
+
+// acousticTokenizer is the acoustic units' tokenizer over its codebook - the
+// bundled one, or the file PHONETOK_CODEBOOK names - made once; a model's units
+// mean nothing without the codebook that made them, so the two travel together.
+func acousticTokenizer() (*phonetok.AcousticTokenizer, error) {
+	acousticOnce.Do(func() {
+		var book *phonetok.Codebook
+		if path := os.Getenv("PHONETOK_CODEBOOK"); path != "" {
+			if book, acousticErr = phonetok.LoadCodebook(path); acousticErr != nil {
+				acousticErr = fmt.Errorf("the acoustic unit's codebook (PHONETOK_CODEBOOK): %w", acousticErr)
+				return
+			}
+		}
+		acousticTok, acousticErr = phonetok.NewAcousticTokenizer(book, true)
+		if acousticErr != nil {
+			acousticErr = fmt.Errorf("the acoustic unit needs its codebook: %w", acousticErr)
+		}
+	})
+	return acousticTok, acousticErr
+}
+
+// HearAudio is a WAV file's bytes as a text of acoustic units - "q2 q28 q55 ...",
+// runs collapsed.  One recording is one utterance, and so one text.
+func HearAudio(data []byte) (string, error) {
+	tok, err := acousticTokenizer()
+	if err != nil {
+		return "", err
+	}
+	heard, err := tok.ListenWAV(data)
+	if err != nil {
+		return "", err
+	}
+	return heard.Text(), nil
+}
+
+// IsAudioFile reports whether a file is a WAV, by its name: something to hear
+// rather than read.
+func IsAudioFile(path string) bool { return strings.HasSuffix(strings.ToLower(path), ".wav") }
+
+// OutputRate is the sample rate a model is heard at: rate for the synthesizer,
+// the codebook's for acoustic units.
+func OutputRate(enc Encoding, rate int) (int, error) {
+	if enc.Unit != Acoustic {
+		return rate, nil
+	}
+	tok, err := acousticTokenizer()
+	if err != nil {
+		return 0, err
+	}
+	return tok.Book.Analysis.Rate, nil
+}
 
 type phoneticBridge struct {
 	mu  sync.Mutex // the tokenizer remembers what it reads; training reads from many goroutines

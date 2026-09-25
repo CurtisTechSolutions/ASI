@@ -9,6 +9,10 @@
     >>> PhoneticTokenizer(level="syllable").tokens("butter")
     ['B.AH1.T', 'ER0']
 
+    >>> from phonetok import AcousticTokenizer
+    >>> AcousticTokenizer().hear(open("speech.wav", "rb").read())   # audio as learned units, no text
+    ['q3', 'q17', 'q4', ...]
+
 Standard library only.  ``pip install cmudict`` (or ``PHONETOK_LEXICON=/path/to/cmudict.dict``)
 gives it the full 135 000-word dictionary; without it the bundled core lexicon and the
 letter-to-sound rules do the work.  See ``README.md`` and ``DESIGN.md``.
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
+from .acoustic import AcousticTokenizer, Codebook, Vocoder
 from .g2p import Transcriber, respell
 from .lexicon import Lexicon
 from .numbers import cardinal, number_words, ordinal
@@ -32,7 +37,7 @@ from .tokenizer import CONSTITUENT, LEVELS, PHONEME, SYLLABLE, WORD, PhoneticTok
 
 __all__ = [
     "__version__", "PhoneticTokenizer", "Token", "Vocab", "parse_token", "LEVELS", "PHONEME", "CONSTITUENT",
-    "SYLLABLE", "WORD",
+    "SYLLABLE", "WORD", "AcousticTokenizer", "Codebook", "Vocoder",
     "Transcriber", "respell", "Lexicon", "Phonotactics", "letter_to_sound",
     "Syllable", "syllabify", "rhymes", "alliterates", "is_legal_onset", "is_legal_coda", "ONSETS",
     "PHONEMES", "VOWELS", "CONSONANTS", "SYMBOLS", "SYMBOL_ID", "SPECIALS", "BOUNDARY", "PAUSES", "IPA",

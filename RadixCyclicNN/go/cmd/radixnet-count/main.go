@@ -703,8 +703,12 @@ func cmdSpeak(args []string) {
 		outPath = "speech.wav"
 	}
 	m := openModel(true)
+	outRate, err := radixnet.OutputRate(m.Encoding(), *rate) // acoustic units are spoken at their codebook's rate
+	if err != nil {
+		fail("%v", err)
+	}
 	opts := radixnet.SpeakOptions{Prefix: *prefix, Count: *count, MaxLength: *maxLength, Temperature: *temperature,
-		Rate: *rate, Pitch: *pitch, Tempo: *tempo, Gain: *gain}
+		Rate: outRate, Pitch: *pitch, Tempo: *tempo, Gain: *gain}
 	if *seeded {
 		s := seedFlag
 		opts.Seed = &s
@@ -715,7 +719,6 @@ func cmdSpeak(args []string) {
 	}
 	total := 0
 	sink := outPath
-	var err error
 	switch {
 	case *play:
 		player := phonetok.FindPlayer()
@@ -730,7 +733,7 @@ func cmdSpeak(args []string) {
 		if perr := cmd.Start(); perr != nil {
 			fail("%v", perr)
 		}
-		stdin.Write(phonetok.WavHeader(*rate, -1))
+		stdin.Write(phonetok.WavHeader(outRate, -1))
 		err = m.SpeakWalks(opts, func(chunk []byte) { stdin.Write(chunk); total += len(chunk) }, record)
 		stdin.Close()
 		cmd.Wait()
@@ -743,7 +746,7 @@ func cmdSpeak(args []string) {
 		var pcm []byte
 		err = m.SpeakWalks(opts, func(chunk []byte) { pcm = append(pcm, chunk...) }, record)
 		if err == nil {
-			if werr := os.WriteFile(outPath, phonetok.WavBytes(pcm, *rate), 0o644); werr != nil {
+			if werr := os.WriteFile(outPath, phonetok.WavBytes(pcm, outRate), 0o644); werr != nil {
 				fail("%v", werr)
 			}
 		}
@@ -756,8 +759,8 @@ func cmdSpeak(args []string) {
 		said = []map[string]any{}
 	}
 	if !*raw {
-		emit(map[string]any{"prefix": *prefix, "utterances": said, "seconds": float64(total) / 2 / float64(*rate),
-			"rate": *rate, "sink": sink, "count": len(said), "encoding": m.Encoding().String()})
+		emit(map[string]any{"prefix": *prefix, "utterances": said, "seconds": float64(total) / 2 / float64(outRate),
+			"rate": outRate, "sink": sink, "count": len(said), "encoding": m.Encoding().String()})
 	}
 }
 

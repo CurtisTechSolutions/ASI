@@ -34,7 +34,7 @@ from .gan import BLATANT_MODES, EvolveConfig, Evolver
 from .beam import Prediction, path_probability
 from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
-from .encoding import CHARS, WINDOW, WORDS, Encoding, parse_encoding, word_rows
+from .encoding import CHARS, WINDOW, WORDS, Encoding, hear_audio, is_audio_file, parse_encoding, word_rows
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .training import ORDERS
@@ -626,6 +626,13 @@ def read_texts(paths: Sequence[str], whole_file: bool = False, what: str = "trai
     """
     texts: list[str] = []
     for path in paths:
+        if is_audio_file(path):  # a recording is heard as a text of acoustic units: one utterance, one text
+            try:
+                with open(path, "rb") as fh:
+                    texts.append(hear_audio(fh.read()))
+            except (OSError, ValueError) as exc:
+                raise CliError(f"{path}: {exc}") from exc
+            continue
         if _is_zip_file(path):
             try:
                 contents = [entry.text for entry in zip_texts_from_file(path)]
@@ -952,9 +959,12 @@ def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
     def on_utterance(i: int, text: str, spelled: str) -> None:
         said.append({"text": text, "spelled": spelled})
 
+    from .voice import output_rate
+
+    rate = output_rate(model.encoding, args.rate)  # acoustic units are spoken at their codebook's rate
     stream = speak_walks(
         model, prefix=args.prefix, count=args.count, max_length=args.max_length, temperature=args.temperature,
-        seed=getattr(args, "seed", None), rate=args.rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain,
+        seed=getattr(args, "seed", None), rate=rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain,
         on_utterance=on_utterance,
     )
     from .encoding import phonetok_module
@@ -972,7 +982,7 @@ def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
 
         proc = subprocess.Popen(player, stdin=subprocess.PIPE)
         assert proc.stdin is not None
-        proc.stdin.write(wav_header(args.rate))
+        proc.stdin.write(wav_header(rate))
         for chunk in stream:  # every chunk reaches the player as the walk makes it
             proc.stdin.write(chunk)
             proc.stdin.flush()
@@ -990,20 +1000,20 @@ def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
     else:
         pcm = b"".join(stream)
         total = len(pcm)
-        write_wav(args.out, pcm, args.rate)
+        write_wav(args.out, pcm, rate)
         sink = args.out
-    seconds = total / 2.0 / args.rate
+    seconds = total / 2.0 / rate
     if not args.raw:
         console.pairs([
             ("model", kind_label(model)),
             ("prefix", quote(args.prefix)),
             ("utterances", len(said)),
-            ("speech", f"{seconds:.2f} s at {args.rate} Hz -> {sink}"),
+            ("speech", f"{seconds:.2f} s at {rate} Hz -> {sink}"),
         ])
         console.say()
         console.table(("#", "said", "spelled"),
                       [[i + 1, quote(clip(u["text"], 60)), quote(clip(u["spelled"], 40))] for i, u in enumerate(said)])
-    return {"prefix": args.prefix, "utterances": said, "seconds": seconds, "rate": args.rate, "sink": sink,
+    return {"prefix": args.prefix, "utterances": said, "seconds": seconds, "rate": rate, "sink": sink,
             "count": len(said), "encoding": str(model.encoding)}
 
 
@@ -1818,7 +1828,7 @@ def cmd_words(args: argparse.Namespace, console: Console) -> dict:
     if encoding.unit == CHARS:
         raise CliError(
             f"{args.model} counts in {encoding.units_name}, so it has no words to list; an alphabet needs a word, "
-            f"phone or syllable encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
+            f"phone, syllable or acoustic encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
         )
     rows = word_rows(encoding, model.graph.trigram_index)
     vocabulary = len(rows)
@@ -3653,7 +3663,7 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             "phonetic tokenizer: the cat -> DH AH0 # K AE1 T), syllable:2:1 the syllable bigram; the "
                             "names trigram | bigram | word-bigram | word-trigram work too.  A loaded file's own "
                             "encoding always wins, and is fixed for its life")
-    group.add_argument("--units", choices=("char", "word", "phone", "syllable"), default=default(None),
+    group.add_argument("--units", choices=("char", "word", "phone", "syllable", "acoustic"), default=default(None),
                        help="what one unit of a NEW model is (default char); --encoding sets this too")
     group.add_argument("--ngram", type=int, metavar="N", default=default(None),
                        help="units per gram of a NEW model: the n of the n-gram (default 3)")
@@ -3889,7 +3899,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--data", nargs="+", required=True, metavar="FILE",
                    help="training text files, one text per line (blank lines are skipped); a .zip archive contributes "
-                        "every text file inside it")
+                        "every text file inside it; a .wav recording is heard as one text of acoustic units "
+                        "(--encoding acoustic:3:1)")
     p.add_argument("--whole-file", action="store_true", help="treat each file as a single text")
     p.add_argument("--epochs", type=nonneg_int, default=TrainConfig.epochs, help="training epochs")
     p.add_argument("--lr", type=nonneg_float, default=TrainConfig.lr, help="learning rate for edge weights and node states")

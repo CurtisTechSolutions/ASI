@@ -426,6 +426,11 @@ pub fn read_named(args: &Args, flag: &str) -> Result<Vec<String>, String> {
     let Some(path) = args.get(flag) else {
         return Ok(Vec::new());
     };
+    // a recording is heard as one text of acoustic units: one utterance, one text
+    if crate::phonetic::is_audio_file(path) {
+        let data = std::fs::read(path).map_err(|err| format!("cannot read {path}: {err}"))?;
+        return Ok(vec![crate::phonetic::hear_audio(&data).map_err(|err| format!("{path}: {err}"))?]);
+    }
     let unit = args.str("split", "lines");
     let page_lines = args.usize("page-lines", 0).unwrap_or(0);
     // a ZIP archive (by its magic, whatever its name) is read entry by entry

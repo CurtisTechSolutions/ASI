@@ -29,6 +29,8 @@ func (e Encoding) UnitsName() string {
 		return "phones"
 	case Syllables:
 		return "syllables"
+	case Acoustic:
+		return "units"
 	}
 	return "chars"
 }

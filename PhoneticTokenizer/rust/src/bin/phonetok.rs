@@ -1,9 +1,12 @@
 //! The Rust port's command line: the same commands as the Python package's
 //! (`phonetok tokenize "The cat sat."`, explain, ipa, decode, pronounce, rhymes,
-//! affinity, coin, blend, lexicon, eval), the same output.
+//! affinity, coin, blend, lexicon, eval, say, and the acoustic units' hear,
+//! learn, replay and codebook), the same output.
 
+use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
+use phonetok::acoustic::{learn, load_wav, resample, AcousticTokenizer, Analysis, Codebook};
 use phonetok::json::Json;
 use phonetok::lexicon::{read_entries, Lexicon, ENV_LEXICON};
 use phonetok::mt::{Mt, Rng};
@@ -29,9 +32,16 @@ commands:
   eval                    the rules against the full dictionary (PHONETOK_LEXICON)
   say TEXT...             speak: the formant synthesizer to a WAV (--out), a player (--play) or stdout (--raw);
                           tokens on stdin when no text is given (--rate, --pitch, --tempo, --gain)
+  hear WAV...             the acoustic units of recordings: sounds learned, nothing written down (--frames)
+  learn WAV...            learn a codebook of acoustic units from recordings (--units, --seed, --iterations,
+                          --note, --out FILE)
+  replay UNIT...          units spoken back through the vocoder (--out, --play, --raw, --polish, --pitch, --gain);
+                          units on stdin when none are given
+  codebook [FILE]         what a codebook holds (the bundled one when no file is named)
 
 options (after the command):
-  --level L  --no-stress  --no-boundaries  --no-pauses  --core  --lexicon FILE  --json";
+  --level L  --no-stress  --no-boundaries  --no-pauses  --core  --lexicon FILE  --json
+  --codebook FILE         the codebook of acoustic units (hear, replay; the bundled one otherwise)";
 
 struct Options {
     level: Level,
@@ -53,6 +63,14 @@ struct Options {
     pitch: f64,
     tempo: f64,
     gain: f64,
+    codebook: Option<String>,
+    frames: bool,
+    units: usize,
+    iterations: usize,
+    note: String,
+    polish: usize,
+    out_set: bool,
+    gain_set: bool,
     positional: Vec<String>,
 }
 
@@ -77,6 +95,14 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         pitch: 120.0,
         tempo: 1.0,
         gain: 0.5,
+        codebook: None,
+        frames: false,
+        units: 64,
+        iterations: 50,
+        note: String::new(),
+        polish: 0,
+        out_set: false,
+        gain_set: false,
         positional: Vec::new(),
     };
     let mut i = 0;
@@ -128,7 +154,28 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     .parse()
                     .map_err(|_| "syllables must be a number")?
             }
-            "--out" => o.out = value(&mut i)?,
+            "--out" => {
+                o.out = value(&mut i)?;
+                o.out_set = true;
+            }
+            "--codebook" => o.codebook = Some(value(&mut i)?),
+            "--frames" => o.frames = true,
+            "--units" => {
+                o.units = value(&mut i)?
+                    .parse()
+                    .map_err(|_| "units must be a number")?
+            }
+            "--iterations" => {
+                o.iterations = value(&mut i)?
+                    .parse()
+                    .map_err(|_| "iterations must be a number")?
+            }
+            "--note" => o.note = value(&mut i)?,
+            "--polish" => {
+                o.polish = value(&mut i)?
+                    .parse()
+                    .map_err(|_| "polish must be a number")?
+            }
             "--play" => o.play = true,
             "--raw" => o.raw = true,
             "--rate" => {
@@ -149,7 +196,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             "--gain" => {
                 o.gain = value(&mut i)?
                     .parse()
-                    .map_err(|_| "gain must be a number")?
+                    .map_err(|_| "gain must be a number")?;
+                o.gain_set = true;
             }
             _ if name.starts_with("--") => return Err(format!("unknown option {name}")),
             _ => o.positional.push(a.clone()),
@@ -547,7 +595,6 @@ fn run(args: &[String]) -> Result<i32, String> {
             emit(&o, Json::obj(doc), lines);
         }
         "say" => {
-            use std::io::{BufRead, Write};
             let voice = VoiceSettings {
                 pitch: o.pitch,
                 tempo: o.tempo,
@@ -630,6 +677,237 @@ fn run(args: &[String]) -> Result<i32, String> {
                 );
             }
         }
+        "hear" => {
+            let tok = AcousticTokenizer::new(load_book(&o)?, !o.frames)?;
+            let mut docs = Vec::new();
+            let mut lines = Vec::new();
+            for path in &o.positional {
+                let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+                let h = tok.listen_wav(&data).map_err(|e| format!("{path}: {e}"))?;
+                docs.push(Json::obj(vec![
+                    ("path", Json::str(path)),
+                    ("units", Json::strs(&h.units)),
+                    ("frames", Json::Num(h.frames as f64)),
+                    ("seconds", Json::Num(h.seconds)),
+                    (
+                        "codes",
+                        Json::Arr(h.codes.iter().map(|&c| Json::Num(c as f64)).collect()),
+                    ),
+                ]));
+                lines.push(h.text());
+            }
+            emit(&o, Json::Arr(docs), lines);
+        }
+        "learn" => {
+            let a = Analysis::default();
+            let mut recordings = Vec::new();
+            let mut seconds = 0.0;
+            for path in &o.positional {
+                let (samples, rate) = load_wav(path)?;
+                let samples =
+                    resample(&samples, rate, a.rate).map_err(|e| format!("{path}: {e}"))?;
+                seconds += samples.len() as f64 / a.rate as f64;
+                recordings.push(samples);
+            }
+            let note = if o.note.is_empty() {
+                format!(
+                    "learned from {} recording(s), {seconds:.0} s",
+                    o.positional.len()
+                )
+            } else {
+                o.note.clone()
+            };
+            let seed = o.seed.unwrap_or(1) as i64;
+            let book = learn(&recordings, o.units, seed, o.iterations, &a, &note)?;
+            let out = if o.out_set {
+                o.out.clone()
+            } else {
+                "codebook.tsv".to_string()
+            };
+            book.dump(&out)?;
+            let total: usize = book.counts.iter().sum();
+            emit(
+                &o,
+                Json::obj(vec![
+                    ("path", Json::str(&out)),
+                    ("units", Json::Num(book.k() as f64)),
+                    ("frames", Json::Num(total as f64)),
+                    ("seconds", Json::Num(seconds)),
+                    ("inertia", Json::Num(book.inertia)),
+                    ("seed", Json::Num(seed as f64)),
+                    ("note", Json::str(&note)),
+                ]),
+                vec![format!(
+                    "{} units learned from {total} frames ({seconds:.1} s of audio), inertia {:.1}: written to {out}",
+                    book.k(),
+                    book.inertia
+                )],
+            );
+        }
+        "replay" => {
+            let tok = AcousticTokenizer::new(load_book(&o)?, true)?;
+            let units: Vec<String> = if o.positional.is_empty() {
+                std::io::stdin()
+                    .lock()
+                    .lines()
+                    .map_while(Result::ok)
+                    .flat_map(|l| l.split_whitespace().map(String::from).collect::<Vec<_>>())
+                    .collect()
+            } else {
+                tok.units_of(&text)?
+            };
+            let rate = tok.book.analysis.rate;
+            let gain = if o.gain_set { o.gain } else { 1.0 };
+            if o.play {
+                let Some(player) = find_player() else {
+                    eprintln!("phonetok: no player found (aplay, paplay, ffplay, play or afplay)");
+                    return Ok(2);
+                };
+                let mut child = std::process::Command::new(&player[0])
+                    .args(&player[1..])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("{}: {e}", player[0]))?;
+                let mut total = 0usize;
+                {
+                    let stdin = child.stdin.as_mut().ok_or("no stdin")?;
+                    stdin
+                        .write_all(&wav_header(rate, None))
+                        .map_err(|e| e.to_string())?;
+                    let mut voc = tok.vocoder(gain, o.pitch)?;
+                    for u in &units {
+                        let chunk = voc.feed(u)?;
+                        stdin.write_all(&chunk).map_err(|e| e.to_string())?;
+                        stdin.flush().ok();
+                        total += chunk.len();
+                    }
+                    let chunk = voc.end();
+                    stdin.write_all(&chunk).map_err(|e| e.to_string())?;
+                    total += chunk.len();
+                }
+                child.wait().ok();
+                let seconds = total as f64 / 2.0 / rate as f64;
+                emit(
+                    &o,
+                    Json::obj(vec![
+                        ("seconds", Json::Num(seconds)),
+                        ("player", Json::str(&player[0])),
+                    ]),
+                    vec![format!("{seconds:.2} s replayed through {}", player[0])],
+                );
+            } else if o.raw {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                let mut voc = tok.vocoder(gain, o.pitch)?;
+                for u in &units {
+                    out.write_all(&voc.feed(u)?).map_err(|e| e.to_string())?;
+                    out.flush().ok();
+                }
+                out.write_all(&voc.end()).map_err(|e| e.to_string())?;
+                out.flush().ok();
+            } else {
+                let pcm = tok.synthesize(&units, o.polish, gain, o.pitch)?;
+                let out = if o.out_set {
+                    o.out.clone()
+                } else {
+                    "replay.wav".to_string()
+                };
+                std::fs::write(&out, wav_bytes(&pcm, rate)).map_err(|e| format!("{out}: {e}"))?;
+                let seconds = pcm.len() as f64 / 2.0 / rate as f64;
+                emit(
+                    &o,
+                    Json::obj(vec![
+                        ("path", Json::str(&out)),
+                        ("seconds", Json::Num(seconds)),
+                        ("rate", Json::Num(rate as f64)),
+                        ("bytes", Json::Num((pcm.len() + 44) as f64)),
+                        ("polish", Json::Num(o.polish as f64)),
+                    ]),
+                    vec![format!(
+                        "{seconds:.2} s of speech written to {out} ({rate} Hz)"
+                    )],
+                );
+            }
+        }
+        "codebook" => {
+            let (book, path) = match o.positional.first() {
+                Some(p) => (Codebook::load(p)?, p.clone()),
+                None => (Codebook::bundled()?, "(bundled)".to_string()),
+            };
+            let a = book.analysis;
+            let total: usize = book.counts.iter().sum();
+            let mut lines = vec![
+                format!(
+                    "{} units over {} log-mel bands ({}-{} Hz), {} ms frames every {} ms at {} Hz: {path}",
+                    book.k(),
+                    a.bands,
+                    a.fmin,
+                    a.fmax,
+                    a.frame * 1000 / a.rate as usize,
+                    a.hop * 1000 / a.rate as usize,
+                    a.rate
+                ),
+                format!(
+                    "learned from {total} frames ({:.1} s), seed {}, inertia {:.1}",
+                    (total * a.hop) as f64 / a.rate as f64,
+                    book.seed,
+                    book.inertia
+                ),
+            ];
+            if !book.note.is_empty() {
+                lines.push(book.note.clone());
+            }
+            lines.push(String::new());
+            lines.push(format!(
+                "{:<6} {:>7} {:>6} {:>5}",
+                "unit", "frames", "share", "run"
+            ));
+            for i in 0..book.k() {
+                let share = if total > 0 {
+                    book.counts[i] as f64 / total as f64 * 100.0
+                } else {
+                    0.0
+                };
+                lines.push(format!(
+                    "{:<6} {:>7} {:>5.1}% {:>5.1}",
+                    book.name(i),
+                    book.counts[i],
+                    share,
+                    book.runs[i]
+                ));
+            }
+            emit(
+                &o,
+                Json::obj(vec![
+                    ("path", Json::str(&path)),
+                    ("units", Json::Num(book.k() as f64)),
+                    ("frames", Json::Num(total as f64)),
+                    ("seed", Json::Num(book.seed as f64)),
+                    ("inertia", Json::Num(book.inertia)),
+                    ("note", Json::str(&book.note)),
+                    (
+                        "analysis",
+                        Json::obj(vec![
+                            ("rate", Json::Num(a.rate as f64)),
+                            ("frame", Json::Num(a.frame as f64)),
+                            ("hop", Json::Num(a.hop as f64)),
+                            ("fft", Json::Num(a.fft as f64)),
+                            ("bands", Json::Num(a.bands as f64)),
+                            ("fmin", Json::Num(a.fmin)),
+                            ("fmax", Json::Num(a.fmax)),
+                            ("preemphasis", Json::Num(a.preemphasis)),
+                            ("normalize", Json::Bool(a.normalize)),
+                        ]),
+                    ),
+                    (
+                        "counts",
+                        Json::Arr(book.counts.iter().map(|&c| Json::Num(c as f64)).collect()),
+                    ),
+                    ("runs", Json::nums(&book.runs)),
+                ]),
+                lines,
+            );
+        }
         "eval" => {
             let Ok(path) = std::env::var(ENV_LEXICON) else {
                 eprintln!("no full dictionary found: set PHONETOK_LEXICON");
@@ -686,6 +964,13 @@ fn run(args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
+/// The codebook `--codebook` names, or the bundled one.
+fn load_book(o: &Options) -> Result<Codebook, String> {
+    match &o.codebook {
+        Some(path) => Codebook::load(path),
+        None => Codebook::bundled(),
+    }
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

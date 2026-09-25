@@ -57,6 +57,40 @@ type parityDoc struct {
 	Coin             map[string][]string    `json:"coin"`
 	Blend            map[string]parityBlend `json:"blend"`
 	TranscriberSpell map[string]string      `json:"transcriber_spell"`
+	Acoustic         parityAcoustic         `json:"acoustic"`
+}
+
+type parityReplay struct {
+	Units   []string `json:"units"`
+	Polish  int      `json:"polish"`
+	Samples int      `json:"samples"`
+	At      int      `json:"at"`
+	Values  []int    `json:"values"`
+}
+
+type parityAcoustic struct {
+	Voice   map[string]float64 `json:"voice"`
+	Texts   []string           `json:"texts"`
+	Tokens  [][]string         `json:"tokens"`
+	Samples []int              `json:"samples"`
+	Frames  struct {
+		Count int                  `json:"count"`
+		Rows  map[string][]float64 `json:"rows"`
+	} `json:"frames"`
+	Units []string `json:"units"`
+	Codes []int    `json:"codes"`
+	Learn struct {
+		K          int         `json:"k"`
+		Seed       int         `json:"seed"`
+		Iterations int         `json:"iterations"`
+		Centroids  [][]float64 `json:"centroids"`
+		Counts     []int       `json:"counts"`
+		Runs       []float64   `json:"runs"`
+		Mean       []float64   `json:"mean"`
+		Inertia    float64     `json:"inertia"`
+	} `json:"learn"`
+	Replay   parityReplay `json:"replay"`
+	Polished parityReplay `json:"polished"`
 }
 
 func loadParity(t *testing.T) parityDoc {
@@ -273,4 +307,89 @@ func equalInts(a, b []int) bool {
 		}
 	}
 	return true
+}
+
+func closeEnough(t *testing.T, what string, got, want []float64, tolerance float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: %d values, want %d", what, len(got), len(want))
+	}
+	for i := range got {
+		if math.Abs(got[i]-want[i]) > tolerance*math.Max(1, math.Abs(want[i])) {
+			t.Fatalf("%s: value %d is %.17g, want %.17g", what, i, got[i], want[i])
+		}
+	}
+}
+
+// The acoustic units: the utterances Python synthesized are heard as the same
+// units, learn the same codebook, and are spoken back as the same samples.
+func TestParityAcoustic(t *testing.T) {
+	doc := loadParity(t).Acoustic
+	var clips [][]float64
+	for i, tokens := range doc.Tokens {
+		voice := DefaultVoice()
+		voice.Pitch, voice.Tempo, voice.Gain = doc.Voice["pitch"], doc.Voice["tempo"], doc.Voice["gain"]
+		clip := PCMSamples(NewSynthesizer(Rate, voice).Speak(tokens))
+		if len(clip) != doc.Samples[i] {
+			t.Fatalf("clip %d: %d samples, want %d", i, len(clip), doc.Samples[i])
+		}
+		clips = append(clips, clip)
+	}
+	book, err := DefaultCodebook()
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, err := FramesOf(clips[0], book.Analysis)
+	if err != nil || len(frames) != doc.Frames.Count {
+		t.Fatalf("%v: %d frames, want %d", err, len(frames), doc.Frames.Count)
+	}
+	for key, row := range map[string][]float64{"0": frames[0], "50": frames[50], "last": frames[len(frames)-1]} {
+		closeEnough(t, "frame "+key, row, doc.Frames.Rows[key], 1e-9)
+	}
+	tok, _ := NewAcousticTokenizer(book, true)
+	heard, err := tok.Listen(clips[0], 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(heard.Units, " ") != strings.Join(doc.Units, " ") {
+		t.Errorf("units:\n%s\nwant\n%s", strings.Join(heard.Units, " "), strings.Join(doc.Units, " "))
+	}
+	if len(heard.Codes) != len(doc.Codes) {
+		t.Fatalf("%d codes, want %d", len(heard.Codes), len(doc.Codes))
+	}
+	for i := range doc.Codes {
+		if heard.Codes[i] != doc.Codes[i] {
+			t.Fatalf("frame %d: code %d, want %d", i, heard.Codes[i], doc.Codes[i])
+		}
+	}
+	want := doc.Learn
+	small, err := Learn(clips, want.K, int64(want.Seed), want.Iterations, DefaultAnalysis(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for c := range want.Centroids {
+		closeEnough(t, "centroid", small.Centroids[c], want.Centroids[c], 1e-9)
+	}
+	for c := range want.Counts {
+		if small.Counts[c] != want.Counts[c] || small.Runs[c] != want.Runs[c] {
+			t.Errorf("unit %d: %d frames run %g, want %d run %g", c, small.Counts[c], small.Runs[c], want.Counts[c], want.Runs[c])
+		}
+	}
+	closeEnough(t, "mean", small.Mean, want.Mean, 1e-9)
+	closeEnough(t, "inertia", []float64{small.Inertia}, []float64{want.Inertia}, 1e-9)
+	for key, spec := range map[string]parityReplay{"replay": doc.Replay, "polished": doc.Polished} {
+		pcm, err := Synthesize(spec.Units, book, spec.Polish, 1.0, Pitch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pcm)/2 != spec.Samples {
+			t.Fatalf("%s: %d samples, want %d", key, len(pcm)/2, spec.Samples)
+		}
+		for i, w := range spec.Values {
+			got := int(int16(uint16(pcm[2*(spec.At+i)]) | uint16(pcm[2*(spec.At+i)+1])<<8))
+			if d := got - w; d > 2 || d < -2 {
+				t.Fatalf("%s: sample %d is %d, want %d", key, spec.At+i, got, w)
+			}
+		}
+	}
 }

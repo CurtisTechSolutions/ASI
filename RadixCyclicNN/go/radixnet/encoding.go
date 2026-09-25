@@ -66,13 +66,25 @@ const (
 	Phones UnitKind = "phone"
 	// Syllables: one unit is one syllable (K.AE1.T), a # or a pause.
 	Syllables UnitKind = "syllable"
+	// Acoustic: one unit is one *acoustic unit* - a sound learned from audio
+	// (q17) by the phonetic tokenizer's codebook, with nothing written down.  A
+	// recording is heard as a text of units (HearAudio), and that text is what
+	// the graph is built over; as text the units are tokens taken as they come,
+	// like words, and what the model says is spoken through the vocoder.
+	Acoustic UnitKind = "acoustic"
 )
 
 // Valid reports whether k is a unit kind this package knows.
-func (k UnitKind) Valid() bool { return k == Chars || k == Words || k == Phones || k == Syllables }
+func (k UnitKind) Valid() bool {
+	return k == Chars || k == Words || k == Phones || k == Syllables || k == Acoustic
+}
 
 // Phonetic reports whether the units are sounds rather than letters or words.
 func (k UnitKind) Phonetic() bool { return k == Phones || k == Syllables }
+
+// Tokens reports whether the units are whitespace-separated tokens taken as
+// they come (words, acoustic units).
+func (k UnitKind) Tokens() bool { return k == Words || k == Acoustic }
 
 // Word is the unit as an English word: "character", "word", "phone", "syllable".
 func (k UnitKind) Word() string {
@@ -83,6 +95,8 @@ func (k UnitKind) Word() string {
 		return "phone"
 	case Syllables:
 		return "syllable"
+	case Acoustic:
+		return "unit"
 	}
 	return "character"
 }
@@ -136,11 +150,16 @@ func (e Encoding) WithDefaults() Encoding {
 // Validate reports what is wrong with an encoding, if anything.
 func (e Encoding) Validate() error {
 	if !e.Unit.Valid() {
-		return fmt.Errorf("unit must be %q, %q, %q or %q, got %q", Chars, Words, Phones, Syllables, e.Unit)
+		return fmt.Errorf("unit must be %q, %q, %q, %q or %q, got %q", Chars, Words, Phones, Syllables, Acoustic, e.Unit)
 	}
 	if e.Unit.Phonetic() {
 		if _, err := phoneticTokenizer(e.Unit); err != nil {
 			return err // a phonetic unit needs its tokenizer: better refused now than mid-run
+		}
+	}
+	if e.Unit == Acoustic {
+		if _, err := acousticTokenizer(); err != nil {
+			return err // and the acoustic unit its codebook, to hear recordings and be heard
 		}
 	}
 	if e.N < 1 {
@@ -215,8 +234,10 @@ func ParseEncoding(spec string) (Encoding, error) {
 		e.Unit = Phones
 	case "syllable", "syllables", "syl":
 		e.Unit = Syllables
+	case "acoustic", "acoustics", "audio", "unit", "units":
+		e.Unit = Acoustic
 	default:
-		return Encoding{}, fmt.Errorf("encoding %q: unit must be char, word, phone or syllable, got %q", spec, parts[0])
+		return Encoding{}, fmt.Errorf("encoding %q: unit must be char, word, phone, syllable or acoustic, got %q", spec, parts[0])
 	}
 	if len(parts) > 1 && parts[1] != "" {
 		n, err := strconv.Atoi(parts[1])
@@ -291,7 +312,7 @@ func (u Units) At(i int) string { return u.Slice(i, i+1) }
 // a word encoding collapses every run of whitespace to a single space, a
 // character encoding leaves the text exactly as it is.
 func (e Encoding) Units(text string) Units {
-	if e.Unit == Words {
+	if e.Unit.Tokens() {
 		return wordUnits(text)
 	}
 	if e.Unit.Phonetic() {
@@ -337,7 +358,7 @@ func wordUnits(text string) Units {
 
 // Len is the number of units in a text.
 func (e Encoding) Len(text string) int {
-	if e.Unit == Words {
+	if e.Unit.Tokens() {
 		return len(strings.Fields(text))
 	}
 	if e.Unit.Phonetic() {

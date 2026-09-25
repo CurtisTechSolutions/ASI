@@ -54,6 +54,12 @@ pub enum Unit {
     Phones,
     /// One syllable (`K.AE1.T`), a `#` or a pause.
     Syllables,
+    /// One *acoustic unit*: a sound learned from audio (`q17`) by the phonetic
+    /// tokenizer's codebook, with nothing written down.  A recording is heard
+    /// as a text of units (`phonetic::hear_audio`), and that text is what the
+    /// graph is built over; as text the units are tokens taken as they come,
+    /// like words, and what the model says is spoken through the vocoder.
+    Acoustic,
 }
 
 impl Unit {
@@ -64,12 +70,19 @@ impl Unit {
             Unit::Words => "word",
             Unit::Phones => "phone",
             Unit::Syllables => "syllable",
+            Unit::Acoustic => "acoustic",
         }
     }
 
     /// Whether the units are sounds rather than letters or words.
     pub fn phonetic(self) -> bool {
         matches!(self, Unit::Phones | Unit::Syllables)
+    }
+
+    /// Whether the units are whitespace-separated tokens taken as they come
+    /// (words, acoustic units).
+    pub fn tokens(self) -> bool {
+        matches!(self, Unit::Words | Unit::Acoustic)
     }
 
     /// What a model under this unit counts in.
@@ -83,6 +96,7 @@ impl Unit {
             Unit::Words => "words",
             Unit::Phones => "phones",
             Unit::Syllables => "syllables",
+            Unit::Acoustic => "units",
         }
     }
 
@@ -93,6 +107,7 @@ impl Unit {
             "word" | "words" => Some(Unit::Words),
             "phone" | "phones" | "phoneme" | "phonemes" | "sound" | "sounds" => Some(Unit::Phones),
             "syllable" | "syllables" | "syl" => Some(Unit::Syllables),
+            "acoustic" | "acoustics" | "audio" | "unit" | "units" => Some(Unit::Acoustic),
             _ => None,
         }
     }
@@ -140,6 +155,9 @@ impl Encoding {
         if self.unit.phonetic() {
             crate::phonetic::tokenizer(self.unit)?; // a phonetic unit needs its tokenizer: better refused now than mid-run
         }
+        if self.unit == Unit::Acoustic {
+            crate::phonetic::acoustic_tokenizer()?; // and the acoustic unit its codebook, to hear recordings and be heard
+        }
         if self.n < 1 {
             return Err(format!("n must be >= 1, got {}", self.n));
         }
@@ -183,6 +201,7 @@ impl Encoding {
             Unit::Words => "word",
             Unit::Phones => "phone",
             Unit::Syllables => "syllable",
+            Unit::Acoustic => "unit",
         };
         let kind = if self.sliding() { "sliding" } else { "groups" };
         format!("{}-{unit} grams, stride {} ({kind})", self.n, self.stride)
@@ -194,7 +213,7 @@ impl Encoding {
     pub fn units(&self, text: &str) -> Units {
         match self.unit {
             Unit::Chars => Units::chars(text),
-            Unit::Words => Units::words(text),
+            Unit::Words | Unit::Acoustic => Units::words(text),
             // the text read through the tokenizer: a word becomes its sounds, punctuation a
             // pause, the gap between two words a #.  Text that is already sounds passes
             // through unchanged, so a label cuts into the units it was made of.
@@ -206,7 +225,7 @@ impl Encoding {
     pub fn len(&self, text: &str) -> usize {
         match self.unit {
             Unit::Chars => text.chars().count(),
-            Unit::Words => text.split_whitespace().count(),
+            Unit::Words | Unit::Acoustic => text.split_whitespace().count(),
             Unit::Phones | Unit::Syllables => crate::phonetic::text(self.unit, text).split_whitespace().count(),
         }
     }
@@ -409,7 +428,7 @@ pub fn parse_encoding(spec: &str) -> Result<Encoding, String> {
     }
     let unit = Unit::parse(parts[0]).ok_or_else(|| {
         format!(
-            "encoding {spec:?}: unit must be char, word, phone or syllable, got {:?}",
+            "encoding {spec:?}: unit must be char, word, phone, syllable or acoustic, got {:?}",
             parts[0]
         )
     })?;
