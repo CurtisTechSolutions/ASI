@@ -334,6 +334,11 @@ pub type Command = fn(&Ctx) -> Result<(), String>;
 pub const COMMANDS: &[(&str, Command, &str)] = &[
     ("converse", crate::dialogue::cli, "the model converses with itself"),
     (
+        "think",
+        crate::thinking::cli,
+        "the model thinks: one thought from the THINK sentinel, questioning itself where it learned to",
+    ),
+    (
         "talk",
         crate::assistant::cli,
         "talk to the model in today's format: messages in, a reply out, the thinking first, streamed",
@@ -367,7 +372,7 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     (
         "ollama",
         crate::ollama::cli,
-        "a local Ollama LLM: models, a corpus from a prompt, the adversarial review",
+        "a local Ollama LLM: models, a corpus from a prompt, the adversarial review, thoughts",
     ),
     (
         "chatgpt",

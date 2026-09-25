@@ -48,6 +48,10 @@ type LLMOptions struct {
 	JSON        bool          // ask for a JSON answer
 	Temperature float64       // 0 = the provider's own default
 	Timeout     time.Duration // 0 = the client's timeout
+	// Think asks a thinking model for its reasoning (Ollama's think field, ThinkValue): nil leaves the
+	// choice to the model, true / false turn it on / off, "low" | "medium" | "high" ask for that much.
+	// Only Ollama reads it; the reasoning comes back beside the answer from OllamaClient.Complete.
+	Think any
 }
 
 // LLMClient is what the tutor needs of a provider.

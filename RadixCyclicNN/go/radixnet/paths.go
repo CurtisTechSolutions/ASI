@@ -56,16 +56,20 @@ type PathTotals struct {
 
 // RecordPath counts one walk of a whole text, step by step, in its own
 // context.  transitions are the (parent, edge) steps of a single text in
-// order; the context of step k is the parent of step k-1 (START for the first
-// step, which has none).  outcome says what the walk was judged to be -
-// PathCorrect, PathIncorrect or PathUnjudged - and create (default: whenever
-// the walk was judged) decides whether contexts never seen before are added.
+// order; the context of step k is the parent of step k-1 (the sentinel the
+// walk began at for the first step, which has none: START for a text, THINK
+// for a thought).  outcome says what the walk was judged to be - PathCorrect,
+// PathIncorrect or PathUnjudged - and create (default: whenever the walk was
+// judged) decides whether contexts never seen before are added.
 func (g *Graph) RecordPath(transitions []Transition, outcome PathOutcome, create bool) int {
 	if len(transitions) == 0 || (!create && len(g.paths) == 0) {
 		return 0
 	}
 	touched := 0
 	prev := Start
+	if first := transitions[0].P; IsOrigin(first) {
+		prev = first
+	}
 	for i, t := range transitions {
 		if i > 0 {
 			prev = transitions[i-1].P

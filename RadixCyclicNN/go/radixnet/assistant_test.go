@@ -172,19 +172,20 @@ func mustAsk(t *testing.T, text string) *Ask {
 
 func TestAssistantDeltasAndTools(t *testing.T) {
 	enc := DefaultEncoding()
-	got := Deltas(enc, []string{"<s>", "the", "he ", "e c", " ca", "cat", "</s>"}, []int{0, 3, 4, 5, 6, 7, 1}, "the cat")
+	// the ids below First (Start, End, Back, Think) are the sentinels; the first real node is First
+	got := Deltas(enc, []string{"<s>", "the", "he ", "e c", " ca", "cat", "</s>"}, []int{0, 4, 5, 6, 7, 8, 1}, "the cat")
 	if strings.Join(got, "|") != "the| |c|a|t" {
 		t.Fatalf("deltas: %v", got)
 	}
-	got = Deltas(enc, []string{"the", "he ", "e cat"}, []int{3, 4, 5}, "xthe cat")
+	got = Deltas(enc, []string{"the", "he ", "e cat"}, []int{4, 5, 6}, "xthe cat")
 	if strings.Join(got, "|") != "xthe| |cat" {
 		t.Fatalf("a merged node adds its whole tail: %v", got)
 	}
-	if got = Deltas(enc, []string{"the", "he ", "e cat"}, []int{3, 4, 5}, "the ca"); len(got) != 1 {
+	if got = Deltas(enc, []string{"the", "he ", "e cat"}, []int{4, 5, 6}, "the ca"); len(got) != 1 {
 		t.Fatalf("a cut text is one piece: %v", got)
 	}
 	words := Encoding{Unit: Words, N: 2, Stride: 1}
-	got = Deltas(words, []string{"<s>", "the cat", "cat sat", "sat on"}, []int{0, 3, 4, 5}, "the cat sat on")
+	got = Deltas(words, []string{"<s>", "the cat", "cat sat", "sat on"}, []int{0, 4, 5, 6}, "the cat sat on")
 	if strings.Join(got, "|") != "the cat| sat| on" {
 		t.Fatalf("word deltas: %v", got)
 	}

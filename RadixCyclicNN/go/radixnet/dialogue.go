@@ -30,6 +30,8 @@ type Rethink struct {
 	Found    bool   `json:"found"`
 	// Taught is the node it taught to hand over here in future (TeachBack), or -1 when it taught nothing.
 	Taught int `json:"taught"`
+	// Thought is what it thought before backing up (ThinkBack, thinking.go), or nil when it did not think.
+	Thought *Thought `json:"thought"`
 }
 
 // Turn is one utterance of a conversation.
@@ -265,6 +267,11 @@ type ConverseOptions struct {
 	// Learn teaches the model what each rethink found out (TeachBack), so the graph itself learns where it
 	// goes round.  A conversation with this on changes the model.
 	Learn bool
+	// Think has a voice that caught itself repeating think before it backs up (ThinkBack): the thought is
+	// walked from Think, questions itself up to ThinkDepth deep where the model has learned to, and hands
+	// over to Back when it stops.
+	Think      bool
+	ThinkDepth int
 	// Veto is what a voice may not say: true for a candidate the speaker must
 	// not speak.  The conversation knows nothing about why - Filter.Converse
 	// passes its own judgement in (the negative network guarding the positive
@@ -276,7 +283,8 @@ type ConverseOptions struct {
 // DefaultConverseOptions mirror the Python defaults.
 func DefaultConverseOptions() ConverseOptions {
 	return ConverseOptions{Turns: 6, Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1.0, K: 5,
-		Speakers: DefaultSpeakers, AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true}
+		Speakers: DefaultSpeakers, AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true,
+		Think: true, ThinkDepth: ThinkDepth}
 }
 
 func shorter(context string) string {
@@ -337,9 +345,22 @@ func (m *Model) offer(context, mode string, count, beam, maxLength int, stepPena
 // From then on the search itself hands over at that node (Onward), wherever it
 // is walking: the trait is the model's, not the conversation's.
 func (m *Model) TeachBack(text string, at int, found *PathResult, amount float64) int {
+	node, went, instead := m.backing(text, at, found)
+	if node < 0 {
+		return -1 // nothing of its own to mark: the repeat started where the graph could not place it
+	}
+	if _, err := m.G.ObserveBack(node, went, instead, amount); err != nil {
+		return -1
+	}
+	return node
+}
+
+// backing is where a rethink backs up to, and what it teaches: (node, went,
+// instead), node -1 when the graph cannot place it (went / instead -1 when not known).
+func (m *Model) backing(text string, at int, found *PathResult) (int, int, int) {
 	node, _, lead := m.prefixStart(text[:at])
 	if node < First || lead != "" || !m.G.Alive[node] {
-		return -1 // nothing of its own to mark: the repeat started where the graph could not place it
+		return -1, -1, -1
 	}
 	word := text[at:]
 	if i := strings.IndexByte(word, ' '); i >= 0 {
@@ -357,10 +378,50 @@ func (m *Model) TeachBack(text string, at int, found *PathResult, amount float64
 			instead = found.NodeIDs[1]
 		}
 	}
-	if _, err := m.G.ObserveBack(node, went, instead, amount); err != nil {
-		return -1
+	return node, went, instead
+}
+
+// ThinkBack has a voice that caught itself repeating *think* before it backs up (Model.Think).
+//
+// The event is the rethink itself (kind: "stutter" or "repeat"), the node it
+// thinks at is the one it backed up to, and when the thought stops it hands
+// over to Back - the lesson TeachBack used to write directly: the node hands
+// over, the step it was about to loop through gets dearer, the step it took
+// instead cheaper.  With o.Learn off the voice still thinks, and teaches
+// nothing.  nil when the graph cannot place the repeat: nothing of its own to
+// think at.  The search settings are o's; the thought questions itself up to
+// o.ThinkDepth deep.
+func (m *Model) ThinkBack(text string, at int, found *PathResult, kind string, o BacktrackOptions) (*Thought, error) {
+	node, went, instead := m.backing(text, at, found)
+	if node < 0 {
+		return nil, nil
 	}
-	return node
+	t := DefaultThinkOptions()
+	t.At, t.About, t.Trigger, t.Went, t.Instead = node, text, kind, went, instead
+	t.Mode, t.K, t.Beam, t.MaxLength = o.Mode, o.K, o.Beam, o.MaxLength
+	t.StepPenalty, t.Temperature, t.RNG = o.StepPenalty, o.Temperature, o.RNG
+	t.MaxDepth, t.Learn = o.ThinkDepth, o.Learn
+	return m.Think(t)
+}
+
+// teach is what a rethink teaches: a thought that hands over to Back when it stops (o.Think), else Back
+// directly (o.Learn).  Returns the node taught to hand over, or -1.
+func (m *Model) teach(text string, at int, found *PathResult, record *Rethink, o BacktrackOptions) (int, error) {
+	if o.Think {
+		thought, err := m.ThinkBack(text, at, found, record.Kind, o)
+		if err != nil {
+			return -1, err
+		}
+		record.Thought = thought
+		if thought == nil {
+			return -1, nil
+		}
+		return thought.HandedOver, nil
+	}
+	if o.Learn {
+		return m.TeachBack(text, at, found, 1.0), nil
+	}
+	return -1, nil
 }
 
 // BacktrackOptions configure Backtrack.
@@ -383,7 +444,10 @@ type BacktrackOptions struct {
 	// Learn teaches the model what the rethink found out (TeachBack), so the graph itself learns where it
 	// goes round.  A conversation with this on changes the model.
 	Learn bool
-	Veto  func(string) bool
+	// Think has the voice think before it backs up (ThinkBack), ThinkDepth deep (see ConverseOptions.Think).
+	Think      bool
+	ThinkDepth int
+	Veto       func(string) bool
 }
 
 // Backtrack has a voice that caught itself repeating go back to where it would
@@ -451,9 +515,11 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 				continue
 			}
 			record.Found = true
-			if o.Learn {
-				record.Taught = m.TeachBack(text, at, cand, 1.0)
+			taught, err := m.teach(text, at, cand, record, o)
+			if err != nil {
+				return nil, record, err
 			}
+			record.Taught = taught
 			return cand, record, nil
 		}
 		shorter := shorter(cut)
@@ -465,9 +531,12 @@ func (m *Model) Backtrack(text string, o BacktrackOptions) (*PathResult, *Rethin
 		}
 		cut = shorter
 	}
-	if o.Learn {
-		record.Taught = m.TeachBack(text, at, nil, 1.0) // it goes round here even if it found no way out
+	// it goes round here even if it found no way out
+	taught, err := m.teach(text, at, nil, record, o)
+	if err != nil {
+		return nil, record, err
 	}
+	record.Taught = taught
 	return nil, record, nil
 }
 
@@ -578,7 +647,8 @@ func (m *Model) Converse(opening string, opts ConverseOptions) ([]*Turn, error) 
 			Heard: heard, Index: index, Speaker: speakers[index%len(speakers)], Mode: mode,
 			MaxLength: opts.MaxLength, Context: opts.Context, Temperature: opts.Temperature, K: opts.K,
 			Beam: opts.Beam, StepPenalty: opts.StepPenalty, RNG: rng, AvoidRepeats: opts.AvoidRepeats,
-			AvoidWordRepeats: opts.AvoidWordRepeats, Explore: opts.Explore, Learn: opts.Learn, Veto: opts.Veto,
+			AvoidWordRepeats: opts.AvoidWordRepeats, Explore: opts.Explore, Learn: opts.Learn,
+			Think: opts.Think, ThinkDepth: opts.ThinkDepth, Veto: opts.Veto,
 		})
 		if err != nil {
 			return nil, err
@@ -626,6 +696,10 @@ type ReplyOptions struct {
 	Explore int
 	// Learn teaches the model what each rethink found out (see ConverseOptions.Learn).
 	Learn bool
+	// Think has a reply that caught itself repeating think before it backs up, ThinkDepth deep (see
+	// ConverseOptions.Think).
+	Think      bool
+	ThinkDepth int
 	// Veto is what the speaker may not say (see ConverseOptions.Veto).
 	Veto func(string) bool
 	// Trace hears every step of Reply as it is taken, with the events Python's dialogue.Trace sends -
@@ -638,7 +712,7 @@ type ReplyOptions struct {
 // DefaultReplyOptions mirror the Python defaults.
 func DefaultReplyOptions() ReplyOptions {
 	return ReplyOptions{Speaker: "B", Mode: "beam", MaxLength: 60, Context: 12, Temperature: 1, K: 5,
-		AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true}
+		AvoidRepeats: true, AvoidWordRepeats: true, Explore: Explore, Learn: true, Think: true, ThinkDepth: ThinkDepth}
 }
 
 // Reply is what this model says next after previous - one turn, or nil when it
@@ -699,7 +773,8 @@ func (m *Model) Reply(previous string, o ReplyOptions) (*Turn, error) {
 		found, record, err := m.Backtrack(p.caught.FullText, BacktrackOptions{
 			Keep: keep, Added: p.caught.Text, Heard: heard, Explore: o.Explore, Mode: mode, K: o.K, Beam: o.Beam,
 			MaxLength: o.MaxLength, StepPenalty: o.StepPenalty, Temperature: o.Temperature, RNG: o.RNG,
-			AvoidRepeats: o.AvoidRepeats, AvoidWordRepeats: o.AvoidWordRepeats, Learn: o.Learn, Veto: o.Veto,
+			AvoidRepeats: o.AvoidRepeats, AvoidWordRepeats: o.AvoidWordRepeats, Learn: o.Learn,
+			Think: o.Think, ThinkDepth: o.ThinkDepth, Veto: o.Veto,
 		})
 		if err != nil {
 			return nil, false, err

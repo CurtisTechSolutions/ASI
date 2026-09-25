@@ -153,8 +153,8 @@ func TestWrappedGraphRoundTripsThroughItsDocument(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := m.G.ToDoc()
-	if doc.FormatVersion != 3 {
-		t.Fatalf("graph format version %d, want 2", doc.FormatVersion)
+	if doc.FormatVersion != 4 {
+		t.Fatalf("graph format version %d, want 4", doc.FormatVersion)
 	}
 	if doc.Nodes.CountResets == nil || doc.Edges.CountResets == nil {
 		t.Fatal("a wrapped graph must write its reset arrays")

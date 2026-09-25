@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
@@ -78,6 +79,12 @@ func init() {
 	doc("POST", "/api/ollama/review", "adversarial LLM review of the model's samples or {texts}: {count, prefix, "+
 		"max_length, temperature, threshold, context, url, model, timeout, seed, blame (teach the negative network "+
 		"what failed and why)}")
+	route("POST", "/api/ollama/think", rOllamaThink)
+	doc("POST", "/api/ollama/think", "a thinking model thinks about a prompt and the network is taught its thinking "+
+		"as thoughts: {prompt, lines (questions to think about), think: true | false | low | medium | high, "+
+		"temperature, model, url, timeout, save_as, train (teach the thinking as thoughts that begin at the THINK "+
+		"sentinel, and where a thought questions itself), with_answers (train the answers as texts too), questions, "+
+		"epochs} -> {prompt, model, url, think, count, thinking, thoughts: [{question, thinking, answer}], upload, job}")
 }
 
 // criticConfigFrom reads the automatic-teaching settings of a request body.
@@ -279,6 +286,114 @@ func rOllamaCorpus(rq *request) (int, any, error) {
 		return 0, nil, err
 	}
 	job, err := rq.svc.StartTrain(texts, epochs, true)
+	if err != nil {
+		return 0, nil, err
+	}
+	out["job"] = job
+	return 202, out, nil
+}
+
+// rOllamaThink is POST /api/ollama/think: a thinking model thinks about a
+// prompt; its thinking is returned and, with train, taught as thoughts.
+func rOllamaThink(rq *request) (int, any, error) {
+	f := rq.f
+	prompt, err := f.text("prompt", nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return 0, nil, badRequest("'prompt' must not be empty")
+	}
+	lines, _, err := f.integer("lines", 5, intp(1))
+	if err != nil {
+		return 0, nil, err
+	}
+	// missing - or null, which the API reads as missing - asks the model to think; "default" leaves it to the model
+	var level any = true
+	if raw, present := f.lookup("think"); present && raw != nil {
+		if level, err = radixnet.ThinkValue(raw); err != nil {
+			return 0, nil, badRequest("%v", err)
+		}
+	}
+	temperature, _, err := f.number("temperature", 0.7, floatp(0))
+	if err != nil {
+		return 0, nil, err
+	}
+	train, err := f.flag("train", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	withAnswers, err := f.flag("with_answers", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	questions, err := f.flag("questions", true)
+	if err != nil {
+		return 0, nil, err
+	}
+	saveAs, err := f.optText("save_as", "")
+	if err != nil {
+		return 0, nil, err
+	}
+	epochs, _, err := f.integer("epochs", 3, intp(0))
+	if err != nil {
+		return 0, nil, err
+	}
+	client, err := ollamaClientOf(rq)
+	if err != nil {
+		return 0, nil, err
+	}
+	if train {
+		// do not spend an LLM call on a request that cannot start a job
+		if err := rq.svc.ensureIdle(); err != nil {
+			return 0, nil, err
+		}
+		if rq.svc.model.IsNegative() {
+			return 0, nil, badRequest("the negative network judges; it does not think")
+		}
+	}
+	thoughts, err := radixnet.ThoughtsFromPrompt(client, prompt, lines, client.ModelName(), level, temperature)
+	if err != nil {
+		return 0, nil, badGateway(err)
+	}
+	if len(thoughts) == 0 {
+		return 0, nil, badGateway(fmt.Errorf("Ollama model %q wrote no questions to think about", client.ModelName()))
+	}
+	thinking, answers := []string{}, []string{}
+	for _, t := range thoughts {
+		if t.Thinking != "" {
+			thinking = append(thinking, t.Thinking)
+		}
+		if t.Answer != "" {
+			answers = append(answers, t.Answer)
+		}
+	}
+	out := map[string]any{
+		"prompt": prompt, "model": client.ModelName(), "url": client.BaseURL(), "think": level,
+		"count": len(thoughts), "thinking": len(thinking), "thoughts": thoughts, "upload": nil, "job": nil,
+	}
+	if saveAs != "" {
+		text := strings.Join(thinking, "\n")
+		if len(thinking) > 0 {
+			text += "\n"
+		}
+		upload, err := rq.svc.uploads.StoreText(saveAs, text)
+		if err != nil {
+			return 0, nil, err
+		}
+		out["upload"] = upload
+	}
+	if !train {
+		return 200, out, nil
+	}
+	if len(thinking) == 0 {
+		return 0, nil, badGateway(fmt.Errorf("Ollama model %q returned no thinking to train on: use a thinking model "+
+			"(qwen3, deepseek-r1, gpt-oss, ...) on an Ollama that separates it", client.ModelName()))
+	}
+	if !withAnswers {
+		answers = nil
+	}
+	job, err := rq.svc.StartTrainThoughts(thinking, answers, epochs, questions)
 	if err != nil {
 		return 0, nil, err
 	}

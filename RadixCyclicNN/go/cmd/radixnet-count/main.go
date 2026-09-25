@@ -288,10 +288,11 @@ commands:
   weights    show or change the dual frequency weight function
   info       statistics and the training history tail
   converse   the model talks to itself
+  think      the model thinks: one thought from the THINK sentinel, questioning itself where it learned to
   talk       talk to the model in today's format: messages in, a reply out, the thinking first, streamed
   chat       an LLM converses with the model and marks every reply
   tutor      English lessons: Ollama writes the prefix, the model completes it, Ollama marks it
-  ollama     a corpus written to order, and the adversarial review (models | corpus | review)
+  ollama     a corpus written to order, the adversarial review and a thinking model's thoughts (models | corpus | review | think)
   chatgpt    ChatGPT as the teacher / reviewer (models | ask); needs $OPENAI_API_KEY
   serve      HTTP API (+ the prebuilt frontend) speaking the Python server's JSON contract
   mcp        speak MCP on stdin / stdout: the tools and the network itself, for any MCP client
@@ -393,6 +394,8 @@ func main() {
 		cmdInfo(rest)
 	case "converse":
 		cmdConverse(rest)
+	case "think":
+		cmdThink(rest)
 	case "talk":
 		cmdTalk(rest)
 	case "chat":
@@ -1203,6 +1206,8 @@ func cmdConverse(args []string) {
 	allowWordRepeats := fs.Bool("allow-word-repeats", false, "do not skip a reply that repeats its own words")
 	explore := fs.Int("explore", radixnet.Explore, "times a reply that caught itself repeating may back up and look for another way on")
 	noLearn := fs.Bool("no-learn", false, "do not teach the graph where it goes round (leave the model exactly as it was)")
+	noThink := fs.Bool("no-think", false, "do not think before backing up out of a repeat (teach the hand-over directly)")
+	thinkDepth := fs.Int("think-depth", radixnet.ThinkDepth, "how deep a thought may question itself (0: never)")
 	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
 	addGuardFlags(fs)
@@ -1212,6 +1217,7 @@ func cmdConverse(args []string) {
 	opts.Turns, opts.Mode, opts.MaxLength, opts.Context, opts.K, opts.Beam = *turns, *mode, *maxLength, *context, *k, *beam
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
 	opts.AvoidWordRepeats, opts.Explore, opts.Learn = !*allowWordRepeats, *explore, !*noLearn
+	opts.Think, opts.ThinkDepth = !*noThink, *thinkDepth
 	names := []string{}
 	for _, s := range strings.Split(*speakers, ",") {
 		if t := strings.TrimSpace(s); t != "" {
@@ -1262,10 +1268,22 @@ func cmdConverse(args []string) {
 		}
 	}
 	sort.Ints(taught)
+	thoughtAt := []int{}
+	seenThought := map[int]bool{}
+	for _, t := range turnsOut {
+		if t.Rethink == nil || t.Rethink.Thought == nil || t.Rethink.Thought.Taught < 0 {
+			continue
+		}
+		if node := t.Rethink.Thought.Taught; !seenThought[node] {
+			seenThought[node] = true
+			thoughtAt = append(thoughtAt, node)
+		}
+	}
+	sort.Ints(thoughtAt)
 	doc := map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode,
 		"opening": *opening, "kind": "count", "partner_kind": partnerKind, "repeats": saidTwice,
-		"taught": taught, "transcript": radixnet.Transcript(turnsOut), "guard": guard}
-	if len(taught) > 0 && *saveLearned {
+		"taught": taught, "thought_at": thoughtAt, "transcript": radixnet.Transcript(turnsOut), "guard": guard}
+	if (len(taught) > 0 || len(thoughtAt) > 0) && *saveLearned {
 		doc["saved"] = saveModel(m)
 	}
 	if jsonMode {
@@ -1317,6 +1335,9 @@ func cmdConverse(args []string) {
 				thought += fmt.Sprintf("; kept %s, weighed %d path(s), %s", quote(r.Cut), r.Explored, ending)
 			}
 			fmt.Println(thought)
+			if r.Thought != nil {
+				fmt.Printf("    %s\n", radixnet.Summarize(r.Thought))
+			}
 		}
 	}
 	if len(turnsOut) == 0 {
@@ -1325,8 +1346,15 @@ func cmdConverse(args []string) {
 	if guard != nil {
 		printVetoes(verdicts, "replies")
 	}
-	if len(taught) > 0 && !*saveLearned {
-		fmt.Printf("it learned to hand over at %d node(s); --save writes that into the model\n", len(taught))
+	if (len(taught) > 0 || len(thoughtAt) > 0) && !*saveLearned {
+		learned := []string{}
+		if len(taught) > 0 {
+			learned = append(learned, fmt.Sprintf("to hand over at %d node(s)", len(taught)))
+		}
+		if len(thoughtAt) > 0 {
+			learned = append(learned, fmt.Sprintf("to stop and think at %d node(s)", len(thoughtAt)))
+		}
+		fmt.Printf("it learned %s; --save writes that into the model\n", strings.Join(learned, " and "))
 	}
 	if len(saidTwice) > 0 {
 		fmt.Printf("%d utterance(s) the model could only repeat - punish them (2NRL negative phase):\n", len(saidTwice))
@@ -1339,6 +1367,90 @@ func cmdConverse(args []string) {
 }
 
 var _ = filepath.Base
+
+// cmdThink has the model think: one thought from the Think sentinel, in the
+// language of the thoughts it was taught (`ollama think -train`), questioning
+// itself where it has learned to.  -about TEXT thinks at the node where that
+// text ends and teaches the model to stop and think there.
+func cmdThink(args []string) {
+	fs := subFlagSet("think")
+	about := fs.String("about", "", "think at the node where this text ends (and teach the model to stop and think there)")
+	mode := fs.String("mode", "beam", "beam (the most likely thought) | sample (a drawn one)")
+	k := fs.Int("k", 5, "thoughts weighed (beam: the K most likely; a question must say something new)")
+	beam := fs.Int("beam", 0, "beam width (0 = default)")
+	maxLength := fs.Int("max-length", radixnet.ThinkLength, "units a thought may run to")
+	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature")
+	stepPenalty := fs.Float64("step-penalty", 0, "extra cost per edge")
+	depth := fs.Int("depth", radixnet.ThinkDepth, "how deep a thought may question itself (0: never)")
+	questions := fs.Int("questions", radixnet.ThinkQuestions, "questions one thought may ask itself")
+	noLearn := fs.Bool("no-learn", false, "think without teaching the model where it stopped to think")
+	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
+	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
+	_ = fs.Parse(args)
+	m := openModel(true)
+	o := radixnet.DefaultThinkOptions()
+	o.About, o.Mode, o.K, o.Beam, o.MaxLength = *about, *mode, *k, *beam, *maxLength
+	o.Temperature, o.StepPenalty, o.MaxDepth, o.MaxQuestions, o.Learn = *temperature, *stepPenalty, *depth, *questions, !*noLearn
+	if *seeded {
+		s := seedFlag
+		o.Seed = &s
+	}
+	thought, err := m.Think(o)
+	if err != nil {
+		fail("%v", err)
+	}
+	g := m.G
+	learned := []string{}
+	if thought.Taught >= 0 {
+		learned = append(learned, "to stop and think at "+quoteLabel(g, thought.Taught))
+	}
+	if thought.HandedOver >= 0 {
+		learned = append(learned, "to hand over at "+quoteLabel(g, thought.HandedOver))
+	}
+	doc := thought.ToDict()
+	doc["kind"] = m.Kind()
+	doc["saved"] = nil
+	if len(learned) > 0 && *saveLearned {
+		doc["saved"] = saveModel(m)
+	}
+	if jsonMode {
+		emit(doc)
+		return
+	}
+	aboutText := "(nothing in particular)"
+	if *about != "" {
+		aboutText = quote(*about)
+	}
+	at := "-"
+	if thought.At >= 0 {
+		at = quoteLabel(g, thought.At)
+	}
+	fmt.Printf("model           %s\n", modelFile())
+	fmt.Printf("about           %s\n", aboutText)
+	fmt.Printf("at              %s\n", at)
+	fmt.Printf("thoughts known  %d\n", len(g.Children(radixnet.Think)))
+	fmt.Println()
+	sayThought(thought, 0)
+	if thought.Stopped == radixnet.StoppedNothing && thought.Text == "" {
+		fmt.Println()
+		fmt.Println("(it has no thoughts to think with yet: `radixnet-count ollama think -prompt TOPIC -train` teaches it some)")
+	}
+	if saved, ok := doc["saved"].(string); ok && saved != "" {
+		fmt.Println()
+		fmt.Printf("saved %s\n", saved)
+	} else if len(learned) > 0 {
+		fmt.Println()
+		fmt.Printf("it learned %s; --save writes that into the model\n", strings.Join(learned, " and "))
+	}
+}
+
+// sayThought prints a thought and its questions, indented one level per depth.
+func sayThought(thought *radixnet.Thought, depth int) {
+	fmt.Printf("%s%s\n", strings.Repeat("    ", depth), radixnet.Summarize(thought))
+	for _, question := range thought.Questions {
+		sayThought(question, depth+1)
+	}
+}
 
 // cmdTutor runs the automated English lessons: Ollama writes sentence
 // openings, the model completes them with the prediction search, Ollama marks

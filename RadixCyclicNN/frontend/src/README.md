@@ -17,6 +17,7 @@ and Go servers can serve the page with zero npm steps. **Rebuild and recommit
 | `api.js` | the fetch wrapper — JSON, and `{"error": ...}` turned into a thrown error; `talkStream` reads a streamed reply from `/v1/messages` |
 | `sse.js` | server-sent events read out of a byte stream one frame at a time, for the Talk panel (`test/sse.test.mjs`) |
 | `util.js` | parsing and formatting helpers (`fmtInt`, `fmtNum`, `fmtBytes`, `fmtCounter`, `asArray`, `parseInteger`, `splitLines`, …) |
+| `thinking.js` | the THINK sentinel's records read for display: the one-line summary of a thought, the questions in a text, the request bodies of `/api/think` and `/api/ollama/think`, which node ids are sentinels. Pure, and tested by `../test/thinking.test.mjs` |
 | `audio.js` | microphone capture, Web Speech dictation, and WAV encoding for the Speech panel — decodes with the Web Audio API, mixes to mono, resamples to 16 kHz and writes 16-bit PCM, so the server never needs ffmpeg |
 | `styles.css` | all of the styling. Responsive; a single column under 800 px |
 | `components/` | the panels and shared widgets (see its own README) |

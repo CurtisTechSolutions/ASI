@@ -10,6 +10,7 @@ import GeneratePanel from "./components/GeneratePanel.jsx";
 import TalkPanel from "./components/TalkPanel.jsx";
 import ConversePanel from "./components/ConversePanel.jsx";
 import ChatPanel from "./components/ChatPanel.jsx";
+import ThinkPanel from "./components/ThinkPanel.jsx";
 import ScorePanel from "./components/ScorePanel.jsx";
 import TwoNRLPanel from "./components/TwoNRLPanel.jsx";
 import NegativePanel from "./components/NegativePanel.jsx";
@@ -43,6 +44,7 @@ const TABS = [
   { id: "talk", label: "Talk", Component: TalkPanel, route: "/v1/messages" },
   { id: "converse", label: "Converse", Component: ConversePanel, route: "/api/converse" },
   { id: "chat", label: "Chat", Component: ChatPanel, route: "/api/chat/start" },
+  { id: "think", label: "Think", Component: ThinkPanel, route: "/api/think" },
   { id: "score", label: "Score", Component: ScorePanel, model: true },
   { id: "words", label: "Words", Component: WordsPanel, wordOnly: true, model: true },
   { id: "2nrl", label: "2NRL", Component: TwoNRLPanel, model: true },

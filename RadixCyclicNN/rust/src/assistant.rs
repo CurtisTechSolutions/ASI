@@ -1215,6 +1215,8 @@ pub fn respond(
                 avoid_word_repeats: ask.avoid_word_repeats,
                 explore: ask.explore,
                 learn: ask.learn,
+                think: true,
+                think_depth: crate::thinking::THINK_DEPTH,
                 veto: if guarding {
                     Some(&mut veto as &mut crate::dialogue::Veto)
                 } else {
@@ -2586,20 +2588,21 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
+        // the ids below FIRST (START, END, BACK, THINK) are the sentinels; the first real node is FIRST
         assert_eq!(
-            deltas(&enc, &labels, &[0, 3, 4, 5, 6, 7, 1], "the cat"),
+            deltas(&enc, &labels, &[0, 4, 5, 6, 7, 8, 1], "the cat"),
             vec!["the", " ", "c", "a", "t"]
         );
         let labels: Vec<String> = ["the", "he ", "e cat"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(deltas(&enc, &labels, &[3, 4, 5], "xthe cat"), vec!["xthe", " ", "cat"]);
-        assert_eq!(deltas(&enc, &labels, &[3, 4, 5], "the ca"), vec!["the ca"]);
+        assert_eq!(deltas(&enc, &labels, &[4, 5, 6], "xthe cat"), vec!["xthe", " ", "cat"]);
+        assert_eq!(deltas(&enc, &labels, &[4, 5, 6], "the ca"), vec!["the ca"]);
         let words = Encoding::new(Unit::Words, 2, 1).unwrap();
         let labels: Vec<String> = ["<s>", "the cat", "cat sat", "sat on"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         assert_eq!(
-            deltas(&words, &labels, &[0, 3, 4, 5], "the cat sat on"),
+            deltas(&words, &labels, &[0, 4, 5, 6], "the cat sat on"),
             vec!["the cat", " sat", " on"]
         );
     }

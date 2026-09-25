@@ -178,6 +178,11 @@ export const api = {
   /** The model converses with itself (or with the other kind in memory): turns of a dialogue. */
   converse: (body) => post("/api/converse", body),
   /**
+   * The model thinks (see ThinkPanel): one thought from the THINK sentinel, questioning itself where it has
+   * learned to. Body: about, mode, k, beam, max_length, temperature, step_penalty, seed, depth, questions, learn.
+   */
+  think: (body) => post("/api/think", body),
+  /**
    * Today's format (see TalkPanel): a Messages request in, one whole message out - thinking, text and
    * tool_use blocks. `talkStream` is the same request streamed; `models` lists the models in memory.
    */
@@ -248,6 +253,12 @@ export const api = {
   ollamaModels: (url) => get(`/api/ollama/models${url ? `?url=${encodeURIComponent(url)}` : ""}`),
   ollamaCorpus: (body) => post("/api/ollama/corpus", body),
   ollamaReview: (body) => post("/api/ollama/review", body),
+  /**
+   * A thinking model thinks about a prompt: questions, the thinking behind each answer, and - with `train` -
+   * a job teaching that thinking to the network as thoughts. Body: prompt, lines, think, temperature, url,
+   * model, save_as, train, with_answers, questions, epochs, lr, batch_size.
+   */
+  ollamaThink: (body) => post("/api/ollama/think", body),
   /** Images as text (see ImagesPanel): the Stable Diffusion VAE run backwards, quantised and base64-encoded. */
   images: () => get("/api/images"),
   imageEncode: (file, { size, encoder, train, saveAs } = {}) => {

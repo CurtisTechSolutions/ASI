@@ -1166,7 +1166,7 @@ func Respond(m *Model, pair *Filter, ask *Ask, name string, emit func(map[string
 			Heard: heard, Index: earlier + 1, Speaker: "assistant", Mode: ask.Mode, MaxLength: ask.MaxTokens,
 			Context: ask.Context, Temperature: ask.Temperature, K: ask.K, Beam: ask.Beam, StepPenalty: ask.StepPenalty,
 			RNG: rng, AvoidRepeats: ask.AvoidRepeats, AvoidWordRepeats: ask.AvoidWordRepeats, Explore: ask.Explore,
-			Learn: ask.Learn, Veto: veto, Trace: n.trace,
+			Learn: ask.Learn, Think: true, ThinkDepth: ThinkDepth, Veto: veto, Trace: n.trace,
 		})
 		if err != nil {
 			return nil, err

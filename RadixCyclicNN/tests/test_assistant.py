@@ -240,7 +240,7 @@ class TestRespond(unittest.TestCase):
         turn = reply.choices[0].turn
         pieces = [e["text"] for e in seen if e["type"] == "text"]
         self.assertEqual("".join(pieces), turn["text"])
-        real = [label for node, label in zip(turn["node_ids"], turn["labels"]) if node >= 3]
+        real = [label for node, label in zip(turn["node_ids"], turn["labels"]) if node >= A.FIRST]
         if len(real) >= 2:
             self.assertEqual(len(pieces), len(real), (pieces, real))
             # every piece after the first is what its node adds beyond the overlap
@@ -248,14 +248,15 @@ class TestRespond(unittest.TestCase):
 
     def test_deltas(self):
         enc = Encoding()
-        self.assertEqual(A.deltas(enc, ["<s>", "the", "he ", "e c", " ca", "cat", "</s>"], [0, 3, 4, 5, 6, 7, 1], "the cat"), ["the", " ", "c", "a", "t"])
-        self.assertEqual(A.deltas(enc, ["the", "he ", "e cat"], [3, 4, 5], "xthe cat"), ["xthe", " ", "cat"])  # a merged node adds its whole tail
-        self.assertEqual(A.deltas(enc, ["the", "he ", "e cat"], [3, 4, 5], "the ca"), ["the ca"])  # cut short: one piece
-        self.assertEqual(A.deltas(enc, ["the"], [3], "the"), ["the"])
+        # the ids below FIRST (START, END, BACK, THINK) are the sentinels; the first real node is FIRST
+        self.assertEqual(A.deltas(enc, ["<s>", "the", "he ", "e c", " ca", "cat", "</s>"], [0, 4, 5, 6, 7, 8, 1], "the cat"), ["the", " ", "c", "a", "t"])
+        self.assertEqual(A.deltas(enc, ["the", "he ", "e cat"], [4, 5, 6], "xthe cat"), ["xthe", " ", "cat"])  # a merged node adds its whole tail
+        self.assertEqual(A.deltas(enc, ["the", "he ", "e cat"], [4, 5, 6], "the ca"), ["the ca"])  # cut short: one piece
+        self.assertEqual(A.deltas(enc, ["the"], [4], "the"), ["the"])
         self.assertEqual(A.deltas(enc, [], [], ""), [])
         words = Encoding(unit=WORDS, n=2, stride=1)
-        self.assertEqual(A.deltas(words, ["<s>", "the cat", "cat sat", "sat on"], [0, 3, 4, 5], "the cat sat on"), ["the cat", " sat", " on"])
-        self.assertEqual(A.deltas(words, ["the cat", "cat sat"], [3, 4], "sat"), ["sat"])
+        self.assertEqual(A.deltas(words, ["<s>", "the cat", "cat sat", "sat on"], [0, 4, 5, 6], "the cat sat on"), ["the cat", " sat", " on"])
+        self.assertEqual(A.deltas(words, ["the cat", "cat sat"], [4, 5], "sat"), ["sat"])
 
     def test_a_word_model_streams_words(self):
         model = trained(words=True)

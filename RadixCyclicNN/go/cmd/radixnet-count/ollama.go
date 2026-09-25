@@ -16,13 +16,16 @@ import (
 func ollamaUsage() {
 	fmt.Fprint(os.Stderr, `usage: radixnet-count [global options] ollama <action> [options]
 
-Two ways of hooking the network into a local large language model: a corpus written to
-order, and an adversarial review of what the network itself writes.
+Three ways of hooking the network into a local large language model: a corpus written to
+order, an adversarial review of what the network itself writes, and a thinking model's
+thoughts taught to the network as thoughts of its own.
 
 actions:
   models   list the models the endpoint offers (never fails: it answers "is it there?")
   corpus   ask for --lines lines about --prompt (--style good | garbage), optionally training on them
   review   let the LLM mark --count samples (or --text / --data), optionally blaming the failures
+  think    a thinking model thinks about --prompt: --lines questions and the thinking behind each answer;
+           --train teaches the thinking as thoughts that begin at the THINK sentinel
 
 --url and --ollama-model override $OLLAMA_HOST and $RADIXNET_OLLAMA_MODEL.
 `)
@@ -41,10 +44,12 @@ func cmdOllama(args []string) {
 		cmdOllamaCorpus(rest)
 	case "review":
 		cmdOllamaReview(rest)
+	case "think":
+		cmdOllamaThink(rest)
 	case "help", "-h", "--help":
 		ollamaUsage()
 	default:
-		fail("unknown ollama action %q (models, corpus, review)", action)
+		fail("unknown ollama action %q (models, corpus, review, think)", action)
 	}
 }
 
@@ -183,6 +188,133 @@ func cmdOllamaCorpus(args []string) {
 		doc["trained"] = map[string]any{"epochs": len(records), "texts": len(texts), "saved": target}
 		say("")
 		say("trained %d epoch(s) on %d line(s); saved to %s", len(records), len(texts), target)
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+// cmdOllamaThink has Ollama think about a prompt, and the network taught its
+// thinking as thoughts of its own (Model.ThinkOn).
+func cmdOllamaThink(args []string) {
+	fs := flag.NewFlagSet("ollama think", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	prompt := fs.String("prompt", "", "what to think about (required)")
+	lines := fs.Int("lines", 5, "questions to think about")
+	think := fs.String("think", "true", "ask the model to think: true | false | low | medium | high ('' leaves it to the model)")
+	temperature := fs.Float64("temperature", 0.7, "sampling temperature")
+	out := fs.String("out", "", "write the thinking to this file, one thought per line")
+	train := fs.Bool("train", false, "teach the model the thinking as thoughts, then save it")
+	withAnswers := fs.Bool("with-answers", false, "with -train: train the answers as texts too")
+	noQuestions := fs.Bool("no-questions", false, "with -train: do not teach where a thought questions itself")
+	epochs := fs.Int("epochs", 10, "training epochs with -train")
+	fs.Float64("lr", 0.5, "accepted for the Python CLI's sake; the count model has no learning rate")
+	fs.Int("batch-size", 4, "accepted for the Python CLI's sake; the count model has no batches")
+	modelOut := fs.String("model-out", "", "where to save the model with -train (default: --model)")
+	_ = fs.Parse(args)
+
+	if strings.TrimSpace(*prompt) == "" {
+		fail("-prompt is required: say what to think about")
+	}
+	level, err := radixnet.ThinkValue(*think)
+	if err != nil {
+		fail("%v", err)
+	}
+	client, ok := flags.client(radixnet.ProviderOllama).(*radixnet.OllamaClient)
+	if !ok {
+		fail("thinking needs an Ollama client")
+	}
+	levelText := "the model's choice"
+	if level != nil {
+		levelText = fmt.Sprint(level)
+	}
+	say("ollama     %s: %s", client.BaseURL(), client.ModelName())
+	say("prompt     %s", quote(clip(*prompt, 60)))
+	say("questions  %d", *lines)
+	say("think      %s", levelText)
+	thoughts, err := radixnet.ThoughtsFromPrompt(client, *prompt, *lines, client.ModelName(), level, *temperature)
+	if err != nil {
+		fail("%v", err)
+	}
+	if len(thoughts) == 0 {
+		fail("Ollama model %q wrote no questions to think about", client.ModelName())
+	}
+	thinking, answers := []string{}, []string{}
+	for _, t := range thoughts {
+		if t.Thinking != "" {
+			thinking = append(thinking, t.Thinking)
+		}
+		if t.Answer != "" {
+			answers = append(answers, t.Answer)
+		}
+	}
+	say("")
+	for i, entry := range thoughts {
+		say("%3d  %s", i+1, entry.Question)
+		if entry.Thinking != "" {
+			say("     thinking: %s", clip(entry.Thinking, 200))
+		} else {
+			say("     thinking: (none: the model did not think)")
+		}
+		say("     answer:   %s", clip(entry.Answer, 200))
+	}
+	doc := map[string]any{
+		"url": client.BaseURL(), "model": client.ModelName(), "prompt": *prompt, "think": level,
+		"count": len(thoughts), "thinking": len(thinking), "thoughts": thoughts, "out": nil, "trained": nil,
+	}
+	if *out != "" {
+		text := strings.Join(thinking, "\n")
+		if len(thinking) > 0 {
+			text += "\n"
+		}
+		if err := os.WriteFile(*out, []byte(text), 0o644); err != nil {
+			fail("cannot write %s: %v", *out, err)
+		}
+		doc["out"] = *out
+		say("")
+		say("wrote %d thought(s) to %s", len(thinking), *out)
+	}
+	if *train {
+		if len(thinking) == 0 {
+			fail("Ollama model %q returned no thinking to train on: use a thinking model (qwen3, deepseek-r1, "+
+				"gpt-oss, ...) on an Ollama that separates it, or -think true", client.ModelName())
+		}
+		m := openModel(false)
+		if m.IsNegative() {
+			fail("the negative network judges; it does not think (a negative model cannot be taught thoughts)")
+		}
+		target := *modelOut
+		if target == "" {
+			target = modelFile()
+		}
+		say("")
+		say("model      %s", modelFile())
+		say("training   thoughts=%d epochs=%d%s", len(thinking), *epochs, map[bool]string{true: " +answers", false: ""}[*withAnswers])
+		say("output     %s", target)
+		opts := radixnet.TrainOptions{Epochs: *epochs, AutoCompress: true}
+		learned, err := m.ThinkOn(thinking, opts, !*noQuestions, 1.0)
+		if err != nil {
+			fail("%v", err)
+		}
+		answerEpochs := 0
+		if *withAnswers && len(answers) > 0 {
+			records, err := m.Train(answers, opts)
+			if err != nil {
+				fail("%v", err)
+			}
+			answerEpochs = len(records)
+		}
+		if err := m.Save(target); err != nil {
+			fail("cannot save %s: %v", target, err)
+		}
+		doc["trained"] = map[string]any{
+			"out": target, "thoughts": learned.Thoughts, "questions": learned.Questions, "taught": learned.Taught,
+			"epochs": learned.Epochs, "answers": answerEpochs, "saved": target, "stats": m.Stats(),
+		}
+		say("")
+		say("taught %d thought(s) and %d question(s) it asked itself; it now stops to think at %d more node(s)",
+			learned.Thoughts, learned.Questions, learned.Taught)
+		say("saved to %s", target)
 	}
 	if jsonMode {
 		emit(doc)
