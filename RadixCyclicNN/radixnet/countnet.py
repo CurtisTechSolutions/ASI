@@ -1045,7 +1045,7 @@ class CountRewardNet(GraphModel):
         """
         cfg = _resolve_config(config, overrides)
         return self._passes(
-            texts, cfg, count=True, reward=0.0, phase=phase, checkpoint_manager=checkpoint_manager,
+            self._read(texts, cfg), cfg, count=True, reward=0.0, phase=phase, checkpoint_manager=checkpoint_manager,
             progress=progress, stop_event=stop_event, planned=phase is None,  # a phase marks a feedback pass
             origin=origin,
         )

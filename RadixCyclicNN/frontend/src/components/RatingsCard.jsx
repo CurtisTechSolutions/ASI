@@ -42,6 +42,9 @@ export function clampMark(value) {
  * proportion to its mark instead of treating every thumb alike.
  * ``punish`` marks a whole batch thumbs-down without toggling (the Converse
  * and Chat tabs punish the duplicates the model could not avoid that way).
+ * A rating keeps the text the model wrote - that is what feedback trains on -
+ * and may carry ``shown``, the text as the panel showed it: a sample asked
+ * backwards is shown turned back round, and the card lists it that way too.
  */
 export function useRatings() {
   const [ratings, setRatings] = useState([]);
@@ -177,7 +180,9 @@ export default function RatingsCard({
             {ratings.map((r) => (
               <li key={r.text}>
                 <span className={`badge ${r.rating}`}>{r.rating === "up" ? "👍" : "👎"}</span>
-                <code>{clipText(r.text)}</code>
+                <code title={r.shown !== undefined ? "sent to the model backwards, the way it reads" : undefined}>
+                  {clipText(r.shown ?? r.text)}
+                </code>
                 {onMark ? (
                   <label className="mark">
                     <span className="muted">{r.rating === "up" ? "how good" : "how bad"}</span>
@@ -188,7 +193,7 @@ export default function RatingsCard({
                       step={1}
                       value={r.mark ?? DEFAULT_MARK}
                       disabled={running}
-                      aria-label={`mark out of 10 for ${clipText(r.text, 40)}`}
+                      aria-label={`mark out of 10 for ${clipText(r.shown ?? r.text, 40)}`}
                       onChange={(e) => onMark(r.text, e.target.value === "" ? "" : clampMark(e.target.value))}
                     />
                     <span className="muted">/ 10</span>

@@ -70,7 +70,8 @@ D-055 chat with an LLM
 D-058 blame at the right granularity · D-059 any provider, no stored key · D-060 browser and MCP
 
 **Part XII — Metacognition** · D-061 the stutter · D-062 backing up and exploring · D-063 a record, not a mood ·
-D-068 the BACK sentinel: where it goes round, learned · D-081 the stream: turns commit, the window streams apart
+D-068 the BACK sentinel: where it goes round, learned · D-080 the THINK sentinel: a thought is a walk that begins
+there · D-081 the stream: turns commit, the window streams apart
 
 **Part XIII — Counters** · D-064 the odometer
 
@@ -87,12 +88,13 @@ D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 
 **Part XVIII — More ways to search and to train** · D-078 every method off by default, and none draws a random
 number · D-079 a setting's home is decided by who keeps it · D-080 thinking is a fourth sentinel that faces both
-ways, and a thought is a walk that begins there
+ways, and a thought is a walk that begins there · D-084 a model is taught backwards by its run, and asked
+backwards by its caller
 
 **Part XIX — The copy editor** · D-082 a correction is a diff, and the LLM is asked for the smallest one ·
 D-083 the veto can keep its provenance to itself
 
-**Part XX — Today's format** · D-084 the format is a rendering of the search, and the thinking is its trace
+**Part XX — Today's format** · D-085 the format is a rendering of the search, and the thinking is its trace
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -3203,6 +3205,52 @@ encoder card being read-only is history: the encoding is chosen on the New model
 **Lives in** `frontend/src/components/SettingsPanel.jsx`, `frontend/src/components/ModelSettingsPanel.jsx`,
 `frontend/src/hooks/useSiteSettings.jsx`, `frontend/src/settings.js`
 
+### D-084 — A model is taught backwards by its training run, and asked backwards by its caller
+
+**Status** Accepted · 2026-09-25 · **Layer** training, frontend · **Extends** D-078, D-079
+
+**Context** The request: train on a file in reverse, or send the queries in reverse from the frontend. A model of
+this kind learns what *follows*: a text is a chain of grams from START to END, and every search continues a prefix
+along it. A model that has read its texts backwards has learned what *precedes* them instead - but only a query
+turned around the same way meets what it read, and only an answer turned back round reads as text.
+
+**Decision** Both halves, each where it belongs. **Training**: `reverse` is a training setting beside the methods
+of D-078 (`TrainConfig.reverse`, Go `Plan.Reverse`, Rust `Plan.reverse`, `reverse` on `/api/train`, `train
+--reverse`), off by default. Every text of the run is turned around in the encoding's units - code points, or whole
+words - as the first thing the training call does, so a reversed run is exactly a run over the reversed texts: the
+same graph, history, counters and replay block in all three ports, byte for byte, on every kind, the negative
+network included. **Asking**: the servers do not change; the caller turns the query around and the answer back.
+The frontend does it (`frontend/src/backwards.js`) with a *Query backwards* setting the browser keeps (D-079),
+shared by Predict and Generate; a thumbs up or down sends the model's own text, the backwards one, because that is
+what feedback trains on. The spec's §9 is the contract.
+
+**Alternatives rejected**
+* **Also reverse the order of the texts** - the file from its last line to its first. For a model that learns
+  every text on its own, the order only decides what the count model's sliding window remembers; `order` already
+  owns that (D-078), one flag doing two things would be harder to read, and the streaming readers would have to
+  hold the whole corpus to start from its end. With each file as one text, the file *is* read from its end.
+* **Reverse on the frontend only**, turning the typed texts around before they are sent. It cannot reach an
+  uploaded file - files live on the server, and a file is what was asked about.
+* **A backwards model**: a flag saved in the file that makes every route turn its texts around. It would make the
+  model self-describing, but every route that takes a text (predict, generate, score, converse, chat, feedback,
+  2NRL, the negative network's judgements) would have to honour it in three ports, the file format would change,
+  and it would rule out what a per-run setting allows: one graph taught both ways and asked either way.
+* **Characters reversed on a word model.** Its symbols are words; turning their letters around would make every
+  word a new symbol and teach it nothing about the order of words.
+
+**Consequences** A reversed run costs no more memory than a plain one: Go wraps its streaming source
+(`ReversedSource`, which keeps an archive's entries as parts that stream side by side). The replay buffer keeps the
+texts as they were read, so a reversed text is rehearsed reversed. Nothing marks a model as trained backwards, so
+the two halves are paired by the person: the Train tab's note and the Settings card say how. The n-gram's short
+context shows through backwards as it does forwards: from "the lazy dog" a trigram model cannot tell the *the*
+before *lazy* from the one that starts the sentence, and may answer that nothing came before it - the full sentence
+is then among the others the beam returns.
+
+**Lives in** `radixnet/encoding.py` (`Encoding.reverse`), `radixnet/model.py` (`TrainConfig.reverse`,
+`GraphModel._read`), `go/radixnet/training.go` (`Plan.Reverse`, `ReversedSource`), `rust/src/training.rs`
+(`Plan.reverse`, `read`), `frontend/src/backwards.js`, `frontend/src/components/BackwardsField.jsx`,
+`SPEC-SearchAndTraining.md` §9
+
 ---
 
 ### D-080 — Thinking is a fourth sentinel that faces both ways, and a thought is a walk that begins there
@@ -3368,7 +3416,7 @@ server-wide default rather than a flag the negative network carries.
 
 # Part XX — Today's format
 
-### D-084 — Today's format is a rendering of the search, and the thinking is its trace
+### D-085 — Today's format is a rendering of the search, and the thinking is its trace
 
 **Status** Accepted · 2026-09-24 · **Layer** surface · **Beside** D-032, D-055, D-062, D-063, D-068
 

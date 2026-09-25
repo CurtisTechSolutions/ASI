@@ -29,6 +29,11 @@ PLANS = (
     ]),
     ("words", ["--encoding", "word:2:1"], ["--epochs", 3, "--order", "shortest-first", "--curriculum", 0.5,
                                            "--replay-size", 5], []),
+    # read backwards: the buffer keeps the texts as they were read, and a later run rehearses them so
+    ("reverse", [], ["--epochs", 2, "--reverse", "--order", "shortest-first", "--replay-size", 6], [
+        ("second", ["--epochs", 2, "--replay", 0.5]),
+    ]),
+    ("reverse-words", ["--encoding", "word:2:1"], ["--epochs", 2, "--reverse", "--curriculum", 0.5], []),
 )
 
 SAMPLES = (
@@ -108,6 +113,9 @@ class TestRustTrainingPlans(unittest.TestCase):
             self.assertLess(len(a["history"]), 8)
             self.assertNotIn("replay", self.models[(kind, "shuffle")][0])
             self.assertEqual(len(self.models[(kind, "replay-size")][0]["replay"]["texts"]), 7)
+            # backwards: the graph holds the corpus's words spelled from their end
+            labels = "".join(self.models[(kind, "reverse")][0]["graph"]["nodes"]["labels"])
+            self.assertIn("eht", labels)
 
     def test_each_side_continues_the_others_buffer(self):
         pm = os.path.join(tmpdir(), "methods-cross.py.json")
@@ -211,6 +219,7 @@ class TestRustServerMethods(unittest.TestCase):
             ("/api/train", {"texts": ["hello there"], "replay_size": -2}),
             ("/api/train", {"texts": ["hello there"], "patience": -1}),
             ("/api/train", {"texts": ["hello there"], "min_delta": -0.1}),
+            ("/api/train", {"texts": ["hello there"], "reverse": "yes"}),
         ):
             with self.subTest(route=route, body=body):
                 status, data, _ = self.server.post(route, body)

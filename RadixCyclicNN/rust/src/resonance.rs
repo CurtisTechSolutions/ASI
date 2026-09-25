@@ -1335,6 +1335,8 @@ impl Model {
             return Err(format!("a text begins at START or THINK, not at node {origin}"));
         }
         let enc = self.g.enc;
+        let read = crate::training::read(&enc, texts, plan);
+        let texts: &[String] = &read;
         let cleaned: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
         let pass = Pass {
             epochs,

@@ -222,6 +222,14 @@ func DefaultTrainOptions() TrainOptions { return TrainOptions{Epochs: 5, AutoCom
 // Train counts one traversal of every text's path per epoch - or, on the
 // negative network, blames every text: training it *is* blaming (see Blame).
 func (m *Model) Train(texts []string, opts TrainOptions) ([]map[string]any, error) {
+	if opts.Plan.Reverse {
+		enc := m.Encoding()
+		reversed := make([]string, len(texts))
+		for i, t := range texts {
+			reversed[i] = enc.Reverse(t)
+		}
+		texts = reversed
+	}
 	if m.IsNegative() {
 		if opts.Origin != Start {
 			return nil, fmt.Errorf("the negative network judges; it does not think")
@@ -268,6 +276,9 @@ func (m *Model) trainSource(src TextSource, texts []string, opts TrainOptions) (
 // negative network blames what the source holds instead, which needs the texts
 // in memory - a corpus of failures is small by construction.
 func (m *Model) TrainSource(src TextSource, opts TrainOptions) ([]map[string]any, error) {
+	if opts.Plan.Reverse {
+		src = ReversedSource(src, m.Encoding()) // every text backwards, as it streams in
+	}
 	if m.IsNegative() {
 		texts, err := CollectTexts(src)
 		if err != nil {

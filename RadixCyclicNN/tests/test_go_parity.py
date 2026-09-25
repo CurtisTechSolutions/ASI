@@ -1825,6 +1825,11 @@ class TestGoSearchAndTraining(unittest.TestCase):
         ]),
         ("words", ["--encoding", "word:2:1"], ["--epochs", 3, "--order", "shortest-first", "--curriculum", 0.5,
                                                "--replay-size", 5], []),
+        # read backwards: the buffer keeps the texts as they were read, and a later run rehearses them so
+        ("reverse", [], ["--epochs", 2, "--reverse", "--order", "shortest-first", "--replay-size", 6], [
+            ("second", ["--epochs", 2, "--replay", 0.5]),
+        ]),
+        ("reverse-words", ["--encoding", "word:2:1"], ["--epochs", 2, "--reverse", "--curriculum", 0.5], []),
     )
 
     @classmethod
@@ -1869,6 +1874,8 @@ class TestGoSearchAndTraining(unittest.TestCase):
                 self.assertEqual(list(a)[-1] == "replay", list(b)[-1] == "replay")
         a = load_json(self.models["patience"][0])
         self.assertTrue(a["history"][-1].get("early_stop"))
+        # backwards: the graph holds the corpus's words spelled from their end
+        self.assertIn("eht", "".join(load_json(self.models["reverse"][0])["graph"]["nodes"]["labels"]))
         self.assertEqual(len(load_json(self.models["rehearsal"][1])["replay"]["texts"]), 4)
 
     def test_the_same_searches(self):

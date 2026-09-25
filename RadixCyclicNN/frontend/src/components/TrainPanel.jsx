@@ -2,7 +2,17 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
+import {
+  asArray,
+  countingKind,
+  fmtInt,
+  fmtNum,
+  jobIsRunning,
+  parseInteger,
+  parseNumber,
+  splitLines,
+  unitName,
+} from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import LineChart from "./LineChart.jsx";
@@ -32,12 +42,16 @@ function multiplierSeries(points, key, base, name, color) {
  *
  * How the run walks its texts - the order, the curriculum, the rehearsal of
  * the model's replay buffer and the early stop - is a site-wide setting
- * (`useSiteSettings`), shown here and on the Settings tab.
+ * (`useSiteSettings`), shown here and on the Settings tab. How it *reads* them
+ * is this panel's own, beside the files: each file as one text, and every text
+ * backwards (`reverse`, ../../SPEC-SearchAndTraining.md section 9), which every
+ * kind honours - a model trained so is asked with Query backwards.
  */
 export default function TrainPanel({ status }) {
   const [text, setText] = useStoredState("train.text", "");
   const [files, setFiles] = useState([]);
   const [wholeFile, setWholeFile] = useStoredState("train.wholeFile", false);
+  const [reverse, setReverse] = useStoredState("train.reverse", false);
   const [epochs, setEpochs] = useStoredState("train.epochs", "5");
   const [lr, setLr] = useStoredState("train.lr", "0.05");
   const [actLr, setActLr] = useStoredState("train.actLr", "0.005");
@@ -180,6 +194,8 @@ export default function TrainPanel({ status }) {
         ...(scheduled && reverseSchedule ? { reverse_schedule: true } : {}),
         batch_size: parseInteger(batchSize, 256),
         auto_compress: autoCompress,
+        // every kind reads its texts backwards on request - the negative network blames them so
+        ...(reverse ? { reverse: true } : {}),
         ...(negativeKind ? {} : training.body()),
       }),
     );
@@ -251,6 +267,21 @@ export default function TrainPanel({ status }) {
           onChange={setWholeFile}
           disabled={running || files.length === 0}
         />
+        <CheckField
+          label="Read every text backwards"
+          hint={`from its last ${unitName(status, false)} to its first, the files and the texts above alike`}
+          checked={reverse}
+          onChange={setReverse}
+          disabled={running}
+        />
+        {reverse ? (
+          <p className="muted">
+            The model learns every text from its end to its start, so what it learns to continue is what came{" "}
+            <b>before</b>. Ask it with <b>Query backwards</b> on Predict and Generate: you type the end of a text and
+            read what precedes it, the right way round.
+            {wholeFile && files.length > 0 ? " With each file as one text, a file is read from its end to its start." : ""}
+          </p>
+        ) : null}
         <div className="row">
           <NumberField label="Epochs" value={epochs} onChange={setEpochs} min={1} step={1} disabled={running} />
           <NumberField

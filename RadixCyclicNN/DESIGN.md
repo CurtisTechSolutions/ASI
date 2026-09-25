@@ -511,6 +511,8 @@ class TrainConfig:
     lr_schedule: str | None = None      # graph function of the epoch for lr (section 18); None = constant
     act_lr_schedule: str | None = None  # same for act_lr; may use `lr`, the epoch's learning rate
     reverse_schedule: bool = False      # play the schedules backwards: the last epoch's rates first
+    order, curriculum, replay, replay_size, patience, min_delta   # how a run walks its texts (SPEC-SearchAndTraining.md)
+    reverse: bool = False               # read every text backwards, in the encoding's units (the spec's section 9)
     def rates(self) -> list[tuple[float, float]]   # (lr, act_lr) of every epoch; validate() evaluates them all
 
 class RadixNet:
@@ -777,8 +779,8 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 
 * `StatusBar.jsx` — polls `/api/status` every 2s: nodes, edges, trigrams, compression ratio, inverted flag, backend/device, job state + latest progress.
 * `TrainPanel.jsx` — textarea (one text per line), epochs, lr, start / stop; live epoch table (loss, perplexity, nodes, compression).
-* `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice.
-* `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`).
+* `PredictPanel.jsx` — prefix, length, mode (dijkstra / beam / sample; the count model's dijkstra is the beam search), K / beam width for beam, to-end, step penalty; shows continuation (prefix + highlighted continuation), cost, probability, path chips with per-step costs, and the top-K / bottom-K tables of a beam prediction (both models). A Like button (on the result and on every top / bottom row) rewards that text: `POST /api/feedback {good: [prefix + continuation]}` through the shared `useJob("feedback")` hook, i.e. `reward()` - a positive-phase pass for RadixNet, a traversal plus reward for the count model; the button shows the liked state and cannot reward the same text twice. With **Query backwards** on (`BackwardsField.jsx`, for a model trained backwards) the prefix is sent turned around in the model's units (`src/backwards.js`) and every answer shown turned back round - what the model says came before, highlighted, then the prefix - while a Like still rewards the model's own, backwards, text.
+* `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`). With **Query backwards** on, the prefix is sent turned around - every text then *ends* with it - and every sample is shown turned back round; a rating keeps the model's own text (what feedback trains on) and carries `shown`, which the ratings card lists.
 * `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Learn where it goes round" (`learn`), "Think before backing up" (`think`) with its "Think depth" (`think_depth`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked. "Stream" (on by default) runs `POST /api/converse/stream` instead (`api.converseStream`, section 22.1): every `turn` event is appended the moment it is spoken, and while a voice speaks a `LiveTurn` sits at the top of the list - the draft it caught itself on with what it backed out of struck through and the way on it found underlined, its meta line saying what it is doing (`applyEvent` in `src/stream.js` folds the events into that state; `LineParser` there cuts the chunks into lines, both with tests in `test/stream.test.mjs`). A committed turn keeps the draft it caught itself on in its meta line. A server without the route answers 404 and the panel falls back to `POST /api/converse`.
 * `ThinkPanel.jsx` — **Think** (section 36): one thought per press - "About" (think at the node where a text ends, and with "Learn where it thinks" teach the model to stop and think there), mode (beam / sample), K, max length, depth, questions, and temperature / seed for sample - through `POST /api/think`; the thoughts are listed newest first, each a `ThoughtView`: its summary, the thought, the trigger, the node, how it stopped, what it triggered, what it taught, its cost and the path from `<think>` as chips, with the questions it asked itself nested one level deeper each. A model taught no thoughts says so and points at the Ollama tab's thinking cards.
 * `ThoughtView.jsx` + `src/thinking.js` — the thought records read for display: `ThoughtView` (a thought in full, recursive over its questions) and `ThoughtLine` (the 💭 line under a Converse or Chat turn whose rethink thought before backing up); `thinking.js` holds the pure helpers - `summarizeThought` (radixnet.thinking.summarize's wording), `questionsIn` / `questionRuns` (radixnet.thinking.questions_in, to mark the questions in an LLM's thinking), the request builders for `/api/think` and `/api/ollama/think`, `isSentinel` (node ids 0-3) - tested with `node --test` in `test/thinking.test.mjs`.
@@ -787,11 +789,12 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
-* `SettingsPanel.jsx` — **Settings** (section 31.4): the site-wide settings of this browser, what every search and every run starts from. Four cards: the **traversal** (`TraversalFields.jsx`), **sampling and diversity** (`SearchFields.jsx`), **how a run walks its texts** (`TrainingPlanFields.jsx`) - each with a button back to its defaults - and **this browser** (how many settings are remembered, and a two-click button that forgets them all).
+* `SettingsPanel.jsx` — **Settings** (section 31.4): the site-wide settings of this browser, what every search and every run starts from. Five cards: the **traversal** (`TraversalFields.jsx`), **sampling and diversity** (`SearchFields.jsx`), **how a run walks its texts** (`TrainingPlanFields.jsx`) - each with a button back to its defaults - **backwards** (`BackwardsField.jsx`: whether Predict and Generate ask the model backwards), and **this browser** (how many settings are remembered, and a two-click button that forgets them all).
 * `ModelSettingsPanel.jsx` — **Model settings** (section 31.4): what belongs to the model and is saved with it. Four cards: **this model** (kind, encoding, size, file, and the replay buffer from `/api/status` `replay`), a **new model** in any kind and encoding (`POST /api/reset {kind, encoding, seed}`, two clicks, the encoding checked before it is sent), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), and the **encoder / decoder** (`GET /api/encoding` for the unit, the n, the stride, the overlap and the four sentinels, each with what it means - asked again whenever the model changes - and `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the grams the model has never seen marked and a label longer than one gram shown as the merged chain it is).
 * `TraversalFields.jsx` — the traversal and its two scales, reading and writing the shared setting, so the Settings, Predict and Generate tabs show one control in three places; `compact` drops the explanation for the action tabs.
 * `SearchFields.jsx` — the sampling filters (top-K, top-p, min-p) and the beam's diversity (`SPEC-SearchAndTraining.md` sections 1-2), over the shared `useSiteSettings().search`. Given the `mode` the search will really run in, the compact version shows only what that mode reads - the filters for `sample`, the diversity for `beam`, nothing for the exact searches - and an out-of-range value as an error the tab refuses to send.
 * `TrainingPlanFields.jsx` — the order, the curriculum, the replay and the early stop (sections 3-6), over `useSiteSettings().training`; on the Train tab it previews how many texts each epoch walks and how many buffered texts it rehearses, and says what the model's buffer holds.
+* `BackwardsField.jsx` — **Query backwards** (`SPEC-SearchAndTraining.md` section 9), over the shared `useSiteSettings().backwards`: for a model trained with the Train tab's *Read every text backwards* (`reverse` on `/api/train`), Predict and Generate turn the query around before it is sent and the answer back when it comes (`src/backwards.js`, pure, tested by `test/backwards.test.mjs`); nothing about it is sent. `compact` is the line the action tabs show.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any). The sentinels are drawn gold - START and END always, BACK and THINK once they are among the most visited nodes.
 * `ScorePanel.jsx` — score a text.
 * `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
@@ -825,12 +828,13 @@ browserStorage()                       // localStorage probed once with a real w
 ```
 
 The settings that belong to the **site** rather than to a panel - the traversal and its two scales, the sampling
-filters and the beam's diversity, and how a run walks its texts - are the exception, and they are why
-`src/hooks/useSiteSettings.jsx` exists: `SiteSettingsProvider` holds them once at the top of `App.jsx` (persisted
-with `useStoredState` under `site.search.*` and `site.train.*`; the traversal keeps its `network.*` names through
-`useNetworkSettings.jsx`, which the site provider wraps) and every panel reads them through `useSiteSettings()` -
-`{network, search, training}`, each group with its values, their problems, whether any is on, `set`, `reset` and
-`body`, the request fields. The rules themselves - ranges, what a mode reads, what a body carries - are pure
+filters and the beam's diversity, how a run walks its texts, and whether a query is asked backwards - are the
+exception, and they are why `src/hooks/useSiteSettings.jsx` exists: `SiteSettingsProvider` holds them once at the
+top of `App.jsx` (persisted with `useStoredState` under `site.search.*`, `site.train.*` and `site.query.backwards`;
+the traversal keeps its `network.*` names through `useNetworkSettings.jsx`, which the site provider wraps) and every
+panel reads them through `useSiteSettings()` - `{network, search, training, backwards}`, each group with its values,
+their problems, whether any is on, `set`, `reset` and `body`, the request fields (`backwards` is `{on, set}`: it is
+never sent, it turns the query and the answer around). The rules themselves - ranges, what a mode reads, what a body carries - are pure
 functions in `src/settings.js`, tested by `test/settings.test.mjs`. Two panels cannot share a `useStoredState`
 name - they would share the stored value but not the state, and every panel here stays mounted while hidden, so
 they would drift apart within a session - so a shared setting has to live in one place with several doors into it.
@@ -3459,13 +3463,14 @@ setting**.
 
 | tab | what it holds | kept by |
 |---|---|---|
-| **Settings** (`SettingsPanel.jsx`) | the traversal and its scales; the sampling filters and the diversity; the order, the curriculum, the replay and the early stop; the browser's own store | this browser (`useSiteSettings`, section 13.1) - never saved with a model, the same whichever model is loaded |
+| **Settings** (`SettingsPanel.jsx`) | the traversal and its scales; the sampling filters and the diversity; whether a query is asked backwards; the order, the curriculum, the replay and the early stop; the browser's own store | this browser (`useSiteSettings`, section 13.1) - never saved with a model, the same whichever model is loaded |
 | **Model settings** (`ModelSettingsPanel.jsx`) | this model (kind, encoding, size, replay buffer); a new model in any kind and encoding; the score function; the encoder / decoder | the model - saved in its file, gone when another model is loaded |
 
 | card | what it sets | how |
 |---|---|---|
 | **Traversal** | the traversal every search runs, and its penalty / merit scales | `TraversalFields.jsx` over the shared store, here in full and on the Predict and Generate tabs in its `compact` form |
 | **Sampling and diversity** | `top_k`, `top_p`, `min_p`, `diversity` | `SearchFields.jsx`; Predict and Generate show only what their mode reads and send only what is on (`searchBody`) |
+| **Backwards** | whether Predict and Generate ask the model backwards | `BackwardsField.jsx`; never sent - the query is turned around before it goes and the answer when it comes back (`src/backwards.js`). Its training half, `reverse`, is the Train tab's own *Read every text backwards* box beside the files |
 | **How a run walks its texts** | `order`, `curriculum`, `replay`, `replay_size`, `patience`, `min_delta` | `TrainingPlanFields.jsx`; the Train tab shows the same fields with a preview of the curriculum and the rehearsal, and sends only what is on (`trainingBody`) |
 | **This model** | nothing: it reports | `/api/status` - the kind, the encoding, the size, the file and `replay` (`{size, texts, seen}` or null, all three servers) |
 | **New model** | a fresh model | `POST /api/reset {kind, encoding, seed}` - two clicks, since it replaces the model of that kind in memory; the encoding presets and the three dials by hand, checked (`encodingSpec`) before anything is sent |
@@ -3772,19 +3777,32 @@ phase - 2NRL, a thumbs up or down, the agent's punishment - is not planned: a pu
 **Where it runs.** Python: every kind that learns by walking a list of texts (count, sine, resonant). Go: the count
 model (the only one it has); a streaming source is read into memory when a plan needs the whole list. Rust: every
 kind, byte for byte with Python. CLI: `--top-k --top-p --min-p --diversity` on `predict` / `generate`, `--order
---curriculum --replay --replay-size --patience --min-delta` on `train`. HTTP: the same names on `/api/predict`,
-`/api/generate` and `/api/train` on all three servers, with the same 400s, and `/api/status` reports the buffer.
-Frontend: the Settings tab and the controls it shares with Predict, Generate and Train (section 31.4).
+--curriculum --replay --replay-size --patience --min-delta --reverse` on `train`. HTTP: the same names on
+`/api/predict`, `/api/generate` and `/api/train` on all three servers, with the same 400s, and `/api/status` reports
+the buffer. Frontend: the Settings tab and the controls it shares with Predict, Generate and Train (section 31.4).
+
+**Reading backwards** (`reverse`, the spec's section 9, D-084) is the first thing a training call does: every text
+is turned around in the encoding's units (`Encoding.reverse` - code points, or whole words with single spaces), so
+the rest of the run - the short texts dropped, the plan, the structure pass, the counters, the replay buffer - sees
+the reversed texts, and a reversed run is byte for byte a run over the reversed texts. It is not a plan in the
+sense above - the order of the texts is `order`'s - and it streams: Go wraps its source (`ReversedSource`, keeping
+an archive's entries as parts), so a reversed run needs no list in memory. Every kind honours it, the negative
+network (whose training is blaming) included; the feedback routes do not take it. Python applies it in each kind's
+`train` (`GraphModel._read`), Go in `Train` and `TrainSource`, Rust in the three trainers the plan reaches (the count
+model's passes, `radix_train`, `resonant_train`) and in `kinds::train` for the negative network. Asking a model
+trained so is the caller's half: the frontend turns the query and the answer around (`src/backwards.js`).
 
 **Fixed on the way.** The lead of a prefix (the unmatched rest of the located gram) was measured in characters where
 `length` is in units - a word model asked for three words got three minus the lead's *characters*; the resonant
 model's score counted `chars` in characters and its `trained_chars` too. All count units now, in every port.
 
 Tests: `tests/test_search_training.py` (the rules, pinned keys, every kind's planned training, the phase rule, the
-HTTP API and the CLI), `tests/test_rust_parity_methods.py` (Rust against Python on six plans in three kinds - graph,
-history and replay block byte for byte - the filters and the diverse beam, and the server),
-`tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`, `go/radixnet/sampling_test.go`,
-the `training`, `search` and `beam` unit tests in Rust, and `frontend/test/settings.test.mjs`.
+HTTP API and the CLI; reading backwards on every kind and both units, an upload trained on backwards over HTTP and a
+file with `train --reverse`), `tests/test_rust_parity_methods.py` (Rust against Python on eight plans in three kinds,
+two of them backwards - graph, history and replay block byte for byte - the filters and the diverse beam, and the
+server), `tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`,
+`go/radixnet/sampling_test.go`, `go/server/server_test.go`, the `training`, `search`, `beam` and `cli` unit tests
+and `tests/server.rs` in Rust, and `frontend/test/settings.test.mjs` and `frontend/test/backwards.test.mjs`.
 
 ## 36. Thinking (`radixnet/thinking.py`, `go/radixnet/thinking.go`, `rust/src/thinking.rs`) — the `THINK` sentinel at work
 

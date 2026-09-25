@@ -831,6 +831,57 @@ fn todays_format_answers_in_both_dialects_and_streams() {
     assert!(headers.contains("application/json"), "{headers}");
 }
 
+/// `reverse` reads every text of a run backwards - the inline texts and the
+/// uploads alike - so the model learns what comes before: its continuation of
+/// a text's end, read backwards, is the whole text.  Anything but a boolean is
+/// refused, as the Python and Go servers refuse it.
+#[test]
+fn a_reversed_run_learns_what_comes_before() {
+    let dir = temp_dir("reverse");
+    let empty = Model::new(0, GraphOptions::default()).expect("a model");
+    let port = serve(empty, &format!("{dir}/model.count.json"));
+
+    let (status, error) = post(port, "/api/train", r#"{"texts":["the cat sat"],"reverse":"yes"}"#);
+    assert_eq!(status, 400);
+    assert!(error
+        .at("error")
+        .as_str()
+        .unwrap_or("")
+        .contains("'reverse' must be a boolean"));
+
+    let (status, _) = post(
+        port,
+        "/api/uploads",
+        r#"{"name":"fox.txt","content":"quick brown fox\n"}"#,
+    );
+    assert_eq!(status, 200);
+    let (status, _) = post(
+        port,
+        "/api/train",
+        r#"{"texts":["lazy dog sleeps"],"files":["fox.txt"],"reverse":true,"epochs":2}"#,
+    );
+    assert_eq!(status, 202);
+    for _ in 0..200 {
+        if get(port, "/api/job").1.at("state").as_str() != Some("running") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(get(port, "/api/job").1.at("state").as_str(), Some("done"));
+
+    let enc = Encoding::default();
+    for (end, whole) in [("fox", "quick brown fox"), ("sleeps", "lazy dog sleeps")] {
+        let body = format!(
+            r#"{{"prefix":"{}","length":1,"to_end":true,"guard":false}}"#,
+            enc.reverse(end)
+        );
+        let (status, found) = post(port, "/api/predict", &body);
+        assert_eq!(status, 200, "{found:?}");
+        let full = found.at("full_text").as_str().unwrap_or("").to_string();
+        assert_eq!(enc.reverse(&full), whole, "backwards from {end:?}");
+    }
+}
+
 /// The uploads route streams its body to disk rather than reading it whole,
 /// so an archive is not held to the cap the JSON routes keep - the old 16 MiB
 /// limit, which one source tree passes at once (D-035).  Multipart, a raw
