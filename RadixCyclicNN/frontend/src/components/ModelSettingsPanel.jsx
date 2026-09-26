@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { asArray, fmtInt, jobIsRunning, parseInteger, parseNumber, unitName } from "../util.js";
-import { ENCODING_PRESETS, describeEncoding, encodingSpec, replayLine } from "../settings.js";
+import { describeEncoding, ENCODING_PRESETS, encodingSpec, replayLine, soundUnit, UNITS, unitWord } from "../settings.js";
 import Alert from "./Alert.jsx";
 import AttentionBandCard from "./AttentionBandCard.jsx";
 import { NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -232,8 +232,7 @@ function EncodingCard({ status }) {
   const unknown = new Set(asArray(preview && preview.unknown_windows));
   const path = preview && preview.path;
   const labels = asArray(path && path.labels);
-  const word = info && info.unit === "word";
-  const units = (count) => (word ? (count === 1 ? "word" : "words") : count === 1 ? "character" : "characters");
+  const units = (count) => unitWord(info ? info.unit : "char", count !== 1);
   const n = info ? info.ngram ?? info.window : null;
 
   return (
@@ -485,10 +484,8 @@ function NewModelCard({ status, onStatus }) {
             label="Unit"
             value={unit}
             onChange={setUnit}
-            options={[
-              ["char", "characters"],
-              ["word", "words"],
-            ]}
+            options={UNITS}
+            hint={soundUnit(unit) ? "read through the phonetic tokenizer: the server needs PhoneticTokenizer beside it" : undefined}
             disabled={busy || jobRunning}
           />
           <NumberField label="n" hint="units per gram" value={n} onChange={setN} min={1} step={1} disabled={busy || jobRunning} />

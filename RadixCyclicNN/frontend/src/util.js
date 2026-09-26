@@ -110,21 +110,29 @@ export function countingKind(status) {
  * model is a number that will be read wrong (../../SPEC-WordNGrams.md section 9).
  */
 export function unitsOf(status) {
-  return status && status.units === "words" ? "words" : "chars";
+  const units = status && status.units;
+  return units === "words" || units === "phones" || units === "syllables" || units === "units" ? units : "chars";
 }
 
-/** True when the active model's symbols are words rather than characters. */
+/** True when the active model's symbols are tokens set apart by spaces - words, sounds or acoustic units - rather than characters. */
 export function wordKind(status) {
-  return unitsOf(status) === "words";
+  return unitsOf(status) !== "chars";
 }
 
-/** The model's unit as an English word: "characters" / "words" (`plural: false` for the singular). */
+const UNIT_NAMES = Object.freeze({
+  chars: ["character", "characters"],
+  words: ["word", "words"],
+  phones: ["phone", "phones"],
+  syllables: ["syllable", "syllables"],
+  units: ["acoustic unit", "acoustic units"],
+});
+
+/** The model's unit as an English word: "characters" / "words" / "phones" / "syllables" / "acoustic units" (`plural: false` for the singular). */
 export function unitName(status, plural = true) {
-  if (wordKind(status)) return plural ? "words" : "word";
-  return plural ? "characters" : "character";
+  return UNIT_NAMES[unitsOf(status)][plural ? 1 : 0];
 }
 
-/** How long a text is in the model's units: its words, or its characters. */
+/** How long a text is in the model's units: its space-separated tokens, or its characters. */
 export function unitLength(text, status) {
   const value = String(text ?? "");
   return wordKind(status) ? (value.match(/\S+/g) || []).length : value.length;

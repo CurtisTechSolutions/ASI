@@ -68,7 +68,7 @@ func addGlobalFlags(fs *flag.FlagSet) {
 	fs.StringVar(&memLimit, "memlimit", memLimit, "soft memory limit, e.g. 2GiB (default: 80% of the container / machine memory; \"off\" to let the heap grow freely)")
 	fs.StringVar(&outPath, "out", outPath, "where to save the model (default: --model)")
 	fs.StringVar(&encSpec, "encoding", encSpec, "encoding of a NEW model, unit[:n[:stride]] (default char:3:1); also trigram | bigram | word-bigram | word-trigram")
-	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word | phone | syllable (default char)")
+	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word | phone | syllable | acoustic (default char)")
 	fs.IntVar(&ngramFlag, "ngram", ngramFlag, "units per gram of a NEW model: the n of the n-gram (default 3)")
 	fs.IntVar(&strideFlag, "stride", strideFlag, "units between consecutive grams of a NEW model: 1 = sliding window, n = groups of n (default 1)")
 }
