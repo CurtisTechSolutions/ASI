@@ -422,6 +422,12 @@ impl LlmClient for OllamaClient {
         Ok(self.complete(prompt, o)?.response)
     }
 
+    /// The answer and the thinking beside it ([`OllamaClient::complete`]).
+    fn complete_thinking(&self, prompt: &str, o: &LlmOptions) -> Result<(String, String), LlmError> {
+        let got = self.complete(prompt, o)?;
+        Ok((got.response, got.thinking))
+    }
+
     /// One chat turn (`POST /api/chat`): the assistant's text.
     fn chat(&self, messages: &[Json], o: &LlmOptions) -> Result<String, LlmError> {
         let message = self.chat_message(messages, o, &[])?;

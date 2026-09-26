@@ -432,6 +432,145 @@ class TestRustCorrectionParity(unittest.TestCase):
         self.assertIn("--strength", b["error"])
 
 
+class TestRustWindowParity(unittest.TestCase):
+    """The dynamic window (../SPEC-DynamicWindow.md) against the Rust port: the same nodes halved at the same grams
+    on every kind, the same chains held apart and regrown, by hand and at the end of every epoch - the same file."""
+
+    TEXTS = [
+        "the quick brown fox jumps over the lazy dog while the cat sat on the mat and the bird sang in the tree all afternoon",
+        "the quick brown fox jumps over the lazy dog while the cat ran to the door",
+        "a bird sang in the tree all afternoon",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.corpus = os.path.join(tmpdir(), "window_corpus.txt")
+        with open(cls.corpus, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(cls.TEXTS) + "\n")
+
+    def strip(self, doc):
+        return compact({k: v for k, v in doc["graph"].items() if k != "version"})
+
+    def test_the_same_steps_on_every_kind(self):
+        for kind in ("count", "radix", "resonant"):
+            with self.subTest(kind=kind):
+                py_path = os.path.join(tmpdir(), f"window_py.{kind}.json")
+                rs_path = os.path.join(tmpdir(), f"window_rs.{kind}.json")
+                for path in (py_path, rs_path):
+                    if os.path.exists(path):
+                        os.remove(path)
+                py("--kind", kind, "--seed", 1, "train", "--data", self.corpus, "--epochs", 1, "--backend", "python",
+                   model=py_path)
+                rust("--kind", kind, "--seed", 1, "train", "--data", self.corpus, "--epochs", 1, model=rs_path)
+                a = py("window", "--on", "--manual", model=py_path)
+                b = rust("window", "--on", "--manual", model=rs_path)
+                self.assertEqual(a["window"], b["window"])
+                self.assertEqual(a["changed"], b["changed"])
+                self.assertEqual(a["window"]["heavy"], 8.0 if kind == "radix" else None)
+                a = py("window", "--step", 4, model=py_path)
+                b = rust("window", "--step", 4, model=rs_path)
+                self.assertEqual(a["step"], b["step"])
+                self.assertEqual((a["step"]["sizes"], a["step"]["to"]), ([32, 16, 8, 4], 32))
+                self.assertGreater(a["step"]["splits"], 0)
+                self.assertEqual(self.strip(load_json(py_path)), self.strip(load_json(rs_path)))
+                self.assertEqual(list(load_json(rs_path)["graph"])[:3], ["format", "format_version", "dynamic_window"])
+                a = py("window", "--step", model=py_path)  # back at the top: what stayed unary merges back
+                b = rust("window", "--step", model=rs_path)
+                self.assertEqual(a["step"], b["step"])
+                self.assertGreater(a["step"]["merges"], 0)
+                self.assertEqual(rust("window", model=py_path)["window"], py("window", model=rs_path)["window"])
+                py("window", "--auto", model=py_path)
+                rust("window", "--auto", model=rs_path)
+                a = py("train", "--data", self.corpus, "--epochs", 5, "--backend", "python", model=py_path)
+                b = rust("train", "--data", self.corpus, "--epochs", 5, model=rs_path)
+                self.assertEqual([r["window"] for r in a["records"]], [16, 8, 4, 32, 16])
+                for x, y in zip(a["records"], b["records"]):
+                    self.assertEqual((x["window"], x["splits"], x["merges"], x["nodes"]), (y["window"], y["splits"], y["merges"], y["nodes"]))
+                a_doc, b_doc = load_json(py_path), load_json(rs_path)
+                self.assertEqual(self.strip(a_doc), self.strip(b_doc))
+                # the same records, key for key - the loss to 1e-9, as the methods suite holds it: the two sides
+                # add the transitions' costs in a different order
+                for x, y in zip(a_doc["history"][-5:], b_doc["history"][-5:]):
+                    self.assertEqual(list(x), list(y))
+                    for key in ("epoch", "window", "splits", "merges", "nodes", "edges", "trigrams", "transitions"):
+                        self.assertEqual(x[key], y[key], key)
+                    self.assertLessEqual(abs(x["loss"] - y["loss"]), 1e-9)
+                self.assertEqual(py("info", model=py_path)["stats"]["dynamic_window"], rust("info", model=rs_path)["stats"]["dynamic_window"])
+                a = py("window", "--off", model=py_path)
+                b = rust("window", "--off", model=rs_path)
+                self.assertEqual((a["window"], a["changed"]), (b["window"], b["changed"]))
+                self.assertNotIn("dynamic_window", load_json(rs_path)["graph"])
+
+    def test_the_cli_refuses_the_same_way(self):
+        py_path = os.path.join(tmpdir(), "window_refuse_py.count.json")
+        rs_path = os.path.join(tmpdir(), "window_refuse_rs.count.json")
+        for path, run in ((py_path, py), (rs_path, rust)):
+            if not os.path.exists(path):
+                run("--seed", 1, "train", "--data", self.corpus, "--epochs", 1, model=path)
+        for argv in (("window", "--top", 20), ("window", "--size", 4, "--floor", 8), ("window", "--step"),
+                     ("window", "--off", "--top", 16), ("window", "--auto", "--manual"), ("window", "--step", 0, "--on")):
+            with self.subTest(argv=argv):
+                a = py(*argv, model=py_path, expect=1)
+                b = rust(*argv, model=rs_path, expect=1)
+                self.assertEqual(a["error"].replace("radixnet: error: ", ""), b["error"].replace("radixnet: ", ""))
+
+
+class TestRustWindowRoutes(unittest.TestCase):
+    """The dynamic window's three routes, Rust's `radixnet serve` against Python's server: the same documents."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.test_api import start_server
+
+        cls.rs = serve(cls, os.path.join(tmpdir(), "routes_window.count.json"))
+        cls.py_client, _server, _service = start_server(
+            cls.addClassCleanup, model_path=os.path.join(tmpdir(), "routes_window_py", "model.json")
+        )
+
+    def both(self, method, path, body=None):
+        py_answer = self.py_client.get(path) if method == "GET" else self.py_client.post(path, body or {})
+        rs_answer = self.rs.get(path) if method == "GET" else self.rs.post(path, body or {})
+        return py_answer[:2], rs_answer[:2]
+
+    def test_the_same_window_through_both_servers(self):
+        from tests.test_api import wait_for_job
+
+        for client in (self.py_client, self.rs):
+            self.assertEqual(client.post("/api/model/select", {"kind": "count"})[0], 200)
+        (ps, pd), (rs_, rd) = self.both("GET", "/api/model/window")
+        self.assertEqual((ps, rs_), (200, 200))
+        self.assertEqual(pd, rd)
+        texts = TestRustWindowParity.TEXTS
+        (ps, _pd), (rs_, _rd) = self.both("POST", "/api/train", {"texts": texts, "epochs": 1})
+        self.assertEqual((ps, rs_), (202, 202))
+        wait_for_job(self.py_client)
+        self.rs.wait_job()
+        for body in ({"on": True}, {"size": 16, "auto": False}, {"top": 64, "floor": 8}):
+            with self.subTest(body=body):
+                (ps, pd), (rs_, rd) = self.both("POST", "/api/model/window", body)
+                self.assertEqual((ps, rs_), (200, 200), (pd, rd))
+                self.assertEqual((pd["kind"], pd["window"]), (rd["kind"], rd["window"]))
+                self.assertEqual(pd["stats"]["dynamic_window"], rd["stats"]["dynamic_window"])
+        (ps, pd), (rs_, rd) = self.both("POST", "/api/model/window/step", {"steps": 3})
+        self.assertEqual((ps, rs_), (200, 200), (pd, rd))
+        self.assertEqual((pd["step"], pd["window"]), (rd["step"], rd["window"]))
+        self.assertGreater(pd["step"]["splits"], 0)
+        self.assertEqual(pd["stats"]["nodes"], rd["stats"]["nodes"])
+        self.assertEqual(self.both("GET", "/api/model")[0][1]["dynamic_window"], self.both("GET", "/api/model")[1][1]["dynamic_window"])
+        for body in ({"top": 12}, {"size": 3}, {"on": "yes"}):
+            with self.subTest(refused=body):
+                (ps, pd), (rs_, rd) = self.both("POST", "/api/model/window", body)
+                self.assertEqual((ps, rs_), (400, 400))
+        (ps, pd), (rs_, rd) = self.both("POST", "/api/model/window/step", {"steps": 0})
+        self.assertEqual((ps, rs_), (400, 400))
+        (ps, pd), (rs_, rd) = self.both("POST", "/api/model/window", {"on": False})
+        self.assertEqual((ps, rs_), (200, 200))
+        self.assertEqual(pd["window"], rd["window"])
+        (ps, pd), (rs_, rd) = self.both("POST", "/api/model/window/step", {})
+        self.assertEqual((ps, rs_), (400, 400))
+        self.assertEqual(pd["error"], rd["error"])
+
+
 class TestRustAttentionRoutes(unittest.TestCase):
     """The attention band's three routes, Rust's `radixnet serve` against Python's server: the same documents."""
 

@@ -91,6 +91,7 @@ pub const SWITCHES: &[&str] = &[
     "allow-private",
     "allow-repeats",
     "allow-word-repeats",
+    "auto",
     "blame",
     "browser",
     "correct",
@@ -99,8 +100,10 @@ pub const SWITCHES: &[&str] = &[
     "json",
     "json-answer",
     "learn",
+    "learn-thinking",
     "lenient",
     "listen-back",
+    "manual",
     "no-adapt",
     "no-avoid",
     "no-blame",
@@ -116,12 +119,15 @@ pub const SWITCHES: &[&str] = &[
     "no-model",
     "no-network-isolation",
     "no-provenance",
+    "no-questions",
     "no-ratio",
     "no-replay",
     "no-solve",
     "no-teach",
     "no-teach-answer",
     "no-teach-partner",
+    "no-think",
+    "no-think-questions",
     "no-to-end",
     "no-waveform",
     "normalise",
@@ -148,11 +154,13 @@ pub const SWITCHES: &[&str] = &[
     "train",
     "verbose",
     "whole-file",
+    "with-answers",
 ];
 
 /// Flags whose value may be left out, with what a bare one means (Python's
-/// `nargs="?"` and `const`): `--plan` alone plans the default three lessons.
-pub const OPTIONAL_VALUES: &[(&str, &str)] = &[("plan", "3")];
+/// `nargs="?"` and `const`): `--plan` alone plans the default three lessons,
+/// `--step` alone takes one step of the dynamic window.
+pub const OPTIONAL_VALUES: &[(&str, &str)] = &[("plan", "3"), ("step", "1")];
 
 /// Splits a command line into the command and its flags.
 pub fn parse_args(argv: &[String]) -> Result<(String, Args), String> {
@@ -367,6 +375,11 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
         "attention",
         crate::attention::cli,
         "the attention band: where inside a gram a correction's blame and credit land",
+    ),
+    (
+        "window",
+        crate::window::cli,
+        "the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up",
     ),
     (
         "evolve",
@@ -620,6 +633,44 @@ mod tests {
         let (_, args) = parse_args(&argv(&["train", "--reverse", "--data", "corpus.txt"])).unwrap();
         assert!(args.on("reverse"));
         assert_eq!(args.get("data"), Some("corpus.txt"));
+    }
+
+    #[test]
+    fn the_thinking_switches_take_no_value() {
+        // a switch that took a value would swallow the flag after it: --no-think would read "--think-depth"
+        let (_, args) = parse_args(&argv(&["converse", "--no-think", "--think-depth", "0"])).unwrap();
+        assert!(args.on("no-think"));
+        assert_eq!(args.get("think-depth"), Some("0"));
+        let (_, args) = parse_args(&argv(&[
+            "ollama",
+            "think",
+            "--with-answers",
+            "--no-questions",
+            "--prompt",
+            "the sea",
+        ]))
+        .unwrap();
+        assert!(args.on("with-answers") && args.on("no-questions"));
+        assert_eq!((args.action(), args.get("prompt")), ("think", Some("the sea")));
+        let (_, args) = parse_args(&argv(&[
+            "tutor",
+            "--learn-thinking",
+            "--no-think-questions",
+            "--think",
+            "high",
+        ]))
+        .unwrap();
+        assert!(args.on("learn-thinking") && args.on("no-think-questions"));
+        assert_eq!(args.get("think"), Some("high"));
+        for switch in [
+            "learn-thinking",
+            "no-questions",
+            "no-think",
+            "no-think-questions",
+            "with-answers",
+        ] {
+            assert!(SWITCHES.contains(&switch), "{switch} is not a switch");
+        }
     }
 
     #[test]

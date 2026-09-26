@@ -44,6 +44,12 @@ fn read_attention(doc: &Json) -> Result<crate::attention::AttentionBand, String>
     }
 }
 
+/// The dynamic window a graph document carries: off unless a `dynamic_window`
+/// block says otherwise - a file without one was written with the window off.
+fn read_window(doc: &Json) -> Result<crate::window::DynamicWindow, String> {
+    crate::window::DynamicWindow::from_json(doc.get("dynamic_window")).map_err(|e| format!("graph {e}"))
+}
+
 /// The encoding a graph document carries.
 ///
 /// A document without an `encoding` block is the character trigram of stride 1,
@@ -295,7 +301,7 @@ impl Graph {
             }
             (false, other) => other,
         };
-        if self.enc.is_default() && !self.attention.is_on() {
+        if self.enc.is_default() && !self.attention.is_on() && !self.dynamic_window.is_on() {
             return graph; // an ordinary file is byte for byte what it always was
         }
         let mut pairs = match graph {
@@ -322,6 +328,11 @@ impl Graph {
         if let Some(blur) = self.attention.blur {
             // the attention band right after it, only while it is on - where Python writes it
             pairs.insert(at, ("attention".to_string(), Json::obj([("blur", Json::Num(blur))])));
+            at += 1;
+        }
+        if let Some(block) = self.dynamic_window.to_json() {
+            // the dynamic window after the band, likewise only while it is on
+            pairs.insert(at, ("dynamic_window".to_string(), block));
         }
         Json::Obj(pairs)
     }
@@ -408,6 +419,7 @@ impl Graph {
         };
         g.inverted = doc.at("inverted").as_bool().unwrap_or(false);
         g.attention = read_attention(doc)?;
+        g.dynamic_window = read_window(doc)?;
 
         // the three sentinels are already there; the rest of the file's nodes follow
         let counts = nodes.at("count").to_i64s();

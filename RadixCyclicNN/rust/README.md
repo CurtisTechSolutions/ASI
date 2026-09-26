@@ -49,6 +49,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/blame.rs`, `src/diff.rs` | where the negative network's data comes from - verdicts turned into faults - and the unit diff that blames only what a teacher changed |
 | `src/correct.rs` | `Model::correct` and `radixnet correct`: teach one correction, only what changed moves |
 | `src/attention.rs` | the attention band and `radixnet attention`: where inside a gram a correction lands, the charges shared out as Python shares them (`../SPEC-AttentionBand.md`) |
+| `src/window.rs` | the dynamic window and `radixnet window`: the ladder of node sizes halving from 32 to 4 and back up, every node longer than the window halved at the same gram Python halves it, with the same heavy connection - the sine model's weight, the phase model's through-traffic - and the same file (`../SPEC-DynamicWindow.md`) |
 | `src/dialogue.rs` | the model converses with itself: skipping what was heard, backing out of a repeat, and teaching the graph where it goes round; `converse --stream` and `POST /api/converse/stream` watch it happen, the turns as they are spoken and the backing up between them (a `Stream`, the same events as Python and Go); `reply` hears a `trace` |
 | `src/assistant.rs` | today's format: messages in, an assistant message out - the search's trace as the thinking, the text one node of the walk at a time - in OpenAI's and Anthropic's dialects, `radixnet talk`, `/v1/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` |
 | `src/counter.rs` | the cyclic counters, wrapping at `10^15` |
@@ -71,7 +72,7 @@ written out is TLS: an `https://` request goes through the system's `curl`
 | `src/ollama.rs`, `src/chatgpt.rs` | the two providers: `radixnet ollama models\|corpus\|review`, `radixnet chatgpt models\|ask`, `/api/ollama/*`, `/api/chatgpt/models` |
 | `src/review.rs` | a corpus from a prompt, the adversarial review and the conversation marking, with Python's prompts byte for byte |
 | `src/critic.rs` | the Negative tab's automatic loop: the model writes, an LLM reviews, the failures blame - `radixnet negative auto`, `/api/negative/auto` |
-| `src/tutor.rs`, `src/tutor/{trainer,serve}.rs`, `src/plan.rs` | the English tutor: exercises, marks, rewards weighted by the mark, the auto run and the lesson plan - `radixnet tutor`, `/api/tutor/*` |
+| `src/tutor.rs`, `src/tutor/{trainer,serve}.rs`, `src/plan.rs` | the English tutor: exercises, marks, rewards weighted by the mark, the marker's thinking taught as thoughts, the auto run and the lesson plan - `radixnet tutor`, `/api/tutor/*` |
 | `src/chat.rs` | an LLM converses with the model and marks every reply - `radixnet chat`, `/api/chat/*` |
 | `src/calc.rs`, `src/web.rs` | the calculator (Python's grammar, whitelist and error texts) and browsing (a client that refuses anything but a public page, every redirect hop re-checked) |
 | `src/tools.rs`, `src/toolbox.rs`, `src/toolbox/sandbox.rs` | the tool registry and the `<tool>` text format, the built-in tools, and the Python sandbox programs run in - `radixnet tools`, `/api/tools/*` |

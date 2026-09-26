@@ -135,6 +135,7 @@ class CountRewardGraph(RadixCyclicGraph):
     """
 
     SMOOTHING = 0.5
+    learns_weights = False  # a weight is the dual frequency function of the counts: recompute_weights writes it
 
     def __init__(
         self,
@@ -567,6 +568,13 @@ class CountRewardGraph(RadixCyclicGraph):
         self._ctx_cache.clear()
         return a_id, b_id
 
+    def split_window(self, size: int) -> int:
+        """Halve what is longer than the window, then give every bridge its weight: the node's whole count."""
+        splits = super().split_window(size)
+        if splits:
+            self.recompute_weights()
+        return splits
+
     def merge_child(self, p: int) -> bool:
         """Merge, then follow the contexts: the chain was unary, so what it knew was never a choice.
 
@@ -992,6 +1000,7 @@ class CountRewardNet(GraphModel):
             loss = self._mean_cost(transitions)
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
             pending_merges = 0
+            stepped = self._window_epoch()  # the dynamic window's step, after the compression it rides on
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             epoch = meta_add(meta, "epochs_total", 1)
             record = {
@@ -1003,6 +1012,7 @@ class CountRewardNet(GraphModel):
                 "trigrams": graph.num_trigrams(),
                 "compression_ratio": graph.compression_ratio(),
                 "merges": merges,
+                **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
                 "transitions": len(transitions),
                 "seconds": time.perf_counter() - t0,
                 "skipped_short": skipped_short,
@@ -1436,6 +1446,7 @@ class CountRewardNet(GraphModel):
             "stride": self.encoding.stride,
             "attention_blur": g.attention.blur,
             "compression_ratio": g.compression_ratio(),
+            "dynamic_window": g.dynamic_window.size,
             "inverted": g.inverted,
             "backend": self.backend.name,
             "device": self.backend.device,

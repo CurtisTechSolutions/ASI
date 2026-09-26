@@ -846,6 +846,11 @@ func (m *Model) blamePass(texts []string, o BlameOptions, blame bool, weight flo
 			merges += g.Compress()
 		}
 		pendingMerges = 0
+		// the dynamic window's step, after the compression it rides on: a blame pass is a training pass
+		var stepped *WindowStep
+		if blame {
+			stepped = m.windowEpoch()
+		}
 		g.CarryCounters(false) // the epoch is over: wrap whatever reached the limit
 		record := map[string]any{
 			"epoch": m.metaAddInt("epochs_total", 1), "loss": loss,
@@ -866,6 +871,9 @@ func (m *Model) blamePass(texts []string, o BlameOptions, blame bool, weight flo
 			"reason":            reasonOrNil(blame, reason),
 			"severity":          severityOrNil(blame, amount),
 			"source":            sourceOrNil(o.Source),
+		}
+		if stepped != nil {
+			record["splits"], record["window"] = stepped.Splits, stepped.From
 		}
 		m.History = append(m.History, record)
 		records = append(records, record)
@@ -1376,6 +1384,7 @@ func (m *Model) negativeStats(lastLoss any) map[string]any {
 		"ngram":                   g.Enc.N,
 		"stride":                  g.Enc.Stride,
 		"attention_blur":          g.Attention.BlurOrNil(),
+		"dynamic_window":          g.DynamicWindow.SizeOrNil(),
 		"compression_ratio":       g.CompressionRatio(),
 		"inverted":                g.Inverted,
 		"backend":                 "go",

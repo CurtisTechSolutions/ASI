@@ -432,6 +432,37 @@ that decide two games are alike are the objects the network reads.**
 
 ---
 
+## The radix graph
+
+### 30. A dynamic window over the nodes — halve down a binary ladder, grow back at the top
+> Implement a dynamic window that is sized in the binary number system. It starts
+> at 32, then moves to 16, then 8, then maybe 4. This algorithm will split nodes
+> into two parts and assign the same weights and data for traversal as well as a
+> heavy connection for the two halves. This process happens manually or
+> automatically. Then we size up the windows back to 32 and do this process again.
+
+Radix compression only coarsens: every unary chain becomes one node, and a merged
+node is a corridor - entered at its first gram, left at its last, nothing to learn
+inside and nowhere to branch. The window makes the structure **breathe**. It is a
+ceiling on a node's length that walks a ladder of powers of two - 32, 16, 8, 4 -
+and back to the top; one step merges what fits, halves every node that is longer
+into two halves that carry the **same state, activation and count**, joined by a
+**heavy connection** (the node's whole count, and in the sine model a weight of
+8, so the cut is invisible to traversal the moment it is made), and moves the
+window. Going down, the halves can learn apart; back at the top, what nothing
+branched into is consolidated by the same lossy merge compression always was.
+It steps by itself at the end of every training epoch, or by hand.
+
+Built, node for node, in all three ports. A node `ABCD` becomes `AB` and `CD`
+under an encoding whose grams do not overlap; under the sliding trigram it is
+`ABC -> BCD` merged and comes apart into those, sharing the pivot `BC` - a half is
+never shorter than one gram, because a gram lives in exactly one node.
+
+*Where:* `RadixCyclicNN/SPEC-DynamicWindow.md`, `RadixCyclicNN/DECISIONS.md`
+D-087 · **held** — what the cycle buys is not measured (its Q-20)
+
+---
+
 ## What to test next
 
 Ordered by how much they would change, per unit of effort:
@@ -442,3 +473,4 @@ Ordered by how much they would change, per unit of effort:
 3. **Does the population actually specialise?** (2) GTMNN rests on the congestion game doing what it claims; `gini` and `diversity` are instrumented from the first commit so it can be falsified early.
 4. **NCD against mechanic Jaccard.** (11) Where a feature-free similarity disagrees with the mechanic one, the vocabulary is blind — the only automatic check on the part of GREN hardest to verify.
 5. **`universal_fraction`.** (18) The share of micros that are game-blind and transfer everywhere. Nothing predicts it; whether evolution finds a stable value is the sharpest test of whether GREN and GTMNN compose.
+6. **Does the cycle buy anything?** (30) A model cycled 32 → 16 → 8 → 4 → 32 over the same corpus as one left alone, compared on loss, on the branch points its halves grew and on what it predicts. Cheap to run: `radixnet window --on`, then the same `train`. It also decides whether the top should merge the halves back at all.

@@ -830,6 +830,7 @@ fn model_info(svc: &Arc<Service>, _r: &Request) -> Answer {
         ("in_memory", Json::strs(svc.in_memory())),
         ("weights", weights),
         ("attention", svc.with_model(|m| m.attention_config())),
+        ("dynamic_window", svc.with_model(|m| m.window_config())),
         ("engine", Json::str(ENGINE)),
     ]))
 }
@@ -952,6 +953,65 @@ fn attention_preview(svc: &Arc<Service>, r: &Request) -> Answer {
             pairs.extend(rest);
         }
         Ok(Json::Obj(pairs))
+    })?;
+    Ok(out)
+}
+
+/// A whole-number body field that may be absent or null (then `None`).
+fn optional_int(r: &Request, key: &str) -> Result<Option<i64>, ApiError> {
+    match r.body.get(key) {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::Int(n)) => Ok(Some(*n)),
+        Some(Json::Num(x)) if x.fract() == 0.0 => Ok(Some(*x as i64)),
+        Some(_) => Err(ApiError::bad_request(format!("'{key}' must be an integer"))),
+    }
+}
+
+/// `GET /api/model/window`: the running model's dynamic window - the ladder of
+/// node sizes and where it stands ([`crate::window`]).
+fn window(svc: &Arc<Service>, _r: &Request) -> Answer {
+    Ok(svc.with_model(|m| Json::obj([("kind", Json::str(m.kind())), ("window", m.window_config())])))
+}
+
+/// `POST /api/model/window`: the window on (at the ladder given) or off; a
+/// size that is not a power of two, or off the ladder, is refused.
+fn window_set(svc: &Arc<Service>, r: &Request) -> Answer {
+    svc.ensure_idle()?;
+    let (on, auto) = (optional_flag(r, "on")?, optional_flag(r, "auto")?);
+    let (top, floor, size) = (
+        optional_int(r, "top")?,
+        optional_int(r, "floor")?,
+        optional_int(r, "size")?,
+    );
+    let out = svc.with_model(|m| -> Result<Json, String> {
+        let config = m.configure_window(on, top, floor, size, auto)?;
+        Ok(Json::obj([
+            ("kind", Json::str(m.kind())),
+            ("window", config),
+            ("stats", stats(m)),
+        ]))
+    })?;
+    Ok(out)
+}
+
+/// `POST /api/model/window/step`: the window stepped by hand - each step
+/// merges what fits, halves what is longer and moves the window.
+fn window_step(svc: &Arc<Service>, r: &Request) -> Answer {
+    svc.ensure_idle()?;
+    let steps = match optional_int(r, "steps")? {
+        None => 1,
+        Some(n) if n >= 1 => n as usize,
+        Some(n) => return Err(ApiError::bad_request(format!("'steps' must be >= 1 (got {n})"))),
+    };
+    let out = svc.with_model(|m| -> Result<Json, String> {
+        let done = m.window_step(steps, true)?;
+        let window = m.window_config();
+        Ok(Json::obj([
+            ("kind", Json::str(m.kind())),
+            ("step", done.to_json(window.clone())),
+            ("window", window),
+            ("stats", stats(m)),
+        ]))
     })?;
     Ok(out)
 }
@@ -2005,6 +2065,9 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("GET", "/api/model/attention", attention);
     server.route("POST", "/api/model/attention", attention_set);
     server.route("POST", "/api/model/attention/preview", attention_preview);
+    server.route("GET", "/api/model/window", window);
+    server.route("POST", "/api/model/window", window_set);
+    server.route("POST", "/api/model/window/step", window_step);
     server.route("POST", "/api/predict", predict);
     server.route("POST", "/api/generate", generate);
     server.route("POST", "/api/score", score);

@@ -291,6 +291,7 @@ commands:
   bench      how fast this build counts and predicts
   weights    show or change the dual frequency weight function
   attention  the attention band: where inside a gram a correction's blame and credit land (--blur, --off, --wrong/--right)
+  window     the dynamic window: a ladder of node sizes halving from 32 to 4 and back up (--on, --top, --floor, --size, --auto/--manual, --step N, --off)
   info       statistics and the training history tail
   converse   the model talks to itself
   think      the model thinks: one thought from the THINK sentinel, questioning itself where it learned to
@@ -399,6 +400,8 @@ func main() {
 		cmdWeights(rest)
 	case "attention":
 		cmdAttention(rest)
+	case "window":
+		cmdWindow(rest)
 	case "info":
 		cmdInfo(rest)
 	case "converse":
@@ -1373,6 +1376,110 @@ func cmdAttention(args []string) {
 	}
 }
 
+// cmdWindow shows the dynamic window, sets its ladder, switches it on or off,
+// or steps it by hand (radixnet/window.py, window.go).
+func cmdWindow(args []string) {
+	fs := subFlagSet("window")
+	on := fs.Bool("on", false, "switch the window on (at the ladder it had, else 32 down to 4, standing at the top)")
+	off := fs.Bool("off", false, "switch the window off: compression is unbounded again, the graph stays as it is")
+	top := fs.Int("top", 0, "the largest window, a power of two (default 32); switches it on")
+	floor := fs.Int("floor", 0, "the smallest window before it goes back to the top, a power of two (default 4)")
+	size := fs.Int("size", 0, "where on the ladder the window stands now")
+	auto := fs.Bool("auto", false, "step at the end of every training epoch (the default)")
+	manual := fs.Bool("manual", false, "step only when --step asks")
+	step := fs.Int("step", 0, "take N steps: merge what fits, halve what is longer, move the window")
+	dryRun := fs.Bool("dry-run", false, "change the window in memory only; nothing is saved")
+	_ = fs.Parse(args)
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	settings := *on || *auto || *manual || set["top"] || set["floor"] || set["size"]
+	if *on && *off {
+		fail("--on and --off contradict each other")
+	}
+	if *off && settings {
+		fail("--off takes no other setting: switching the window off is all it does")
+	}
+	if *off && set["step"] {
+		fail("--off and --step contradict each other: a step needs the window on")
+	}
+	if *auto && *manual {
+		fail("--auto and --manual contradict each other")
+	}
+	m := openModel(true)
+	changed := map[string]any{}
+	var stepped *radixnet.WindowStep
+	saved := ""
+	if settings || *off {
+		onArg := true
+		if *off {
+			onArg = false
+		}
+		var topArg, floorArg, sizeArg *int
+		var autoArg *bool
+		if set["top"] {
+			topArg = top
+		}
+		if set["floor"] {
+			floorArg = floor
+		}
+		if set["size"] {
+			sizeArg = size
+		}
+		if *auto || *manual {
+			value := *auto
+			autoArg = &value
+		}
+		if _, err := m.ConfigureWindow(&onArg, topArg, floorArg, sizeArg, autoArg); err != nil {
+			fail("%v", err)
+		}
+		if w := m.G.DynamicWindow; w.On {
+			changed = map[string]any{"top": w.Top, "floor": w.Floor, "size": w.Size, "auto": w.Auto}
+		} else {
+			changed = map[string]any{"on": false}
+		}
+	}
+	if set["step"] {
+		done, err := m.WindowStep(*step, true)
+		if err != nil {
+			fail("%v", err)
+		}
+		stepped = done
+	}
+	if (len(changed) > 0 || stepped != nil) && !*dryRun {
+		saved = saveModel(m)
+	}
+	cfg := m.WindowConfig()
+	if jsonMode {
+		var savedDoc, stepDoc any
+		if saved != "" {
+			savedDoc = saved
+		}
+		if stepped != nil {
+			stepDoc = stepped
+		}
+		emit(map[string]any{"window": cfg, "changed": changed, "step": stepDoc, "saved": savedDoc})
+		return
+	}
+	fmt.Printf("window         %s\n", m.G.DynamicWindow.Describe(cfg.Units))
+	nodes := fmt.Sprintf("%d real node(s), the longest %d %s", cfg.Nodes, cfg.Longest, cfg.Units)
+	if cfg.Longer != nil {
+		nodes += fmt.Sprintf(", %d longer than the window", *cfg.Longer)
+	}
+	fmt.Printf("nodes          %s\n", nodes)
+	fmt.Println("heavy          the bridge between two halves carries the node's whole count")
+	if len(changed) > 0 {
+		fmt.Printf("changed        %v\n", changed)
+	}
+	if stepped != nil {
+		fmt.Printf("step           %d step(s) at %v: %d merge(s), %d split(s), nodes %d -> %d, edges %d -> %d\n",
+			stepped.Steps, stepped.Sizes, stepped.Merges, stepped.Splits, stepped.NodesBefore, stepped.NodesAfter,
+			stepped.EdgesBefore, stepped.EdgesAfter)
+	}
+	if saved != "" {
+		fmt.Printf("saved          %s\n", saved)
+	}
+}
+
 func cmdInfo(args []string) {
 	fs := subFlagSet("info")
 	tail := fs.Int("tail", 5, "history records to show")
@@ -1813,6 +1920,13 @@ func cmdTutor(args []string) {
 	threshold := fs.Float64("threshold", cfg.Threshold, "mark out of 10 a sentence must reach to pass")
 	grammarWeight := fs.Float64("grammar-weight", cfg.GrammarWeight, "share of the mark that is grammar")
 	batch := fs.Int("batch", cfg.Batch, "sentences marked in one Ollama call")
+	think := fs.String("think", "", "ask the marker to think while it marks: true | false | low | medium | high | "+
+		"default (the model's choice); every round shows what it thought (default: on with -learn-thinking, "+
+		"otherwise not asked)")
+	learnThinking := fs.Bool("learn-thinking", false, "teach the network the marker's thinking as thoughts that "+
+		"begin at the THINK sentinel - what `think` and a conversation that catches itself repeating think in")
+	noThinkQuestions := fs.Bool("no-think-questions", false, "with -learn-thinking: do not teach the questions "+
+		"in the thinking as places where the network stops to think")
 	noAdapt := fs.Bool("no-adapt", false, "do not drill the previous round's weakest points")
 	drills := fs.Int("drills", cfg.Drills, "extra correct example sentences per round")
 	plan := fs.Int("plan", cfg.Plan, "hand the report card at the end back to the teacher and print the next N lessons it plans (0 = off)")
@@ -1843,6 +1957,10 @@ func cmdTutor(args []string) {
 	cfg.Mode, cfg.Length, cfg.MaxLength, cfg.Temperature = *mode, *length, *maxLength, *temperature
 	cfg.ToEnd = !*noToEnd
 	cfg.Threshold, cfg.GrammarWeight, cfg.Batch = *threshold, *grammarWeight, *batch
+	if *think != "" {
+		cfg.Think = *think
+	}
+	cfg.LearnThinking, cfg.ThinkQuestions = *learnThinking, !*noThinkQuestions
 	cfg.Adapt, cfg.Drills, cfg.TeachAnswer, cfg.Learn = !*noAdapt, *drills, !*noTeachAnswer, !*dryRun
 	cfg.Plan = *plan
 	cfg.TwoNRLPer, cfg.MinWeight = *twonrlPer, *minWeight
@@ -1869,6 +1987,9 @@ func cmdTutor(args []string) {
 		}
 	}
 	m := openModel(true)
+	if cfg.Learn && cfg.LearnThinking && m.IsNegative() {
+		fail("the negative network judges; it does not think (a negative model cannot be taught thoughts)")
+	}
 	trainer, err := radixnet.NewTutorTrainer(m, client, cfg)
 	if err != nil {
 		fail("%v", err)
@@ -1892,6 +2013,7 @@ func cmdTutor(args []string) {
 	} else {
 		say("corrections: as whole sentences (--no-diff-corrections)")
 	}
+	say("thinking: %s", tutorThinkingLine(cfg))
 	if !jsonMode {
 		trainer.Progress = func(record map[string]any) { sayLesson(record) }
 	}
@@ -2001,6 +2123,14 @@ func sayLesson(record map[string]any) {
 		say("round %v: %v/%v passed, mean %s (grammar %s), weakest: %s -> %s (bad=%v, good=%v)",
 			record["round"], record["passed"], record["lessons"], fmtMark(record["mean_score"]),
 			fmtMark(record["mean_grammar"]), weak, action, record["bad"], record["good"])
+		thinking, _ := record["thinking"].([]string)
+		for _, thought := range thinking {
+			say("    thinking: %s", clip(thought, 100))
+		}
+		if thoughts, _ := record["thoughts"].(int); thoughts > 0 {
+			say("    taught %v thought(s) and %v question(s) it asked itself; it now stops to think at %v more node(s)",
+				thoughts, record["thought_questions"], record["thought_nodes"])
+		}
 	case "batch":
 		say("batch %v (%v): %v level, openings of %v words, pass at %v, %v drill(s) - %v",
 			record["batch"], record["step"], record["level"], record["words"], fmtMark(record["threshold"]),
@@ -2017,6 +2147,31 @@ func sayLesson(record map[string]any) {
 	case "note":
 		say("note: %v", record["message"])
 	}
+}
+
+// tutorThinkingLine is what the tutor does with its marker's thinking, for the settings line.
+func tutorThinkingLine(cfg radixnet.TutorConfig) string {
+	think := cfg.ResolvedThink()
+	if think == nil && !cfg.LearnThinking {
+		return "not asked (-think LEVEL shows it, -learn-thinking teaches it)"
+	}
+	asked := "the model's choice"
+	switch v := think.(type) {
+	case bool:
+		asked = map[bool]string{true: "on", false: "off"}[v]
+	case string:
+		asked = v
+	}
+	if !cfg.LearnThinking {
+		return "the marker thinks (" + asked + "); shown, not taught (-learn-thinking)"
+	}
+	if !cfg.Learn {
+		return "the marker thinks (" + asked + "); a dry run teaches none of it"
+	}
+	if cfg.ThinkQuestions {
+		return "the marker thinks (" + asked + "); taught as thoughts and every question in it as a place to stop and think"
+	}
+	return "the marker thinks (" + asked + "); taught as thoughts"
 }
 
 func fmtMark(value any) string {

@@ -5,6 +5,7 @@ import { asArray, fmtInt, jobIsRunning, parseInteger, parseNumber, unitName } fr
 import { describeEncoding, ENCODING_PRESETS, encodingSpec, replayLine, soundUnit, UNITS, unitWord } from "../settings.js";
 import Alert from "./Alert.jsx";
 import AttentionBandCard from "./AttentionBandCard.jsx";
+import DynamicWindowCard from "./DynamicWindowCard.jsx";
 import { NumberField, SelectField, TextField } from "./Fields.jsx";
 
 /**
@@ -530,8 +531,9 @@ function NewModelCard({ status, onStatus }) {
  * **This model** - its kind, its encoding, its size and the replay buffer it
  * rehearses from; a **new model** in any kind and encoding; the **score
  * function** of whichever kind is active; the **attention band** - where inside
- * a gram a correction lands; and the **encoder / decoder** - what a text
- * becomes before the graph ever sees it, and what comes back out of it.
+ * a gram a correction lands; the **dynamic window** - the ladder of node sizes
+ * the graph is halved down and regrown up; and the **encoder / decoder** - what
+ * a text becomes before the graph ever sees it, and what comes back out of it.
  */
 export default function ModelSettingsPanel({ status, onStatus }) {
   return (
@@ -540,14 +542,16 @@ export default function ModelSettingsPanel({ status, onStatus }) {
         <h2>Model settings</h2>
         <p className="muted">
           What belongs to the model and is saved with it: the encoding it reads text in, how an edge is scored,
-          where inside a gram a correction lands (the attention band), and the replay buffer it rehearses from. The settings of this browser - the traversal, the sampling
-          filters, how a run walks its texts - are on the <a href="#settings">Settings</a> tab.
+          where inside a gram a correction lands (the attention band), the dynamic window its nodes are halved down
+          and regrown up through, and the replay buffer it rehearses from. The settings of this browser - the
+          traversal, the sampling filters, how a run walks its texts - are on the <a href="#settings">Settings</a> tab.
         </p>
       </div>
       <ThisModelCard status={status} />
       <NewModelCard status={status} onStatus={onStatus} />
       <ScoreFunctionCard status={status} />
       <AttentionBandCard status={status} onStatus={onStatus} />
+      <DynamicWindowCard status={status} onStatus={onStatus} />
       <EncodingCard status={status} />
     </>
   );

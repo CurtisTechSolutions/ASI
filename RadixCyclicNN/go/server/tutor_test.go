@@ -50,7 +50,11 @@ func newFakeTeacher(t *testing.T) *fakeTeacher {
 			kind = "plan"
 		}
 		fake.prompts[kind] = append(fake.prompts[kind], prompt)
-		json.NewEncoder(w).Encode(map[string]any{"response": fake.answer(kind, prompt)})
+		reply := map[string]any{"response": fake.answer(kind, prompt)}
+		if think := body["think"]; think != nil && think != false && kind == "grades" { // it thinks when asked
+			reply["thinking"] = "Does every verb agree with its subject? Not always. Is each sentence finished?"
+		}
+		json.NewEncoder(w).Encode(reply)
 	}))
 	t.Cleanup(fake.server.Close)
 	return fake
@@ -339,6 +343,71 @@ func TestTutorStartAndHistory(t *testing.T) {
 	}
 	if changed == 0 {
 		t.Fatal("the corrected lessons should say what changed")
+	}
+}
+
+func TestTutorLessonShowsTheMarkersThinking(t *testing.T) {
+	e, _ := tutorEnv(t)
+	status, body := e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "exercises": 2, "think": true})
+	if status != 200 {
+		t.Fatalf("POST /api/tutor/lesson = %d: %v", status, body)
+	}
+	if thinking, _ := body["thinking"].([]any); len(thinking) != 1 {
+		t.Fatalf("thinking = %v", body["thinking"])
+	}
+	status, body = e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "exercises": 2})
+	if thinking, ok := body["thinking"].([]any); status != 200 || !ok || len(thinking) != 0 {
+		t.Fatalf("without think: %d thinking = %#v", status, body["thinking"])
+	}
+	if status, body = e.post("/api/tutor/lesson", map[string]any{"topic": "animals", "think": "loud"}); status != 400 {
+		t.Fatalf("think=loud = %d: %v", status, body)
+	}
+}
+
+func TestTutorStartTeachesTheTeachersThinking(t *testing.T) {
+	e, _ := tutorEnv(t)
+	status, body := e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "learn_thinking": true, "neg_epochs": 1, "pos_epochs": 1,
+	})
+	if status != 202 {
+		t.Fatalf("POST /api/tutor/start = %d: %v", status, body)
+	}
+	if config, _ := body["config"].(map[string]any); config["learn_thinking"] != true {
+		t.Fatalf("config = %v", body["config"])
+	}
+	if finished := waitForJob(e, 30*time.Second); finished["state"] != "done" || finished["error"] != nil {
+		t.Fatalf("job did not finish cleanly: %v", finished)
+	}
+	_, history := e.get("/api/tutor/history")
+	rounds := []map[string]any{}
+	for _, raw := range history["history"].([]any) {
+		if record, _ := raw.(map[string]any); record["kind"] == "round" {
+			rounds = append(rounds, record)
+		}
+	}
+	if len(rounds) != 1 || rounds[0]["thoughts"] != 1.0 || rounds[0]["thought_questions"] != 2.0 {
+		t.Fatalf("rounds = %v", rounds)
+	}
+	if len(e.svc.Model().G.Children(radixnet.Think)) == 0 {
+		t.Fatal("the network was taught no thoughts")
+	}
+}
+
+func TestTutorWillNotTeachTheNegativeNetworkToThink(t *testing.T) {
+	e, fake := tutorEnv(t)
+	negative, err := radixnet.NewNegativeModel(1, radixnet.DefaultNegativeOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.model = negative
+	status, body := e.post("/api/tutor/start", map[string]any{
+		"topic": "animals", "rounds": 1, "exercises": 2, "learn_thinking": true,
+	})
+	if status != 400 || !strings.Contains(fmt.Sprint(body["error"]), "does not think") {
+		t.Fatalf("POST /api/tutor/start on the negative network = %d: %v", status, body)
+	}
+	if len(fake.prompts["exercises"]) != 0 {
+		t.Fatalf("the teacher was asked before the refusal: %v", fake.prompts)
 	}
 }
 

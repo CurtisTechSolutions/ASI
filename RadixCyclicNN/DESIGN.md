@@ -47,6 +47,7 @@ RadixCyclicNN/
     activation.py           sine activation (parametric sine + derivatives)
     encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 34)
     attention.py            the attention band: where inside a gram a correction's blame and credit land (section 38)
+    window.py               the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up (section 40)
     counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 28)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
@@ -378,6 +379,18 @@ def merge_child(self, p: int) -> bool
 
 def compress(self) -> int
     # Repeatedly merge all mergeable unary chains until none remain. Returns number of merges.
+    # With the dynamic window on (section 40), merge_child refuses a chain whose merged label would be longer
+    # than the window's size: len(p) + len(c) - overlap > size.
+
+def grams_held(self, node: int) -> int          # (label_len - n) // stride + 1
+def longer_than(self, size: int) -> tuple[int, int]   # (real nodes longer than size, the longest label)
+def split_window(self, size: int) -> int
+    # The step of the dynamic window (section 40): halve every real node longer than `size` units at its middle
+    # gram - split(node, ceil(grams / 2) * stride) - again while it is still longer, visiting ids in increasing
+    # order (the second halves are appended and halved in turn); a node of one gram is left as it is.  Each bridge
+    # A -> B is the heavy connection: the sine model sets its weight to W_HEAVY (negated while inverted), the
+    # phase model gives it the traversals of the out-edges it stands before, every other kind the node's count
+    # that split already gave it.  Returns the number of splits.  ValueError for size < 1.
 
 def invert(self) -> None
     # w -> -w for every alive edge; a -> -a AND k -> -k for every node (incl. START/END), which is the exact
@@ -416,7 +429,7 @@ def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> RadixCyclicGraph
 3. Two alive nodes never contain the same trigram (a trigram lives in exactly one node).
 4. For every alive edge `p->c` with neither endpoint a sentinel: `labels[p][-2:] == labels[c][:2]` (window overlap).
 5. `children`/`parents` are mirror images; every alive edge appears in both; dead nodes have empty dicts.
-6. After `compress()`, no unary chain remains (no non-sentinel p with exactly one child c != p, c non-sentinel, where c has exactly one parent).
+6. After `compress()`, no unary chain remains (no non-sentinel p with exactly one child c != p, c non-sentinel, where c has exactly one parent) - except a chain the dynamic window holds apart: with the window on, one whose merged label would be longer than its size (section 40).
 7. After `observe_sequence(encode(t))`, walking `t`'s trigrams through the index and decoding gives `t` (structure round trip), before and after `compress()`.
 8. Every counter is non-negative, every stored reset count is in `1..COUNTER_LIMIT - 1` and belongs to a real id; after `carry_counters()` every reading is below `COUNTER_LIMIT`.
 
@@ -719,7 +732,8 @@ output only, one JSON document on stdout).
 | `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out`, `--stream` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript`. `--stream` prints the conversation as it happens (section 22.1): each turn the moment it is spoken and, dimmed on a terminal, the window before it - the context it continues, the draft it caught itself on, where it backed up to, what it found; with `--json` one JSON object per line and the document last, as `{"event": "done", ...}` |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
-| `compress` | `--out` | compresses and saves, prints merges |
+| `compress` | `--out` | compresses and saves, prints merges (within the dynamic window, when it is on) |
+| `window` | `--on`, `--off`, `--top N`, `--floor N`, `--size N`, `--auto` / `--manual`, `--step [N]`, `--dry-run`, `--out` | the dynamic window (section 40): without options it is shown; the settings switch it on (at the ladder given over the one it had, else 32 down to 4) or off and save; `--step` merges what fits the window, halves every node that is longer, moves the window down the ladder, N times, and saves; JSON: `window` (the config), `changed`, `step`, `saved` |
 | `evolve` | `--data FILE`, `--generations N` (0 = forever, Ctrl-C stops cleanly and saves), `--samples`, `--max-length`, `--discriminator PATH` (load/save), `--checkpoint-dir`, `--checkpoint-every`, `--out` | GAN loop |
 | `info` | | stats + history tail |
 | `checkpoints` | `--dir DIR`, `--restore NAME --out PATH` | list / restore |
@@ -759,6 +773,9 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | GET `/api/model/attention` | | `{"kind","attention": {"on","blur","weights","ngram","stride","unit","units","applies","default_blur"}}` — the active model's attention band (section 38); `weights` is the band over one gram, null while it is off; `applies` is false for a kind that is never corrected |
 | POST `/api/model/attention` | `{"on","blur"}` | `{"kind","attention","stats"}` — a blur alone switches the band on, `on: true` without one uses the blur it had (else `default_blur`), `on: false` switches it off; 400 for a blur outside `[0, 1]` and for a kind that is never corrected |
 | POST `/api/model/attention/preview` | `{"wrong","right","blur"}` | `{"kind","attention","blur","weights","changes","wrong","right"}`, each side `{"text","units","grams","spans","writer","charges","focus","end"}` — where one correction would land, gram by gram, under the writer rule and under a band (`blur`, else the model's, else the default); changes nothing |
+| GET `/api/model/window` | | `{"kind","window": {"on","top","floor","size","auto","sizes","next","unit","units","ngram","longer","longest","nodes","heavy","default_top","default_floor"}}` — the active model's dynamic window (section 40): the ladder of node sizes and where it stands; `longer` is how many real nodes a step would halve (null while off), `heavy` the sine model's bridge weight (null where the bridge is heavy by its count) |
+| POST `/api/model/window` | `{"on","top","floor","size","auto"}` | `{"kind","window","stats"}` — `on: false` switches it off (the graph stays as it is); `on: true` or any setting switches it on at the values given over the ones it had (else 32 down to 4, at the top, stepping every epoch), a new top or floor keeping the size on the ladder; 400 for a size that is not a power of two, a floor over the top or a size off the ladder |
+| POST `/api/model/window/step` | `{"steps"}` (default 1) | `{"kind","step": {"steps","sizes","from","to","merges","splits","nodes_before","nodes_after","edges_before","edges_after","window"},"window","stats"}` — the window stepped by hand: each step merges what fits, halves every node that is longer and moves the window down the ladder, back to the top from the floor; 400 while it is off or for fewer than one step; 409 while a job runs |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
 | POST `/api/invert` | | `stats()` |
@@ -814,7 +831,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `EvolvePanel.jsx` — corpus textarea, samples, generations (blank = forever), start/stop; live SVG line chart of `gap` and `fake_score_mean` over generations + latest sample text.
 * `CheckpointPanel.jsx` — list checkpoints, save checkpoint (tag), restore, save/load model path, reset.
 * `SettingsPanel.jsx` — **Settings** (section 31.4): the site-wide settings of this browser, what every search and every run starts from. Five cards: the **traversal** (`TraversalFields.jsx`), **sampling and diversity** (`SearchFields.jsx`), **how a run walks its texts** (`TrainingPlanFields.jsx`) - each with a button back to its defaults - **backwards** (`BackwardsField.jsx`: whether Predict and Generate ask the model backwards), and **this browser** (how many settings are remembered, and a two-click button that forgets them all).
-* `ModelSettingsPanel.jsx` — **Model settings** (section 31.4): what belongs to the model and is saved with it. Five cards: **this model** (kind, encoding, size, file, and the replay buffer from `/api/status` `replay`), a **new model** in any kind and encoding (`POST /api/reset {kind, encoding, seed}`, two clicks, the encoding checked before it is sent), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), the **attention band** (`AttentionBandCard.jsx`, section 38: `GET` / `POST /api/model/attention`, the band drawn over one gram, and a correction previewed under both rules with `POST /api/model/attention/preview`), and the **encoder / decoder** (`GET /api/encoding` for the unit, the n, the stride, the overlap and the four sentinels, each with what it means - asked again whenever the model changes - and `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the grams the model has never seen marked and a label longer than one gram shown as the merged chain it is).
+* `ModelSettingsPanel.jsx` — **Model settings** (section 31.4): what belongs to the model and is saved with it. Five cards: **this model** (kind, encoding, size, file, and the replay buffer from `/api/status` `replay`), a **new model** in any kind and encoding (`POST /api/reset {kind, encoding, seed}`, two clicks, the encoding checked before it is sent), the **score function** of whichever kind is active (`GET /api/model` → `weights`, applied with `POST /api/model/weights`; the count model's six settings, the resonant model's seven, and for a kind without one - the sine model, the negative network - the sentence saying why and where its own settings are), the **attention band** (`AttentionBandCard.jsx`, section 38: `GET` / `POST /api/model/attention`, the band drawn over one gram, and a correction previewed under both rules with `POST /api/model/attention/preview`), the **dynamic window** (`DynamicWindowCard.jsx`, section 40: `GET` / `POST /api/model/window` for the ladder of node sizes, where it stands and whether it steps by itself, the ladder drawn as its rungs, and a Step button that steps it by hand with `POST /api/model/window/step`, saying what the step did), and the **encoder / decoder** (`GET /api/encoding` for the unit, the n, the stride, the overlap and the four sentinels, each with what it means - asked again whenever the model changes - and `POST /api/encoding/preview` for one text through the encoder, back through the decoder and through the graph's own node labels, with the grams the model has never seen marked and a label longer than one gram shown as the merged chain it is).
 * `TraversalFields.jsx` — the traversal and its two scales, reading and writing the shared setting, so the Settings, Predict and Generate tabs show one control in three places; `compact` drops the explanation for the action tabs.
 * `SearchFields.jsx` — the sampling filters (top-K, top-p, min-p) and the beam's diversity (`SPEC-SearchAndTraining.md` sections 1-2), over the shared `useSiteSettings().search`. Given the `mode` the search will really run in, the compact version shows only what that mode reads - the filters for `sample`, the diversity for `beam`, nothing for the exact searches - and an out-of-range value as an error the tab refuses to send.
 * `TrainingPlanFields.jsx` — the order, the curriculum, the replay and the early stop (sections 3-6), over `useSiteSettings().training`; on the Train tab it previews how many texts each epoch walks and how many buffered texts it rehearses, and says what the model's buffer holds.
@@ -929,6 +946,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_thinking.py` — `questions_in` (sentences ending in `?`, a terminator run with no sentence, a comma question), `place` (the node cut so the prefix ends there; an unknown text and an empty prefix place nowhere), `think` (a model taught no thoughts has nothing to think with; asking about a text teaches the node to think and ends; learning off writes nothing; `think_on` teaches thoughts from `THINK` and not from `START`, and the questions they asked themselves; a thought questions itself where the model learned to think, once, one level down, saying something new, bounded by depth and count; a thought out of a repeat hands over to `BACK`; validation; the model file keeps its thoughts), `POST /api/think` and the conversation's thoughts, the `think` and `converse --no-think` commands.
 * `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation; `stream` (section 22.1): the turns streamed are the turns returned, the window between two turns belongs to the one that follows and shows the backing up event for event against the rethink record, a `backtrack` streamed on its own, and streaming changing nothing (the same turns and the same graph afterwards). `test_api.py::test_converse_stream` reads the route's JSON Lines, `test_cli.py` the `--stream` output in both modes, and the Go / Rust sides are held to the same events by `test_go_parity.py::test_the_same_conversation_streamed` and `test_rust_parity_dialogue.py`.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
+* `test_window.py` — the **dynamic window** (section 40, `../SPEC-DynamicWindow.md`): the ladder and what it refuses; `ABCD` cut into `AB` and `CD` under a grouping encoding and into `ABC` and `BCD` under the trigram; a node halved at its middle gram, again until it fits, never below one gram; the halves carrying the same state, parameters and count, joined by the heavy connection (the sine model's weight and its sign while inverted, the counting kinds' count, the phase model's through-traffic); compression stopping at the window and resuming when it is off; a step merging, halving and moving, and the top regrowing what stayed unary; the settings; the automatic step on every kind; the file block beside the band, and off being the old file to the bit; the CLI and the HTTP API. The cross-language half is `test_go_parity.py::test_the_dynamic_window_halves_the_same_nodes` and `test_rust_parity_tools.py::TestRustWindowParity / TestRustWindowRoutes`, with `go/radixnet/window_test.go`, `go/server/window_test.go` and the unit tests of `rust/src/window.rs` on their own sides.
 
 ---
 
@@ -1123,8 +1141,10 @@ def write_exercises(client, topic, count=5, *, focus=None, level="beginner", wea
     # "opening" / "stem" instead of "prefix", trailing punctuation, duplicates and an answer without the prefix
 def drill_sentences(client, topic, count, *, weak=(), model=None) -> list[str]   # extra correct examples to imitate
 def grade_completions(client, lessons, *, topic, threshold=6.0, grammar_weight=0.6, model=None, batch=10,
-                      external=None, graded_by=None)   # graded_by: the provider behind the client
+                      external=None, graded_by=None, think=None, thinking=None)
+    # graded_by: the provider behind the client; think: the thinking level asked of the marker (None sends none)
     # one JSON call per batch: {"grades": [{"index","grammar","spelling","fluency","error","correction","comment"}]}
+    # a client that says what it thought (Ollama's complete) appends it to `thinking`, one line per call
     # empty completion -> failed without asking (graded_by="empty", the exercise's own answer as the correction);
     # unreadable answer -> score None, graded_by="unrated", counted as a failure
 def report_card(lessons) -> dict          # {"lessons","graded","passed","failed","pass_rate","mean_score",
@@ -1204,7 +1224,8 @@ the topic, the focus and the weak points), so one batch's report card is the nex
 `grader_model`; `__post_init__` normalises the providers and fills in the models they imply, and
 `resolved_grader_model` is what the marking runs on), the completion settings (`mode`, `length`, `max_length`, `temperature`,
 `to_end`, `beam`), the marking settings (`threshold`, `grammar_weight`, `batch`, `adapt`, `drills`, `plan`, `teach_answer`,
-`learn`), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
+`learn`), the teacher's thinking (`think`, `learn_thinking`, `think_questions`; `resolved_think` is what the marking
+asks for - `think` as given, else on while `learn_thinking`, else nothing), how a correction is taught (`diff_corrections`, `keep_weight`) and the 2NRL settings (`twonrl_per`,
 `min_weight`, `neg_epochs`, `pos_epochs`, `neg_lr`, `pos_lr`, `batch_size`, `strength`, `replay`, `replay_limit`,
 `checkpoint_every`).
 
@@ -1215,7 +1236,8 @@ one is built from the environment), and every grade records which one marked it:
 1. `set_exercises` — the teacher writes the openings (with the previous round's weakest points as the syllabus when
    `adapt`).
 2. `complete` — `model.predict(exercise.cue, ...)` per attempt (attempt 0 in `mode`, later ones sampled).
-3. `grade` — one call per `batch` sentences.
+3. `grade` — one call per `batch` sentences, asking the marker for `resolved_think`; what it thought comes back
+   with the marks, one line per call.
 4. `corrections_of` + `texts_of` + `learn` — a failure the teacher corrected is a `Correction(wrong, right,
    weight_of(grade))` taught by `model.correct` (section 16.4), not a whole sentence in `bad`; `weight_of(grade) =
    min_weight + (1 - min_weight) * (threshold - score) / threshold` (1 for an unrated one). What is left is the old
@@ -1226,6 +1248,10 @@ one is built from the environment), and every grade records which one marked it:
    `punish(weights=)` when only one side exists, and `action` names what ran ("correct+2nrl"). The corrections join
    the replay buffer like any taught text. `diff_corrections=False` goes back to the whole-sentence way;
    `learn=False` reports what it would have taught and touches nothing.
+5. `teach_thinking` — with `learn_thinking` (and `learn`), what the marker thought is taught to the network as
+   thoughts: `think_on(model, thinking, questions=think_questions)` at the fine-tune pass's `pos_epochs`, `pos_lr`
+   and `batch_size` (section 36.2), so every question the teacher asked itself marks a node where the network stops
+   to think. A dry run records the thinking and teaches none of it.
 
 `run()` is a loop over **batches**: one batch is `rounds` rounds and the report card over them (its own lessons,
 not the run's).  With `batches` > 1 - or 0, which keeps going until the stop event - it closes the loop itself:
@@ -1238,7 +1264,8 @@ Records: `{"kind": "lesson", batch, round, exercise, prefix, focus, attempt, mod
 spelling, fluency, passed, error, correction, changes, comment, graded_by, probability, seconds, why, variants}` (`changes` is what
 the teacher changed, span by span, and rides on the `Lesson` itself so a dry run carries it too), `{"kind": "round",
 ...}` (the report card plus `action`, `bad`, `good`, `corrections`, `edits`, `penalised`, `rewarded`, `neg_loss`,
-`pos_loss`, `mean_weight`, `mean_reward`, `drills`) and a final `{"kind": "report", rounds, ...}`.  With
+`pos_loss`, `mean_weight`, `mean_reward`, `drills`, and `thinking`, `thoughts`, `thought_questions`,
+`thought_nodes` - what the marker thought and what it taught) and a final `{"kind": "report", rounds, ...}`.  With
 `plan = N` (`--plan N`, `POST /api/tutor/start {"plan": N}`) one more record closes the run:
 `{"kind": "plan", batch, rounds, ...LessonPlan.to_dict()}`, from `TutorTrainer.plan(card=None, count=N)` — the
 run's own report card unless one is given.  A teacher that cannot plan costs only a `note`; the lessons stand.
@@ -1254,6 +1281,24 @@ changed are blamed. The round records then carry `negative_blamed`, `negative_ed
 wrong in the same way (`--variants N`, `--variant-weight X`, `{"variants": N, "variant_weight": X}`; the lesson
 records carry them as `why` and `variants`).
 
+**What the teacher thought.**  A mark is the teacher's conclusion; a thinking model (qwen3, deepseek-r1, gpt-oss)
+also reasons its way to it, and Ollama hands the reasoning back beside the answer (`complete`, section 16.1).  That
+reasoning is the one supply of *thoughts* the tutor has for free: it is about exactly the sentences the network
+wrote, and it asks itself the questions a teacher asks (*does every verb agree with its subject?*).  So the
+marking call asks for it (`think`, `--think LEVEL`: `true`, `false`, `low`, `medium`, `high` or `default`, the
+model's own choice), every round records it (`thinking`, whitespace collapsed to one line per call), and with
+`learn_thinking` (`--learn-thinking`) step 5 teaches it as thoughts - walks from the THINK sentinel - with every
+question in it a node where the network learns to stop and think (`think_questions`, `--no-think-questions` to
+leave them out; section 36).  The network then learns the English it got wrong and how its teacher reasoned about
+it, and `think` (or a voice that catches itself repeating) thinks in those thoughts.  Asking a model to think
+costs time, so the marker is asked only when something reads the answer: `think` unset means on while the
+thinking is taught and not asked otherwise, and `--think` alone shows the thinking without teaching it.  A dry run
+shows it too.  Only an Ollama client says what it thought (`_complete` asks a client for `complete` and falls
+back to `generate`), so a ChatGPT marker records nothing, and the negative network is refused before a lesson is
+set - it judges; it does not think (400 from the API, an error from the CLI).  The ports do the same: Go's
+`TutorConfig.Think` / `LearnThinking` / `ThinkQuestions`, `TutorTrainer.TeachThinking` and the optional
+`thoughtfulClient` interface, Rust's `LlmClient::complete_thinking` and `TutorTrainer::teach_thinking`.
+
 CLI `radixnet tutor` prints one row per marked sentence (round, exercise, score, grammar, spelling, fluency, mark,
 mistake, sentence) with the correction and the teacher's line under a failure, a note per round and a report card at
 the end; `--dry-run` marks without training or saving, `--report FILE` writes config, records, lessons, the card and
@@ -1263,15 +1308,19 @@ the plan.  `--plan [N]` (default 3) prints the planned lessons as a table, the s
 
 CLI flags for the teacher: `--tutor-provider ollama|chatgpt` (`--provider`), `--tutor-model`, `--grader-provider`,
 `--grader-model`, `--url`, `--grader-url`; a `chatgpt` teacher without `$OPENAI_API_KEY` stops before anything is
-sent.
+sent.  For its thinking: `--think LEVEL`, `--learn-thinking`, `--no-think-questions`; the settings table says what
+will happen to it (a `thinking` row), and every round prints what the marker thought and what the network learned
+from it (*taught 1 thought and 2 questions it asked itself; it now stops to think at 2 more nodes*).
 
 API: `GET /api/tutor` (defaults, error types, modes, `levels`, `plan_lessons`, and `providers` — each teacher's url,
 model and whether it is `configured`), `POST /api/tutor/start` (job), `GET /api/tutor/history`,
-`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer) and `POST /api/tutor/plan`
+`POST /api/tutor/lesson` (one round, no training; `prefixes` skips the exercise writer; `thinking` is what the
+marker thought, empty unless `think` asked it to) and `POST /api/tutor/plan`
 (`{report, count, topic, level, exercises, drills}` -> `{plan, source, provider, model, url, report}`; without
 `report` the card at the end of the last run — `ModelService.tutor_card()`, the last `"report"` record of the
 history — is used, and 400 says so when there is none). All of them take `tutor_provider` / `grader_provider` (and
-`url` / `grader_url`); a `chatgpt` teacher on a server without a key is refused with 400. The service releases the model
+`url` / `grader_url`); a `chatgpt` teacher on a server without a key is refused with 400.  `start` and `lesson`
+take `think`, `learn_thinking` and `think_questions` (a `null` `think` is no `think`, as in every other body). The service releases the model
 lock around every LLM call (`pause_lock`), so readers keep being served while the teacher thinks. The default
 teacher is `$RADIXNET_TUTOR_MODEL`, else the model the server was started with (ChatGPT: the server's
 `--chatgpt-model`).
@@ -1293,7 +1342,13 @@ and **Prefix words** field are `brief` and `words`; the **Plan** field is the ru
 that ends with a `"plan"` record shows it in the same card without asking again.  **Batches** is the auto run: the
 button becomes *Start auto run*, the Rounds table gains a `batch` column, the report card is the last batch's, and
 every `"batch"` record fills the brief, the level, the openings, the pass mark and the drills into the form (once
-per batch) so the settings show what the server is teaching.
+per batch) so the settings show what the server is teaching.  **The teacher's thinking** settings are *The marker
+thinks* (the level; blank leaves it to the server, and the blank option says which way that goes), *Train on the
+teacher's thinking* and *Learn where it questions itself* (`tutorThinkingBody` in `frontend/src/thinking.js`); a
+dry run shows *What the marker thought* under its report card, and a run adds a `thoughts` column to the Rounds
+table (`1 (+2?)`: one thought and the two questions it asked itself) and a list of what the teacher thought round
+by round, the questions marked as the Ollama tab marks them (`ThinkingText`) with what the network learned from
+them (`roundThinkingSays`).
 
 Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, explains a mistake and writes
 it again, answers drill requests and plans the next lessons; the parsers, the marking, the widening -
@@ -1301,7 +1356,12 @@ it again, answers drill requests and plans the next lessons; the parsers, the ma
 planner, the loop with a scripted model, the endpoints and the CLI), `tests/test_blame.py` (a widened lesson
 becomes its whole family of faults) and the same in Go (`go/radixnet/tutor_test.go`, `blame_test.go`), the ChatGPT teacher of
 `tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
-model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.
+model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.  The fake teacher thinks aloud
+when asked (in Ollama's `thinking` field, or inline in `<think>` tags), so the thinking cases - asked or not, read
+from either place, taught with and without its questions, shown by a dry run, a bad level, the negative network
+refused - run in Python and Go, and `test_go_parity.py` / `test_rust_parity_teach.py` hold the Go and Rust
+tutors to Python's requests, records and models with `--learn-thinking`, and to its refusal of the negative
+network (the Rust one on the server as well).
 
 ### 16.4 Learning from a correction (`diff.py`, `CountRewardNet.correct`) — only what changed moves, counted per path
 
@@ -3889,6 +3949,11 @@ network learns to question where its teacher did. `radixnet ollama think --promp
 /api/ollama/think {"train": true}`) is the whole pipeline; `--with-answers` trains the answers as ordinary texts
 too, and the negative network refuses thoughts (it judges; it does not think).
 
+The tutor is the second source (section 16.3): its marker reasons about the very sentences the network wrote before
+it marks them, so `tutor --learn-thinking` (the Tutor tab's *Train on the teacher's thinking*, `{"learn_thinking":
+true}`) asks for that reasoning while it marks and teaches it through the same `think_on` after every round - the
+network learns to question itself where its teacher did, about its own mistakes.
+
 ### 36.3 What it touches, and the three ports
 
 * `graph.py`: `THINK`, `FIRST`, `ORIGINS`, `THINK_Z`, `observe_think`, `think_cost`, `thinks_at`, `origin` on
@@ -3904,18 +3969,23 @@ too, and the negative network refuses thoughts (it judges; it does not think).
 * `cli.py`: `think`, `ollama think`, `converse --no-think --think-depth` (and *it learned to stop and think at N
   node(s)*); `api.py`: `POST /api/think`, `POST /api/ollama/think`, `think` / `think_depth` on `/api/converse`,
   `think_label` on `/api/encoding`.
+* `tutor.py`: `_complete`, `think` / `thinking` on `grade_completions`, `TutorConfig.think` / `learn_thinking` /
+  `think_questions` / `resolved_think`, `TutorTrainer.teach_thinking`; `tutor --think --learn-thinking
+  --no-think-questions`, the same fields on `/api/tutor/start` and `/api/tutor/lesson` (section 16.3).
 * Go - `thinking.go` (`Model.Think`, `ThinkOn`, `Place`, `QuestionsIn`, `Summarize`, `ThoughtsOf`), `graph.go`
   (`Think`, `First`, `IsOrigin`, `ThinkZ`, `ObserveThink`, `ThinkCost`, `ThinksAt`, `ObserveFrom` / `TraceFrom` /
   `NodePathFrom`), `json.go` (`withSentinels`), `search.go`, `model.go` (`TrainOptions.Origin`, `walkStart`),
   `dialogue.go` (`ThinkBack`, `Rethink.Thought`), `ollama.go` (`Complete`, `ThinkValue`, `SplitThinking`,
-  `QuestionsFromPrompt`, `ThoughtsFromPrompt`), the same routes in `server/` and the same commands in
-  `cmd/radixnet-count` - and Rust (`thinking.rs`, `graph.rs`, `file.rs`, `search.rs`, `model.rs`, `dialogue.rs`,
-  `ollama.rs`, the `think` command and routes) produce the same records: the Go parity tests compare the
+  `QuestionsFromPrompt`, `ThoughtsFromPrompt`), `tutor.go` (`TeachThinking`, `thoughtfulClient`), the same routes in
+  `server/` and the same commands in `cmd/radixnet-count` - and Rust (`thinking.rs`, `graph.rs`, `file.rs`,
+  `search.rs`, `model.rs`, `dialogue.rs`, `ollama.rs`, `llm.rs`'s `complete_thinking`, `tutor/trainer.rs`'s
+  `teach_thinking`, the `think` command and routes) produce the same records: the Go parity tests compare the
   rethinks' thoughts field for field, the Rust ones the model files byte for byte.
 * Tests: `tests/test_thinking.py`, `TestThinkSentinel` in `test_graph.py`, the origin cases in `test_search.py`,
-  `TestThinksBeforeBackingUp` in `test_dialogue.py`, the thinking cases in `test_ollama.py`;
-  `go/radixnet/thinking_test.go`, `go/server/thinking_test.go`; the unit tests in `rust/src/thinking.rs` and
-  `rust/src/ollama.rs`.
+  `TestThinksBeforeBackingUp` in `test_dialogue.py`, the thinking cases in `test_ollama.py` and `test_tutor.py`;
+  `go/radixnet/thinking_test.go`, `go/server/thinking_test.go`, the thinking cases in `go/radixnet/tutor_test.go`
+  and `go/server/tutor_test.go`; the unit tests in `rust/src/thinking.rs` and `rust/src/ollama.rs`; the tutor's
+  thinking held to Python's by `test_go_parity.py` and `test_rust_parity_teach.py`.
 
 ## 37. Today's format (`radixnet/assistant.py`, `go/radixnet/assistant.go`, `rust/src/assistant.rs`) — messages in, thinking and a streamed reply out
 
@@ -4214,3 +4284,79 @@ differ from the phonetic units, and nothing else does:
 The codebook is the bundled one or the file `PHONETOK_CODEBOOK` names; it is
 part of what a model means and is not written into the model file, which is
 the cost noted in D-082.
+
+## 40. The dynamic window (`radixnet/window.py`, `go/radixnet/window.go`, `rust/src/window.rs`) — a ladder of node sizes, halving from 32 to 4 and back up
+
+`SPEC-DynamicWindow.md` is the specification and D-087 the decision. A merged node holds every gram of a chain
+the corpus never branched inside, and a walk through it has nowhere to branch: it is entered at its first gram,
+left at its last, and the steps inside are deterministic. The **dynamic window** is a ceiling on a node's length,
+in the encoding's units, and the ceiling moves: it is sized in the binary number system, walking a ladder of
+powers of two from a top down to a floor (32, 16, 8, 4 by default) and from the floor back to the top. It
+applies to the actual nodes of the graph - a node with the value `ABCD` becomes `AB` and `CD`.
+
+### 40.1 The setting
+
+`DynamicWindow(top, floor, size, auto)` lives on the graph (`RadixCyclicGraph.dynamic_window`, Go
+`Graph.DynamicWindow`, Rust `Graph::dynamic_window`) beside the encoding and the attention band, and like the band
+it may change at any time: the setting touches nothing, only a step does. Off - `DynamicWindow()`, the zero value,
+every model before this existed - it does nothing. `check_ladder` refuses a top or floor that is not a power of
+two, a floor over the top and a size off the ladder, with one message per refusal shared by the three
+implementations word for word. `GraphModel.window_config()` reports it (`on, top, floor, size, auto, sizes, next,
+unit, units, ngram, longer, longest, nodes, heavy, default_top, default_floor`); `configure_window(on, top,
+floor, size, auto)` switches it on at the values given over the ones it had - a new top or floor keeping the size
+on the ladder - or off.
+
+### 40.2 The step
+
+`window_step(steps, compress)`: each step compresses the graph within the current size (`compress=False` leaves
+that to a loop that has just done it), halves every node longer than the size (`split_window`, 40.3) and moves
+the window down the ladder, back to the top from the floor; it returns `{steps, sizes, from, to, merges, splits,
+nodes_before, nodes_after, edges_before, edges_after, window}`. `_window_epoch(compress)` is the automatic step
+every kind's loop takes at the end of an epoch while `auto` is set - after the epoch's own compression in
+`RadixNet.train`, `CountRewardNet._passes` and the negative network's blame passes (a clearing pass is not a
+training pass), and with the merging in the phase model's passes, which compress once before the first - and the
+epoch's record then carries `splits` and `window` (the size applied) right after `merges`; a record without a
+step carries neither. Feedback passes are epochs and step like any other.
+
+### 40.3 The halving, and the heavy connection
+
+`split_window(size)` visits the real nodes in id order and cuts a node longer than `size` between its grams at
+the middle - `split(node, ⌈G / 2⌉ · stride)`, `G` the grams it holds: the first half keeps the odd gram, the id
+and the in-edges; the second half, appended and halved in its turn, takes the rest and the out-edges - again while
+it is still longer; a node of one gram is never cut. Under a grouping encoding the cut is exact (`ABCD` into `AB`
+and `CD`); under a sliding one the halves share the overlap (`ABCD` is `ABC -> BCD` merged, and comes apart into
+those). Both halves carry the node's state, activation parameters, count and, in the count model, its judged
+contexts (`split`). The bridge `A -> B` is the **heavy connection**, in each kind's currency: `split` already gives
+it the node's whole visit count, which is what makes it heavy where weights are computed from counts; the sine
+model sets its weight to `W_HEAVY = 8` (negated while inverted, as every fresh weight is), a score of `8 · f²`
+between two copies of one activation; the phase model, which counts edges and not nodes, gives it what passed
+through the node - the traversals of the out-edges it stands before, read before the halving (`_heavy_bridge`);
+the negative network counts nothing, and its bridge carries no evidence. The first half has one child, so the
+step across the bridge is probability 1 and cost 0: the cut is invisible to traversal the moment it is made.
+
+### 40.4 Compression under the window
+
+`merge_child` refuses a chain whose merged label would be longer than the window's size (`len(p) + len(c) -
+overlap > size`), so a step's halves are held apart while the window stands at or below their size and grow
+together again when the ladder is back at the top - keeping one side's activation and rescaling the other's edges,
+as every merge does - or the moment the window is switched off. `check_invariants(compressed=True)` exempts a
+chain the window holds apart. The graph is never left in a state the old rules could not have produced.
+
+### 40.5 The file, the CLI, the API, the frontend
+
+* **File**: `"dynamic_window": {"top": 32, "floor": 4, "size": 16, "auto": true}` in the graph document, only
+  while it is on, right after `attention` (or `encoding`, or `format_version`) - where Rust writes it too, byte
+  for byte. `stats()` reports `dynamic_window` (the size, null while off) for every kind.
+* **CLI**: `radixnet window` shows it; `--on`, `--top`, `--floor`, `--size`, `--auto` / `--manual`, `--off` change
+  it and save the model (not with `--dry-run`); `--step [N]` steps it and saves; `info` has a `dynamic window` row.
+  The same command in `radixnet-count` and in the Rust `radixnet`.
+* **API**: `GET` / `POST /api/model/window` and `POST /api/model/window/step` (section 12), on all three servers;
+  `GET /api/model` carries `dynamic_window`.
+* **Frontend**: the Dynamic window card on Model settings (`DynamicWindowCard.jsx`, section 13), with its display
+  helpers in `src/window.js` (the same ladder the servers walk, drawn before it is applied).
+
+Tests: `tests/test_window.py` (section 14), `go/radixnet/window_test.go`, `go/server/window_test.go`, the unit
+tests in `rust/src/window.rs`, `frontend/test/window.test.mjs`, and the parity cases
+`test_the_dynamic_window_halves_the_same_nodes` in `test_go_parity.py` and `TestRustWindowParity` /
+`TestRustWindowRoutes` in `test_rust_parity_tools.py`, which hold both ports to Python's nodes, bridges, records
+and - for Rust - model files byte for byte.

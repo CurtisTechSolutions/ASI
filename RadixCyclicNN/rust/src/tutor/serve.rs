@@ -52,17 +52,32 @@ fn say(record: &Json) {
                 crate::log_info!(LOG, "    correct: {:?} ({})", text("correction"), text("error"));
             }
         }
-        Some("round") => crate::log_info!(
-            LOG,
-            "round {}: {}/{} passed, mean {} (grammar {}), weakest: {} -> {}",
-            record.at("round").as_i64().unwrap_or(0),
-            record.at("passed").as_i64().unwrap_or(0),
-            record.at("lessons").as_i64().unwrap_or(0),
-            mark("mean_score"),
-            mark("mean_grammar"),
-            record.at("weakest").to_strings().join(", "),
-            record.at("action").as_str().unwrap_or("nothing to learn")
-        ),
+        Some("round") => {
+            crate::log_info!(
+                LOG,
+                "round {}: {}/{} passed, mean {} (grammar {}), weakest: {} -> {}",
+                record.at("round").as_i64().unwrap_or(0),
+                record.at("passed").as_i64().unwrap_or(0),
+                record.at("lessons").as_i64().unwrap_or(0),
+                mark("mean_score"),
+                mark("mean_grammar"),
+                record.at("weakest").to_strings().join(", "),
+                record.at("action").as_str().unwrap_or("nothing to learn")
+            );
+            for thought in record.at("thinking").to_strings() {
+                crate::log_info!(LOG, "    thinking: {}", super::clip(&thought, 100));
+            }
+            let thoughts = record.at("thoughts").as_i64().unwrap_or(0);
+            if thoughts > 0 {
+                crate::log_info!(
+                    LOG,
+                    "    taught {thoughts} thought(s) and {} question(s) it asked itself; it now stops to think at {} \
+                     more node(s)",
+                    record.at("thought_questions").as_i64().unwrap_or(0),
+                    record.at("thought_nodes").as_i64().unwrap_or(0)
+                );
+            }
+        }
         Some("report") => crate::log_info!(
             LOG,
             "report card: {}/{} passed, mean {}",
@@ -147,6 +162,9 @@ fn config_from_args(ctx: &Ctx) -> Result<TutorConfig, String> {
         threshold: number("threshold", d.threshold)?,
         grammar_weight: number("grammar-weight", d.grammar_weight)?,
         batch: count("batch", d.batch, 1)?,
+        think: args.get("think").map(Json::str),
+        learn_thinking: args.on("learn-thinking"),
+        think_questions: !args.on("no-think-questions"),
         adapt: !args.on("no-adapt"),
         drills: count("drills", d.drills, 0)?,
         variants: count("variants", d.variants, 0)?,
@@ -225,6 +243,11 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         Json::obj([("kind", Json::str("new")), ("path", Json::Null)])
     };
     let mut model = ctx.open(false)?;
+    if config.learn && config.learn_thinking && model.is_negative() {
+        return Err(
+            "the negative network judges; it does not think (--kind negative cannot be taught thoughts)".to_string(),
+        );
+    }
     let mut negative = if args.on("blame") {
         Some(ctx.open_negative(false)?)
     } else {
@@ -444,6 +467,10 @@ fn config_from_fields(svc: &Service, f: &Fields) -> Result<TutorConfig, ApiError
         threshold: number("threshold", d.threshold)?,
         grammar_weight: number("grammar_weight", d.grammar_weight)?,
         batch: count("batch", d.batch, 1)?,
+        // a null field is a missing one, as everywhere in the API
+        think: f.get("think").filter(|value| !matches!(value, Json::Null)).cloned(),
+        learn_thinking: f.flag("learn_thinking", d.learn_thinking)?,
+        think_questions: f.flag("think_questions", d.think_questions)?,
         adapt: f.flag("adapt", d.adapt)?,
         drills: count("drills", d.drills, 0)?,
         variants: count("variants", d.variants, 0)?,
@@ -549,6 +576,9 @@ fn start(svc: &Arc<Service>, r: &Request) -> Answer {
         crate::checkpoint::require(svc, "checkpoint_every")?;
     }
     svc.ensure_idle()?;
+    if config.learn && config.learn_thinking && svc.with_model(|m| m.is_negative()) {
+        return Err(ApiError::bad_request("the negative network judges; it does not think"));
+    }
     if blame {
         // loaded now, so a file that is not a negative network is this request's 400
         svc.ensure_negative()?;
@@ -626,7 +656,7 @@ fn lesson(svc: &Arc<Service>, r: &Request) -> Answer {
         }
         Ok(out)
     })?;
-    trainer.grade(&mut lessons)?;
+    let thinking = trainer.grade(&mut lessons)?;
     Ok(Json::obj([
         (
             "source",
@@ -645,6 +675,7 @@ fn lesson(svc: &Arc<Service>, r: &Request) -> Answer {
         ),
         ("lessons", Json::Arr(lessons.iter().map(|l| l.to_json()).collect())),
         ("report", report_card(&lessons)),
+        ("thinking", Json::strs(thinking)),
     ]))
 }
 

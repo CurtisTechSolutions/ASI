@@ -509,6 +509,29 @@ type GradeOptions struct {
 	Batch         int
 	Temperature   float64
 	GradedBy      string // the provider behind the client (empty: the client's own)
+	// Think is the thinking level asked of the marker (Ollama's think; nil sends nothing), and Thinking, when
+	// set, collects what it thought before each batch's marks - one line per batch that thought.
+	Think    any
+	Thinking *[]string
+}
+
+// thoughtfulClient is a client that can say what it thought before it answered (OllamaClient).
+type thoughtfulClient interface {
+	Complete(prompt string, o LLMOptions) (*Completion, error)
+}
+
+// completeThinking is one completion and the thinking behind it, (answer, thinking): a client that can say
+// what it thought is asked for both, the thinking collapsed to one line; any other answers as it always has.
+func completeThinking(client LLMClient, prompt string, o LLMOptions) (string, string, error) {
+	if c, ok := client.(thoughtfulClient); ok {
+		got, err := c.Complete(prompt, o)
+		if err != nil {
+			return "", "", err
+		}
+		return got.Response, strings.Join(strings.Fields(got.Thinking), " "), nil
+	}
+	raw, err := client.Generate(prompt, o)
+	return raw, "", err
 }
 
 // GradeCompletions marks every lesson in place, in batches of Batch.
@@ -563,11 +586,14 @@ func GradeCompletions(client LLMClient, lessons []*Lesson, o GradeOptions) error
 			user = "Topic of the lesson: " + strings.TrimSpace(o.Topic) + "\n\n"
 		}
 		user += fmt.Sprintf("Mark these %d completions:\n%s\n\nReturn the JSON now.", len(asked), strings.Join(body, "\n"))
-		raw, err := client.Generate(user, LLMOptions{
-			System: system, Model: o.Model, JSON: true, Temperature: temperature,
+		raw, thought, err := completeThinking(client, user, LLMOptions{
+			System: system, Model: o.Model, JSON: true, Temperature: temperature, Think: o.Think,
 		})
 		if err != nil {
 			return err
+		}
+		if o.Thinking != nil && thought != "" {
+			*o.Thinking = append(*o.Thinking, thought)
 		}
 		parsed := ParseGrades(raw, len(chunk), o.GrammarWeight, o.Threshold, gradedBy)
 		for _, i := range asked {
@@ -928,8 +954,15 @@ type TutorConfig struct {
 	Threshold     float64 `json:"threshold"`
 	GrammarWeight float64 `json:"grammar_weight"`
 	Batch         int     `json:"batch"`
-	Adapt         bool    `json:"adapt"`  // drill the previous round's weakest points
-	Drills        int     `json:"drills"` // extra correct example sentences per round
+	// Think is the thinking level asked of the marker (a thinking Ollama model): nil asks for it only when
+	// LearnThinking teaches it (then on), true / false / "low" | "medium" | "high", or "default" for the
+	// model's own choice.  LearnThinking teaches the network the marker's thinking as thoughts that begin at
+	// the Think sentinel (Model.ThinkOn), and ThinkQuestions every question in it as a place to stop and think.
+	Think          any  `json:"think"`
+	LearnThinking  bool `json:"learn_thinking"`
+	ThinkQuestions bool `json:"think_questions"`
+	Adapt          bool `json:"adapt"`  // drill the previous round's weakest points
+	Drills         int  `json:"drills"` // extra correct example sentences per round
 	// Variants is how many sentences with the same mistake the teacher writes
 	// per failure, for the negative network (0 = do not ask); VariantWeight is
 	// their share of the failure's severity, since the student never wrote them.
@@ -963,7 +996,8 @@ func DefaultTutorConfig() TutorConfig {
 		Topic: "everyday life", Rounds: 3, Exercises: 5, Attempts: 1, Level: "beginner", Words: "3 to 6",
 		TutorProvider: DefaultProvider, TutorModel: DefaultTutorModel(),
 		Mode: "beam", Length: 20, MaxLength: 80, Temperature: 1.0, ToEnd: true,
-		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, Batches: 1, Adapt: true, TeachAnswer: true, Learn: true,
+		K: 5, Threshold: 6.0, GrammarWeight: 0.6, Batch: 10, ThinkQuestions: true, Batches: 1, Adapt: true,
+		TeachAnswer: true, Learn: true,
 		Variants: DefaultVariants, VariantWeight: 0.5,
 		TwoNRLPer: "round", DiffCorrections: true, KeepWeight: 0, MinWeight: 0.25, NegEpochs: 2, PosEpochs: 3,
 		Strength: 1.0, Replay: true, ReplayLimit: 64,
@@ -991,6 +1025,22 @@ func (c *TutorConfig) Resolve() error {
 		c.TutorModel = DefaultProviderModel(c.TutorProvider)
 	}
 	return nil
+}
+
+// ResolvedThink is what the marking asks the teacher for: Think as given, else - when its thinking is
+// taught - on (nil sends nothing).
+func (c *TutorConfig) ResolvedThink() any {
+	if c.Think == nil {
+		if c.LearnThinking {
+			return true
+		}
+		return nil
+	}
+	level, err := ThinkValue(c.Think)
+	if err != nil {
+		return nil
+	}
+	return level
 }
 
 // ResolvedGraderModel is the model the marking runs on: GraderModel, else the
@@ -1051,6 +1101,9 @@ func (c *TutorConfig) Validate() error {
 	}
 	if c.Batch < 1 {
 		return fmt.Errorf("batch must be >= 1")
+	}
+	if _, err := ThinkValue(c.Think); err != nil { // true | false | low | medium | high | default
+		return err
 	}
 	if c.Drills < 0 || c.ReplayLimit < 0 {
 		return fmt.Errorf("drills and replay_limit must be >= 0")
@@ -1208,16 +1261,41 @@ func (t *TutorTrainer) Complete(exercise Exercise, attempt int) (*Lesson, error)
 	}, nil
 }
 
-// GradeLessons is step 3: the marker marks the completions (one call per Batch).
-func (t *TutorTrainer) GradeLessons(lessons []*Lesson) error {
+// GradeLessons is step 3: the marker marks the completions (one call per Batch), and says what it
+// thought while it marked - one line per call that thought.
+func (t *TutorTrainer) GradeLessons(lessons []*Lesson) ([]string, error) {
 	cfg := t.Config
 	grader := t.grader()
-	return t.outside(func() error {
+	thinking := []string{}
+	err := t.outside(func() error {
 		return GradeCompletions(grader, lessons, GradeOptions{
 			Topic: cfg.Topic, Threshold: cfg.Threshold, GrammarWeight: cfg.GrammarWeight,
 			Model: cfg.ResolvedGraderModel(), Batch: cfg.Batch, GradedBy: ProviderOf(grader),
+			Think: cfg.ResolvedThink(), Thinking: &thinking,
 		})
 	})
+	return thinking, err
+}
+
+// TeachThinking is what the teacher thought this round and - with LearnThinking - what the network
+// learned from it: the thinking taught as thoughts (Model.ThinkOn: walks that begin at the Think
+// sentinel) at the fine-tune pass's epochs, and with ThinkQuestions every question in it as a node where
+// the network stops to think.  A dry run records the thinking and teaches none of it.
+func (t *TutorTrainer) TeachThinking(thinking []string) (map[string]any, error) {
+	cfg := t.Config
+	out := map[string]any{
+		"thinking": append([]string{}, thinking...), "thoughts": 0, "thought_questions": 0, "thought_nodes": 0,
+	}
+	if !cfg.Learn || !cfg.LearnThinking || len(thinking) == 0 || t.stopped() || t.Model == nil {
+		return out, nil
+	}
+	learned, err := t.Model.ThinkOn(thinking, TrainOptions{Epochs: cfg.PosEpochs, AutoCompress: true, Stop: t.Stop},
+		cfg.ThinkQuestions, 1.0)
+	if err != nil {
+		return nil, err
+	}
+	out["thoughts"], out["thought_questions"], out["thought_nodes"] = learned.Thoughts, learned.Questions, learned.Taught
+	return out, nil
 }
 
 // WeightOf is the negative-phase weight of a failed sentence: MinWeight for a near miss, 1 for a hopeless one.
@@ -1560,8 +1638,9 @@ func (t *TutorTrainer) runRound(round, batch int) (map[string]any, []*Lesson, er
 			lessons = append(lessons, lesson)
 		}
 	}
+	thinking := []string{}
 	if len(lessons) > 0 && !t.stopped() {
-		if err := t.GradeLessons(lessons); err != nil {
+		if thinking, err = t.GradeLessons(lessons); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1589,6 +1668,10 @@ func (t *TutorTrainer) runRound(round, batch int) (map[string]any, []*Lesson, er
 			return nil, nil, err
 		}
 	}
+	thought, err := t.TeachThinking(thinking)
+	if err != nil {
+		return nil, nil, err
+	}
 	blamed, err := t.TeachNegative(lessons)
 	if err != nil {
 		return nil, nil, err
@@ -1604,6 +1687,9 @@ func (t *TutorTrainer) runRound(round, batch int) (map[string]any, []*Lesson, er
 		record[key] = value
 	}
 	for key, value := range learned {
+		record[key] = value
+	}
+	for key, value := range thought {
 		record[key] = value
 	}
 	if blamed != nil {

@@ -18,8 +18,9 @@ and Go servers can serve the page with zero npm steps. **Rebuild and recommit
 | `sse.js` | server-sent events read out of a byte stream one frame at a time, for the Talk panel (`test/sse.test.mjs`) |
 | `stream.js` | a streamed conversation, pure: `LineParser` cuts the chunks into whole lines, `applyEvent` folds the events of the turn being spoken into what the live bubble shows (`test/stream.test.mjs`) |
 | `util.js` | parsing and formatting helpers (`fmtInt`, `fmtNum`, `fmtBytes`, `fmtCounter`, `asArray`, `parseInteger`, `splitLines`, …) |
-| `thinking.js` | the THINK sentinel's records read for display: the one-line summary of a thought, the questions in a text, the request bodies of `/api/think` and `/api/ollama/think`, which node ids are sentinels. Pure, and tested by `../test/thinking.test.mjs` |
+| `thinking.js` | the THINK sentinel's records read for display: the one-line summary of a thought, the questions in a text, the request bodies of `/api/think` and `/api/ollama/think`, the Tutor tab's thinking settings and what a round learned from its teacher's thinking, which node ids are sentinels. Pure, and tested by `../test/thinking.test.mjs` |
 | `attention.js` | the attention band read for display: the band over one gram (the servers' own formula, so a blur can be drawn before it is applied), how sharply a unit is drawn, the rows of a correction preview. Pure, and tested by `../test/attention.test.mjs` |
+| `window.js` | the dynamic window read for display: the ladder from a top to a floor (the servers' own sizes, so a ladder can be drawn before it is applied), the next rung, a size kept on the ladder, the window and a step in one line each. Pure, and tested by `../test/window.test.mjs` |
 | `audio.js` | microphone capture, Web Speech dictation, and WAV encoding for the Speech panel — decodes with the Web Audio API, mixes to mono, resamples to 16 kHz and writes 16-bit PCM, so the server never needs ffmpeg |
 | `styles.css` | all of the styling. Responsive; a single column under 800 px |
 | `components/` | the panels and shared widgets (see its own README) |

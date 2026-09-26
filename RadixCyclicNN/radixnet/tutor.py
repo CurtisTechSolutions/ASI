@@ -68,6 +68,18 @@ plural exercises.
    unreadable answer still leaves a plan.  Every lesson of it can be started
    as the next run.
 
+7. **The teacher's thinking** - a thinking model (qwen3, deepseek-r1, ...)
+   reasons before it marks, and Ollama hands the reasoning back beside the
+   marks (``think``: the level asked for while it marks).  Every round records
+   it (``thinking``), and with ``learn_thinking`` the network is taught it as
+   *thoughts* - walks that begin at the THINK sentinel
+   (:func:`radixnet.thinking.think_on`) - with every question the teacher
+   asked itself taught as a place where the network stops to think
+   (``think_questions``).  So the network learns not only the English it got
+   wrong but how its teacher reasoned about it; ``radixnet think`` and a
+   conversation that catches itself repeating think in those thoughts.  Only
+   an Ollama teacher thinks aloud: ChatGPT keeps its reasoning to itself.
+
 The teacher is a local Ollama model by default (``OLLAMA_HOST``,
 ``RADIXNET_TUTOR_MODEL``) or ChatGPT (``tutor_provider="chatgpt"``, see
 :mod:`radixnet.chatgpt`, which needs ``OPENAI_API_KEY``); the marking follows
@@ -106,7 +118,8 @@ from .llm import (
     normalise_provider,
     provider_of,
 )
-from .ollama import DEFAULT_MODEL, parse_lines
+from .ollama import DEFAULT_MODEL, parse_lines, think_value
+from .thinking import think_on
 
 __all__ = [
     "DEFAULT_PLAN_LESSONS",
@@ -562,6 +575,20 @@ def _parse_grades(
     return grades
 
 
+def _complete(client: LLMClient, prompt: str, *, think: bool | str | None = None, **options: Any) -> tuple[str, str]:
+    """One completion and the thinking behind it, ``(answer, thinking)``.
+
+    A client that can say what it thought (Ollama's :meth:`~radixnet.ollama.OllamaClient.complete`) is asked
+    for both - with ``think`` as the level - and the thinking comes back collapsed to one line; any other
+    client answers as it always has, and thought nothing anyone can read.
+    """
+    complete = getattr(client, "complete", None)
+    if callable(complete):
+        got = complete(prompt, think=think, **options)
+        return got["response"], " ".join(str(got.get("thinking") or "").split())
+    return client.generate(prompt, **options), ""
+
+
 def grade_completions(
     client: LLMClient,
     lessons: Sequence[Lesson],
@@ -574,11 +601,16 @@ def grade_completions(
     temperature: float = 0.2,
     external: Callable[[], Any] | None = None,
     graded_by: str | None = None,
+    think: bool | str | None = None,
+    thinking: list[str] | None = None,
 ) -> list[Lesson]:
     """Mark every lesson in place (``lesson.grade``) in batches of ``batch``; returns ``lessons``.
 
     ``graded_by`` names the provider doing the marking (the client's own by
-    default) and ends up in every grade it gives.
+    default) and ends up in every grade it gives.  ``think`` is the thinking
+    level asked of the marker (Ollama's ``think``; ``None`` sends nothing), and
+    what it thought before each batch's marks - one line per batch that
+    thought - is appended to ``thinking`` when a list is given.
 
     An empty completion is failed without asking (``graded_by="empty"``), with
     the teacher's model answer as the correction when the exercise has one; a
@@ -612,7 +644,12 @@ def grade_completions(
             + f"Mark these {len(asked)} completions:\n{body}\n\nReturn the JSON now."
         )
         with hold():
-            raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": temperature})
+            raw, thought = _complete(
+                client, user, system=system, model=model, json_mode=True, options={"temperature": temperature},
+                think=think,
+            )
+        if thinking is not None and thought:
+            thinking.append(thought)
         parsed = _parse_grades(raw, len(chunk), grammar_weight, threshold, graded_by)
         for i, lesson in asked:
             grade = parsed.get(i)
@@ -1338,6 +1375,10 @@ class TutorConfig:
     threshold: float = 6.0
     grammar_weight: float = 0.6
     batch: int = 10
+    # the teacher's thinking (a thinking Ollama model): asked for while it marks, and taught as thoughts
+    think: bool | str | None = None  # the level asked of the marker; None: on with learn_thinking, else not asked
+    learn_thinking: bool = False  # teach the network the marker's thinking as thoughts (radixnet.thinking.think_on)
+    think_questions: bool = True  # ... and every question in it as a place where the network stops to think
     adapt: bool = True  # drill the previous round's weakest points
     drills: int = 0  # extra correct example sentences per round
     # why it is wrong, and the same mistake again (the negative network's lesson; see explain_mistakes)
@@ -1370,6 +1411,13 @@ class TutorConfig:
             self.tutor_model = default_tutor_model(self.tutor_provider)
         if self.grader_model is not None and not str(self.grader_model).strip():
             self.grader_model = None
+
+    @property
+    def resolved_think(self) -> bool | str | None:
+        """What the marking asks the teacher for: ``think`` as given, else - when its thinking is taught - on."""
+        if self.think is None:
+            return True if self.learn_thinking else None
+        return think_value(self.think)
 
     @property
     def resolved_grader_model(self) -> str:
@@ -1411,6 +1459,7 @@ class TutorConfig:
             raise ValueError("keep_weight must lie in [0, 1]")
         if self.batch < 1:
             raise ValueError("batch must be >= 1")
+        think_value(self.think)  # true | false | low | medium | high | default, or a ValueError saying so
         if self.drills < 0 or self.replay_limit < 0 or self.checkpoint_every < 0:
             raise ValueError("drills, replay_limit and checkpoint_every must be >= 0")
         if self.variants < 0 or self.variants > MAX_VARIANTS:
@@ -1518,14 +1567,35 @@ class TutorTrainer:
             seconds=time.perf_counter() - t0,
         )
 
-    def grade(self, lessons: list[Lesson]) -> list[Lesson]:
-        """Step 3: the teacher marks the completions (one call per :attr:`TutorConfig.batch`)."""
+    def grade(self, lessons: list[Lesson], thinking: list[str] | None = None) -> list[Lesson]:
+        """Step 3: the teacher marks the completions (one call per :attr:`TutorConfig.batch`).
+
+        What it thought while it marked - one line per call that thought - is appended to ``thinking``.
+        """
         cfg = self.config
         return grade_completions(
             self.grader_client, lessons, topic=cfg.topic, threshold=cfg.threshold, grammar_weight=cfg.grammar_weight,
             model=cfg.resolved_grader_model, batch=cfg.batch, external=self._external,
-            graded_by=self.grader_provider,
+            graded_by=self.grader_provider, think=cfg.resolved_think, thinking=thinking,
         )
+
+    def teach_thinking(self, thinking: Sequence[str]) -> dict:
+        """What the teacher thought this round and - with ``learn_thinking`` - what the network learned from it.
+
+        The thinking is taught as thoughts (:func:`radixnet.thinking.think_on`: walks that begin at the THINK
+        sentinel), at the fine-tune pass's epochs and rate, and with ``think_questions`` every question in it
+        marks a node where the network stops to think.  A dry run records the thinking and teaches none of it.
+        """
+        cfg = self.config
+        out = {"thinking": list(thinking), "thoughts": 0, "thought_questions": 0, "thought_nodes": 0}
+        if not (cfg.learn and cfg.learn_thinking and thinking) or self._stopped():
+            return out
+        learned = think_on(
+            self.model, list(thinking), questions=cfg.think_questions, epochs=cfg.pos_epochs, lr=cfg.pos_lr,
+            batch_size=cfg.batch_size, stop_event=self._stop,
+        )
+        out.update(thoughts=learned["thoughts"], thought_questions=learned["questions"], thought_nodes=learned["taught"])
+        return out
 
     def widen(self, lessons: Sequence[Lesson], round_no: int = 1, progress: ProgressFn | None = None) -> dict:
         """Step 4: why are the failures wrong, and what else is wrong in the same way?
@@ -1776,8 +1846,9 @@ class TutorTrainer:
                 break
             for attempt in range(cfg.attempts):
                 lessons.append(self.complete(exercise, attempt))
+        thinking: list[str] = []
         if lessons and not self._stopped():
-            self.grade(lessons)
+            self.grade(lessons, thinking)
         widened = self.widen(lessons, round_no, progress)
         for lesson in lessons:
             self._emit_lesson(progress, round_no, lesson, batch)
@@ -1793,13 +1864,14 @@ class TutorTrainer:
                 except LLMError as exc:  # the lesson stands without its drill sentences
                     self._emit(progress, {"kind": "note", "round": round_no, "message": f"no drill sentences: {exc}"})
         learned = {} if self._stopped() else self._learn_lessons(lessons, drills)
+        thought = self.teach_thinking(thinking)
         blamed = self._teach_negative(lessons)
         if cfg.adapt:
             self.weak = card["weakest"]
         record = {
             "kind": "round", "batch": batch, "round": round_no, "topic": cfg.topic, "focus": cfg.focus,
             "exercises": len(exercises), "drills": len(drills), "seconds": time.perf_counter() - t0,
-            **card, **learned,
+            **card, **learned, **thought,
         }
         if blamed is not None:
             record["negative_blamed"] = blamed["blamed"]

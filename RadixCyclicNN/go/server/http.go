@@ -260,6 +260,12 @@ func init() {
 	doc("POST", "/api/model/attention", "switch the band: {on, blur} - blur (0..1) alone switches it on, on: true without a blur uses the one it had (else default_blur), on: false switches it off -> {kind, attention, stats}")
 	route("POST", "/api/model/attention/preview", rAttentionPreview)
 	doc("POST", "/api/model/attention/preview", "where one correction would land, gram by gram, and nothing changes: {wrong, right, blur} -> {kind, attention, blur, weights, changes, wrong, right}, each side {text, units, grams, spans, writer, charges, focus, end}")
+	route("GET", "/api/model/window", rWindow)
+	doc("GET", "/api/model/window", "the model's dynamic window - the ladder of node sizes, halving from 32 to 4 and back up: {kind, window: {on, top, floor, size, auto, sizes, next, unit, units, ngram, longer (real nodes a step would halve; null while off), longest, nodes, heavy (null: the bridge is heavy by its count), default_top, default_floor}}")
+	route("POST", "/api/model/window", rWindowSet)
+	doc("POST", "/api/model/window", "switch the window: {on, top, floor, size, auto} - on: false switches it off, on: true or any setting switches it on at the values given over the ones it had (else 32 down to 4, at the top, stepping every epoch); 400 for a size that is not a power of two or off the ladder -> {kind, window, stats}")
+	route("POST", "/api/model/window/step", rWindowStep)
+	doc("POST", "/api/model/window/step", "step the window by hand: {steps (default 1)} - each step merges what fits, halves every node that is longer and moves the window down the ladder -> {kind, step: {steps, sizes, from, to, merges, splits, nodes_before, nodes_after, edges_before, edges_after, window}, window, stats}; 400 while it is off")
 	route("GET", "/api/encoding", rEncoding)
 	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, think_label, configurable: false (the window is part of the model format, not a setting), note}")
 	route("POST", "/api/encoding/preview", rEncodingPreview)
@@ -479,6 +485,49 @@ func rAttentionPreview(rq *request) (int, any, error) {
 		return 0, nil, err
 	}
 	out, err := rq.svc.AttentionPreview(wrong, right, blur)
+	return 200, out, err
+}
+
+// optionalInt reads an integer that may be absent or null (then nil).
+func optionalInt(f fields, name string) (*int, error) {
+	v, present, err := f.integer(name, 0, nil)
+	if err != nil || !present {
+		return nil, err
+	}
+	return &v, nil
+}
+
+func rWindow(rq *request) (int, any, error) {
+	out, err := rq.svc.Window()
+	return 200, out, err
+}
+
+func rWindowSet(rq *request) (int, any, error) {
+	on, err := optionalFlag(rq.f, "on")
+	if err != nil {
+		return 0, nil, err
+	}
+	auto, err := optionalFlag(rq.f, "auto")
+	if err != nil {
+		return 0, nil, err
+	}
+	var ints [3]*int
+	for i, name := range []string{"top", "floor", "size"} {
+		if ints[i], err = optionalInt(rq.f, name); err != nil {
+			return 0, nil, err
+		}
+	}
+	out, err := rq.svc.ConfigureWindow(on, ints[0], ints[1], ints[2], auto)
+	return 200, out, err
+}
+
+func rWindowStep(rq *request) (int, any, error) {
+	minimum := 1
+	steps, _, err := rq.f.integer("steps", 1, &minimum)
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.WindowStep(steps)
 	return 200, out, err
 }
 

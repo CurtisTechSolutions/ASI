@@ -188,11 +188,23 @@ type GraphDoc struct {
 	// Attention is the attention band, written only while it is on: a file
 	// without it was written with the band off (attention.go).
 	Attention *attentionDoc `json:"attention,omitempty"`
+
+	// DynamicWindow is the dynamic window, likewise written only while it is
+	// on: the ladder, where it stands and whether it steps by itself (window.go).
+	DynamicWindow *windowDoc `json:"dynamic_window,omitempty"`
 }
 
 // attentionDoc is the "attention" block of a graph document.
 type attentionDoc struct {
 	Blur *float64 `json:"blur"`
+}
+
+// windowDoc is the "dynamic_window" block of a graph document.
+type windowDoc struct {
+	Top   int  `json:"top"`
+	Floor int  `json:"floor"`
+	Size  int  `json:"size"`
+	Auto  bool `json:"auto"`
 }
 
 // ToDoc snapshots the graph with dead nodes and edges compacted away (node
@@ -219,6 +231,9 @@ func (g *Graph) ToDoc() *GraphDoc {
 	if g.Attention.On {
 		blur := g.Attention.Blur
 		doc.Attention = &attentionDoc{Blur: &blur}
+	}
+	if w := g.DynamicWindow; w.On {
+		doc.DynamicWindow = &windowDoc{Top: w.Top, Floor: w.Floor, Size: w.Size, Auto: w.Auto}
 	}
 	n := len(order)
 	doc.Nodes = nodesDoc{Labels: make([]string, n), Z: make([]float64, n), A: make([]float64, n), B: make([]float64, n),
@@ -485,6 +500,17 @@ func GraphFromDoc(d *GraphDoc) (*Graph, error) {
 			return nil, fmt.Errorf("graph attention: %v", err)
 		}
 		g.Attention = AttentionBand{On: true, Blur: *d.Attention.Blur}
+	}
+	if w := d.DynamicWindow; w != nil && w.Top != 0 {
+		floor := w.Floor
+		if floor == 0 {
+			floor = DefaultWindowFloor
+		}
+		window, err := NewDynamicWindow(w.Top, floor, w.Size, w.Auto)
+		if err != nil {
+			return nil, fmt.Errorf("graph dynamic_window: %v", err)
+		}
+		g.DynamicWindow = window
 	}
 	enc := g.Enc
 	g.Inverted = d.Inverted

@@ -421,6 +421,13 @@ class LessonPrinter(_RowPrinter):
                 f"mean {fmt(record.get('mean_score'))} (grammar {fmt(record.get('mean_grammar'))}), "
                 f"weakest: {weakest} -> {learned} (bad={record.get('bad')}, good={record.get('good')})"
             )
+            for thought in record.get("thinking") or []:
+                self.console.note(f"    thinking: {clip(str(thought), 100)}")
+            if record.get("thoughts"):
+                self.console.note(
+                    f"    taught {record.get('thoughts')} thought(s) and {record.get('thought_questions')} question(s) "
+                    f"it asked itself; it now stops to think at {record.get('thought_nodes')} more node(s)"
+                )
             if record.get("similar"):
                 self.console.note(
                     f"    negative network: {record.get('explained')} mistake(s) explained, "
@@ -2304,6 +2311,60 @@ def _print_changes(console: Console, changes: list[dict]) -> None:
         ["change", "the network wrote", "the teacher wrote"],
         [[change["op"], change["wrong"] or "-", change["right"] or "-"] for change in changes],
     )
+
+
+def cmd_window(args: argparse.Namespace, console: Console) -> dict:
+    """The dynamic window: show it, set its ladder, switch it on or off, or step it by hand."""
+    settings = args.on or args.auto or args.manual or any(v is not None for v in (args.top, args.floor, args.size))
+    if args.off and settings:
+        raise CliError("--off takes no other setting: switching the window off is all it does")
+    if args.off and args.step is not None:
+        raise CliError("--off and --step contradict each other: a step needs the window on")
+    if args.auto and args.manual:
+        raise CliError("--auto and --manual contradict each other")
+    model, origin = open_model(args, console, required=True)
+    changes: dict = {}
+    stepped = None
+    saved = None
+    if settings or args.off:
+        try:
+            model.configure_window(
+                on=False if args.off else True, top=args.top, floor=args.floor, size=args.size,
+                auto=True if args.auto else False if args.manual else None,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        changes = model.graph.dynamic_window.to_dict() or {"on": False}
+    if args.step is not None:
+        try:
+            stepped = model.window_step(args.step)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+    if (changes or stepped) and not args.dry_run:
+        saved = save_model(model, args.out or args.model)
+    config = model.window_config()
+    window = model.graph.dynamic_window
+    units = units_of(model)
+    if stepped:
+        step_text = (
+            f"{stepped['steps']} step(s) at {', '.join(str(s) for s in stepped['sizes'])}: {stepped['merges']} "
+            f"merge(s), {stepped['splits']} split(s), nodes {stepped['nodes_before']} -> {stepped['nodes_after']}, "
+            f"edges {stepped['edges_before']} -> {stepped['edges_after']}"
+        )
+    else:
+        step_text = "-"
+    console.pairs([
+        ("model", origin.describe()),
+        ("window", window.describe(units)),
+        ("nodes", f"{config['nodes']} real node(s), the longest {config['longest']} {units}" + (
+            f", {config['longer']} longer than the window" if window.on else "")),
+        ("heavy", f"the bridge between two halves weighs {fmt(config['heavy'])}" if config["heavy"] is not None else
+                  "the bridge between two halves carries the node's whole count"),
+        ("changed", ", ".join(f"{k}={fmt(v)}" for k, v in changes.items()) if changes else "nothing"),
+        ("step", step_text),
+        ("saved", saved["path"] if saved else ("- (dry run)" if (changes or stepped) and args.dry_run else "-")),
+    ])
+    return {"model": origin.to_dict(), "window": config, "changed": changes, "step": stepped, "saved": saved}
 # --------------------------------------------------------------------------
 # the negative network (the failures, and why)
 # --------------------------------------------------------------------------
@@ -3090,6 +3151,7 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
                        f"{stats['feedback_passes']} feedback pass(es)")]
           if model.kind == "resonant" else []),
         *([("attention", model.graph.attention.describe(model.encoding.n))] if model.takes_corrections else []),
+        ("dynamic window", model.graph.dynamic_window.describe(units_of(model))),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -3267,7 +3329,8 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
         tutor_model=args.tutor_model or default_tutor_model(args.tutor_provider),
         grader_model=args.grader_model, mode=args.mode, length=args.length, max_length=args.max_length,
         temperature=args.temperature, to_end=not args.no_to_end, beam=args.beam, threshold=args.threshold,
-        grammar_weight=args.grammar_weight, batch=args.batch, adapt=not args.no_adapt, drills=args.drills,
+        grammar_weight=args.grammar_weight, batch=args.batch, think=args.think, learn_thinking=args.learn_thinking,
+        think_questions=not args.no_think_questions, adapt=not args.no_adapt, drills=args.drills,
         variants=args.variants, variant_weight=args.variant_weight, plan=args.plan or 0, batches=args.batches,
         teach_answer=not args.no_teach_answer, learn=not args.dry_run, twonrl_per=args.twonrl_per,
         diff_corrections=not args.no_diff_corrections, keep_weight=args.keep_weight, min_weight=args.min_weight, neg_epochs=args.neg_epochs, pos_epochs=args.pos_epochs, neg_lr=args.neg_lr,
@@ -3289,6 +3352,8 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
     except ValueError as exc:
         raise CliError(str(exc)) from exc
     model, origin = open_model(args, console, required=False)
+    if config.learn and config.learn_thinking and model.kind == "negative":
+        raise CliError("the negative network judges; it does not think (--kind negative cannot be taught thoughts)")
     out = args.out or args.model
     console.pairs([
         ("model", origin.describe()),
@@ -3301,6 +3366,7 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
                        + (f", temperature={fmt(config.temperature)}" if config.mode == "sample" else "")),
         ("marking", f"pass at {fmt(config.threshold)}/10, grammar weight {fmt(config.grammar_weight)}, "
                     f"{config.batch} per call" + (", adapting to the weakest points" if config.adapt else "")),
+        ("thinking", _tutor_thinking_line(config)),
         ("corrections", "from the diff with what the network wrote: only what changed moves"
                         f" (the rest keeps {fmt(config.keep_weight)})" if config.diff_corrections
                         else "as whole sentences (--no-diff-corrections)"),
@@ -3396,6 +3462,20 @@ def cmd_tutor(args: argparse.Namespace, console: Console) -> dict:
             json.dump({k: doc[k] for k in ("config", "records", "lessons", "report", "plan")}, fh, indent=2)
         console.say(f"wrote report to {args.report}")
     return doc
+def _tutor_thinking_line(config: Any) -> str:
+    """What the tutor does with its marker's thinking, for the settings table."""
+    think = config.resolved_think
+    if think is None and not config.learn_thinking:
+        return "not asked (--think LEVEL shows it, --learn-thinking teaches it)"
+    asked = "the model's choice" if think is None else ("on" if think is True else "off" if think is False else think)
+    if not config.learn_thinking:
+        return f"the marker thinks ({asked}); shown, not taught (--learn-thinking)"
+    if not config.learn:
+        return f"the marker thinks ({asked}); a dry run teaches none of it"
+    questions = " and every question in it as a place to stop and think" if config.think_questions else ""
+    return f"the marker thinks ({asked}); taught as thoughts{questions}"
+
+
 def _save_negative(console: Console, negative: Any, path: str) -> dict:
     """Save the negative network and print what the tutor taught it."""
     saved = save_model(negative, path)
@@ -5098,6 +5178,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="change the band in memory only; nothing is saved")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_attention)
+    # window ---------------------------------------------------------------
+    p = command(
+        "window", "the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up",
+        "A merged node can hold a whole sentence, and a walk through it has nowhere to branch.  The dynamic\n"
+        "window is a ceiling on that length, sized in the binary number system: it starts at 32 units, then\n"
+        "moves to 16, then 8, then 4, and then goes back up to 32 and runs again.  One step merges what fits\n"
+        "the window, halves every node that is longer - both halves keep the node's state, activation and\n"
+        "count, joined by a heavy connection - and moves the window down the ladder.  It steps by itself at\n"
+        "the end of every training epoch (--auto, the default) or by hand (--manual, then --step).  Off (the\n"
+        "default), compression is unbounded and no node is halved.  Without options the window is shown; --on,\n"
+        "--top, --floor, --size, --auto / --manual and --off change it and save the model (--dry-run: in memory\n"
+        "only); --step [N] takes N steps and saves.",
+    )
+    state = p.add_mutually_exclusive_group()
+    state.add_argument("--on", action="store_true",
+                       help="switch the window on (at the ladder it had, else 32 down to 4, standing at the top)")
+    state.add_argument("--off", action="store_true",
+                       help="switch the window off: compression is unbounded again, the graph stays as it is")
+    p.add_argument("--top", type=int, metavar="N", help="the largest window, a power of two (default 32); switches it on")
+    p.add_argument("--floor", type=int, metavar="N",
+                   help="the smallest window before it goes back to the top, a power of two (default 4)")
+    p.add_argument("--size", type=int, metavar="N", help="where on the ladder the window stands now")
+    p.add_argument("--auto", action="store_true", help="step at the end of every training epoch (the default)")
+    p.add_argument("--manual", action="store_true", help="step only when --step asks")
+    p.add_argument("--step", type=int, nargs="?", const=1, metavar="N",
+                   help="take N steps (default 1): merge what fits, halve what is longer, move the window")
+    p.add_argument("--dry-run", action="store_true", help="change the window in memory only; nothing is saved")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_window)
     # negative -------------------------------------------------------------
     p = command(
         "negative", "the negative network: failures, why they failed, and the filter",
@@ -5474,6 +5583,17 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--no-teach-answer", action="store_true",
                        help="a failed lesson learns only the correction, not the teacher's own model answer")
     group.add_argument("--dry-run", action="store_true", help="set and mark the exercises but train nothing and save nothing")
+    group = p.add_argument_group("the teacher's thinking (a thinking Ollama model: qwen3, deepseek-r1, ...)")
+    group.add_argument("--think", metavar="LEVEL",
+                       help="ask the marker to think while it marks: true | false | low | medium | high | default (the "
+                            "model's choice); every round shows what it thought (default: on with --learn-thinking, "
+                            "otherwise not asked)")
+    group.add_argument("--learn-thinking", action="store_true",
+                       help="teach the network the marker's thinking as thoughts that begin at the THINK sentinel - "
+                            "what `radixnet think` and a conversation that catches itself repeating think in")
+    group.add_argument("--no-think-questions", action="store_true",
+                       help="with --learn-thinking: do not teach the questions in the thinking as places where the "
+                            "network stops to think")
     group = p.add_argument_group("what a correction teaches")
     group.add_argument("--no-diff-corrections", action="store_true",
                        help="learn a correction as two whole sentences (the old way) instead of from its diff "

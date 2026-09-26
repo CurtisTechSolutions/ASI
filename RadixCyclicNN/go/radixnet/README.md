@@ -87,6 +87,7 @@ takes a write lock.**
 | `blame.go` | the tutor's verdicts turned into blame |
 | `correct.go`, `diff.go` | corrections, and the character diff that decides which steps to blame |
 | `attention.go` | the attention band: where inside a gram a correction's blame and credit land (`BandWeights`, `SpreadCharges`, `chargedSteps`, the preview) |
+| `window.go` | the dynamic window: the ladder of node sizes halving from 32 to 4 and back up (`DynamicWindow`, `Ladder`), the halving (`SplitWindow`), the step by hand and at the end of every epoch (`WindowStep`, `windowEpoch`) and what the API and the CLI show (`WindowConfig`, `ConfigureWindow`) |
 | `duo.go` | the positive model writes, the negative one vetoes |
 | `gan.go` | the self-upgrading loop |
 | `critic.go` | the reviewer on a loop — the negative network feeding itself |
@@ -96,7 +97,7 @@ takes a write lock.**
 
 | file | what it is |
 |---|---|
-| `tutor.go` | the English lessons — set, answer, mark |
+| `tutor.go` | the English lessons — set, answer, mark, and the marker's thinking taught as thoughts |
 | `recall.go` | what it remembers of what it was shown |
 | `dialogue.go`, `chat.go` | conversing with itself, and with an LLM that marks the replies |
 | `plan.go` | the lesson plan — the report card at the end of a run, the grammar focus each mistake drills, and the level it moves the student to |
