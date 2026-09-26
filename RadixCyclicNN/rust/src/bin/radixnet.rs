@@ -58,7 +58,8 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      serve version\n\
      --kind radix | count | negative | resonant: the algorithm of a NEW model (count is this port's default); a \
      loaded file's own kind always wins.\n\
-     --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word | phone | syllable), how many \
+     --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word | phone | syllable | acoustic), how \
+     many \
      units a gram holds and how far apart\n\
      consecutive grams start (1 = the sliding window, n = non-overlapping groups).  char:3:1 is the default, \
      char:5:5 groups of five\n\

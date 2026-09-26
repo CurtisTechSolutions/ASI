@@ -38,10 +38,10 @@ export function unitStyle(weight) {
   };
 }
 
-/** The units of a gram: its characters, or its words under a word encoding. */
+/** The units of a gram: its characters, or its space-separated tokens under a word, phone, syllable or acoustic encoding. */
 export function gramUnits(gram, unit) {
   const text = String(gram ?? "");
-  return unit === "word" ? text.split(" ") : Array.from(text);
+  return unit && unit !== "char" ? text.split(" ") : Array.from(text);
 }
 
 /** One sentence for the band as GET /api/model/attention reports it. */

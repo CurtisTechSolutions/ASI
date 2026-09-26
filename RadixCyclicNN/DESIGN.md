@@ -3711,7 +3711,7 @@ body the server did not read - a refused upload - still carries it.  So no serve
 Three things it has to get right for the frontend rather than for the model, each of them a rule of §12 rather than
 of the port:
 
-* **`/api/model/select` switches encoding**, between characters and words, the way the Python service switches
+* **`/api/model/select` switches encoding**, between characters, words and sounds, the way the Python service switches
   kind: an encoding is fixed for a model's life, so changing it means a *different* model, and the one that was
   running is *parked* with its unsaved work rather than dropped.  The one selected is whichever comes first of the
   parked model of that encoding, its own file (`<stem>.<unit><ext>`) and a fresh one - which the answer says in

@@ -207,16 +207,58 @@ export const ENCODING_PRESETS = Object.freeze([
   ["char:5:5", "groups of 5 letters"],
   ["word:2:1", "word bigram"],
   ["word:3:1", "word trigram"],
+  ["phone:3:1", "phone trigram (the text as sounds)"],
+  ["syllable:2:1", "syllable bigram"],
+  ["acoustic:3:1", "acoustic unit trigram (sounds learned from recordings)"],
   ["custom", "custom (unit, n, stride)"],
 ]);
 
 /**
- * An encoding spec from the three dials, or an error message: the unit is
- * `char` or `word`, `n` a whole number >= 1 and the stride one from 1 to `n`
+ * What one unit of a model can be, as the servers name it, with what to call
+ * it: characters and words, and the sounds the phonetic tokenizer reads -
+ * phones and syllables from the text, acoustic units learned from recordings.
+ */
+export const UNITS = Object.freeze([
+  ["char", "characters"],
+  ["word", "words"],
+  ["phone", "phones (the text as sounds)"],
+  ["syllable", "syllables"],
+  ["acoustic", "acoustic units (learned from recordings)"],
+]);
+
+const UNIT_NAMES = Object.freeze({
+  char: ["character", "characters"],
+  word: ["word", "words"],
+  phone: ["phone", "phones"],
+  syllable: ["syllable", "syllables"],
+  acoustic: ["acoustic unit", "acoustic units"],
+});
+
+/** True for a unit the servers know. */
+export function isUnit(unit) {
+  return Object.prototype.hasOwnProperty.call(UNIT_NAMES, unit);
+}
+
+/** A unit as an English word: "character" / "characters", "acoustic unit" / "acoustic units" (`char` when unknown). */
+export function unitWord(unit, plural = true) {
+  const names = UNIT_NAMES[unit] || UNIT_NAMES.char;
+  return names[plural ? 1 : 0];
+}
+
+/** True for the units the phonetic tokenizer reads: the server needs the PhoneticTokenizer package beside it. */
+export function soundUnit(unit) {
+  return unit === "phone" || unit === "syllable" || unit === "acoustic";
+}
+
+/**
+ * An encoding spec from the three dials, or an error message: the unit one
+ * of `UNITS`, `n` a whole number >= 1 and the stride one from 1 to `n`
  * (1 slides the window, `n` cuts non-overlapping groups).
  */
 export function encodingSpec(unit, n, stride) {
-  if (unit !== "char" && unit !== "word") return { error: `The unit must be char or word, not ${JSON.stringify(unit)}.` };
+  if (!isUnit(unit)) {
+    return { error: `The unit must be char, word, phone, syllable or acoustic, not ${JSON.stringify(unit)}.` };
+  }
   const size = countOf(n);
   if (size === null || size < 1) return { error: "n must be a whole number of units, 1 or more." };
   const step = countOf(stride);
@@ -224,15 +266,15 @@ export function encodingSpec(unit, n, stride) {
   return { spec: `${unit}:${size}:${step}` };
 }
 
-/** `unit:n:stride` in words: "word trigram", "groups of 5 characters", "7-grams of characters, stride 2". */
+/** `unit:n:stride` in words: "word trigram", "groups of 5 characters", "7-grams of phones, stride 2". */
 export function describeEncoding(spec) {
   const [unit, rawN, rawStride] = String(spec || "").split(":");
   const n = Number(rawN);
   const stride = Number(rawStride);
-  if ((unit !== "char" && unit !== "word") || !Number.isInteger(n) || !Number.isInteger(stride)) return String(spec || "");
-  const units = unit === "word" ? "words" : "characters";
+  if (!isUnit(unit) || !Number.isInteger(n) || !Number.isInteger(stride)) return String(spec || "");
+  const units = unitWord(unit);
   const named = { 2: "bigram", 3: "trigram" }[n];
-  if (stride === 1) return named ? `${unit === "word" ? "word" : "character"} ${named}` : `${n}-grams of ${units}`;
+  if (stride === 1) return named ? `${unitWord(unit, false)} ${named}` : `${n}-grams of ${units}`;
   if (stride === n) return `groups of ${n} ${units}`;
   return `${n}-grams of ${units}, stride ${stride}`;
 }

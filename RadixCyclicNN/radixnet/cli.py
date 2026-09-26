@@ -4338,7 +4338,7 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
     group.add_argument("--encoding", metavar="SPEC", default=default(None),
                        help="encoding of a NEW model: unit[:n[:stride]] - what one unit of text is (char | word | "
-                            "phone | syllable), how many units a gram holds (the n of the n-gram) and how far apart "
+                            "phone | syllable | acoustic), how many units a gram holds (the n of the n-gram) and how far apart "
                             "consecutive grams start (1 = the sliding window, n = non-overlapping groups of n).  "
                             "char:3:1 is the default, char:5:5 groups of five letters, word:2:1 the word bigram, "
                             "word:3:1 the word trigram, phone:3:1 the trigram of sounds (the text read through the "

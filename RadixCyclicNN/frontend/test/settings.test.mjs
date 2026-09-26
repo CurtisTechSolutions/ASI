@@ -15,6 +15,9 @@ import {
   TRAINING_DEFAULTS,
   describeEncoding,
   encodingSpec,
+  soundUnit,
+  UNITS,
+  unitWord,
   pacedCounts,
   problemText,
   rehearsalCount,
@@ -135,6 +138,9 @@ test("the rehearsal preview rounds half up and stops at the buffer", () => {
 test("a new model's encoding is checked before it is sent", () => {
   assert.deepEqual(encodingSpec("word", "3", "1"), { spec: "word:3:1" });
   assert.deepEqual(encodingSpec("char", 5, 5), { spec: "char:5:5" });
+  assert.deepEqual(encodingSpec("phone", "3", "1"), { spec: "phone:3:1" });
+  assert.deepEqual(encodingSpec("syllable", "2", "1"), { spec: "syllable:2:1" });
+  assert.deepEqual(encodingSpec("acoustic", 2, 2), { spec: "acoustic:2:2" });
   assert.ok(encodingSpec("rune", "3", "1").error);
   assert.ok(encodingSpec("char", "0", "1").error);
   assert.ok(encodingSpec("char", "2", "3").error, "a stride longer than the gram skips text");
@@ -153,6 +159,15 @@ test("an encoding reads as words", () => {
   assert.equal(describeEncoding("char:5:5"), "groups of 5 characters");
   assert.equal(describeEncoding("char:5:1"), "5-grams of characters");
   assert.equal(describeEncoding("word:4:2"), "4-grams of words, stride 2");
+  assert.equal(describeEncoding("phone:3:1"), "phone trigram");
+  assert.equal(describeEncoding("syllable:2:1"), "syllable bigram");
+  assert.equal(describeEncoding("acoustic:3:1"), "acoustic unit trigram");
+  assert.equal(describeEncoding("acoustic:4:4"), "groups of 4 acoustic units");
+  assert.equal(describeEncoding("phone:5:2"), "5-grams of phones, stride 2");
+  assert.deepEqual(UNITS.map(([unit]) => unit), ["char", "word", "phone", "syllable", "acoustic"]);
+  assert.equal(unitWord("acoustic", false), "acoustic unit");
+  assert.equal(unitWord("rune"), "characters");
+  assert.ok(soundUnit("phone") && soundUnit("acoustic") && !soundUnit("word"));
   assert.equal(describeEncoding("nonsense"), "nonsense");
   assert.equal(describeEncoding(undefined), "");
 });

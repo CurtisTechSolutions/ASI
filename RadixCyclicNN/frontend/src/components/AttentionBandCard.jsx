@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { unitWord } from "../settings.js";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { DEFAULT_BLUR, bandWeights, chargedRows, clampBlur, describeBand, fmtShare, gramUnits, unitStyle } from "../attention.js";
@@ -19,7 +20,7 @@ function BlurredGram({ gram, unit, weights }) {
     >
       {units.map((text, i) => (
         <span key={i} className="band-unit" style={unitStyle(weights[i] ?? 1)}>
-          {unit === "word" ? text : text === " " ? "␣" : text}
+          {unit && unit !== "char" ? text : text === " " ? "␣" : text}
         </span>
       ))}
     </span>
@@ -226,7 +227,7 @@ export default function AttentionBandCard({ status, onStatus }) {
             ? "A gram of two units has no centre - both are ends - so the band is flat whatever the blur: the two grams that see a unit share it evenly."
             : info && info.stride === n
               ? "This encoding cuts the text into groups that share nothing: each unit sits in one gram, which takes its whole charge, so the band changes nothing here."
-              : `Over a gram of ${n} ${unit === "word" ? "words" : "characters"}: the bars are the band at the blur above.`}
+              : `Over a gram of ${n} ${unitWord(unit)}: the bars are the band at the blur above.`}
       </p>
       <div className="actions">
         <button type="button" className="primary" disabled={busy || jobRunning || !applies} onClick={apply}>
