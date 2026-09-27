@@ -5,6 +5,7 @@ Every test talks to a real ``ThreadingHTTPServer`` bound to port 0 on
 python backend and ``quiet=True``.
 """
 
+import base64
 import json
 import math
 import os
@@ -477,6 +478,41 @@ class TestEndpoints(unittest.TestCase):
         self.assertEqual(set(backends), {"python", "torch", "cuda", "mps", "default"})
         self.assertTrue(backends["python"])
         self.assertIn(backends["default"], ("python", "torch"))
+
+    def test_say_the_output_decoder(self):
+        """POST /api/say speaks any output in the model's units; POST /api/speech/decode speaks what is not a waveform."""
+        try:
+            from radixnet.encoding import phonetok_module
+
+            phonetok_module("synth", "speaking")
+        except ValueError:
+            self.skipTest("the phonetic tokenizer is not importable")
+        status, data, _ = self.client.post("/api/say", {"texts": ["the cat sat", "a dog"]})
+        self.assertEqual(status, 200, data)
+        self.assertEqual((data["count"], data["decoder"], data["encoding"], data["rate"]), (2, "voice", "char:3:1", 16000))
+        wav = base64.b64decode(data["wav_base64"])
+        self.assertTrue(wav.startswith(b"RIFF"))
+        self.assertEqual(len(wav), 44 + 2 * data["samples"])
+        self.assertEqual([u["text"] for u in data["utterances"]], ["the cat sat", "a dog"])
+        self.assertEqual(data["utterances"][0]["tokens"][:3], ["DH", "AH0", "#"])
+        self.assertEqual(data["utterances"][1]["tokens"][-1], "</s>")
+        self.assertEqual(data["samples"], sum(u["samples"] for u in data["utterances"]))
+        self.assertEqual(data["seconds"], data["samples"] / 16000)
+        # one text per line, and the voice's dials
+        status, lines, _ = self.client.post("/api/say", {"text": "the cat sat\n\na dog\n", "pitch": 150, "gain": 0.3})
+        self.assertEqual((status, lines["count"]), (200, 2), lines)
+        self.assertNotEqual(lines["wav_base64"], data["wav_base64"])
+        for body in ({"texts": []}, {}, {"texts": ["the cat"], "pitch": 0}, {"texts": ["the cat"], "tempo": 0},
+                     {"texts": "not a list"}, {"texts": ["the cat"], "rate": 0}):
+            status, err, _ = self.client.post("/api/say", body)
+            self.assertEqual(status, 400, (body, err))
+        # what is not a waveform is spoken by /api/speech/decode too, exactly as /api/say speaks it
+        status, spoken, _ = self.client.post("/api/speech/decode", {"text": "the cat sat"})
+        self.assertEqual((status, spoken["decoder"], spoken["count"]), (200, "voice", 1), spoken)
+        status, again, _ = self.client.post("/api/say", {"texts": ["the cat sat"]})
+        self.assertEqual(spoken, again)
+        status, err, _ = self.client.post("/api/speech/decode", {"text": "  \n "})
+        self.assertEqual(status, 400, err)
 
     def test_encoding_and_its_preview(self):
         status, info, _ = self.client.get("/api/encoding")

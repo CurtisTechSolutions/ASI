@@ -8,6 +8,7 @@ import { asArray, fmtInt, fmtNum, parseInteger, parseNumber, unitName } from "..
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
+import HearButton from "./HearButton.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 import { ThoughtLine } from "./ThoughtView.jsx";
 
@@ -448,6 +449,7 @@ export default function ConversePanel({ status }) {
                       onRate={(text, r) => rate(text, r, { cost: t.cost })}
                       label={`turn ${position}`}
                     />
+                    <HearButton text={t.text} label={`turn ${position}`} compact />
                   </div>
                   <ThoughtLine thought={t.rethink ? t.rethink.thought : null} />
                 </li>

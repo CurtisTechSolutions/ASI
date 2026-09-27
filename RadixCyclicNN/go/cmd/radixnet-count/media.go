@@ -155,7 +155,7 @@ actions:
   info     which codecs this build has
   teach    encode FILE (WAV) and -text into the texts the network learns (--train)
   tutor    ask the network to say back what it was taught, and mark what comes back
-  decode   turn an encoded or predicted waveform text back into a WAV file
+  decode   turn an encoded or predicted waveform text back into a WAV file (any other output is spoken)
 
 Transcription is Python-only (faster-whisper / openai-whisper are Python packages): pass
 the words with -text, which is what the browser's dictation does.
@@ -284,6 +284,38 @@ func cmdSpeechDecode(args []string) {
 	if strings.TrimSpace(*out) == "" {
 		fail("-out is required: where to write the WAV")
 	}
+	if !radixnet.IsWaveformText(body) {
+		// not a waveform: an output in the model's own units, spoken through the model's
+		// voice, one utterance per line (the output decoder, `say`)
+		var texts []string
+		for _, line := range strings.Split(body, "\n") {
+			if strings.TrimSpace(line) != "" {
+				texts = append(texts, strings.TrimRight(line, "\r"))
+			}
+		}
+		if len(texts) == 0 {
+			fail("nothing to decode: the text is blank")
+		}
+		m := openModel(false)
+		spoken, err := radixnet.Say(m.Encoding(), texts, radixnet.DefaultSayOptions())
+		if err != nil {
+			fail("%v", err)
+		}
+		if err := os.WriteFile(*out, spoken.WAV(), 0o644); err != nil {
+			fail("cannot write %s: %v", *out, err)
+		}
+		say("decoder    %s (%s)", spoken.Decoder, spoken.Encoding)
+		say("rate       %d Hz x 1", spoken.Rate)
+		say("length     %.2fs (%d samples)", spoken.Seconds(), spoken.Samples())
+		say("utterances %d", len(spoken.Utterances))
+		say("written    %s", *out)
+		if jsonMode {
+			doc := spoken.Dict()
+			doc["out"] = *out
+			emit(doc)
+		}
+		return
+	}
 	decoded, err := radixnet.DecodeSpeechText(body, *codec)
 	if err != nil {
 		fail("%v", err)
@@ -299,7 +331,7 @@ func cmdSpeechDecode(args []string) {
 	if jsonMode {
 		emit(map[string]any{"codec": decoded.Codec, "rate": decoded.Rate, "channels": decoded.Channels,
 			"samples": decoded.Samples, "seconds": decoded.Seconds, "bytes": decoded.Bytes,
-			"repaired": decoded.Repaired, "out": *out})
+			"repaired": decoded.Repaired, "out": *out, "decoder": "waveform"})
 	}
 }
 

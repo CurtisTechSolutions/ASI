@@ -211,8 +211,23 @@ class TestRustSpeechParity(unittest.TestCase):
                 a = py("speech", "decode", "--text", body, *extra, "--out", out_py, model=self.model)
                 b = rust("speech", "decode", "--text", body, *extra, "--out", out_rs, model=self.model)
                 self.assertEqual({**a, "out": None}, {**b, "out": None})
+                self.assertEqual(a["decoder"], "waveform")
                 with open(out_py, "rb") as fa, open(out_rs, "rb") as fb:
                     self.assertEqual(fa.read(), fb.read(), "the decoded WAV must be identical")
+        # a text that carries no waveform is an output in the model's units, spoken the same on both sides (D-088)
+        out_py = os.path.join(tmpdir(), "said_py.wav")
+        out_rs = os.path.join(tmpdir(), "said_rs.wav")
+        a = py("speech", "decode", "--text", "the cat sat on the mat\na dog", "--out", out_py, model=self.model)
+        b = rust("speech", "decode", "--text", "the cat sat on the mat\na dog", "--out", out_rs, model=self.model)
+        self.assertEqual({**a, "out": None}, {**b, "out": None})
+        self.assertEqual((a["decoder"], a["count"], a["utterances"][1]["tokens"][-1]), ("voice", 2, "</s>"))
+        with open(out_py, "rb") as fa, open(out_rs, "rb") as fb:
+            x, y = fa.read(), fb.read()
+        self.assertEqual(len(x), len(y))
+        self.assertLessEqual(max(abs(p - q) for p, q in zip(struct.unpack("<%dh" % ((len(x) - 44) // 2), x[44:]),
+                                                            struct.unpack("<%dh" % ((len(y) - 44) // 2), y[44:]))), 64)
+        for side in (py, rust):  # a blank text is nothing to decode on either side: the helpers assert the exit code
+            side("speech", "decode", "--text", "   ", "--out", out_py, model=self.model, expect=1)
 
     def test_a_given_transcript_is_transcribed_the_same(self):
         options = ("speech", "transcribe", self.wav, "--text", "  hello   there ")
@@ -506,6 +521,23 @@ class TestRustMediaServer(unittest.TestCase):
         status, doc, _ = self.raw("/api/speech/transcribe?transcript=hello%20there", self.wav, "audio/wav")
         self.assertEqual((status, doc["transcript"], doc["backend"], doc["name"]), (200, "hello there", "given",
                                                                                     "speech"))
+        # what is not a waveform is an output in the model's units, spoken as Python speaks it
+        from radixnet.encoding import parse_encoding
+        from radixnet.voice import say
+
+        status, doc, _ = self.server.post("/api/speech/decode", {"text": "the cat sat on the mat\na dog"})
+        self.assertEqual((status, doc["decoder"], doc["count"]), (200, "voice", 2), doc)
+        expected = say(parse_encoding(doc["encoding"]), ["the cat sat on the mat", "a dog"]).to_dict()
+        self.assertEqual({k: doc[k] for k in expected}, expected)
+        status, said, _ = self.server.post("/api/say", {"texts": ["the cat sat on the mat", "a dog"]})
+        self.assertEqual(status, 200, said)
+        self.assertEqual(said, doc)
+        heard = base64.b64decode(doc["wav_base64"])
+        self.assertEqual(len(heard), 44 + 2 * expected["samples"])
+        mine = say(parse_encoding(doc["encoding"]), ["the cat sat on the mat", "a dog"]).wav()
+        self.assertLessEqual(max(abs(p - q) for p, q in zip(struct.unpack("<%dh" % expected["samples"], heard[44:]),
+                                                            struct.unpack("<%dh" % expected["samples"], mine[44:]))), 64)
+        self.assertIn("POST /api/say", self.server.get("/api/status")[1]["routes"])
 
     def test_the_recall_tutors_answer_the_frontend(self):
         status, doc, _ = self.multipart("/api/images/tutor?size=32&lead=4&length=16", "pic.png", self.png, "image/png")

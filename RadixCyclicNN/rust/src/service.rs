@@ -1704,6 +1704,64 @@ fn words(svc: &Arc<Service>, r: &Request) -> Answer {
     Ok(out)
 }
 
+/// The voice `POST /api/say` and the voice fallback of `POST /api/speech/decode`
+/// speak with.
+pub(crate) fn voice_options(r: &Request) -> Result<crate::voice::SayOptions, ApiError> {
+    let o = crate::voice::SayOptions {
+        rate: r.usize("rate", phonetok::synth::RATE as usize)? as u32,
+        pitch: r.number("pitch", 120.0)?,
+        tempo: r.number("tempo", 1.0)?,
+        gain: r.number("gain", 0.5)?,
+        polish: r.usize("polish", 0)?,
+    };
+    if o.rate == 0 {
+        return Err(ApiError::bad_request("'rate' must be at least 1"));
+    }
+    if o.pitch <= 0.0 {
+        return Err(ApiError::bad_request("'pitch' must be above 0 Hz"));
+    }
+    if o.tempo <= 0.0 {
+        return Err(ApiError::bad_request("'tempo' must be above 0"));
+    }
+    if o.gain < 0.0 {
+        return Err(ApiError::bad_request("'gain' must be at least 0"));
+    }
+    Ok(o)
+}
+
+/// The output decoder behind `POST /api/say` and the voice fallback of
+/// `POST /api/speech/decode`: the texts spoken in the model's units, one
+/// utterance each.  Only the encoding is the model's - it says how a text is
+/// read - so the lock is held for that alone and the voice runs outside it.
+pub(crate) fn say_texts(svc: &Arc<Service>, texts: Vec<String>, o: &crate::voice::SayOptions) -> Answer {
+    if texts.is_empty() {
+        return Err(ApiError::bad_request("'texts' contains no texts"));
+    }
+    let enc = svc.with_model(|m| m.g.enc);
+    let spoken = crate::voice::say(enc, &texts, o).map_err(ApiError::bad_request)?;
+    let mut doc = spoken.to_json();
+    if let Json::Obj(pairs) = &mut doc {
+        pairs.push((
+            "wav_base64".to_string(),
+            Json::str(crate::multipart::base64::encode(&spoken.wav())),
+        ));
+    }
+    Ok(doc)
+}
+
+/// `POST /api/say`: `{texts | text, rate, pitch, tempo, gain, polish}` ->
+/// `{wav_base64, rate, samples, seconds, encoding, decoder, count, utterances}`.
+fn say(svc: &Arc<Service>, r: &Request) -> Answer {
+    let form = crate::multipart::Form::json(r)?;
+    if form.field("texts").is_none() && form.field("text").is_none() {
+        return Err(ApiError::bad_request(
+            "missing field 'texts' (list of strings) or 'text' (string, one text per line)",
+        ));
+    }
+    let texts = form.texts("texts", "text")?;
+    say_texts(svc, texts, &voice_options(r)?)
+}
+
 fn encoding(svc: &Arc<Service>, _r: &Request) -> Answer {
     let enc = svc.active_encoding();
     Ok(Json::obj([
@@ -2070,6 +2128,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     server.route("POST", "/api/model/window/step", window_step);
     server.route("POST", "/api/predict", predict);
     server.route("POST", "/api/generate", generate);
+    server.route("POST", "/api/say", say);
     server.route("POST", "/api/score", score);
     server.route("POST", "/api/feedback", feedback);
     server.route("POST", "/api/2nrl", two_nrl);

@@ -349,6 +349,33 @@ fn the_model_endpoints_answer_the_same_contract() {
     assert!(scored.at("log_prob").as_f64().unwrap_or(1.0) < 0.0);
     assert_eq!(scored.at("count").as_i64(), Some(1));
 
+    // the output decoder: any text in the model's units, spoken (and what is not a
+    // waveform reaches it through /api/speech/decode too)
+    let (status, spoken) = post(port, "/api/say", r#"{"texts":["the cat sat on the mat","a dog"]}"#);
+    assert_eq!(status, 200, "{spoken:?}");
+    assert_eq!(spoken.at("count").as_i64(), Some(2));
+    assert_eq!(spoken.at("decoder").as_str(), Some("voice"));
+    assert_eq!(spoken.at("encoding").as_str(), Some("char:3:1"));
+    assert_eq!(spoken.at("rate").as_i64(), Some(16000));
+    let wav = spoken.at("wav_base64").as_str().unwrap_or("");
+    assert!(wav.starts_with("UklGR"), "not a WAV: {}", &wav[..wav.len().min(12)]); // "RIFF" in base64
+    assert_eq!(spoken.at("utterances").as_array().len(), 2);
+    let (status, decoded) = post(port, "/api/speech/decode", r#"{"text":"the cat sat on the mat"}"#);
+    assert_eq!(status, 200, "{decoded:?}");
+    assert_eq!(decoded.at("decoder").as_str(), Some("voice"));
+    assert_eq!(decoded.at("count").as_i64(), Some(1));
+    for body in [
+        r#"{"texts":[]}"#,
+        r#"{}"#,
+        r#"{"texts":["the cat"],"pitch":0}"#,
+        r#"{"texts":"no"}"#,
+    ] {
+        let (status, _) = post(port, "/api/say", body);
+        assert_eq!(status, 400, "{body}");
+    }
+    let (status, _) = post(port, "/api/speech/decode", r#"{"text":"   "}"#);
+    assert_eq!(status, 400);
+
     for path in [
         "/api/graph?limit=5",
         "/api/paths?limit=3",

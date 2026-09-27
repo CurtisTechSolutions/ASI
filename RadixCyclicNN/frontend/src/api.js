@@ -391,8 +391,18 @@ export const api = {
    * temperature, threshold, listen_back, blame.
    */
   speechTutor: (audio, options = {}) => sendAudio("/api/speech/tutor", audio, options),
-  /** An encoded - or predicted - `aud:...` text back to audio that can be played. */
+  /**
+   * An encoded - or predicted - `aud:...` text back to audio that can be played; any other text is an output in
+   * the model's units and comes back spoken through its voice (`decoder: "voice" | "vocoder"`), as `say` answers.
+   */
   speechDecode: (text, codec) => post("/api/speech/decode", codec ? { text, codec } : { text }),
+  /**
+   * The output decoder: texts in the model's units (predictions, samples, turns - sounds, syllables, acoustic
+   * units, words or letters) spoken through the model's voice, one utterance each. Options: rate, pitch, tempo,
+   * gain, polish (acoustic units: Griffin-Lim iterations). Answers `{wav_base64, rate, samples, seconds, encoding,
+   * decoder, count, utterances}`.
+   */
+  say: (texts, options = {}) => post("/api/say", { texts: Array.isArray(texts) ? texts : [texts], ...options }),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama or ChatGPT teacher / judge and 2NRL rewards. */
   /** Tool use (see AgentPanel): the tools the network can call, and one direct call. */
   tools: () => get("/api/tools"),

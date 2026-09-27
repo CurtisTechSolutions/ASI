@@ -10,6 +10,7 @@ package radixnet
 // intonation.  One walk, one utterance.
 
 import (
+	"fmt"
 	"strings"
 	"unicode"
 
@@ -141,11 +142,12 @@ func (s *Speaker) feedTokens(tokens []string) []byte {
 
 // End is the final sentinel: the utterance is closed, and what was pending is spoken.
 func (s *Speaker) End() []byte {
-	s.Tokens = append(s.Tokens, "</s>")
 	if s.vocoder != nil {
+		s.Tokens = append(s.Tokens, "</s>")
 		return s.vocoder.End()
 	}
-	out := s.flushLetters()
+	out := s.flushLetters() // a letter model's last word, so the sentinel is recorded after it
+	s.Tokens = append(s.Tokens, "</s>")
 	out = append(out, s.synth.End()...)
 	s.spokenWords = 0
 	return out
@@ -220,4 +222,194 @@ func (m *Model) SpeakWalks(o SpeakOptions, emit func(chunk []byte), said func(i 
 		}
 	}
 	return nil
+}
+
+// -- the output decoder --------------------------------------------------------------
+
+// SayOptions shape the voice the output decoder speaks with: the one SpeakWalks
+// walks with, and for acoustic units how many Griffin-Lim iterations polish
+// each whole utterance (0: the streaming vocoder's output as it is).
+type SayOptions struct {
+	Rate   int
+	Pitch  float64
+	Tempo  float64
+	Gain   float64
+	Polish int
+}
+
+// DefaultSayOptions is the default voice.
+func DefaultSayOptions() SayOptions {
+	return SayOptions{Rate: phonetok.Rate, Pitch: 120, Tempo: 1, Gain: 0.5}
+}
+
+// Utterance is one text of a model spoken: what it said, what that spells, and
+// how much audio it made.
+type Utterance struct {
+	Text    string   // the text as the model wrote it, in its units
+	Spelled string   // the words a text of sounds spells; the text itself for every other unit
+	Tokens  []string // every token that reached the voice, the closing sentinel last
+	Samples int
+	Seconds float64
+}
+
+// Dict is the utterance as the CLI prints it and the API returns it.
+func (u Utterance) Dict() map[string]any {
+	tokens := u.Tokens
+	if tokens == nil {
+		tokens = []string{}
+	}
+	return map[string]any{"text": u.Text, "spelled": u.Spelled, "tokens": tokens, "samples": u.Samples, "seconds": u.Seconds}
+}
+
+// Spoken is the speech of one or more texts: 16-bit mono PCM, and what each
+// utterance was.
+type Spoken struct {
+	PCM        []byte
+	Rate       int
+	Encoding   string // the encoding the texts were read in
+	Decoder    string // "voice": the formant synthesizer; "vocoder": the acoustic codebook's vocoder
+	Utterances []Utterance
+}
+
+// Samples is how many PCM samples were made.
+func (s *Spoken) Samples() int { return len(s.PCM) / 2 }
+
+// Seconds is how long the speech lasts.
+func (s *Spoken) Seconds() float64 {
+	if s.Rate == 0 {
+		return 0
+	}
+	return float64(s.Samples()) / float64(s.Rate)
+}
+
+// WAV is the speech as a WAV file.
+func (s *Spoken) WAV() []byte { return phonetok.WavBytes(s.PCM, s.Rate) }
+
+// Dict is the record without the audio: what the CLI prints and the API
+// returns beside wav_base64.
+func (s *Spoken) Dict() map[string]any {
+	utterances := make([]map[string]any, 0, len(s.Utterances))
+	for _, u := range s.Utterances {
+		utterances = append(utterances, u.Dict())
+	}
+	return map[string]any{
+		"rate": s.Rate, "samples": s.Samples(), "seconds": s.Seconds(), "encoding": s.Encoding,
+		"decoder": s.Decoder, "count": len(s.Utterances), "utterances": utterances,
+	}
+}
+
+// DecoderName is what speaks a model's texts: the codebook's vocoder for
+// acoustic units, the formant voice for the rest.
+func DecoderName(enc Encoding) string {
+	if enc.Unit == Acoustic {
+		return "vocoder"
+	}
+	return "voice"
+}
+
+// Spelled is the words a text spells: through the tokenizer for a model of
+// sounds (so "the cat" given to a phone model spells "the cat" too), the text
+// itself for every other unit.
+func Spelled(enc Encoding, text string) string {
+	if !enc.Unit.Phonetic() {
+		return text
+	}
+	return enc.Spell(phoneticText(enc.Unit, text))
+}
+
+// checkUnits refuses a text of acoustic units holding a token that is not a
+// unit of the codebook, as the Python vocoder does (the Speaker skips such a
+// token, which a model over its units never emits; a text given from outside
+// can hold anything).
+func checkUnits(enc Encoding, text string) error {
+	if enc.Unit != Acoustic {
+		return nil
+	}
+	tok, err := acousticTokenizer()
+	if err != nil {
+		return err
+	}
+	for _, u := range strings.Fields(text) {
+		if !tok.IsUnit(u) {
+			return fmt.Errorf("not a unit of this codebook: %q", u)
+		}
+	}
+	return nil
+}
+
+// SpeakTexts is the output decoder in its streaming form: every text - a
+// prediction, a sample, a turn - is fed whole to a Speaker for the encoding
+// and closed by the END sentinel, exactly as a walk is, so a text of sounds is
+// spoken directly, a text of acoustic units through the codebook's vocoder,
+// and a text of words or letters is read through the tokenizer word by word.
+// emit gets every chunk of PCM as it is made; said (if not nil) each
+// utterance once it has been spoken.
+func SpeakTexts(enc Encoding, texts []string, o SayOptions, emit func(chunk []byte), said func(i int, u Utterance)) error {
+	for i, text := range texts {
+		if err := checkUnits(enc, text); err != nil {
+			return err
+		}
+		speaker, err := NewSpeaker(enc, o.Rate, o.Pitch, o.Tempo, o.Gain)
+		if err != nil {
+			return err
+		}
+		made := 0
+		for _, chunk := range [][]byte{speaker.Feed(text), speaker.End()} {
+			if len(chunk) > 0 {
+				made += len(chunk)
+				emit(chunk)
+			}
+		}
+		if said != nil {
+			said(i, Utterance{
+				Text: text, Spelled: Spelled(enc, text), Tokens: append([]string{}, speaker.Tokens...),
+				Samples: made / 2, Seconds: float64(made) / 2 / float64(speaker.Rate),
+			})
+		}
+	}
+	return nil
+}
+
+// Say is the output decoder: texts in a model's units become speech, one
+// utterance each, through the same voice SpeakWalks walks with and closed by
+// the same rule, the END sentinel.  o.Polish applies to acoustic units only:
+// that many Griffin-Lim iterations over each whole utterance once it is
+// known, which the streaming vocoder cannot do.
+func Say(enc Encoding, texts []string, o SayOptions) (*Spoken, error) {
+	rate, err := OutputRate(enc, o.Rate)
+	if err != nil {
+		return nil, err
+	}
+	spoken := &Spoken{Rate: rate, Encoding: enc.String(), Decoder: DecoderName(enc), Utterances: []Utterance{}}
+	if spoken.Decoder == "vocoder" && o.Polish > 0 {
+		// the whole utterance is known, so it can be polished: the vocoder's gain convention
+		// is the Speaker's (the voice's half scale is the codebook's own level)
+		tok, err := acousticTokenizer()
+		if err != nil {
+			return nil, err
+		}
+		for _, text := range texts {
+			if err := checkUnits(enc, text); err != nil {
+				return nil, err
+			}
+			units := strings.Fields(text)
+			pcm, err := phonetok.Synthesize(units, tok.Book, o.Polish, o.Gain*2.0, o.Pitch)
+			if err != nil {
+				return nil, err
+			}
+			spoken.PCM = append(spoken.PCM, pcm...)
+			spoken.Utterances = append(spoken.Utterances, Utterance{
+				Text: text, Spelled: text, Tokens: append(append([]string{}, units...), "</s>"),
+				Samples: len(pcm) / 2, Seconds: float64(len(pcm)) / 2 / float64(rate),
+			})
+		}
+		return spoken, nil
+	}
+	err = SpeakTexts(enc, texts, o,
+		func(chunk []byte) { spoken.PCM = append(spoken.PCM, chunk...) },
+		func(_ int, u Utterance) { spoken.Utterances = append(spoken.Utterances, u) })
+	if err != nil {
+		return nil, err
+	}
+	return spoken, nil
 }

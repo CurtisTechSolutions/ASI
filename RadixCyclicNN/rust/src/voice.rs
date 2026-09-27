@@ -8,10 +8,11 @@
 //! pending with the closing intonation.  One walk, one utterance.
 
 use phonetok::acoustic::Vocoder;
-use phonetok::synth::{Synthesizer, VoiceSettings};
+use phonetok::synth::{Synthesizer, VoiceSettings, RATE};
 
 use crate::encoding::{Encoding, Unit};
 use crate::graph::{END, FIRST};
+use crate::json::Json;
 use crate::model::Model;
 use crate::mt19937::Mt19937;
 use crate::search::{SamplingFilter, Traversal};
@@ -162,11 +163,13 @@ impl Speaker {
 
     /// The final sentinel: the utterance is closed, and what was pending is spoken.
     pub fn end(&mut self) -> Vec<u8> {
-        self.tokens.push("</s>".to_string());
         if let Some(voc) = self.vocoder.as_mut() {
+            self.tokens.push("</s>".to_string());
             return voc.end();
         }
+        // a letter model's last word, so the sentinel is recorded after it
         let mut out = self.flush_letters();
+        self.tokens.push("</s>".to_string());
         out.extend(self.synth.end());
         self.spoken_words = 0;
         out
@@ -261,6 +264,226 @@ impl Model {
         }
         Ok(())
     }
+}
+
+// -- the output decoder --------------------------------------------------------------
+
+/// How the output decoder speaks: the voice `speak_walks` walks with, and for
+/// acoustic units how many Griffin-Lim iterations polish each whole utterance
+/// (0: the streaming vocoder's output as it is).
+#[derive(Clone, Debug)]
+pub struct SayOptions {
+    pub rate: u32,
+    pub pitch: f64,
+    pub tempo: f64,
+    pub gain: f64,
+    pub polish: usize,
+}
+
+impl Default for SayOptions {
+    fn default() -> Self {
+        SayOptions {
+            rate: RATE,
+            pitch: 120.0,
+            tempo: 1.0,
+            gain: 0.5,
+            polish: 0,
+        }
+    }
+}
+
+/// One text of a model spoken: what it said, what that spells, and how much
+/// audio it made.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Utterance {
+    /// The text as the model wrote it, in its units.
+    pub text: String,
+    /// The words a text of sounds spells; the text itself for every other unit.
+    pub spelled: String,
+    /// Every token that reached the voice, the closing sentinel last.
+    pub tokens: Vec<String>,
+    pub samples: usize,
+    pub seconds: f64,
+}
+
+impl Utterance {
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("text", Json::str(&self.text)),
+            ("spelled", Json::str(&self.spelled)),
+            ("tokens", Json::strs(self.tokens.clone())),
+            ("samples", Json::Int(self.samples as i64)),
+            ("seconds", Json::Num(self.seconds)),
+        ])
+    }
+}
+
+/// The speech of one or more texts: 16-bit mono PCM, and what each utterance was.
+#[derive(Clone, Debug)]
+pub struct Spoken {
+    pub pcm: Vec<u8>,
+    pub rate: u32,
+    /// The encoding the texts were read in.
+    pub encoding: String,
+    /// `"voice"`: the formant synthesizer; `"vocoder"`: the acoustic codebook's vocoder.
+    pub decoder: &'static str,
+    pub utterances: Vec<Utterance>,
+}
+
+impl Spoken {
+    pub fn samples(&self) -> usize {
+        self.pcm.len() / 2
+    }
+
+    pub fn seconds(&self) -> f64 {
+        if self.rate == 0 {
+            0.0
+        } else {
+            self.samples() as f64 / self.rate as f64
+        }
+    }
+
+    /// The speech as a WAV file.
+    pub fn wav(&self) -> Vec<u8> {
+        phonetok::synth::wav_bytes(&self.pcm, self.rate)
+    }
+
+    /// The record without the audio: what the CLI prints and the API returns beside `wav_base64`.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("rate", Json::Int(self.rate as i64)),
+            ("samples", Json::Int(self.samples() as i64)),
+            ("seconds", Json::Num(self.seconds())),
+            ("encoding", Json::str(&self.encoding)),
+            ("decoder", Json::str(self.decoder)),
+            ("count", Json::Int(self.utterances.len() as i64)),
+            (
+                "utterances",
+                Json::Arr(self.utterances.iter().map(Utterance::to_json).collect()),
+            ),
+        ])
+    }
+}
+
+/// What speaks a model's texts: the codebook's vocoder for acoustic units, the
+/// formant voice for the rest.
+pub fn decoder_name(enc: Encoding) -> &'static str {
+    if enc.unit == Unit::Acoustic {
+        "vocoder"
+    } else {
+        "voice"
+    }
+}
+
+/// The words a text spells: through the tokenizer for a model of sounds (so
+/// `"the cat"` given to a phone model spells `"the cat"` too), the text itself
+/// for every other unit.
+pub fn spelled(enc: Encoding, text: &str) -> String {
+    if !enc.unit.phonetic() {
+        return text.to_string();
+    }
+    enc.spell(&crate::phonetic::text(enc.unit, text))
+}
+
+/// A text of acoustic units may hold nothing but units of the codebook, as the
+/// Python vocoder insists (the `Speaker` skips such a token, which a model
+/// over its units never emits; a text given from outside can hold anything).
+fn check_units(enc: Encoding, text: &str) -> Result<(), String> {
+    if enc.unit != Unit::Acoustic {
+        return Ok(());
+    }
+    let tok = crate::phonetic::acoustic_tokenizer()?;
+    match text.split_whitespace().find(|u| !tok.is_unit(u)) {
+        Some(u) => Err(format!("not a unit of this codebook: {u:?}")),
+        None => Ok(()),
+    }
+}
+
+/// The output decoder in its streaming form: every text - a prediction, a
+/// sample, a turn - is fed whole to a [`Speaker`] for the encoding and closed
+/// by the END sentinel, exactly as a walk is, so a text of sounds is spoken
+/// directly, a text of acoustic units through the codebook's vocoder, and a
+/// text of words or letters is read through the tokenizer word by word.
+/// `emit` gets every chunk of PCM as it is made, `said` each utterance once it
+/// has been spoken.
+pub fn speak_texts(
+    enc: Encoding,
+    texts: &[String],
+    o: &SayOptions,
+    emit: &mut dyn FnMut(&[u8]),
+    said: &mut dyn FnMut(usize, Utterance),
+) -> Result<(), String> {
+    for (i, text) in texts.iter().enumerate() {
+        check_units(enc, text)?;
+        let mut speaker = Speaker::new(enc, o.rate, o.pitch, o.tempo, o.gain)?;
+        let mut made = 0usize;
+        for chunk in [speaker.feed(text), speaker.end()] {
+            if !chunk.is_empty() {
+                made += chunk.len();
+                emit(&chunk);
+            }
+        }
+        said(
+            i,
+            Utterance {
+                text: text.clone(),
+                spelled: spelled(enc, text),
+                tokens: speaker.tokens.clone(),
+                samples: made / 2,
+                seconds: made as f64 / 2.0 / speaker.rate as f64,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// The output decoder: texts in a model's units become speech, one utterance
+/// each, through the same voice [`Model::speak_walks`] walks with and closed by
+/// the same rule, the END sentinel.  `o.polish` applies to acoustic units only:
+/// that many Griffin-Lim iterations over each whole utterance once it is
+/// known, which the streaming vocoder cannot do.
+pub fn say(enc: Encoding, texts: &[String], o: &SayOptions) -> Result<Spoken, String> {
+    let rate = crate::phonetic::output_rate(enc, o.rate)?;
+    let mut spoken = Spoken {
+        pcm: Vec::new(),
+        rate,
+        encoding: enc.to_string(),
+        decoder: decoder_name(enc),
+        utterances: Vec::new(),
+    };
+    if spoken.decoder == "vocoder" && o.polish > 0 {
+        // the whole utterance is known, so it can be polished: the vocoder's gain
+        // convention is the Speaker's (the voice's half scale is the codebook's own level)
+        let tok = crate::phonetic::acoustic_tokenizer()?;
+        for text in texts {
+            check_units(enc, text)?;
+            let units: Vec<String> = text.split_whitespace().map(String::from).collect();
+            let pcm = phonetok::acoustic::synthesize(&units, &tok.book, o.polish, o.gain * 2.0, o.pitch)?;
+            let mut tokens = units;
+            tokens.push("</s>".to_string());
+            spoken.utterances.push(Utterance {
+                text: text.clone(),
+                spelled: text.clone(),
+                tokens,
+                samples: pcm.len() / 2,
+                seconds: pcm.len() as f64 / 2.0 / rate as f64,
+            });
+            spoken.pcm.extend(pcm);
+        }
+        return Ok(spoken);
+    }
+    let mut pcm: Vec<u8> = Vec::new();
+    let mut utterances: Vec<Utterance> = Vec::new();
+    speak_texts(
+        enc,
+        texts,
+        o,
+        &mut |chunk: &[u8]| pcm.extend_from_slice(chunk),
+        &mut |_, u| utterances.push(u),
+    )?;
+    spoken.pcm = pcm;
+    spoken.utterances = utterances;
+    Ok(spoken)
 }
 
 #[cfg(test)]
@@ -390,6 +613,91 @@ mod tests {
         assert_eq!(speaker.tokens, vec!["q2", "q28", "</s>"]);
         assert_eq!(output_rate(enc, 8000).unwrap(), 16000);
         assert_eq!(output_rate(Encoding::default(), 8000).unwrap(), 8000);
+    }
+
+    /// The output decoder: hearing a walk as it walks and saying its text
+    /// afterwards are the same audio, byte for byte; acoustic units are spoken
+    /// through the vocoder, polished or not, and refused when one is not a unit.
+    #[test]
+    fn say_is_the_walk_heard_after_the_fact() {
+        for spec in ["phone:3:1", "char:3:1", "word:2:1"] {
+            let mut model = spoken_model(spec);
+            let enc = model.g.enc;
+            let opts = SpeakOptions {
+                prefix: "the cat".to_string(),
+                count: 2,
+                max_length: Some(30),
+                temperature: 1.0,
+                seed: Some(1),
+                rate: 16000,
+                pitch: 120.0,
+                tempo: 1.0,
+                gain: 0.5,
+            };
+            let mut said: Vec<String> = Vec::new();
+            let mut live: Vec<u8> = Vec::new();
+            model
+                .speak_walks(
+                    &opts,
+                    &mut |chunk: &[u8]| live.extend_from_slice(chunk),
+                    &mut |_, text, _| said.push(text.to_string()),
+                )
+                .unwrap();
+            let spoken = say(enc, &said, &SayOptions::default()).unwrap();
+            assert_eq!(spoken.pcm, live, "{spec}");
+            assert_eq!(
+                (
+                    spoken.utterances.len(),
+                    spoken.decoder,
+                    spoken.rate,
+                    spoken.encoding.as_str()
+                ),
+                (2, "voice", 16000, spec)
+            );
+            for u in &spoken.utterances {
+                assert_eq!(u.tokens.last().map(String::as_str), Some("</s>"), "{spec}: {u:?}");
+                assert_eq!(u.seconds, u.samples as f64 / 16000.0);
+            }
+            assert_eq!(
+                spoken.samples(),
+                spoken.utterances.iter().map(|u| u.samples).sum::<usize>()
+            );
+            assert_eq!(spoken.seconds(), spoken.samples() as f64 / 16000.0);
+            let wav = spoken.wav();
+            assert_eq!((wav.len(), &wav[..4]), (44 + spoken.pcm.len(), b"RIFF".as_slice()));
+            let doc = spoken.to_json();
+            assert_eq!(doc.at("count").as_i64(), Some(2));
+            assert_eq!(doc.at("decoder").as_str(), Some("voice"));
+            assert_eq!(doc.at("utterances").as_array().len(), 2);
+        }
+        // what a text spells: a text of sounds through the tokenizer, anything else as it is
+        let phones = parse_encoding("phone:3:1").unwrap();
+        assert_eq!(spelled(phones, "DH AH0 # K AE1 T"), "the cat");
+        assert_eq!(spelled(phones, "the cat"), "the cat");
+        assert_eq!(spelled(Encoding::default(), "DH AH0"), "DH AH0");
+        // acoustic units: the codebook's vocoder, at its rate
+        let acoustic = parse_encoding("acoustic:3:1").unwrap();
+        let units = vec!["q2 q28 q55 q5".to_string(), "q1 q2".to_string()];
+        let spoken = say(acoustic, &units, &SayOptions::default()).unwrap();
+        assert_eq!(
+            (spoken.decoder, spoken.rate, spoken.utterances.len()),
+            ("vocoder", 16000, 2)
+        );
+        assert!(spoken.samples() > 0);
+        assert_eq!(spoken.utterances[1].tokens, vec!["q1", "q2", "</s>"]);
+        assert_eq!(spoken.utterances[1].spelled, "q1 q2");
+        let polish = SayOptions {
+            polish: 4,
+            ..SayOptions::default()
+        };
+        let polished = say(acoustic, &units, &polish).unwrap();
+        assert_eq!(polished.samples(), spoken.samples());
+        assert_ne!(polished.pcm, spoken.pcm);
+        let nope = vec!["q2 nope".to_string()];
+        for opts in [SayOptions::default(), polish] {
+            let err = say(acoustic, &nope, &opts).expect_err("a token that is not a unit was spoken");
+            assert!(err.contains("not a unit"), "{err}");
+        }
     }
 
     /// What is spoken is what the walk says: from START (the first node whole)

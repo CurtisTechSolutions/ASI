@@ -49,12 +49,12 @@ use radixnet::report::{node_rows, path_rows, stats};
 use radixnet::search::SamplingFilter;
 use radixnet::service::Service;
 use radixnet::training::Plan;
-use radixnet::voice::SpeakOptions;
+use radixnet::voice::{decoder_name, say, speak_texts, SayOptions, SpeakOptions, Utterance};
 
 const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SPEC] [--json] [--seed N] \
      [--workers N] [--out PATH] <command>\n\
-     commands: train predict generate speak score feedback 2nrl negative invert compress weights schedule paths \
-     nodes words info \
+     commands: train predict generate speak say score feedback 2nrl negative invert compress weights schedule \
+     paths nodes words info \
      serve version\n\
      --kind radix | count | negative | resonant: the algorithm of a NEW model (count is this port's default); a \
      loaded file's own kind always wins.\n\
@@ -90,7 +90,25 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      streams 16-bit PCM\n\
      to stdout; --rate, --pitch, --tempo, --gain shape the voice; --seeded walks with a private RNG from \
      --seed.  \
+     say: the output decoder - every TEXT (and every line of --data FILE, - for stdin) spoken in the model's \
+     units, one\n\
+     utterance each, through the same voice; --polish N polishes acoustic units; the model file need not exist \
+     (--encoding\n\
+     says how a text is read).  predict / generate --speak FILE write their outputs as speech the same way.  \
      ../SPEC-SearchAndTraining.md has the rules.";
+
+/// `--speak FILE` on predict and generate: the command's outputs written as
+/// speech, one utterance each, by the output decoder ([`say`]) with the
+/// default voice; `say` has the dials.
+fn speak_outputs(model: &Model, texts: &[String], path: &str) -> Result<Json, String> {
+    let spoken = say(model.g.enc, texts, &SayOptions::default())?;
+    std::fs::write(path, spoken.wav()).map_err(|e| format!("{path}: {e}"))?;
+    let mut doc = spoken.to_json();
+    if let Json::Obj(pairs) = &mut doc {
+        pairs.push(("out".to_string(), Json::str(path)));
+    }
+    Ok(doc)
+}
 
 /// The default `--model` per unit, so a word model never overwrites a
 /// character model's file.
@@ -313,6 +331,13 @@ fn run() -> Result<(), String> {
             ];
             doc.push(("traversal".to_string(), Json::str(found.traversal.clone())));
             doc.push(("guard".to_string(), guard));
+            if let Some(path) = args.get("speak") {
+                // --speak FILE: the answer, heard
+                doc.push((
+                    "speech".to_string(),
+                    speak_outputs(&model, &[found.best.full_text.clone()], path)?,
+                ));
+            }
             emit(Json::Obj(doc));
         }
         "generate" => {
@@ -356,7 +381,7 @@ fn run() -> Result<(), String> {
                 }
                 None => (model.generate(&opts)?, Json::Null),
             };
-            emit(Json::obj([
+            let mut doc = Json::obj([
                 ("samples", Json::Arr(samples.iter().map(path_json).collect())),
                 ("count", Json::Int(samples.len() as i64)),
                 ("mode", Json::str(opts.mode.clone())),
@@ -365,7 +390,15 @@ fn run() -> Result<(), String> {
                 ("temperature", Json::Num(opts.temperature)),
                 ("traversal", Json::str(opts.traversal.clone())),
                 ("guard", guard),
-            ]));
+            ]);
+            if let Some(path) = args.get("speak") {
+                // --speak FILE: every sample, heard
+                let texts: Vec<String> = samples.iter().map(|r| r.text.clone()).collect();
+                if let Json::Obj(pairs) = &mut doc {
+                    pairs.push(("speech".to_string(), speak_outputs(&model, &texts, path)?));
+                }
+            }
+            emit(doc);
         }
         "speak" => {
             // the model is heard as it walks: every step's units reach the voice
@@ -458,6 +491,122 @@ fn run() -> Result<(), String> {
                     ("sink", Json::str(&sink)),
                     ("count", Json::Int(count as i64)),
                     ("encoding", Json::str(model.g.enc.to_string())),
+                ]));
+            }
+        }
+        "say" => {
+            // the output decoder: texts in the model's units - a prediction, a sample, a
+            // turn - are spoken, one utterance each, through the same voice `speak` walks
+            // with ([`radixnet::voice::say`]); the model file need not exist, its encoding
+            // is what matters
+            let model = open(false)?;
+            let enc = model.g.enc;
+            let mut texts: Vec<String> = args.rest.clone();
+            if let Some(path) = args.get("data") {
+                let blob = if path == "-" {
+                    let mut s = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut s).map_err(|e| e.to_string())?;
+                    s
+                } else {
+                    std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?
+                };
+                texts.extend(blob.lines().map(str::to_string));
+            }
+            texts.retain(|t| !t.trim().is_empty());
+            if texts.is_empty() {
+                return Err(
+                    "nothing to say: give TEXT arguments, or --data FILE (- for stdin) with one text per line"
+                        .to_string(),
+                );
+            }
+            let opts = SayOptions {
+                rate: args.usize("rate", phonetok::synth::RATE as usize)? as u32,
+                pitch: args.float("pitch", 120.0)?,
+                tempo: args.float("tempo", 1.0)?,
+                gain: args.float("gain", 0.5)?,
+                polish: args.usize("polish", 0)?,
+            };
+            // acoustic units are spoken at their codebook's rate
+            let rate = radixnet::phonetic::output_rate(enc, opts.rate)?;
+            let wav_path = args.str("out", "speech.wav");
+            let play = args.on("play");
+            let raw = args.on("raw");
+            let mut said: Vec<Json> = Vec::new();
+            let mut record = |_i: usize, u: Utterance| said.push(u.to_json());
+            // polishing needs the whole utterance, so it is not streamed
+            let polished = opts.polish > 0 && decoder_name(enc) == "vocoder";
+            let mut run = |emit_pcm: &mut dyn FnMut(&[u8])| -> Result<(), String> {
+                if polished {
+                    let spoken = say(enc, &texts, &opts)?;
+                    for u in spoken.utterances {
+                        record(0, u);
+                    }
+                    emit_pcm(&spoken.pcm);
+                    Ok(())
+                } else {
+                    speak_texts(enc, &texts, &opts, emit_pcm, &mut record)
+                }
+            };
+            let mut total = 0usize;
+            let sink: String;
+            if play {
+                let Some(player) = phonetok::synth::find_player() else {
+                    return Err(
+                        "no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw".to_string(),
+                    );
+                };
+                let mut child = std::process::Command::new(&player[0])
+                    .args(&player[1..])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .map_err(|e| format!("{}: {e}", player[0]))?;
+                {
+                    let stdin = child.stdin.as_mut().ok_or("no stdin")?;
+                    stdin
+                        .write_all(&phonetok::synth::wav_header(rate, None))
+                        .map_err(|e| e.to_string())?;
+                    let mut emit_pcm = |chunk: &[u8]| {
+                        if stdin.write_all(chunk).is_ok() {
+                            stdin.flush().ok();
+                        }
+                        total += chunk.len();
+                    };
+                    run(&mut emit_pcm)?;
+                }
+                child.wait().ok();
+                sink = player[0].clone();
+            } else if raw {
+                let stdout = std::io::stdout();
+                let mut out = stdout.lock();
+                let mut emit_pcm = |chunk: &[u8]| {
+                    if out.write_all(chunk).is_ok() {
+                        out.flush().ok();
+                    }
+                    total += chunk.len();
+                };
+                run(&mut emit_pcm)?;
+                sink = "stdout".to_string();
+            } else {
+                let mut pcm: Vec<u8> = Vec::new();
+                let mut emit_pcm = |chunk: &[u8]| pcm.extend_from_slice(chunk);
+                run(&mut emit_pcm)?;
+                std::fs::write(&wav_path, phonetok::synth::wav_bytes(&pcm, rate))
+                    .map_err(|e| format!("{wav_path}: {e}"))?;
+                total = pcm.len();
+                sink = wav_path.clone();
+            }
+            if !raw {
+                let count = said.len();
+                emit(Json::obj(vec![
+                    ("texts", Json::strs(texts.clone())),
+                    ("utterances", Json::Arr(said)),
+                    ("count", Json::Int(count as i64)),
+                    ("seconds", Json::Num(total as f64 / 2.0 / rate as f64)),
+                    ("rate", Json::Int(rate as i64)),
+                    ("sink", Json::str(&sink)),
+                    ("encoding", Json::str(enc.to_string())),
+                    ("decoder", Json::str(decoder_name(enc))),
+                    ("polish", Json::Int(opts.polish as i64)),
                 ]));
             }
         }

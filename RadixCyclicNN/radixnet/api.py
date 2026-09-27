@@ -135,6 +135,7 @@ from .training import check_plan
 from .speech import DEFAULT_RATE as SPEECH_DEFAULT_RATE
 from .speech import SpeechError
 from .speech import decode_text as decode_speech_text
+from .speech import is_waveform_text
 from .speech import describe as describe_speech
 from .speech import teach as teach_speech
 from .speech import transcribe as transcribe_speech
@@ -1064,6 +1065,24 @@ class ModelService:
     def score(self, text: str) -> dict:
         with self.session() as model:
             return model.score(text)
+
+    def say(self, texts: list[str], **options: Any) -> dict:
+        """The output decoder (``POST /api/say``): texts in the model's units as speech, one utterance each.
+
+        Only the encoding is the model's - it says how a text is read - so
+        the lock is held for that alone and the voice runs outside it.
+        """
+        from .voice import say
+
+        with self.session() as model:
+            encoding = model.encoding
+        try:
+            spoken = say(encoding, texts, **options)
+        except ValueError as exc:  # a token that is not a unit of the codebook, or no tokenizer to speak with
+            raise ApiError(400, str(exc)) from exc
+        doc = spoken.to_dict()
+        doc["wav_base64"] = base64.b64encode(spoken.wav()).decode("ascii")
+        return doc
 
     def invert(self) -> dict:
         with self.mutating() as model:
@@ -3633,16 +3652,49 @@ def _r_speech_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     )
 
 
+def _voice_fields(f: Fields) -> dict:
+    """The voice ``POST /api/say`` and the voice fallback of ``POST /api/speech/decode`` speak with."""
+    out = dict(
+        rate=f.integer("rate", 16000, minimum=1),
+        pitch=f.number("pitch", 120.0, minimum=0.0),
+        tempo=f.number("tempo", 1.0, minimum=0.0),
+        gain=f.number("gain", 0.5, minimum=0.0),
+        polish=f.integer("polish", 0, minimum=0),
+    )
+    if out["pitch"] <= 0:
+        raise ApiError(400, "'pitch' must be above 0 Hz")
+    if out["tempo"] <= 0:
+        raise ApiError(400, "'tempo' must be above 0")
+    return out
+
+
+def _r_say(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The output decoder: texts in the model's units, spoken through its voice - one utterance each."""
+    return 200, svc.say(f.texts("texts", "text"), **_voice_fields(f))
+
+
 def _r_speech_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    """An encoded - or predicted - waveform text back to a WAV file that can be played."""
+    """An encoded - or predicted - waveform text back to a WAV file that can be played.
+
+    A text that carries no waveform is an output in the model's own units -
+    a prediction of sounds, of acoustic units, of words - and is spoken
+    through the model's voice instead, one utterance per line (the output
+    decoder, :meth:`ModelService.say`).
+    """
     text = f.text("text")
     codec = f.text("codec", None) or None
+    if not is_waveform_text(text):
+        texts = [line for line in str(text).splitlines() if line.strip()]
+        if not texts:
+            raise ApiError(400, "nothing to decode: the text is blank")
+        return 200, svc.say(texts, **_voice_fields(f))
     try:
         result = decode_speech_text(text, codec=codec)
     except SpeechError as exc:
         raise ApiError(400, str(exc)) from exc
     wav = result.pop("wav")
     result["wav_base64"] = base64.b64encode(wav).decode("ascii")
+    result["decoder"] = "waveform"
     return 200, result
 
 
@@ -4678,7 +4730,15 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "{recording bytes | texts, transcript, rate, codec, lead, length, attempts, mode, temperature, "
      "threshold, listen_back, blame} -> lessons with a mark out of 10 and the reason each failure failed"),
     ("POST", "/api/speech/decode", _r_speech_decode,
-     "decode an encoded or predicted waveform text back to audio: {text, codec} -> {wav_base64, rate, seconds, repaired}"),
+     "decode an encoded or predicted waveform text back to audio: {text, codec} -> {wav_base64, rate, seconds, "
+     "repaired, decoder: waveform}; a text carrying no waveform is an output in the model's units and is spoken "
+     "through its voice instead, one utterance per line, as /api/say answers (decoder: voice | vocoder)"),
+    ("POST", "/api/say", _r_say,
+     "the output decoder: texts in the model's units - predictions, samples, turns; sounds, syllables, acoustic "
+     "units, words or letters - spoken through the model's voice, one utterance each, closed by the END sentinel: "
+     "{texts | text (one per line), rate, pitch, tempo, gain, polish (acoustic units: Griffin-Lim iterations over "
+     "each whole utterance)} -> {wav_base64, rate, samples, seconds, encoding, decoder: voice | vocoder, count, "
+     "utterances: [{text, spelled, tokens, samples, seconds}]}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),

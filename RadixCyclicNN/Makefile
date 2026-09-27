@@ -95,7 +95,7 @@ DEVICE_FLAG := $(if $(DEVICE),--device $(DEVICE),)
 GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
-        phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play acoustic-train acoustic-speak phone-go phone-rust phone-parity \
+        phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play say acoustic-train acoustic-speak phone-go phone-rust phone-parity \
         rust-build rust-test rust-parity rust-talk go-talk bench-compare train resume predict generate score talk talk-repl 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
@@ -379,6 +379,10 @@ acoustic-train: ## Train a model on recordings alone: WAVS heard as acoustic uni
 
 acoustic-speak: ## Hear the acoustic model walk: COUNT utterances through the vocoder, into SPEECH
 	$(RADIXNET) --model $(MODEL_EARS) --seed $(SEED) speak --count $(COUNT) --max-length $(MAX_LENGTH) --out $(SPEECH)
+
+SAY ?= the cat sat on the mat
+say: ## The output decoder: SAY spoken in the sound model's units (the model file need not exist), into SPEECH
+	$(RADIXNET) --model $(MODEL_PHONE) --encoding $(PHONE_ENC) say "$(SAY)" --out $(SPEECH)
 
 phone-go: ## The Go port over sounds: train on DATA and continue PHONE_PREFIX (needs `make go-build`)
 	go/bin/radixnet-count --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)

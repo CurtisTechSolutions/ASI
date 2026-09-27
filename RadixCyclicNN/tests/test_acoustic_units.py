@@ -8,6 +8,7 @@ tokenizer is not importable.
 
 import contextlib
 import io
+import json
 import os
 import struct
 import sys
@@ -153,6 +154,52 @@ class TestTheAcousticUnit(unittest.TestCase):
         self.assertEqual(speaker.tokens, ["q2", "q28", "</s>"])
         with self.assertRaises(ValueError):
             speaker.feed("not-a-unit")
+
+    def test_the_decoder_speaks_units(self):
+        """``say`` over acoustic units: the vocoder, polished or not, and no token that is not a unit."""
+        from radixnet.cli import main
+        from radixnet.voice import say
+
+        enc = Encoding(unit=ACOUSTIC)
+        book = default_codebook()
+        spoken = say(enc, ["q2 q28 q55 q5", "q1 q2"])
+        self.assertEqual((spoken.decoder, spoken.rate, spoken.encoding), ("vocoder", book.analysis.rate, "acoustic:3:1"))
+        self.assertEqual([u.tokens for u in spoken.utterances], [["q2", "q28", "q55", "q5", "</s>"], ["q1", "q2", "</s>"]])
+        self.assertEqual([u.spelled for u in spoken.utterances], ["q2 q28 q55 q5", "q1 q2"])  # nothing to spell
+        self.assertGreater(spoken.samples, 0)
+        self.assertEqual(spoken.samples, sum(u.samples for u in spoken.utterances))
+        # the vocoder's stream is the Speaker's, exactly
+        speaker = Speaker(enc)
+        self.assertEqual(say(enc, "q2 q28 q55 q5").pcm, speaker.feed("q2 q28 q55 q5") + speaker.end())
+        # polished: Griffin-Lim over each whole utterance - the same length, other samples
+        polished = say(enc, ["q2 q28 q55 q5", "q1 q2"], polish=4)
+        self.assertEqual([u.samples for u in polished.utterances], [u.samples for u in spoken.utterances])
+        self.assertNotEqual(polished.pcm, spoken.pcm)
+        self.assertEqual([u.tokens for u in polished.utterances], [u.tokens for u in spoken.utterances])
+        with self.assertRaises(ValueError):
+            say(enc, ["q2 nope"])
+        with self.assertRaises(ValueError):
+            say(enc, ["q2 nope"], polish=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = os.path.join(tmp, "units.wav")
+            none = os.path.join(tmp, "none.json")  # no model file: the encoding says how a text is read
+            for extra in ([], ["--polish", "2"]):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    code = main(["--model", none, "--encoding", "acoustic:3:1", "--json", "say", "q2 q28 q55", "--out", wav, *extra])
+                self.assertEqual(code, 0, out.getvalue())
+                doc = json.loads(out.getvalue())
+                self.assertEqual((doc["decoder"], doc["rate"], doc["count"], doc["polish"]),
+                                 ("vocoder", book.analysis.rate, 1, 2 if extra else 0))
+                with wave.open(wav) as w:
+                    self.assertEqual((w.getframerate(), w.getnframes()), (book.analysis.rate, doc["utterances"][0]["samples"]))
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertNotEqual(main(["--model", none, "--encoding", "acoustic:3:1", "say", "q2 nope", "--out", wav]), 0)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = main(["--model", none, "--encoding", "acoustic:3:1", "--json", "speech", "decode", "--text", "q2 q28", "--out", wav])
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertEqual(json.loads(out.getvalue())["decoder"], "vocoder")
 
     def test_the_command_line_trains_on_recordings_and_speaks(self):
         from radixnet.cli import main

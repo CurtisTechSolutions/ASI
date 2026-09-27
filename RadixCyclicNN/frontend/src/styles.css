@@ -1450,6 +1450,21 @@ fieldset.schedule code {
   padding: 3px 12px;
 }
 
+/* 🔊 Hear: the output decoder beside a prediction, a sample or a turn */
+.hear {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  vertical-align: middle;
+}
+
+.hear audio {
+  height: 28px;
+  max-width: 240px;
+  vertical-align: middle;
+}
+
 /* Images tab */
 .image-row {
   display: flex;

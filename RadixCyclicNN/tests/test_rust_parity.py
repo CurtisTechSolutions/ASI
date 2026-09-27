@@ -574,6 +574,40 @@ class TestRustWordParity(unittest.TestCase):
                 self.assertGreater(len(x), 16000)
                 self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 64)
 
+    def test_the_same_say(self):
+        """The output decoder: the same text said in the same units is the same audio, sample for sample, with no model file."""
+
+        def pcm(path):
+            with open(path, "rb") as fh:
+                data = fh.read()[44:]
+            return struct.unpack("<%dh" % (len(data) // 2), data)
+
+        cases = (
+            ("phone:3:1", ["the cat sat on the mat", "DH AH0 # D AO1 G"], []),
+            ("syllable:2:1", ["the cat sat on the mat"], []),
+            ("char:3:1", ["the cat sat on the mat.", "hello, world"], []),
+            ("word:2:1", ["the cat sat on the mat"], []),
+            ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1", "q3 q7"], []),
+            ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1"], ["--polish", "8"]),
+        )
+        for spec, texts, extra in cases:
+            with self.subTest(spec=spec, polish=bool(extra)):
+                py_wav = os.path.join(TMP.name, "say-py.wav")
+                other_wav = os.path.join(TMP.name, "say-rust.wav")
+                a = py("--encoding", spec, "say", *texts, "--out", py_wav, *extra, model=os.path.join(TMP.name, "no-py.json"))
+                b = rust("--encoding", spec, "say", *texts, "--out", other_wav, *extra, model=os.path.join(TMP.name, "no-rust.json"))
+                for key in ("utterances", "count", "seconds", "rate", "encoding", "decoder", "texts", "polish"):
+                    self.assertEqual(a[key], b[key], key)
+                self.assertEqual(a["count"], len(texts))
+                self.assertEqual(a["decoder"], "vocoder" if spec.startswith("acoustic") else "voice")
+                x, y = pcm(py_wav), pcm(other_wav)
+                self.assertEqual(len(x), len(y))
+                self.assertEqual(len(x), sum(u["samples"] for u in a["utterances"]))
+                self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 2 if spec.startswith("acoustic") else 64)
+        # a token that is not a unit of the codebook is refused on both sides
+        self.assertTrue(py("--encoding", "acoustic:3:1", "say", "q2 nope", "--out", py_wav, model=os.path.join(TMP.name, "no-py.json"), expect=1)["error"])
+        self.assertTrue(rust("--encoding", "acoustic:3:1", "say", "q2 nope", "--out", other_wav, model=os.path.join(TMP.name, "no-rust.json"), expect=1)["error"])
+
 
 class TestRustNegativeParity(unittest.TestCase):
     """The negative network: the same blame, the same verdicts, the same file.

@@ -14,13 +14,22 @@ walks are ``count`` utterances, each ended by its own sentinel.
 
 :func:`speak_walks` is the whole loop: locate the prefix, sample a walk with a
 listener on every step, and yield the PCM chunks as they are made; the CLI's
-``speak`` and the API's ``/api/speak`` sit on it.
+``speak`` sits on it.
+
+:func:`say` is the **output decoder**: any text a model produced - a
+prediction, a generated sample, a turn of a conversation, in whatever units
+the model is in - is fed to a :class:`Speaker` whole and closed by the
+sentinel, so every output can be heard after the fact as well as while it is
+made.  :func:`speak_texts` streams the same thing utterance by utterance; the
+CLI's ``say`` and ``--speak``, the API's ``/api/say`` and the frontend's Hear
+buttons sit on them.
 """
 
 from __future__ import annotations
 
 import random
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass, field
 
 from .encoding import ACOUSTIC, Encoding, acoustic_tokenizer, phonetic_tokenizer, phonetok_module
 from .graph import END, FIRST, START, RadixCyclicGraph
@@ -117,10 +126,11 @@ class Speaker:
 
     def end(self) -> bytes:
         """The final sentinel: the utterance is closed, and what was pending is spoken."""
-        self.tokens.append("</s>")
         if self.vocoder is not None:
+            self.tokens.append("</s>")
             return self.vocoder.end()
-        out = bytearray(self._flush_letters())
+        out = bytearray(self._flush_letters())  # a letter model's last word, so the sentinel is recorded after it
+        self.tokens.append("</s>")
         out += self.synth.end()
         self._spoken_words = 0
         return bytes(out)
@@ -203,3 +213,147 @@ def speak_walks(
         if on_utterance is not None:
             text = enc.join(*said)
             on_utterance(i, text, enc.spell(text))
+
+
+# -- the output decoder ---------------------------------------------------------------
+
+
+@dataclass
+class Utterance:
+    """One text of a model, spoken: what it said, what that spells, and how much audio it made."""
+
+    text: str
+    """The text as the model wrote it, in its units."""
+    spelled: str
+    """The words a text of sounds spells; the text itself for every other unit."""
+    tokens: list[str] = field(default_factory=list)
+    """Every token that reached the voice, the closing sentinel last."""
+    samples: int = 0
+    seconds: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "text": self.text, "spelled": self.spelled, "tokens": list(self.tokens),
+            "samples": self.samples, "seconds": self.seconds,
+        }
+
+
+@dataclass
+class Spoken:
+    """The speech of one or more texts: 16-bit mono PCM, and what each utterance was."""
+
+    pcm: bytes
+    rate: int
+    encoding: str
+    """The encoding the texts were read in (``str(model.encoding)``)."""
+    decoder: str
+    """``"voice"``: the formant synthesizer; ``"vocoder"``: the acoustic codebook's vocoder."""
+    utterances: list[Utterance] = field(default_factory=list)
+
+    @property
+    def samples(self) -> int:
+        return len(self.pcm) // 2
+
+    @property
+    def seconds(self) -> float:
+        return self.samples / self.rate if self.rate else 0.0
+
+    def wav(self) -> bytes:
+        """The speech as a WAV file."""
+        return _synth_module().wav_bytes(self.pcm, self.rate)
+
+    def to_dict(self) -> dict:
+        """The record without the audio: what the CLI prints and the API returns beside ``wav_base64``."""
+        return {
+            "rate": self.rate, "samples": self.samples, "seconds": self.seconds,
+            "encoding": self.encoding, "decoder": self.decoder, "count": len(self.utterances),
+            "utterances": [u.to_dict() for u in self.utterances],
+        }
+
+
+def spelled(encoding: Encoding, text: str) -> str:
+    """The words a text spells: through the tokenizer for a model of sounds (so ``"the cat"`` given to a
+    phone model spells ``"the cat"`` too), the text itself for every other unit."""
+    if not encoding.phonetic:
+        return text
+    return encoding.spell(" ".join(encoding.units(text)))
+
+
+def decoder_name(encoding: Encoding) -> str:
+    """What speaks a model's texts: the codebook's vocoder for acoustic units, the formant voice for the rest."""
+    return "vocoder" if encoding.unit == ACOUSTIC else "voice"
+
+
+def speak_texts(
+    encoding: Encoding,
+    texts: str | Iterable[str],
+    rate: int = RATE,
+    pitch: float = 120.0,
+    tempo: float = 1.0,
+    gain: float = 0.5,
+    on_utterance: Callable[[int, Utterance], None] | None = None,
+) -> Iterator[bytes]:
+    """Speak texts as they are, one utterance each, and yield the PCM as it is made.
+
+    This is the output decoder in its streaming form: every text - a
+    prediction, a sample, a turn - is fed whole to a :class:`Speaker` for the
+    encoding and closed by the END sentinel, exactly as a walk is, so a text
+    of sounds is spoken directly, a text of acoustic units through the
+    codebook's vocoder, and a text of words or letters is read through the
+    tokenizer word by word.  ``on_utterance(i, utterance)`` is told what each
+    text was once it has been spoken.  A token that is not a unit of the
+    acoustic codebook is a :class:`ValueError`.
+    """
+    if isinstance(texts, str):
+        texts = [texts]
+    for i, text in enumerate(texts):
+        speaker = Speaker(encoding, rate=rate, pitch=pitch, tempo=tempo, gain=gain)
+        made = 0
+        for pcm in (speaker.feed(text), speaker.end()):
+            if pcm:
+                made += len(pcm)
+                yield pcm
+        if on_utterance is not None:
+            on_utterance(i, Utterance(text, spelled(encoding, text), list(speaker.tokens), made // 2,
+                                      made / 2.0 / speaker.rate))
+
+
+def say(
+    encoding: Encoding,
+    texts: str | Iterable[str],
+    rate: int = RATE,
+    pitch: float = 120.0,
+    tempo: float = 1.0,
+    gain: float = 0.5,
+    polish: int = 0,
+) -> Spoken:
+    """The output decoder: texts in a model's units become speech, one utterance each.
+
+    The same voice as :func:`speak_walks` reads them (``rate``, ``pitch``,
+    ``tempo``, ``gain``), and the same rule closes each: the END sentinel.
+    ``polish`` applies to acoustic units only - that many Griffin-Lim
+    iterations over each whole utterance once it is known, which the streaming
+    vocoder cannot do; ``0`` is exactly what the vocoder makes.
+    """
+    if isinstance(texts, str):
+        texts = [texts]
+    texts = list(texts)
+    out_rate = output_rate(encoding, rate)
+    spoken = Spoken(b"", out_rate, str(encoding), decoder_name(encoding))
+    chunks: list[bytes] = []
+    if spoken.decoder == "vocoder" and polish > 0:
+        # the whole utterance is known, so it can be polished: the vocoder's gain convention
+        # is the Speaker's (the voice's half scale is the codebook's own level)
+        acoustic = phonetok_module("acoustic", "speaking")
+        book = acoustic_tokenizer().codebook
+        for text in texts:
+            units = encoding.units(text)
+            pcm = acoustic.synthesize(units, book, polish=polish, gain=gain * 2.0, pitch=pitch)
+            chunks.append(pcm)
+            spoken.utterances.append(Utterance(text, spelled(encoding, text), [*units, "</s>"], len(pcm) // 2,
+                                               len(pcm) / 2.0 / out_rate))
+    else:
+        chunks.extend(speak_texts(encoding, texts, rate=rate, pitch=pitch, tempo=tempo, gain=gain,
+                                  on_utterance=lambda i, u: spoken.utterances.append(u)))
+    spoken.pcm = b"".join(chunks)
+    return spoken

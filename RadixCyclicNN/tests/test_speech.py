@@ -597,7 +597,8 @@ class TestApi(unittest.TestCase):
         )
         self.assertEqual(status, 400, data)
         self.assertIn("sample rate", data["error"])
-        status, data, _ = self.client.post("/api/speech/decode", {"text": "hello"})
+        # a text without a waveform is an output in the model's units, spoken (test_api.py); a blank one is nothing
+        status, data, _ = self.client.post("/api/speech/decode", {"text": "   "})
         self.assertEqual(status, 400, data)
         status, data, _ = self.client.post("/api/speech/teach", {"name": "x.wav", "content": "text, not bytes"})
         self.assertEqual(status, 400, data)
@@ -647,8 +648,13 @@ class TestCli(unittest.TestCase):
 
             proc = run_cli("speech", "teach", os.path.join(tmp, "missing.wav"), expect=1)
             self.assertIn("not found", proc.stderr)
-            proc = run_cli("speech", "decode", "--text", "hello", "--out", out, expect=1)
-            self.assertIn("not an encoded waveform", proc.stderr)
+            # a text that carries no waveform is an output in the model's units, spoken (D-088); a blank one is nothing
+            spoken = run_json("speech", "decode", "--text", "hello", "--out", out, model=model)
+            self.assertEqual((spoken["decoder"], spoken["count"], spoken["out"]), ("voice", 1, out))
+            self.assertEqual(spoken["utterances"][0]["tokens"], ["HH", "AH0", "L", "OW1", "</s>"])
+            self.assertTrue(os.path.getsize(out) > 44)
+            proc = run_cli("speech", "decode", "--text", "  ", "--out", out, expect=1)
+            self.assertIn("nothing to decode", proc.stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

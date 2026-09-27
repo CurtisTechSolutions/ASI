@@ -20,6 +20,7 @@ import BackwardsField from "./BackwardsField.jsx";
 import JobStatus from "./JobStatus.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
+import HearButton from "./HearButton.jsx";
 import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
@@ -88,6 +89,7 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, fl
                 <th>cost</th>
                 <th>END</th>
                 <th>like</th>
+                <th>hear</th>
               </tr>
             </thead>
             <tbody>
@@ -112,6 +114,9 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, fl
                         label={`like ${title.toLowerCase().split(" ")[0]} continuation ${i + 1}`}
                         compact
                       />
+                    </td>
+                    <td>
+                      <HearButton text={text} label={`${title.toLowerCase().split(" ")[0]} continuation ${i + 1}`} compact />
                     </td>
                   </tr>
                 );
@@ -378,6 +383,7 @@ export default function PredictPanel({ status }) {
                   ? "Rewards the shown text: one traversal and +1 reward on every edge of its path."
                   : "Rewards the shown text: a positive-phase training pass (thumbs up)."}
               </span>
+              <HearButton text={fullText} label="this prediction" />
             </div>
             {job ? (
               <JobStatus job={job} emptyText="" />
