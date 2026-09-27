@@ -911,3 +911,54 @@ func parseOverall(raw string) *Overall {
 	}
 	return out
 }
+
+const replySystem = "You are the voice of a very small language model that is learning to talk from the " +
+	"conversations it has, and a person is talking to it out loud. Answer the person's last line in one short, " +
+	"plain, friendly sentence of everyday words, as if speaking: no lists, no markdown, no explanations, nothing " +
+	"about being a model, and never more than one sentence. Reply with the sentence and nothing else."
+
+// ReplyLineOptions steer ReplyLine: who the LLM is being, what the
+// conversation is about, who speaks (the person, then the model), the model
+// that answers and how warmly.
+type ReplyLineOptions struct {
+	Persona     string
+	Topic       string
+	Speakers    [2]string
+	Model       string
+	Temperature float64
+}
+
+// ReplyLine is the LLM answering a person on the model's behalf: the next line
+// of the model's side (the Voice tab, Python's ollama.reply_line).  transcript
+// is the conversation so far, the person's line last; the answer is one short
+// spoken sentence, because it is said aloud and then taught to the model, which
+// learns to answer by itself from what it hears (voicechat.go).
+func ReplyLine(client LLMClient, transcript []Line, o ReplyLineOptions) (string, error) {
+	system := replySystem
+	if strings.TrimSpace(o.Topic) != "" {
+		system += " The conversation is about " + strings.TrimSpace(o.Topic) + "."
+	}
+	if strings.TrimSpace(o.Persona) != "" {
+		system += " You are " + strings.TrimSpace(o.Persona) + "."
+	}
+	speakers := o.Speakers
+	if speakers[0] == "" || speakers[1] == "" {
+		speakers = VoiceSpeakers
+	}
+	said := []string{}
+	for _, line := range transcript {
+		if strings.TrimSpace(line.Text) != "" {
+			said = append(said, line.Speaker+": "+line.Text)
+		}
+	}
+	user := fmt.Sprintf("Say hello to %s in one short, plain line.", speakers[0])
+	if len(said) > 0 {
+		user = fmt.Sprintf("The conversation so far:\n%s\n\nWrite the next line of %s: what it says back to %s.",
+			strings.Join(said, "\n"), speakers[1], speakers[0])
+	}
+	raw, err := client.Generate(user, LLMOptions{System: system, Model: o.Model, Temperature: max(o.Temperature, 0)})
+	if err != nil {
+		return "", err
+	}
+	return firstLine(raw), nil
+}

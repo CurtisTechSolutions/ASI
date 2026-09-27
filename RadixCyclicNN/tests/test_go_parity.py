@@ -1768,6 +1768,63 @@ class TestGoMediaParity(unittest.TestCase):
         self.assertEqual(a["report"]["passed"], b["report"]["passed"])
         self.assertAlmostEqual(a["report"]["mean_score"], b["report"]["mean_score"], places=9)
 
+    TURN_KEYS = ("text", "speaker", "context", "reply", "fresh", "given", "repeat", "stutter", "candidates",
+                 "skipped", "vetoed", "rethink", "labels", "node_ids", "reached_end")
+
+    def assert_same_voice_turn(self, a, b):
+        """Two ``speech talk`` documents heard, learned, answered and spoke the same (D-089)."""
+        for key in ("transcript", "line", "token", "texts", "units", "asr", "by", "history", "encoding", "answer",
+                    "taught", "source"):
+            self.assertEqual(a[key], b[key], key)
+        # the waveform text and its numbers; `source` describes the file in each side's own words
+        self.assertEqual({k: v for k, v in (a["audio"] or {}).items() if k != "source"},
+                         {k: v for k, v in (b["audio"] or {}).items() if k != "source"})
+        if a["trained"] is None:
+            self.assertIsNone(b["trained"])
+        else:
+            self.assertEqual((a["trained"]["texts"], a["trained"]["epochs"]),
+                             (b["trained"]["texts"], b["trained"]["epochs"]))
+            self.assertLessEqual(abs(a["trained"]["loss"] - b["trained"]["loss"]), 1e-6)
+        for key in ("by", "text", "spelled", "ollama_error"):
+            self.assertEqual(a["reply"][key], b["reply"][key], key)
+        for key in self.TURN_KEYS:
+            self.assertEqual(a["reply"]["turn"][key], b["reply"]["turn"][key], key)
+        self.assertLessEqual(abs(a["reply"]["turn"]["cost"] - b["reply"]["turn"]["cost"]), 1e-9)
+        for key in ("rate", "samples", "seconds", "encoding", "decoder", "count"):
+            self.assertEqual(a["spoken"][key], b["spoken"][key], key)
+        self.assertEqual([(u["text"], u["spelled"], u["samples"]) for u in a["spoken"]["utterances"]],
+                         [(u["text"], u["spelled"], u["samples"]) for u in b["spoken"]["utterances"]])
+
+    def test_speech_talk_hears_learns_answers_and_speaks_the_same(self):
+        py_model = os.path.join(TMP.name, "talk-py.count.json")
+        go_model = os.path.join(TMP.name, "talk-go.count.json")
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=py_model)
+        go("--seed", 1, "train", "--data", CORPUS, "--epochs", 2, "--workers", 4, model=go_model)
+        py_out, go_out = os.path.join(TMP.name, "talk-py.wav"), os.path.join(TMP.name, "talk-go.wav")
+        options = ("speech", "talk", self.wav, "--text", "the cat sat on the mat", "--answer", "model", "--epochs", 1)
+        a = py(*options, "--out", py_out, model=py_model)
+        b = go(*options, "--out", go_out, model=go_model)
+        self.assertEqual((a["by"], b["by"]), ("model", "model"), (a["reply"], b["reply"]))
+        self.assert_same_voice_turn(a, b)
+        self.assertEqual((a["sink"], a["saved"]["path"], b["sink"], b["saved"]["path"]),
+                         (py_out, py_model, go_out, go_model))
+        mine, theirs = load_bytes(py_out), load_bytes(go_out)
+        samples = a["spoken"]["samples"]
+        self.assertEqual((len(mine), len(theirs)), (44 + 2 * samples, 44 + 2 * samples))
+        self.assertLessEqual(max(abs(p - q) for p, q in zip(struct.unpack(f"<{samples}h", mine[44:]),
+                                                            struct.unpack(f"<{samples}h", theirs[44:]))), 64)
+        # both learned the same, so a conversation continued on either side goes on the same way
+        history = os.path.join(TMP.name, "talk-so-far.txt")
+        with open(history, "w", encoding="utf-8") as fh:
+            fh.write("You: hello\nModel: hi there\nthe dog sat\n")
+        options = ("speech", "talk", "--text", "the cat", "--answer", "model", "--no-train", "--history", history)
+        a = py(*options, "--out", py_out, model=py_model)
+        b = go(*options, "--out", go_out, model=go_model)
+        self.assertEqual(a["history"][:4], [["You", "hello"], ["Model", "hi there"], ["You", "the dog sat"],
+                                            ["You", "the cat"]])
+        self.assert_same_voice_turn(a, b)
+        self.assertEqual((a["saved"], b["saved"]), (None, None))
+
 
 def _gradient_png(width, height):
     """A deterministic RGB gradient as a PNG, built by hand so the test needs no Pillow."""
@@ -1789,6 +1846,7 @@ def _gradient_png(width, height):
 def load_bytes(path):
     with open(path, "rb") as fh:
         return fh.read()
+
 
 
 class TestGoServer(unittest.TestCase):
@@ -2019,6 +2077,59 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual(restored.stats()["epochs_total"], final["epochs_total"])
         status, doc, _ = self.client.post("/api/uploads/delete", {"name": "notes.txt"})
         self.assertEqual(status, 200)
+
+    def test_the_voice_routes_answer_the_voice_tab(self):
+        """GET /api/voice and POST /api/voice/turn (whole and streamed): the Voice tab's turn on the Go server."""
+        from tests.test_api import wait_for_job
+
+        status, info, _ = self.client.get("/api/voice")
+        self.assertEqual(status, 200, info)
+        self.assertEqual((info["speakers"], info["answers"], info["encoding"], info["decoder"], info["acoustic"]),
+                         (["You", "Model"], ["auto", "model", "ollama", "none"], "char:3:1", "voice", False))
+        self.assertEqual(set(info), {"speakers", "answers", "encoding", "decoder", "acoustic", "default_rate", "chunk",
+                                     "transcription", "ollama"})
+        status, doc, _ = self.client.post("/api/train", {"texts": _VOICE_CORPUS, "epochs": 2})
+        self.assertEqual(status, 202, doc)
+        wait_for_job(self.client)
+        from radixnet import speech
+        rate = 8000
+        samples = array.array("f", [0.6 * math.sin(2 * math.pi * 220 * i / rate) for i in range(rate // 10)])
+        wav = speech.wav_bytes(samples, rate)
+        status, doc, _ = self.client.post("/api/voice/turn", {
+            "name": "u.wav", "content_base64": base64.b64encode(wav).decode("ascii"),
+            "transcript": "the cat sat on the mat", "answer": "model", "epochs": 1, "seed": 1})
+        self.assertEqual(status, 200, doc)
+        self.assertEqual((doc["transcript"], doc["by"], doc["encoding"], doc["rate"], doc["trained"]["texts"]),
+                         ("the cat sat on the mat", "model", "char:3:1", 16000, 2), doc)
+        self.assertTrue(doc["reply"]["text"], doc["reply"])
+        self.assertEqual(doc["reply"]["turn"]["speaker"], "Model")
+        self.assertEqual(len(base64.b64decode(doc["wav_base64"])), 44 + 2 * doc["spoken"]["samples"])
+        self.assertEqual(doc["history"][-2:], [["You", "the cat sat on the mat"], ["Model", doc["reply"]["text"]]])
+        status, lines, headers = self.client.post("/api/voice/turn/stream", {
+            "transcript": "the cat sat", "answer": "model", "history": [["You", "hello"], ["Model", "hi there"]],
+            "epochs": 1})
+        self.assertEqual(status, 200, lines)
+        self.assertTrue(headers.get("Content-Type", "").startswith("application/x-ndjson"), headers)
+        events = [json.loads(line) for line in lines.decode("utf-8").splitlines()]
+        kinds = [e["event"] for e in events]
+        self.assertEqual((kinds[:3], kinds[-2:]), (["heard", "trained", "reply"], ["spoken", "done"]))
+        self.assertIn("audio", kinds)
+        done = events[-1]
+        self.assertNotIn("wav_base64", done)
+        pcm = b"".join(base64.b64decode(e["pcm_base64"]) for e in events if e["event"] == "audio")
+        self.assertEqual(len(pcm) // 2, done["spoken"]["samples"])
+        for body in ({}, {"transcript": "hi", "answer": "nobody"}, {"transcript": "hi", "epochs": "many"},
+                     {"transcript": "hi", "history": "not a list"}, {"transcript": "hi", "pitch": 0}):
+            status, err, _ = self.client.post("/api/voice/turn", body)
+            self.assertEqual(status, 400, (body, err))
+        status, doc, _ = self.client.post("/api/voice/turn", {"transcript": "the cat sat", "answer": "ollama",
+                                                                "url": "http://127.0.0.1:1", "timeout": 1, "speak": False})
+        self.assertEqual((status, doc["by"]), (200, "none"), doc)
+        self.assertIn("cannot reach Ollama", doc["reply"]["ollama_error"])
+
+
+_VOICE_CORPUS = ["the cat sat on the mat", "the cat sat on the floor", "the dog sat on the mat", "a bird in the hand"]
+
 
 
 class TestGoSearchAndTraining(unittest.TestCase):

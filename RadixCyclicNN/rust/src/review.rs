@@ -1120,6 +1120,54 @@ pub fn chat_line(
     Ok(first_line(&client.generate(&user, &o)?))
 }
 
+const REPLY_SYSTEM: &str = "You are the voice of a very small language model that is learning to talk from the \
+    conversations it has, and a person is talking to it out loud. Answer the person's last line in one short, plain, \
+    friendly sentence of everyday words, as if speaking: no lists, no markdown, no explanations, nothing about being \
+    a model, and never more than one sentence. Reply with the sentence and nothing else.";
+
+/// The LLM answering a person on the model's behalf: the next line of the
+/// model's side (the Voice tab, `ollama.reply_line`).  `transcript` is the
+/// conversation so far as `(speaker, text)` pairs, the person's line last;
+/// the answer is one short spoken sentence, because it is said aloud and then
+/// taught to the model, which learns to answer by itself from what it hears.
+pub fn reply_line(
+    client: &dyn LlmClient,
+    transcript: &[(String, String)],
+    persona: &str,
+    topic: &str,
+    speakers: (&str, &str),
+    model: &str,
+    temperature: f64,
+) -> Result<String, LlmError> {
+    let mut system = REPLY_SYSTEM.to_string();
+    if !topic.trim().is_empty() {
+        system.push_str(&format!(" The conversation is about {}.", topic.trim()));
+    }
+    if !persona.trim().is_empty() {
+        system.push_str(&format!(" You are {}.", persona.trim()));
+    }
+    let said: Vec<String> = transcript
+        .iter()
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(speaker, text)| format!("{speaker}: {text}"))
+        .collect();
+    let user = if said.is_empty() {
+        format!("Say hello to {} in one short, plain line.", speakers.0)
+    } else {
+        format!(
+            "The conversation so far:\n{}\n\nWrite the next line of {}: what it says back to {}.",
+            said.join("\n"),
+            speakers.1,
+            speakers.0
+        )
+    };
+    let o = LlmOptions::default()
+        .system(system)
+        .model(model)
+        .temperature(temperature.max(0.0));
+    Ok(first_line(&client.generate(&user, &o)?))
+}
+
 /// One line out of an LLM answer that may have written several, or quoted
 /// itself with a speaker's name.
 pub fn first_line(raw: &str) -> String {

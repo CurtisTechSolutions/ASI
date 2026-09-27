@@ -194,6 +194,8 @@ _BINARY_ROUTES = {
     "/api/images/encode": "image",
     "/api/speech/transcribe": "speech",
     "/api/speech/teach": "speech",
+    "/api/voice/turn": "recording",
+    "/api/voice/turn/stream": "recording",
 }
 """POST routes whose bodies may be raw bytes or multipart (value: the default name of a raw body, None = required)."""
 

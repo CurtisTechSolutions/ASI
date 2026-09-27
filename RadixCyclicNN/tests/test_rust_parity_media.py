@@ -613,3 +613,159 @@ class TestRustMediaServer(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TestRustVoiceParity(unittest.TestCase):
+    """Talking with the model by voice (D-089): ``speech talk`` and the voice routes of the Rust port answer as
+    Python's do - the same recording heard the same, learned the same, the same reply found and spoken."""
+
+    TURN_KEYS = ("text", "speaker", "context", "reply", "fresh", "given", "repeat", "stutter", "candidates",
+                 "skipped", "vetoed", "rethink", "labels", "node_ids", "reached_end")
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.rust_harness import CORPUS
+
+        cls.root = os.path.join(tmpdir(), "voice")
+        os.makedirs(cls.root, exist_ok=True)
+        cls.model = os.path.join(cls.root, "trained.count.json")
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=cls.model)
+        cls.wav = speech.wav_bytes(tone(0.1), RATE)
+        cls.clip = os.path.join(cls.root, "clip.wav")
+        with open(cls.clip, "wb") as fh:
+            fh.write(cls.wav)
+
+    def copy(self, name):
+        model = os.path.join(self.root, f"{name}.count.json")
+        shutil.copy(self.model, model)
+        return model
+
+    def assert_same_turn(self, a, b):
+        """Two turn documents (a CLI's or a route's) heard, learned, answered and spoke the same."""
+        for key in ("transcript", "line", "token", "texts", "audio", "units", "asr", "by", "history", "encoding",
+                    "answer", "taught"):
+            self.assertEqual(a[key], b[key], key)
+        if a["trained"] is None:
+            self.assertIsNone(b["trained"])
+        else:
+            self.assertEqual((a["trained"]["texts"], a["trained"]["epochs"]),
+                             (b["trained"]["texts"], b["trained"]["epochs"]))
+        for key in ("by", "text", "spelled", "ollama_error"):
+            self.assertEqual(a["reply"][key], b["reply"][key], key)
+        for key in self.TURN_KEYS:
+            self.assertEqual(a["reply"]["turn"][key], b["reply"]["turn"][key], key)
+        self.assertLessEqual(abs(a["reply"]["turn"]["cost"] - b["reply"]["turn"]["cost"]), 1e-9)
+        for key in ("rate", "samples", "seconds", "encoding", "decoder", "count"):
+            self.assertEqual(a["spoken"][key], b["spoken"][key], key)
+        self.assertEqual([(u["text"], u["spelled"], u["samples"]) for u in a["spoken"]["utterances"]],
+                         [(u["text"], u["spelled"], u["samples"]) for u in b["spoken"]["utterances"]])
+
+    def assert_same_speech(self, mine, theirs, samples):
+        """Two WAVs of the same reply: the same length, and the voices within the synthesiser's tolerance."""
+        self.assertEqual((len(mine), len(theirs)), (44 + 2 * samples, 44 + 2 * samples))
+        self.assertLessEqual(max(abs(p - q) for p, q in zip(struct.unpack(f"<{samples}h", mine[44:]),
+                                                            struct.unpack(f"<{samples}h", theirs[44:]))), 64)
+
+    def test_speech_talk_hears_learns_answers_and_speaks_the_same(self):
+        py_model, rust_model = self.copy("py"), self.copy("rust")
+        py_out, rust_out = os.path.join(self.root, "py.wav"), os.path.join(self.root, "rust.wav")
+        options = ("speech", "talk", self.clip, "--text", "the cat sat on the mat", "--answer", "model", "--epochs", 1)
+        a = py(*options, "--out", py_out, model=py_model)
+        b = rust(*options, "--out", rust_out, model=rust_model)
+        self.assertEqual((a["by"], b["by"]), ("model", "model"), (a["reply"], b["reply"]))
+        self.assert_same_turn(a, b)
+        self.assertEqual((a["source"], a["sink"], a["saved"]["path"]), (self.clip, py_out, py_model))
+        self.assertEqual((b["source"], b["sink"], b["saved"]["path"]), (self.clip, rust_out, rust_model))
+        self.assertLessEqual(abs(a["trained"]["loss"] - b["trained"]["loss"]), 1e-6)
+        with open(py_out, "rb") as fh, open(rust_out, "rb") as gh:
+            self.assert_same_speech(fh.read(), gh.read(), a["spoken"]["samples"])
+        # both learned the same, so a conversation continued on either side goes on the same way
+        history = os.path.join(self.root, "so-far.txt")
+        with open(history, "w", encoding="utf-8") as fh:
+            fh.write("You: hello\nModel: hi there\nthe dog sat\n")
+        options = ("speech", "talk", "--text", "the cat", "--answer", "model", "--no-train", "--history", history)
+        a = py(*options, "--out", py_out, model=py_model)
+        b = rust(*options, "--out", rust_out, model=rust_model)
+        self.assertEqual(a["history"][:4], [["You", "hello"], ["Model", "hi there"], ["You", "the dog sat"],
+                                            ["You", "the cat"]])
+        self.assert_same_turn(a, b)
+        self.assertEqual((a["saved"], a["trained"], b["saved"], b["trained"]), (None, None, None, None))
+
+    def test_the_voice_routes_answer_as_python_s_turn_answers(self):
+        from radixnet.dialogue import reply as dialogue_reply
+        from radixnet.voicechat import SPEAKERS, VoiceOptions, describe, turn
+
+        server = serve(self, self.copy("served"))
+        status, info, _ = server.get("/api/voice")
+        self.assertEqual(status, 200, info)
+        expected = describe(load_model(self.model).encoding)
+        self.assertEqual(set(info), set(expected))
+        for key in ("speakers", "answers", "encoding", "decoder", "acoustic", "default_rate", "chunk"):
+            self.assertEqual(info[key], expected[key], key)
+        self.assertEqual(set(info["transcription"]), set(expected["transcription"]))
+        self.assertTrue(info["ollama"]["url"].startswith("http"))
+        routes = server.get("/api/status")[1]["routes"]
+        for route in ("GET /api/voice", "POST /api/voice/turn", "POST /api/voice/turn/stream"):
+            self.assertIn(route, routes)
+        # the same turn in-process on Python's side, on a copy of the same model
+        model = load_model(self.copy("mine"))
+
+        def learn(texts):
+            model.train(texts, epochs=1, lr=0.5, batch_size=8)
+            return {"texts": len(texts), "epochs": 1}
+
+        def model_reply(line, heard):
+            return dialogue_reply(model, line, heard=heard, index=1, speaker=SPEAKERS[1])
+
+        mine = turn(self.wav, encoding=model.encoding,
+                    options=VoiceOptions(transcript="the cat sat on the mat", answer="model", epochs=1),
+                    learn=learn, model_reply=model_reply)
+        body = {"name": "u.wav", "content_base64": base64.b64encode(self.wav).decode(),
+                "transcript": "the cat sat on the mat", "answer": "model", "epochs": 1}
+        status, doc, _ = server.post("/api/voice/turn", body)
+        self.assertEqual(status, 200, doc)
+        self.assertEqual(doc["by"], "model", doc["reply"])
+        self.assert_same_turn(mine.document, doc)
+        self.assertEqual(set(doc), set(mine.document) | {"rate", "wav_base64"})
+        self.assertEqual(doc["rate"], mine.rate)
+        self.assert_same_speech(mine.wav(), base64.b64decode(doc["wav_base64"]), doc["spoken"]["samples"])
+        # the same utterance as a raw body and as a multipart form, nobody answering and nothing learned
+        query = "?transcript=the%20cat%20sat%20on%20the%20mat&answer=none&train=false"
+        status, again, _ = server.client.request("POST", "/api/voice/turn" + query, raw=self.wav,
+                                                 headers={"Content-Type": "audio/wav"})
+        self.assertEqual(status, 200, again)
+        self.assertEqual((again["texts"], again["by"], again["trained"], again["wav_base64"]),
+                         (doc["texts"], "none", None, None))
+        boundary = "----radixnet-voice"
+        form = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"u.wav\"\r\n"
+                f"Content-Type: audio/wav\r\n\r\n").encode() + self.wav + f"\r\n--{boundary}--\r\n".encode()
+        status, again, _ = server.client.request("POST", "/api/voice/turn" + query, raw=form,
+                                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        self.assertEqual((status, again["texts"], again["by"]), (200, doc["texts"], "none"), again)
+        # streamed: the events reassemble to the whole turn, as Python streams it
+        status, lines, headers = server.post("/api/voice/turn/stream", {
+            "transcript": "the cat sat", "answer": "model", "history": [["You", "hello"], ["Model", "hi there"]],
+            "epochs": 1})
+        self.assertEqual(status, 200, lines)
+        self.assertTrue(headers.get("Content-Type", "").startswith("application/x-ndjson"), headers)
+        events = [json.loads(line) for line in lines.decode("utf-8").splitlines()]
+        kinds = [e["event"] for e in events]
+        self.assertEqual(kinds[:3], ["heard", "trained", "reply"])
+        self.assertEqual(kinds[-2:], ["spoken", "done"])
+        self.assertIn("audio", kinds)
+        done = events[-1]
+        self.assertNotIn("wav_base64", done)
+        self.assertEqual(done["history"][:2], [["You", "hello"], ["Model", "hi there"]])
+        pcm = b"".join(base64.b64decode(e["pcm_base64"]) for e in events if e["event"] == "audio")
+        self.assertEqual(len(pcm) // 2, done["spoken"]["samples"])
+        # refused as Python refuses
+        for body in ({}, {"transcript": "hi", "answer": "nobody"}, {"transcript": "hi", "epochs": "many"},
+                     {"transcript": "hi", "history": "not a list"}, {"transcript": "hi", "pitch": 0},
+                     {"name": "u.wav", "content_base64": "bm90IGF1ZGlv", "answer": "model"}):
+            status, err, _ = server.post("/api/voice/turn", body)
+            self.assertEqual(status, 400, (body, err))
+        # an Ollama that cannot be reached: the turn still happens, the error is on record
+        status, doc, _ = server.post("/api/voice/turn", {"transcript": "the cat sat", "answer": "ollama",
+                                                          "url": "http://127.0.0.1:1", "timeout": 1, "speak": False})
+        self.assertEqual((status, doc["by"]), (200, "none"), doc)
+        self.assertIn("cannot reach Ollama", doc["reply"]["ollama_error"])

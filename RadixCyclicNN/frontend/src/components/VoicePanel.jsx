@@ -85,6 +85,9 @@ export default function VoicePanel({ status }) {
   const onRef = useRef(false);
   const counter = useRef(0);
   const settings = useRef({});
+  const [view, setView] = useStoredState("voice.view", "talk");
+  const log = useRef(null);
+  const stuck = useRef(true); // the log follows the newest turn until the reader scrolls up
 
   const canListen = listeningSupported();
   const canDictate = typeof window !== "undefined" && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -97,6 +100,15 @@ export default function VoicePanel({ status }) {
   useEffect(() => {
     onRef.current = on;
   }, [on]);
+  useEffect(() => {
+    const box = log.current;
+    if (box && stuck.current) box.scrollTop = box.scrollHeight;
+  }, [turns, phase, view]);
+  const onScroll = () => {
+    const box = log.current;
+    if (box) stuck.current = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  };
+
   useEffect(() => {
     settings.current = {
       answer, ollamaModel, url, persona, train, epochs, learnReply, speak, pitch, tempo, gain, mode, maxLength,
@@ -349,94 +361,122 @@ export default function VoicePanel({ status }) {
 
   const phaseText = STATUS_TEXT[phase] || phase;
   const meter = Math.min(100, Math.round(level * 500));
+  const shown = [...turns].reverse(); // oldest first, the newest at the bottom, as a conversation reads
+  const who = info
+    ? `${info.encoding} through its ${info.decoder}${info.ollama ? ` · Ollama: ${info.ollama.model}` : ""}`
+    : "";
 
   return (
     <>
-      <div className="card">
-        <h2>Voice</h2>
-        <p className="muted">
-          Talk to it. The microphone stays on: everything you say is cut into utterances, written down with the
-          browser&apos;s dictation, <b>learned</b> - the words and the waveform, or a model of acoustic units&apos; units -
-          and <b>answered</b>, and the reply is <b>spoken</b> back the moment its first chunk of audio arrives. While it
-          speaks it does not listen, so it never hears itself. Ollama can answer for a model that has nothing to say
-          yet, and the model learns those answers too.
-        </p>
-        <div className="voice-bar">
-          <button type="button" className={`primary mic${on ? " on" : ""}`} onClick={toggle} disabled={!canListen && !on}>
-            {on ? "Stop listening" : "Start listening"}
+      <nav className="tabs sub" role="tablist" aria-label="Voice">
+        {[
+          ["talk", "Conversation"],
+          ["settings", "Settings"],
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={view === id}
+            className={view === id ? "active" : ""}
+            onClick={() => setView(id)}
+          >
+            {label}
           </button>
-          <span className={`badge voice-status ${phase}`}>{phaseText}</span>
-          <span className="level" role="meter" aria-label="microphone level" aria-valuenow={meter} aria-valuemin={0} aria-valuemax={100}>
-            <span style={{ width: `${meter}%` }} />
-          </span>
-          {interim ? <span className="muted interim">{interim}</span> : null}
-        </div>
-        {!canListen ? (
-          <Alert
-            kind="warning"
-            message="This browser cannot listen (no microphone access or no Web Audio); type below instead."
-          />
-        ) : null}
-        {canListen && !canDictate ? (
+        ))}
+      </nav>
+
+      {view === "settings" ? (
+        <div className="card voice-settings">
+          <h2>Settings</h2>
           <p className="muted">
-            This browser has no dictation, so the words come from the server&apos;s own transcription when it has one
-            {info && info.transcription && info.transcription.auto ? ` (${info.transcription.auto})` : ""}; the sound is
-            learned either way.
+            The microphone stays on: everything you say is cut into utterances, written down with the browser&apos;s
+            dictation, <b>learned</b> - the words and the waveform, or a model of acoustic units&apos; units - and{" "}
+            <b>answered</b>, and the reply is <b>spoken</b> back the moment its first chunk of audio arrives. While it
+            speaks it does not listen, so it never hears itself. Ollama can answer for a model that has nothing to say
+            yet, and the model learns those answers too.
           </p>
-        ) : null}
-        {otherJobRunning ? <p className="muted">A job is running: a turn cannot train until it has finished.</p> : null}
-        <Alert message={error} onDismiss={() => setError(null)} />
-        <Alert kind="warning" message={note} onDismiss={() => setNote(null)} />
-        <form className="voice-typed" onSubmit={sendTyped}>
-          <TextField label="Or type something" value={typed} onChange={setTyped} placeholder="the cat sat on the mat" />
-          <div className="actions">
-            <button type="submit" disabled={!typed.trim()}>
+          <div className="grid">
+            <SelectField label="Answered by" value={answer} onChange={setAnswer} options={ANSWERS} />
+            <TextField label="Ollama model" value={ollamaModel} onChange={setOllamaModel} placeholder="(the server's default)" />
+            <TextField label="Ollama URL" value={url} onChange={setUrl} placeholder="(the server's default)" />
+            <TextField label="Persona (for Ollama)" value={persona} onChange={setPersona} placeholder="a friendly cat" />
+            <CheckField label="Learn what I say" checked={train} onChange={setTrain} hint="the words and the waveform, trained on before the reply" />
+            <NumberField label="Epochs" value={epochs} onChange={setEpochs} step="1" min="0" />
+            <CheckField label="Learn Ollama's replies" checked={learnReply} onChange={setLearnReply} hint="so the model learns to answer by itself" />
+            <CheckField label="Speak the replies" checked={speak} onChange={setSpeak} />
+            <SelectField label="Reply search" value={mode} onChange={setMode} options={[["beam", "beam (the most likely)"], ["sample", "sample (a walk)"]]} />
+            <NumberField label="Reply length" value={maxLength} onChange={setMaxLength} step="1" min="0" hint={`${units} a reply may add`} />
+            <NumberField label="Pitch (Hz)" value={pitch} onChange={setPitch} step="1" min="1" />
+            <NumberField label="Tempo" value={tempo} onChange={setTempo} step="0.1" min="0.1" />
+            <NumberField label="Gain" value={gain} onChange={setGain} step="0.05" min="0" max="1" />
+            <NumberField label="Silence that ends an utterance (ms)" value={silenceMs} onChange={setSilenceMs} step="50" min="200" hint="takes effect when listening is started again" />
+            <NumberField label="Sensitivity (level)" value={threshold} onChange={setThreshold} step="0.005" min="0.001" max="0.5" hint="lower hears quieter speech; takes effect when listening is started again" />
+          </div>
+          <p className="muted">
+            {info
+              ? `The model speaks ${info.encoding} through its ${info.decoder}${info.ollama ? `; Ollama: ${info.ollama.model} at ${info.ollama.url}` : ""}.`
+              : ""}
+          </p>
+        </div>
+      ) : (
+        <div className="card voice-room">
+          <div className="voice-bar">
+            <button type="button" className={`primary mic${on ? " on" : ""}`} onClick={toggle} disabled={!canListen && !on}>
+              {on ? "Stop listening" : "Start listening"}
+            </button>
+            <span className={`badge voice-status ${phase}`}>{phaseText}</span>
+            <span className="level" role="meter" aria-label="microphone level" aria-valuenow={meter} aria-valuemin={0} aria-valuemax={100}>
+              <span style={{ width: `${meter}%` }} />
+            </span>
+            {interim ? <span className="muted interim">{interim}</span> : null}
+            {who ? <span className="muted voice-who">{who}</span> : null}
+          </div>
+          {!canListen ? (
+            <Alert
+              kind="warning"
+              message="This browser cannot listen (no microphone access or no Web Audio); type below instead."
+            />
+          ) : null}
+          {canListen && !canDictate ? (
+            <p className="muted">
+              This browser has no dictation, so the words come from the server&apos;s own transcription when it has one
+              {info && info.transcription && info.transcription.auto ? ` (${info.transcription.auto})` : ""}; the sound is
+              learned either way.
+            </p>
+          ) : null}
+          {otherJobRunning ? <p className="muted">A job is running: a turn cannot train until it has finished.</p> : null}
+          <Alert message={error} onDismiss={() => setError(null)} />
+          <Alert kind="warning" message={note} onDismiss={() => setNote(null)} />
+          <div className="voice-log" ref={log} onScroll={onScroll}>
+            {turns.length === 0 ? (
+              <p className="muted empty">
+                {on
+                  ? "Listening - say something."
+                  : "Press Start listening, then just talk - or type below. Everything you say is learned and answered out loud."}
+              </p>
+            ) : (
+              <ol className="dialogue voice">
+                {shown.map((t) => (
+                  <VoiceTurn key={t.id} turn={t} />
+                ))}
+              </ol>
+            )}
+          </div>
+          <form className="voice-composer" onSubmit={sendTyped}>
+            <input
+              type="text"
+              value={typed}
+              onChange={(event) => setTyped(event.target.value)}
+              placeholder="Or type something and press Enter"
+              aria-label="Say something by typing"
+            />
+            <button type="submit" className="primary" disabled={!typed.trim()}>
               Say it
             </button>
-            <span className="muted">
-              {info
-                ? `the model speaks ${info.encoding} through its ${info.decoder}${info.ollama ? `; Ollama: ${info.ollama.model} at ${info.ollama.url}` : ""}`
-                : ""}
-            </span>
-          </div>
-        </form>
-      </div>
-
-      <details className="card voice-settings">
-        <summary>Settings</summary>
-        <div className="grid">
-          <SelectField label="Answered by" value={answer} onChange={setAnswer} options={ANSWERS} />
-          <TextField label="Ollama model" value={ollamaModel} onChange={setOllamaModel} placeholder="(the server's default)" />
-          <TextField label="Ollama URL" value={url} onChange={setUrl} placeholder="(the server's default)" />
-          <TextField label="Persona (for Ollama)" value={persona} onChange={setPersona} placeholder="a friendly cat" />
-          <CheckField label="Learn what I say" checked={train} onChange={setTrain} hint="the words and the waveform, trained on before the reply" />
-          <NumberField label="Epochs" value={epochs} onChange={setEpochs} step="1" min="0" />
-          <CheckField label="Learn Ollama's replies" checked={learnReply} onChange={setLearnReply} hint="so the model learns to answer by itself" />
-          <CheckField label="Speak the replies" checked={speak} onChange={setSpeak} />
-          <SelectField label="Reply search" value={mode} onChange={setMode} options={[["beam", "beam (the most likely)"], ["sample", "sample (a walk)"]]} />
-          <NumberField label="Reply length" value={maxLength} onChange={setMaxLength} step="1" min="0" hint={`${units} a reply may add`} />
-          <NumberField label="Pitch (Hz)" value={pitch} onChange={setPitch} step="1" min="1" />
-          <NumberField label="Tempo" value={tempo} onChange={setTempo} step="0.1" min="0.1" />
-          <NumberField label="Gain" value={gain} onChange={setGain} step="0.05" min="0" max="1" />
-          <NumberField label="Silence that ends an utterance (ms)" value={silenceMs} onChange={setSilenceMs} step="50" min="200" hint="takes effect when listening is started again" />
-          <NumberField label="Sensitivity (level)" value={threshold} onChange={setThreshold} step="0.005" min="0.001" max="0.5" hint="lower hears quieter speech; takes effect when listening is started again" />
+          </form>
         </div>
-      </details>
-
-      <div className="card">
-        <h2>Conversation</h2>
-        {turns.length === 0 ? (
-          <p className="muted">
-            {on ? "Listening - say something." : "Press Start listening, then just talk (or type above)."}
-          </p>
-        ) : (
-          <ol className="dialogue voice" reversed>
-            {turns.map((t) => (
-              <VoiceTurn key={t.id} turn={t} />
-            ))}
-          </ol>
-        )}
-      </div>
+      )}
     </>
   );
 }
