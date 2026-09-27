@@ -1953,6 +1953,128 @@ def cmd_speech_teach(args: argparse.Namespace, console: Console) -> dict:
     return _teach_from_audio(args, console, read_audio_file(args.file), args.file)
 
 
+def _history_lines(text: str) -> list[tuple[str, str]]:
+    """A conversation file: one line per utterance, ``Speaker: text`` (a bare line is the person's)."""
+    pairs: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        speaker, sep, said = line.partition(":")
+        if sep and speaker and " " not in speaker.strip():
+            pairs.append((speaker.strip(), said.strip()))
+        else:
+            pairs.append(("You", line))
+    return pairs
+
+
+def cmd_speech_talk(args: argparse.Namespace, console: Console) -> dict:
+    """One turn of talking with the model by voice: a recording is heard, learned, answered and spoken back.
+
+    The same turn the Voice tab makes for every utterance (``POST /api/voice/turn``,
+    :mod:`radixnet.voicechat`): the recording (a file, or ``--seconds`` from the
+    microphone) becomes the texts the model learns and is trained on at once, the
+    model answers (or Ollama on its behalf), the reply is spoken through the
+    model's voice, and a reply Ollama wrote is taught to the model.
+    """
+    import random
+
+    from .chat import _Veto as PairVeto
+    from .dialogue import reply as dialogue_reply
+    from .speech import SpeechError, record
+    from .voicechat import SPEAKERS, VoiceOptions, turn
+
+    data: bytes | None = None
+    if args.file:
+        data, source = read_audio_file(args.file), args.file
+    elif args.seconds:
+        console.note(f"recording {args.seconds:g}s from the microphone - speak now…")
+        try:
+            data = record(seconds=args.seconds, rate=args.record_rate, recorder=args.recorder)
+        except SpeechError as exc:
+            raise CliError(str(exc)) from exc
+        source = f"microphone ({args.seconds:g}s)"
+    else:
+        source = "typed"
+    if data is None and not (args.text or "").strip():
+        raise CliError("nothing was said: give a recording FILE, --seconds N to record one, or --text")
+    history = _history_lines(read_text_file(args.history)) if args.history else []
+    model, origin = open_model(args, console, required=False)
+    options = VoiceOptions(
+        transcript=args.text or "", backend=args.backend, language=args.language, asr_model=args.asr_model,
+        asr_url=args.asr_url, rate=args.rate, codec=args.codec, normalise=args.normalise,
+        waveform=not args.no_waveform, pair=args.pair, unique=not args.shared_token, train=not args.no_train,
+        epochs=args.epochs, lr=args.lr, batch_size=args.batch_size, answer=args.answer,
+        learn_reply=not args.no_learn_reply, persona=args.persona or "", topic=args.topic or "", mode=args.mode,
+        max_length=args.max_length, context=args.context, k=args.k, beam=args.beam, temperature=args.temperature,
+        seed=getattr(args, "seed", None), explore=args.explore, learn=not args.no_learn, speak=not args.no_speak,
+        voice_rate=args.voice_rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain, polish=args.polish,
+    )
+    try:
+        options.validate()
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    ollama = None
+    if options.answer in ("auto", "ollama"):
+        from .ollama import OllamaClient
+
+        try:
+            ollama = OllamaClient(args.url, args.ollama_model, args.timeout)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+    learned = {"texts": 0}
+
+    def learn(texts: list[str]) -> dict:
+        records = model.train(texts, epochs=options.epochs, lr=options.lr, batch_size=options.batch_size)
+        learned["texts"] += len(texts)
+        return {"texts": len(texts), "epochs": len(records), "loss": records[-1]["loss"] if records else None}
+
+    pair = open_guard(args, console, model)
+    veto = PairVeto(pair) if pair is not None else None
+    rng = random.Random(options.seed) if options.seed is not None else None
+
+    def model_reply(line: str, heard: Any) -> Any:
+        try:
+            return dialogue_reply(
+                model, line, heard=heard, index=1 + len(history), speaker=SPEAKERS[1], mode=options.mode,
+                max_length=options.max_length, context=options.context, temperature=options.temperature, k=options.k,
+                beam=options.beam, rng=rng, avoid_repeats=options.avoid_repeats,
+                avoid_word_repeats=options.avoid_word_repeats, explore=options.explore, learn=options.learn, veto=veto,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CliError(str(exc)) from exc
+
+    try:
+        outcome = turn(data, encoding=model.encoding, options=options, history=history, learn=learn,
+                       model_reply=model_reply, ollama=ollama)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    doc = dict(outcome.document)
+    doc["source"] = source
+    doc["saved"] = save_model(model, args.model_out or args.model) if learned["texts"] else None
+    doc["sink"] = None
+    if outcome.pcm:
+        total, sink = _deliver_speech(args, [outcome.pcm], outcome.rate)
+        doc["sink"] = sink
+    reply = doc["reply"]
+    if not args.raw:
+        console.pairs([
+            ("model", origin.describe()),
+            ("source", source),
+            ("heard", quote(doc["transcript"]) if doc["transcript"] else "-"),
+            ("learned", f"{doc['trained']['texts']} text(s)" if doc["trained"] else "-"),
+            ("answered by", doc["by"]),
+            ("reply", quote(reply["spelled"] or reply["text"]) if reply["text"] else "-"),
+            ("in units", quote(clip(reply["text"], 80)) if reply["text"] and reply["text"] != reply["spelled"] else "-"),
+            ("speech", f"{doc['spoken']['seconds']:.2f} s at {doc['spoken']['rate']} Hz -> {doc['sink']}" if doc["spoken"] else "-"),
+            ("taught the reply", "yes" if doc["taught"] else "no"),
+            ("saved", doc["saved"]["path"] if doc["saved"] else "-"),
+        ])
+        if reply["ollama_error"]:
+            console.note(f"note: Ollama could not answer ({reply['ollama_error']})")
+    return doc
+
+
 def cmd_speech_listen(args: argparse.Namespace, console: Console) -> dict:
     """Talk to the model: record from the microphone, then teach it what was said and how it sounded."""
     from .speech import SpeechError, record
@@ -5145,6 +5267,67 @@ def build_parser() -> argparse.ArgumentParser:
     _add_speech_encode_options(a)
     _add_recall_options(a, "speech")
     a.set_defaults(handler=cmd_speech_tutor)
+
+    a = actions.add_parser(
+        "talk", help="one turn of talking with the model by voice: heard, learned, answered and spoken back",
+        description="The turn the Voice tab makes for everything you say: the recording (FILE, or --seconds from the "
+                    "microphone, or --text alone) becomes the texts the model learns - the transcript and the "
+                    "waveform behind one token, or a model of acoustic units' units - and is trained on at once; "
+                    "the model answers (--answer model), or Ollama answers for it (ollama), or Ollama steps in only "
+                    "when the model has nothing to say (auto, the default); the reply is spoken through the model's "
+                    "voice into --out (or --play / --raw), and a reply Ollama wrote is taught to the model.  "
+                    "--history FILE (one `Speaker: text` line per utterance) continues a conversation.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", nargs="?", metavar="FILE", help="the recording (WAV; other formats through ffmpeg)")
+    a.add_argument("--seconds", type=nonneg_float, default=0.0, metavar="N", help="record N seconds from the microphone instead")
+    a.add_argument("--record-rate", type=pos_int, default=16000, help="sample rate to record at (before resampling)")
+    a.add_argument("--recorder", choices=SPEECH_RECORDERS, help="force one recorder (default: the first installed)")
+    a.add_argument("--text", metavar="TEXT", help="the transcript (what you said), or the whole line when there is no recording")
+    a.add_argument("--history", metavar="FILE", help="the conversation so far, one `Speaker: text` line per utterance")
+    _add_asr_options(a)
+    _add_speech_encode_options(a)
+    group = a.add_argument_group("waveform options")
+    group.add_argument("--no-waveform", action="store_true", help="learn the transcript only, not the sound")
+    group.add_argument("--pair", action="store_true", help="also learn the waveform followed by its transcript")
+    group = a.add_argument_group("training")
+    group.add_argument("--no-train", action="store_true", help="do not learn what was said")
+    group.add_argument("--epochs", type=pos_int, default=2, help="epochs over the utterance's texts (default 2)")
+    group.add_argument("--lr", type=nonneg_float, default=0.5, help="learning rate (default 0.5)")
+    group.add_argument("--batch-size", type=pos_int, default=8, help="batch size (default 8)")
+    group.add_argument("--model-out", metavar="PATH", help="save the model here instead of --model")
+    group = a.add_argument_group("the answer")
+    group.add_argument("--answer", choices=("auto", "model", "ollama", "none"), default="auto",
+                       help="who answers: the model with Ollama stepping in when it has nothing to say (auto), "
+                            "the model alone, Ollama alone, nobody")
+    group.add_argument("--ollama-model", metavar="NAME", help="the Ollama model that answers (default: the server's)")
+    group.add_argument("--url", metavar="URL", help="the Ollama endpoint (default: $OLLAMA_HOST or 127.0.0.1:11434)")
+    group.add_argument("--timeout", type=nonneg_float, metavar="S", help="seconds to wait for Ollama")
+    group.add_argument("--persona", metavar="TEXT", help="who Ollama speaks as, when it answers")
+    group.add_argument("--topic", metavar="TEXT", help="what the conversation is about, for Ollama")
+    group.add_argument("--no-learn-reply", action="store_true", help="do not teach the model a reply Ollama wrote")
+    group.add_argument("--mode", choices=("beam", "sample"), default="beam", help="how the model's reply is found")
+    group.add_argument("--max-length", type=nonneg_int, default=60, help="units a reply may add to its context")
+    group.add_argument("--context", type=nonneg_int, default=12, help="characters of the line the reply picks up")
+    group.add_argument("--k", type=pos_int, default=5, help="candidates considered (beam: the K most likely)")
+    group.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * k, 16))")
+    group.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature")
+    group.add_argument("--explore", type=nonneg_int, default=EXPLORE, metavar="N",
+                       help="times a reply that caught itself repeating may back up and look for another way on")
+    group.add_argument("--no-learn", action="store_true", help="do not teach the graph where it goes round")
+    add_guard_flags(a)
+    group = a.add_argument_group("the voice")
+    group.add_argument("--no-speak", action="store_true", help="answer in text only")
+    group.add_argument("--out", default="reply.wav", metavar="WAV", help="the WAV the reply is written to (default reply.wav)")
+    group.add_argument("--play", action="store_true", help="play the reply (aplay, paplay, ffplay, play or afplay)")
+    group.add_argument("--raw", action="store_true", help="write the reply as 16-bit PCM to stdout")
+    group.add_argument("--voice-rate", type=pos_int, default=16000, help="the voice's sample rate (default 16000)")
+    group.add_argument("--pitch", type=nonneg_float, default=120.0, help="the voice's base pitch in Hz (default 120)")
+    group.add_argument("--tempo", type=nonneg_float, default=1.0, help="the voice's pace (default 1)")
+    group.add_argument("--gain", type=nonneg_float, default=0.5, help="peak level as a share of full scale (default 0.5)")
+    group.add_argument("--polish", type=nonneg_int, default=0, metavar="N",
+                       help="acoustic units: Griffin-Lim iterations over the whole reply (default 0)")
+    a.set_defaults(handler=cmd_speech_talk)
 
     a = actions.add_parser(
         "decode", help="turn an encoded or predicted waveform text back into a WAV file (any other output is spoken)",

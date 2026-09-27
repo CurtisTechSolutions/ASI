@@ -403,6 +403,19 @@ export const api = {
    * decoder, count, utterances}`.
    */
   say: (texts, options = {}) => post("/api/say", { texts: Array.isArray(texts) ? texts : [texts], ...options }),
+  /** Talking with the model by voice (VoicePanel): what the tab has to work with. */
+  voice: () => get("/api/voice"),
+  /**
+   * One turn, whole: `{name, content_base64}` (the utterance, a WAV) and / or `transcript`, `history`, `answer`,
+   * `train`, `epochs`, `learn_reply`, `speak`, the voice's dials, `persona`, `ollama_model`, `url` -> the turn's
+   * document with the reply's `wav_base64`.
+   */
+  voiceTurn: (body) => post("/api/voice/turn", body),
+  /**
+   * The same turn as it happens: `heard`, `trained`, `reply`, `audio` (16-bit PCM chunks, `pcm_base64` at
+   * `rate`, played as they arrive), `spoken`, `taught` events, then the document.
+   */
+  voiceTurnStream: (body, onEvent) => stream("/api/voice/turn/stream", body, onEvent),
   /** Code generation (see CodeGenPanel): sandbox runs, an Ollama or ChatGPT teacher / judge and 2NRL rewards. */
   /** Tool use (see AgentPanel): the tools the network can call, and one direct call. */
   tools: () => get("/api/tools"),

@@ -852,6 +852,45 @@ def chat_line(
     return _first_line(raw)
 
 
+_REPLY_SYSTEM = (
+    "You are the voice of a very small language model that is learning to talk from the conversations it has, "
+    "and a person is talking to it out loud. Answer the person's last line in one short, plain, friendly "
+    "sentence of everyday words, as if speaking: no lists, no markdown, no explanations, nothing about being a "
+    "model, and never more than one sentence. Reply with the sentence and nothing else."
+)
+
+
+def reply_line(
+    client: OllamaClient,
+    transcript: Sequence[tuple[str, str]],
+    *,
+    persona: str = "",
+    topic: str = "",
+    speakers: Sequence[str] = ("You", "Model"),
+    model: str | None = None,
+    temperature: float = 0.8,
+) -> str:
+    """The LLM answering a person on the model's behalf: the next line of the model's side (the Voice tab).
+
+    ``transcript`` is the conversation so far as ``(speaker, text)`` pairs, the
+    person's line last.  The answer is one short spoken sentence, because it is
+    said aloud and then taught to the model, which learns to answer by itself
+    from what it hears (:mod:`radixnet.voicechat`).
+    """
+    system = _REPLY_SYSTEM
+    if topic.strip():
+        system += f" The conversation is about {topic.strip()}."
+    if persona.strip():
+        system += f" You are {persona.strip()}."
+    said = "\n".join(f"{speaker}: {text}" for speaker, text in transcript if str(text).strip())
+    if said:
+        user = f"The conversation so far:\n{said}\n\nWrite the next line of {speakers[1]}: what it says back to {speakers[0]}."
+    else:
+        user = f"Say hello to {speakers[0]} in one short, plain line."
+    raw = client.generate(user, system=system, model=model, options={"temperature": temperature})
+    return _first_line(raw)
+
+
 def _first_line(raw: str) -> str:
     """One line out of an LLM answer that may have written several (or quoted itself)."""
     for line in str(raw or "").splitlines():

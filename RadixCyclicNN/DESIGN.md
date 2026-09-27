@@ -780,6 +780,9 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn","think","think_depth"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22); `think` (default on) has a voice that caught itself repeating think before it backs up, `think_depth` deep, and its `rethink` carries the `thought` (section 36) |
 | POST `/api/converse/stream` | the same body as `/api/converse` | the same conversation as it happens (section 22.1): `application/x-ndjson`, one JSON object per line - `look` / `draft` / `caught` / `backtrack` / `found` / `stuck` (the window) and `turn` (the answer), each with `index` and `speaker`, then `{"event": "done", ...}` with the `/api/converse` document; a request refused before the first line is an ordinary 400, a failure after it the last line `{"event": "error", "error"}`. `ApiHandler._send_stream` writes it chunked, the headers waiting for the first event (`StreamedResponse`) |
 | POST `/api/say` | `{"texts" \| "text" (one per line), "rate", "pitch", "tempo", "gain", "polish"}` | `{"wav_base64", "rate", "samples", "seconds", "encoding", "decoder": "voice" \| "vocoder", "count", "utterances": [{"text", "spelled", "tokens", "samples", "seconds"}]}` — the output decoder (section 4.1, D-088): the texts spoken in the model's units, one utterance each; only the encoding is read under the model's lock. `POST /api/speech/decode` answers the same way for a text that carries no waveform (and adds `"decoder": "waveform"` to what it decodes). 400 for no texts, a pitch or tempo of 0, or a token that is not a unit of the acoustic codebook |
+| GET `/api/voice` | | `{"speakers", "answers", "encoding", "decoder", "acoustic", "default_rate", "chunk", "transcription", "ollama"}` — what the Voice tab has to work with (section 25.9) |
+| POST `/api/voice/turn` | the recording (the audio forms) and / or `{"transcript", "history", "answer", "train", "epochs", "lr", "batch_size", "learn_reply", "persona", "topic", "url", "ollama_model", "timeout", "mode", "max_length", "context", "k", "beam", "temperature", "seed", "explore", "learn", "guard", "provenance", "speak", "voice_rate", "pitch", "tempo", "gain", "polish", "rate", "codec", "pair", "unique", "normalise", "waveform", "backend", "language"}` | `{"transcript", "line", "token", "texts", "audio", "units", "asr", "trained", "reply": {"by", "text", "spelled", "turn", "ollama_error"}, "by", "spoken", "taught", "history", "encoding", "answer", "seconds", "rate", "wav_base64"}` — one turn of talking with the model by voice (section 25.9, D-089): heard, trained on, answered, spoken, the reply taught when Ollama wrote it; 400 for nothing said, a bad option or unreadable audio, 409 while a job runs |
+| POST `/api/voice/turn/stream` | the same body | `application/x-ndjson`: `heard`, `trained`, `reply`, `audio` (`pcm_base64` chunks of 16-bit PCM at `rate`), `spoken`, `taught`, then `{"event": "done", ...}` with the document (without `wav_base64`) |
 | POST `/api/think` | `{"about","mode","k","beam","max_length","temperature","step_penalty","seed","depth","questions","learn"}` | `{"kind", **Thought.to_dict()}` — one thought from the `THINK` sentinel (`thinking.think`, section 36): `about` thinks at the node where that text ends and teaches the model to stop and think there (`learn`, default on - a thought changes the model); `depth` / `questions` bound how it questions itself; 400 for a mode, a depth or a node that is not one |
 | POST `/api/score` | `{"text"}` | score dict |
 | GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","think_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
@@ -852,7 +855,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `BackwardsField.jsx` — **Query backwards** (`SPEC-SearchAndTraining.md` section 9), over the shared `useSiteSettings().backwards`: for a model trained with the Train tab's *Read every text backwards* (`reverse` on `/api/train`), Predict and Generate turn the query around before it is sent and the answer back when it comes (`src/backwards.js`, pure, tested by `test/backwards.test.mjs`); nothing about it is sent. `compact` is the line the action tabs show.
 * `GraphView.jsx` — SVG rendering of `/api/graph` (circular layout, edge opacity by prob, node radius by count - the *exact* count, `counterTotal(count, count_resets)` -, hover label; the tooltips show a counter's resets once it has any). The sentinels are drawn gold - START and END always, BACK and THINK once they are among the most visited nodes.
 * `ScorePanel.jsx` — score a text.
-* `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone The *Listen to an output* card decodes any text: a waveform text through its codec, anything else through the model's voice (`POST /api/speech/decode` speaks what carries no waveform, as `POST /api/say` does); the Converse tab's turns carry the same 🔊 Hear button as the Predict and Generate tabs.
+* `SpeechPanel.jsx` + `src/audio.js` — teaching by talking (section 25): the browser records the microphone
   (`MediaRecorder`) and dictates the words at the same time (`SpeechRecognition`, the Web Speech API); `audio.js`
   decodes the recording with the Web Audio API, mixes it to mono, resamples it to 16 kHz and writes a 16-bit PCM WAV,
   so the server reads it with the standard library alone and never needs ffmpeg for a browser recording. The panel
@@ -860,7 +863,15 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
   for the server's Whisper), the waveform rate / codec / pair / unique-token / normalise switches and the training
   settings; "Teach the model" posts `/api/speech/teach` with `train`, "Preview the texts" the same request without it,
   and the result card shows the token, the ASR backend, the waveform's size and every text. A third card decodes any
-  `aud:` text - including a prediction - back into audio through `/api/speech/decode` and plays it.
+  `aud:` text - including a prediction - back into audio through `/api/speech/decode` and plays it. The
+  *Listen to an output* card decodes any text: a waveform text through its codec, anything else through the
+  model's voice (`POST /api/speech/decode` speaks what carries no waveform, as `POST /api/say` does); the
+  Converse tab's turns carry the same 🔊 Hear button as the Predict and Generate tabs.
+* `VoicePanel.jsx` + `src/voice.js` — talking with the model by voice (section 25.9, D-089): the always-on ear (the
+  `Endpointer` over the microphone's level, the dictation log paired with each utterance by time), one turn per
+  utterance through `POST /api/voice/turn/stream` (`api.voiceTurnStream`; `api.voiceTurn` when a server lacks the
+  stream), the `PcmPlayer` playing the reply's chunks as they arrive with the ear paused meanwhile, the settings and
+  the conversation newest first; `test/voice.test.mjs` holds the endpointer, the pairing, the decoders and the history.
 * `RecallCard.jsx` — the **What does it remember?** card, shared by the Speech and Images tabs (section 26): the
   exercise settings (how much of the payload to ask for, the lead, attempts, mode, the pass mark, listen back, blame
   it), one button, and the marked table — what was asked about, the mark out of 10, the agreement, the verdict and
@@ -2629,6 +2640,52 @@ the token and the browser's dictation; `pip install radixnet[speech]` (faster-wh
 (openai-whisper) for server-side transcription, ffmpeg for audio formats other than WAV.
 
 ---
+
+### 25.9 Talking with it: the Voice tab (`radixnet/voicechat.py`, `frontend/src/voice.js`, `VoicePanel.jsx`) - D-089
+
+The Speech tab teaches one utterance at a time, by hand: record, stop, teach. The **Voice tab** is the same teaching
+with nothing to press, and a reply: the microphone stays on, and everything the person says is one **turn**.
+
+* **The ear** (`src/voice.js`): the microphone under an `Endpointer`, a state machine over the level (RMS) of every
+  audio frame - two loud frames start an utterance, `silenceMs` (700 ms) of quiet end it, shorter than `minSpeechMs`
+  is a click, `maxMs` cuts a monologue - with `preRollMs` of audio kept from before the start so the first sound is
+  not clipped. The utterance's frames become a 16-bit PCM WAV (`audio.js`'s `encodeWav`, resampled to 16 kHz). The
+  words come from the Web Speech API running beside the ear (`startDictationLog`, restarted whenever the recogniser
+  stops by itself): its final results carry the time they landed, and `pairTranscript` gives an utterance the finals
+  inside its window (a recogniser commits a phrase a little after the speaker stops, so the window is generous after
+  the end and every final is used once). A browser without dictation sends the audio alone and the server's own
+  transcription (section 25.3) takes over, or the sound is learned unheard.
+* **The turn** (`radixnet/voicechat.py`, `turn`): *heard* - `speech.teach` makes the transcript and the waveform behind
+  one token (a model of acoustic units hears the recording as its units instead, `hear_audio`, the one text of sound
+  it can learn); *trained* - the model is trained on those texts before it answers, under the mutating lock, so the
+  reply already knows them; *answered* - `dialogue.reply` picks up the end of the line, with the conversation so far
+  `Heard` and the guard's veto, or Ollama answers on the model's behalf (`ollama.reply_line`: one short spoken sentence
+  as the model's voice, with the transcript so far); `answer` decides who - `auto` asks the model first and Ollama
+  only when the model has nothing to say to the person (no reply, or a *fresh* text that picked up none of the
+  line), `model`, `ollama`, `none`; *spoken* - the reply goes through the output decoder (D-088, section 4.1) in the
+  model's encoding, or in letters when it is words a model of acoustic units cannot say; *taught* - a reply Ollama
+  wrote is trained on too (`learn_reply`), never for a model of units. The model's parts come in as callables
+  (`learn`, `model_reply`), so the service takes its locks around exactly those and Ollama is asked outside them.
+* **The stream**: every step is an event of `POST /api/voice/turn/stream` (JSON Lines, section 22.1's mechanism) -
+  `heard`, `trained`, `reply`, then the audio as `audio` events of `CHUNK_SAMPLES` (half a second) of base64 16-bit
+  PCM, `spoken`, `taught`, and `done` with the document; `POST /api/voice/turn` answers the same document whole with
+  the reply as `wav_base64`.
+* **The mouth** (`PcmPlayer`): each `audio` chunk is decoded (`decodePcm`) and scheduled on an AudioContext right
+  after the previous one, so the reply is heard from its first chunk, gaplessly, and nobody presses play; `drained()`
+  says when it has all been heard (with a timer for a context that never ran). **While the mouth speaks the ear is
+  paused**, and reopened once the reply has been heard, so the model never hears itself as the person: the
+  conversation is half-duplex by construction.
+* **The panel** (`VoicePanel.jsx`): one button starts and stops the ear (a browser needs a click before a page may
+  listen or make a sound; the choice is remembered and the ear reopens by itself next time where the browser allows
+  it), a status badge (listening / hearing you / thinking / speaking) and a level meter, the interim words as they
+  are recognised, a text box that says something without a microphone, the settings (who answers, the Ollama model
+  and URL, a persona, learn what I say and how many epochs, learn Ollama's replies, speak, the reply search and
+  length, the voice's dials, the silence and the sensitivity of the endpointer), and the conversation newest first -
+  what you said (its length, what was learned, its token) and what came back (spelled for a model of sounds, the
+  units under it, who answered, cost and probability, how long it spoke, a 🔊 to hear it again). `historyOf` sends
+  the last turns as the `history` every turn continues. A server without the stream route gets the plain one.
+* **From the shell**: `speech talk FILE | --seconds N | --text` is one turn with every dial (`cmd_speech_talk`),
+  `--history FILE` continuing a conversation and the model saved when it learned; `tests/test_voicechat.py`.
 
 ## 26. The recall tutor (`recall.py`) — the tutor that needs no teacher
 

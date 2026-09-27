@@ -1450,6 +1450,77 @@ fieldset.schedule code {
   padding: 3px 12px;
 }
 
+/* Voice tab: the always-on ear and the conversation it holds */
+.voice-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0.4rem 0 0.8rem;
+}
+
+button.mic.on {
+  background: #b42318;
+  border-color: #b42318;
+}
+
+.voice-status.listening,
+.voice-status.hearing {
+  background: rgba(22, 163, 74, 0.18);
+  color: #16a34a;
+}
+
+.voice-status.hearing {
+  animation: dialogue-thinking 1s steps(4, end) infinite;
+}
+
+.voice-status.thinking,
+.voice-status.speaking,
+.voice-status.starting {
+  background: var(--accent);
+  color: #fff;
+}
+
+.level {
+  display: inline-block;
+  width: 160px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.level > span {
+  display: block;
+  height: 100%;
+  background: #16a34a;
+  transition: width 60ms linear;
+}
+
+.voice-bar .interim {
+  font-style: italic;
+}
+
+.voice-typed .actions {
+  margin-top: 0.4rem;
+}
+
+.voice-settings summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+ol.dialogue.voice li.turn.failed .bubble {
+  border-color: var(--danger);
+}
+
+ol.dialogue.voice .meta.units {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-word;
+}
+
 /* 🔊 Hear: the output decoder beside a prediction, a sample or a turn */
 .hear {
   display: inline-flex;
