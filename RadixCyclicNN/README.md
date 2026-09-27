@@ -210,6 +210,7 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 | `schedule` | preview a learning-rate schedule: `--lr-schedule EXPR`, `--act-lr-schedule EXPR`, `--reverse-schedule`, `--epochs 10`, `--lr`, `--act-lr` print the rate of every epoch with a bar graph; without expressions the presets, variables and functions are listed |
 | `predict --prefix TEXT` | `--length`, `--max-length`, `--mode dijkstra\|kbest\|beam\|sample`, `--to-end`, `--step-penalty`, `--temperature`, `--traversal reward\|punishment` with `--penalty-scale` / `--merit-scale` (what the search looks for, see below); `--top-k`, `--top-p`, `--min-p` (what a sampled step draws from) and `--diversity` (how far apart the beam's K are picked), all off by default; `--mode beam` (every kind; the count model's default): `--k 5` (top K and bottom K continuations in one search), `--beam N`; the guard flags below. `--mode kbest` is the resonant model's default: the exact K cheapest walks over `(node, chars, phase)`, metacognitive layer included; its `dijkstra` is the same search with one label per state, and so cycle-blind |
 | `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra\|kbest`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam N`, `--traversal reward\|punishment` with `--penalty-scale` / `--merit-scale`, `--top-k` / `--top-p` / `--min-p` (sample) and `--diversity` (beam); `beam` is the prediction search run to the end of a text: the `--count` most likely complete texts, most likely first; `kbest` (the resonant model's default) returns the same list *exactly* and stops as soon as it has it; the guard flags below |
+| `say TEXT [TEXT...]` | the **output decoder**: any text in the model's units - a prediction, a sample, a turn; sounds, syllables, acoustic units, words or letters - spoken through the model's voice, one utterance each, closed by the END sentinel; `--data FILE` (one text per line, `-` for stdin), `--out FILE` (a WAV, default `speech.wav`), `--play`, `--raw`, `--rate`, `--pitch`, `--tempo`, `--gain`, `--polish N` (acoustic units: Griffin-Lim over each whole utterance); no model file is needed (`--encoding` says how a text is read). `predict --speak FILE` and `generate --speak FILE` write their outputs as speech the same way, and `speech decode` speaks any text that is not a waveform |
 | `score --text TEXT` / `--data FILE` | log-probability, per-character score, unknown transitions |
 | `converse` | the model talks to itself: `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12` (characters of the previous line a reply picks up), `--max-length 60`, `--k 5`, `--beam N`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE` (a second model speaks the second voice), `--allow-repeats`, `--allow-word-repeats`, `--explore 3` (times a reply that caught itself repeating - its own words, or the conversation's - may back up and look for another way on), `--no-learn` (do not teach the graph where it goes round), `--no-think` (do not think before backing up out of a repeat), `--think-depth 2` (how deep such a thought may question itself), `--save` / `--out` (write what it learned back), `--stream` (print the conversation as it happens: each turn the moment it is spoken, and before it what the voice does - the context it continues, the draft it caught itself on, where it backed up to, what it found - dimmed on a terminal; with `--json` one JSON object per line, the usual document last as `{"event": "done", ...}`); prints the transcript with cost, probability and the words each reply picked up, each rethink's thought under it, then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; the guard flags below |
 | `think` | the model thinks: one thought from the THINK sentinel, questioning itself where it has learned to: `--about TEXT` (think at the node where that text ends, and teach the model to stop and think there), `--mode beam\|sample`, `--k 5`, `--beam N`, `--max-length 60`, `--temperature`, `--step-penalty`, `--depth 2` (how deep it may question itself), `--questions 1` (per thought), `--no-learn`, `--save` / `--out`; prints the thought and its questions, and what it triggered when it stopped |
@@ -288,7 +289,8 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/speech/transcribe` | audio as multipart (`curl -F file=@clip.wav`), a raw body, or JSON `{name, content_base64}`; options from the query string or the body (`backend`, `language`, `asr_model`, `asr_url`, `transcript`) -> `{"transcript", "backend", "model", "language", "seconds"}` |
 | `POST /api/speech/teach` | the same audio forms + `transcript` (what the browser dictated), `rate`, `codec`, `normalise`, `waveform`, `pair`, `token`, `unique`, `train`, `epochs`, `lr`, `batch_size`, `save_as` -> `{"token", "transcript", "asr", "audio", "texts", "chars", "pair", "upload", "job"}` (202 with a train job on the texts) |
 | `POST /api/speech/tutor` | the recall tutor: the same audio forms, or `{"texts": ["<speech:…> aud:…"]}` for utterances already encoded, + `transcript`, `rate`, `codec`, `normalise`, `token`, `unique`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `listen_back`, `blame` -> `{"modality","lessons","report","negative"}` |
-| `POST /api/speech/decode` | `{"text", "codec"}` -> `{"wav_base64", "codec", "rate", "samples", "seconds", "repaired"}` - an encoded or predicted waveform as playable audio |
+| `POST /api/speech/decode` | `{"text", "codec"}` -> `{"wav_base64", "codec", "rate", "samples", "seconds", "repaired", "decoder": "waveform"}` - an encoded or predicted waveform as playable audio; a text that carries no waveform is an output in the model's units and comes back spoken through its voice, one utterance per line, exactly as `POST /api/say` answers |
+| `POST /api/say` | the **output decoder**: `{"texts": [...] \| "text" (one per line), "rate", "pitch", "tempo", "gain", "polish"}` -> `{"wav_base64", "rate", "samples", "seconds", "encoding", "decoder": "voice" \| "vocoder", "count", "utterances": [{"text", "spelled", "tokens", "samples", "seconds"}]}` - any text in the model's units (a prediction, a sample, a turn; sounds, syllables, acoustic units, words or letters) spoken through the model's voice, one utterance each; the 🔊 Hear buttons of the Predict, Generate and Converse tabs |
 | `POST /api/codegen/start` | `{"problems": [str or {"id","prompt","tests","expected_output"}], "problems_text", "problem_files", "phases": "both"\|"teacher"\|"model", "rounds", "teacher_provider": "ollama"\|"chatgpt", "teacher_model", "judge_provider", "judge_model", "url", "judge_url", "teacher_attempts", "model_attempts", "strictness", "judge", "fallback_teacher", "twonrl_per", "replay", "sandbox_timeout", "memory_mb", "blame" (the sandbox and the judge also teach the negative network), 2NRL settings, ...}` -> job whose records are `{"kind": "attempt"\|"problem"\|"round", ...}`; an attempt's `source` and a verdict's `judged_by` name the provider (400 when `teacher_provider` is `chatgpt` and the server has no key) |
 | `GET /api/codegen/history` | `{"history": [records of all codegen runs]}` |
 | `POST /api/codegen/solve` | `{"problem", "source": "model"\|"teacher", "attempts", "judge", "teacher_provider", ...}` -> `{"attempts": [{"code","run","style","verdict","correct"}], "correct"}` (no training) |
@@ -2394,6 +2396,40 @@ The voice (`../PhoneticTokenizer/phonetok/synth.py`) is a source-filter vocoder
 over a table of formants - no data, no download, the same in every port - and
 it runs some 70 x faster than real time in pure Python, so the walk is never
 waited for.
+
+### Hearing any output: the decoder
+
+`speak` hears a walk while it walks; `say` is the **output decoder** that hears
+anything the model produced after the fact - a prediction, a generated sample,
+a turn of a conversation, in whatever units the model is in. A text is fed
+whole to the same voice and closed by the same rule, the END sentinel, so a
+model of sounds speaks a text of sounds as it is (and reads plain words through
+the tokenizer first), a model of syllables the same, a model of acoustic units
+speaks them through its codebook's vocoder, and a model of words or letters is
+read through the tokenizer word by word. Hearing a walk and saying its text
+afterwards are the same audio, byte for byte, in all three ports.
+
+```bash
+python -m radixnet --model s.json say "the cat sat on the mat" "DH AH0 # D AO1 G" --out said.wav
+python -m radixnet --model s.json say --data replies.txt --play               # one utterance per line, streamed
+python -m radixnet --encoding phone:3:1 say "the cat" --out cat.wav            # no model file: the encoding reads the text
+python -m radixnet --model s.json predict --prefix "the cat" --speak answer.wav # the answer, heard
+python -m radixnet --model s.json generate --count 3 --speak samples.wav       # every sample, one utterance each
+python -m radixnet --model ears.json say "q2 q28 q55 q5" --polish 16 --out u.wav  # acoustic units, Griffin-Lim polished
+make say SAY="the cat sat on the mat"
+```
+
+Over HTTP it is `POST /api/say` (`{"texts": [...]}` -> `wav_base64` and the
+record of every utterance: what was said, what it spells, the tokens that
+reached the voice), and `POST /api/speech/decode` speaks any text that carries
+no waveform the same way. In the frontend every output has a 🔊 **Hear**
+button - the prediction and its top / bottom rows, every generated sample,
+every turn of a conversation - and the Speech tab's *Listen to an output* card
+takes any text. `speech decode` on the command line does the same for a
+text that is not a waveform. The Go and Rust ports carry all of it (`say`,
+`--speak`, `/api/say`), and `tests/test_go_parity.py::test_the_same_say` /
+`tests/test_rust_parity.py::test_the_same_say` hold the three to the same
+samples.
 
 The four Python model kinds all take it (`--kind radix | count | negative |
 resonant`), and so do the library constructors:

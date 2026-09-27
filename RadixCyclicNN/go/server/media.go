@@ -29,9 +29,16 @@ func init() {
 	doc("POST", "/api/speech/teach", "one utterance -> the words and the waveform behind one unique token: "+
 		"audio as JSON {name, content_base64} + {transcript, rate, codec, normalise, waveform, pair, token, "+
 		"unique, train, epochs, save_as}")
+	route("POST", "/api/say", rSay)
+	doc("POST", "/api/say", "the output decoder: texts in the model's units - predictions, samples, turns; sounds, "+
+		"syllables, acoustic units, words or letters - spoken through the model's voice, one utterance each, closed "+
+		"by the END sentinel: {texts | text (one per line), rate, pitch, tempo, gain, polish (acoustic units: "+
+		"Griffin-Lim iterations over each whole utterance)} -> {wav_base64, rate, samples, seconds, encoding, "+
+		"decoder: voice | vocoder, count, utterances: [{text, spelled, tokens, samples, seconds}]}")
 	route("POST", "/api/speech/decode", rSpeechDecode)
-	doc("POST", "/api/speech/decode", "{text, codec} -> {wav_base64, ...} - an encoded or predicted waveform "+
-		"as playable audio")
+	doc("POST", "/api/speech/decode", "{text, codec} -> {wav_base64, ..., decoder: waveform} - an encoded or "+
+		"predicted waveform as playable audio; a text that carries no waveform is an output in the model's units "+
+		"and is spoken through its voice instead, one utterance per line, as /api/say answers (decoder: voice | vocoder)")
 	route("POST", "/api/speech/tutor", rSpeechTutor)
 	doc("POST", "/api/speech/tutor", "the recall tutor: ask the network to say back an utterance it was taught "+
 		"and mark what comes back {recording bytes | texts, transcript, rate, codec, lead, length, attempts, "+
@@ -162,6 +169,19 @@ func rSpeechDecode(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	if !radixnet.IsWaveformText(text) {
+		// not a waveform: an output in the model's own units, spoken through the model's
+		// voice, one utterance per line (the output decoder, POST /api/say)
+		texts := nonBlankLines(text)
+		if len(texts) == 0 {
+			return 0, nil, badRequest("nothing to decode: the text is blank")
+		}
+		o, err := voiceOptions(rq.f)
+		if err != nil {
+			return 0, nil, err
+		}
+		return sayTexts(rq, texts, o)
+	}
 	codec, err := rq.f.optText("codec", "")
 	if err != nil {
 		return 0, nil, err
@@ -174,7 +194,88 @@ func rSpeechDecode(rq *request) (int, any, error) {
 		"wav_base64": base64.StdEncoding.EncodeToString(decoded.WAV), "codec": decoded.Codec,
 		"rate": decoded.Rate, "channels": decoded.Channels, "samples": decoded.Samples,
 		"seconds": decoded.Seconds, "bytes": decoded.Bytes, "repaired": decoded.Repaired,
+		"decoder": "waveform",
 	}, nil
+}
+
+// nonBlankLines cuts a text into its utterances, one per line.
+func nonBlankLines(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, strings.TrimRight(line, "\r"))
+		}
+	}
+	return out
+}
+
+// voiceOptions is the voice POST /api/say and the voice fallback of POST
+// /api/speech/decode speak with.
+func voiceOptions(f fields) (radixnet.SayOptions, error) {
+	o := radixnet.DefaultSayOptions()
+	var err error
+	if o.Rate, _, err = f.integer("rate", o.Rate, intp(1)); err != nil {
+		return o, err
+	}
+	if o.Pitch, _, err = f.number("pitch", o.Pitch, floatp(0)); err != nil {
+		return o, err
+	}
+	if o.Tempo, _, err = f.number("tempo", o.Tempo, floatp(0)); err != nil {
+		return o, err
+	}
+	if o.Gain, _, err = f.number("gain", o.Gain, floatp(0)); err != nil {
+		return o, err
+	}
+	if o.Polish, _, err = f.integer("polish", 0, intp(0)); err != nil {
+		return o, err
+	}
+	if o.Pitch <= 0 {
+		return o, badRequest("'pitch' must be above 0 Hz")
+	}
+	if o.Tempo <= 0 {
+		return o, badRequest("'tempo' must be above 0")
+	}
+	return o, nil
+}
+
+// sayTexts is the output decoder behind POST /api/say and the voice fallback of
+// POST /api/speech/decode: the texts spoken in the model's units, one utterance
+// each.  Only the encoding is the model's - it says how a text is read - so the
+// lock is held for that alone and the voice runs outside it.
+func sayTexts(rq *request, texts []string, o radixnet.SayOptions) (int, any, error) {
+	if len(texts) == 0 {
+		return 0, nil, badRequest("'texts' contains no texts")
+	}
+	found, _ := rq.svc.read(func(m *radixnet.Model) (any, error) { return m.Encoding(), nil })
+	spoken, err := radixnet.Say(found.(radixnet.Encoding), texts, o)
+	if err != nil {
+		return 0, nil, badRequest("%v", err)
+	}
+	doc := spoken.Dict()
+	doc["wav_base64"] = base64.StdEncoding.EncodeToString(spoken.WAV())
+	return 200, doc, nil
+}
+
+// rSay is POST /api/say: {texts | text, rate, pitch, tempo, gain, polish}.
+func rSay(rq *request) (int, any, error) {
+	texts, err := rq.f.textsOptional("texts", "text")
+	if err != nil {
+		return 0, nil, err
+	}
+	if texts == nil {
+		return 0, nil, badRequest("missing field 'texts' (list of strings) or 'text' (string, one text per line)")
+	}
+	kept := make([]string, 0, len(texts))
+	for _, t := range texts {
+		if strings.TrimSpace(t) != "" {
+			kept = append(kept, t)
+		}
+	}
+	o, err := voiceOptions(rq.f)
+	if err != nil {
+		return 0, nil, err
+	}
+	return sayTexts(rq, kept, o)
 }
 
 // mediaTrain finishes an encode / teach request: save_as keeps the texts as an

@@ -7,6 +7,7 @@ import Alert from "./Alert.jsx";
 import BackwardsField from "./BackwardsField.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
+import HearButton from "./HearButton.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
@@ -203,6 +204,7 @@ export default function GeneratePanel({ status }) {
                       onRate={(t, r) => rate(t, r, { cost: s && s.cost, ...(flip ? { shown } : {}) })}
                       label={`sample ${i + 1}`}
                     />
+                    <HearButton text={text} label={`sample ${i + 1}`} compact />
                   </div>
                 </li>
               );

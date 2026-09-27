@@ -167,6 +167,14 @@ fn find_header(text: &str) -> Option<(String, i64, i64, usize)> {
     None
 }
 
+/// Whether a text carries an encoded waveform (`aud:<codec>:<rate>x<channels>:`)
+/// anywhere in it.  What does not is not an error to the decoders: it is an
+/// output in the model's own units, which the voice speaks instead
+/// ([`crate::voice::say`]).
+pub fn is_waveform_text(text: &str) -> bool {
+    find_header(text).is_some()
+}
+
 /// Reads an encoded - or predicted - waveform text (`speech.parse_text`).
 ///
 /// The header is looked for *anywhere*, because a spoken text carries its
@@ -1149,11 +1157,34 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         "decode" => {
             let text = text_or_data(ctx)?;
             let out = a.get("out").ok_or("--out is required: where to write the WAV")?;
-            let decoded = decode_text(&text, a.get("codec"))?;
-            std::fs::write(out, &decoded.wav).map_err(|err| format!("cannot write {out}: {err}"))?;
-            let mut doc = decoded.to_json();
-            extend(&mut doc, vec![("out", Json::str(out))]);
-            doc
+            if !is_waveform_text(&text) {
+                // not a waveform: an output in the model's own units, spoken through the
+                // model's voice, one utterance per line (the output decoder, `say`); the
+                // model file need not exist, its encoding is what matters
+                let texts: Vec<String> = text
+                    .lines()
+                    .filter(|l| !l.trim_matches(is_python_space).is_empty())
+                    .map(str::to_string)
+                    .collect();
+                if texts.is_empty() {
+                    return Err("nothing to decode: the text is blank".to_string());
+                }
+                let model = ctx.open(false)?;
+                let spoken = crate::voice::say(model.g.enc, &texts, &crate::voice::SayOptions::default())?;
+                std::fs::write(out, spoken.wav()).map_err(|err| format!("cannot write {out}: {err}"))?;
+                let mut doc = spoken.to_json();
+                extend(&mut doc, vec![("out", Json::str(out))]);
+                doc
+            } else {
+                let decoded = decode_text(&text, a.get("codec"))?;
+                std::fs::write(out, &decoded.wav).map_err(|err| format!("cannot write {out}: {err}"))?;
+                let mut doc = decoded.to_json();
+                extend(
+                    &mut doc,
+                    vec![("out", Json::str(out)), ("decoder", Json::str("waveform"))],
+                );
+                doc
+            }
         }
         "" => return Err("speech needs an action: info, transcribe, teach, listen, tutor, decode".to_string()),
         other => {
@@ -1244,17 +1275,39 @@ fn r_teach(svc: &Arc<Service>, r: &Request) -> Answer {
 }
 
 /// `POST /api/speech/decode`: `{text, codec}` -> `{wav_base64, ...}`.
-fn r_decode(_svc: &Arc<Service>, r: &Request) -> Answer {
+///
+/// A text that carries no waveform is an output in the model's own units - a
+/// prediction of sounds, of acoustic units, of words - and is spoken through
+/// the model's voice instead, one utterance per line (the output decoder,
+/// `POST /api/say`).
+fn r_decode(svc: &Arc<Service>, r: &Request) -> Answer {
     let form = Form::json(r)?;
     let text = match form.field("text") {
         Some(Json::Str(text)) => text.clone(),
         Some(_) => return Err(ApiError::bad_request("'text' must be a string")),
         None => return Err(ApiError::bad_request("missing field 'text' (string)")),
     };
+    if !is_waveform_text(&text) {
+        let texts: Vec<String> = text
+            .lines()
+            .filter(|l| !l.trim_matches(is_python_space).is_empty())
+            .map(str::to_string)
+            .collect();
+        if texts.is_empty() {
+            return Err(ApiError::bad_request("nothing to decode: the text is blank"));
+        }
+        return crate::service::say_texts(svc, texts, &crate::service::voice_options(r)?);
+    }
     let codec = form.field("codec").and_then(|c| c.as_str()).filter(|c| !c.is_empty());
     let decoded = decode_text(&text, codec).map_err(ApiError::bad_request)?;
     let mut doc = decoded.to_json();
-    extend(&mut doc, vec![("wav_base64", Json::str(base64::encode(&decoded.wav)))]);
+    extend(
+        &mut doc,
+        vec![
+            ("wav_base64", Json::str(base64::encode(&decoded.wav))),
+            ("decoder", Json::str("waveform")),
+        ],
+    );
     Ok(doc)
 }
 

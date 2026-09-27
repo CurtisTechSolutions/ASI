@@ -24,7 +24,7 @@ import math
 import os
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, NoReturn, TextIO, TypeVar
 
 from . import __version__, diff
@@ -927,6 +927,9 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     if guard is not None:
         _print_vetoes(console, guard, "continuations")
     doc["guard"] = guard
+    speech = _speak_outputs(args, console, model, [result.full_text])  # --speak FILE: the answer, heard
+    if speech is not None:
+        doc["speech"] = speech
     return doc
 
 
@@ -957,7 +960,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         console.table(("#", "spelled"), [[i + 1, quote(clip(s, 100))] for i, s in spelled.items()])
     if guard is not None:
         _print_vetoes(console, guard)
-    return {
+    doc = {
         "samples": [{**r.to_dict(), "probability": path_probability(r), **({"spelled": spelled[i]} if i in spelled else {})}
                     for i, r in enumerate(results)],
         "count": len(results),
@@ -968,6 +971,31 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         "temperature": args.temperature,
         "guard": guard,
     }
+    speech = _speak_outputs(args, console, model, [r.text for r in results])  # --speak FILE: every sample, heard
+    if speech is not None:
+        doc["speech"] = speech
+    return doc
+
+
+def _speak_outputs(args: argparse.Namespace, console: Console, model: GraphModel, texts: list[str]) -> dict | None:
+    """``--speak FILE``: the command's outputs written as speech, one utterance each.
+
+    The output decoder (:func:`radixnet.voice.say`) reads them in the model's
+    units with the default voice; ``say`` has the dials.
+    """
+    path = getattr(args, "speak", None)
+    if not path:
+        return None
+    from .voice import say
+
+    try:
+        spoken = say(model.encoding, texts)
+    except ValueError as exc:  # a token that is not a unit of the codebook, or no tokenizer to speak with
+        raise CliError(str(exc)) from exc
+    with open(path, "wb") as fh:
+        fh.write(spoken.wav())
+    console.pairs([("speech", f"{len(spoken.utterances)} utterance(s), {spoken.seconds:.2f} s at {spoken.rate} Hz -> {path}")])
+    return {**spoken.to_dict(), "out": path}
 
 
 def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
@@ -988,41 +1016,7 @@ def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
         seed=getattr(args, "seed", None), rate=rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain,
         on_utterance=on_utterance,
     )
-    from .encoding import phonetok_module
-
-    synth = phonetok_module("synth", "speaking")  # from the environment, or the checkout beside this one
-    find_player, wav_header, write_wav = synth.find_player, synth.wav_header, synth.write_wav
-
-    total = 0
-    sink = "file"
-    if args.play:
-        player = find_player()
-        if player is None:
-            raise CliError("no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw")
-        import subprocess
-
-        proc = subprocess.Popen(player, stdin=subprocess.PIPE)
-        assert proc.stdin is not None
-        proc.stdin.write(wav_header(rate))
-        for chunk in stream:  # every chunk reaches the player as the walk makes it
-            proc.stdin.write(chunk)
-            proc.stdin.flush()
-            total += len(chunk)
-        proc.stdin.close()
-        proc.wait()
-        sink = player[0]
-    elif args.raw:
-        out = sys.stdout.buffer
-        for chunk in stream:
-            out.write(chunk)
-            out.flush()
-            total += len(chunk)
-        sink = "stdout"
-    else:
-        pcm = b"".join(stream)
-        total = len(pcm)
-        write_wav(args.out, pcm, rate)
-        sink = args.out
+    total, sink = _deliver_speech(args, stream, rate)
     seconds = total / 2.0 / rate
     if not args.raw:
         console.pairs([
@@ -1036,6 +1030,90 @@ def cmd_speak(args: argparse.Namespace, console: Console) -> dict:
                       [[i + 1, quote(clip(u["text"], 60)), quote(clip(u["spelled"], 40))] for i, u in enumerate(said)])
     return {"prefix": args.prefix, "utterances": said, "seconds": seconds, "rate": rate, "sink": sink,
             "count": len(said), "encoding": str(model.encoding)}
+
+
+def _deliver_speech(args: argparse.Namespace, stream: Iterable[bytes], rate: int) -> tuple[int, str]:
+    """Where speech goes - a player (``--play``), stdout (``--raw``) or a WAV (``--out``) - as it is made.
+
+    Returns the bytes of PCM delivered and the sink's name.
+    """
+    from .encoding import phonetok_module
+
+    synth = phonetok_module("synth", "speaking")  # from the environment, or the checkout beside this one
+    find_player, wav_header, write_wav = synth.find_player, synth.wav_header, synth.write_wav
+    total = 0
+    if args.play:
+        player = find_player()
+        if player is None:
+            raise CliError("no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw")
+        import subprocess
+
+        proc = subprocess.Popen(player, stdin=subprocess.PIPE)
+        assert proc.stdin is not None
+        proc.stdin.write(wav_header(rate))
+        for chunk in stream:  # every chunk reaches the player the moment it is made
+            proc.stdin.write(chunk)
+            proc.stdin.flush()
+            total += len(chunk)
+        proc.stdin.close()
+        proc.wait()
+        return total, player[0]
+    if args.raw:
+        out = sys.stdout.buffer
+        for chunk in stream:
+            out.write(chunk)
+            out.flush()
+            total += len(chunk)
+        return total, "stdout"
+    pcm = b"".join(stream)
+    write_wav(args.out, pcm, rate)
+    return len(pcm), args.out
+
+
+def cmd_say(args: argparse.Namespace, console: Console) -> dict:
+    """Say: the output decoder - texts in the model's units are spoken, one utterance each."""
+    from .voice import Utterance, decoder_name, output_rate, say, speak_texts
+
+    # the model file need not exist: its encoding is what matters, and a fresh model of
+    # --encoding reads a text the way a trained one would
+    model, _ = open_model(args, console, required=False)
+    texts = list(args.text)
+    if args.data:
+        blob = sys.stdin.read() if args.data == "-" else read_text_file(args.data)
+        texts.extend(line for line in blob.splitlines() if line.strip())
+    texts = [t for t in texts if t.strip()]
+    if not texts:
+        raise CliError("nothing to say: give TEXT arguments, or --data FILE (- for stdin) with one text per line")
+    enc = model.encoding
+    rate = output_rate(enc, args.rate)  # acoustic units are spoken at their codebook's rate
+    said: list[Utterance] = []
+    try:
+        if args.polish > 0 and decoder_name(enc) == "vocoder":
+            # polishing needs the whole utterance, so it is not streamed
+            spoken = say(enc, texts, rate=args.rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain,
+                         polish=args.polish)
+            said = spoken.utterances
+            stream: Iterable[bytes] = [spoken.pcm]
+        else:
+            stream = speak_texts(enc, texts, rate=rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain,
+                                 on_utterance=lambda i, u: said.append(u))
+        total, sink = _deliver_speech(args, stream, rate)
+    except ValueError as exc:  # a token that is not a unit of the codebook, or no tokenizer to speak with
+        raise CliError(str(exc)) from exc
+    seconds = total / 2.0 / rate
+    if not args.raw:
+        console.pairs([
+            ("model", kind_label(model)),
+            ("decoder", f"{decoder_name(enc)} ({enc})"),
+            ("utterances", len(said)),
+            ("speech", f"{seconds:.2f} s at {rate} Hz -> {sink}"),
+        ])
+        console.say()
+        console.table(("#", "said", "spelled"),
+                      [[i + 1, quote(clip(u.text, 60)), quote(clip(u.spelled, 40))] for i, u in enumerate(said)])
+    return {"texts": texts, "utterances": [u.to_dict() for u in said], "count": len(said),
+            "seconds": seconds, "rate": rate, "sink": sink, "encoding": str(enc),
+            "decoder": decoder_name(enc), "polish": args.polish}
 
 
 def cmd_think(args: argparse.Namespace, console: Console) -> dict:
@@ -1889,10 +1967,36 @@ def cmd_speech_listen(args: argparse.Namespace, console: Console) -> dict:
 
 
 def cmd_speech_decode(args: argparse.Namespace, console: Console) -> dict:
-    """An encoded - or predicted - waveform text back into a WAV file, so it can be listened to."""
-    from .speech import SpeechError, decode_text
+    """An encoded - or predicted - waveform text back into a WAV file, so it can be listened to.
+
+    A text that carries no waveform is an output in the model's own units and
+    is spoken through the model's voice instead, one utterance per line (the
+    output decoder, ``say``).
+    """
+    from .speech import SpeechError, decode_text, is_waveform_text
 
     text = args.text if args.text is not None else read_text_file(args.data)
+    if not is_waveform_text(text):
+        from .voice import say
+
+        model, _ = open_model(args, console, required=False)
+        texts = [line for line in text.splitlines() if line.strip()]
+        if not texts:
+            raise CliError("nothing to decode: the text is blank")
+        try:
+            spoken = say(model.encoding, texts)
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        with open(args.out, "wb") as fh:
+            fh.write(spoken.wav())
+        console.pairs([
+            ("decoder", f"{spoken.decoder} ({spoken.encoding})"),
+            ("rate", f"{spoken.rate} Hz x 1"),
+            ("length", f"{spoken.seconds:.2f}s ({spoken.samples} samples)"),
+            ("utterances", len(spoken.utterances)),
+            ("written", args.out),
+        ])
+        return {**spoken.to_dict(), "out": args.out}
     try:
         result = decode_text(text, codec=args.codec)
     except SpeechError as exc:
@@ -1900,6 +2004,7 @@ def cmd_speech_decode(args: argparse.Namespace, console: Console) -> dict:
     with open(args.out, "wb") as fh:
         fh.write(result.pop("wav"))
     result["out"] = args.out
+    result["decoder"] = "waveform"
     console.pairs([
         ("codec", result["codec"]),
         ("rate", f"{result['rate']} Hz x {result['channels']}"),
@@ -4631,6 +4736,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_search_flags(p)
     add_traversal_flags(p)
     add_guard_flags(p)
+    p.add_argument("--speak", metavar="FILE",
+                   help="also hear the answer: the full text spoken through the model's voice, written as a WAV "
+                        "(the output decoder; `say` has the voice's dials)")
     p.set_defaults(handler=cmd_predict)
 
     # generate -------------------------------------------------------------
@@ -4651,6 +4759,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_search_flags(p)
     add_traversal_flags(p)
     add_guard_flags(p)
+    p.add_argument("--speak", metavar="FILE",
+                   help="also hear the texts: every sample spoken through the model's voice, one utterance each, "
+                        "written as a WAV (the output decoder; `say` has the voice's dials)")
     p.set_defaults(handler=cmd_generate)
 
     # speak ----------------------------------------------------------------
@@ -4675,6 +4786,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tempo", type=nonneg_float, default=1.0, help="the voice's pace (default 1)")
     p.add_argument("--gain", type=nonneg_float, default=0.5, help="peak level as a share of full scale (default 0.5)")
     p.set_defaults(handler=cmd_speak)
+
+    # say ------------------------------------------------------------------
+    p = command(
+        "say", "the output decoder: hear any text in the model's units (a prediction, a sample, a turn)",
+        "Speak every TEXT (and every line of --data FILE; - reads stdin) through the model's voice, one\n"
+        "utterance each: a text is fed whole to the same voice `speak` walks with and closed by the END\n"
+        "sentinel.  A model of sounds speaks a text of sounds as it is and reads words through the tokenizer\n"
+        "first; a model of acoustic units speaks them through its codebook's vocoder (--polish N runs\n"
+        "Griffin-Lim over each whole utterance); a model of words or letters is read word by word.  The model\n"
+        "file need not exist: --encoding says how a text is read.  --out writes a WAV (default speech.wav);\n"
+        "--play streams to a player (aplay, paplay, ffplay, play or afplay); --raw streams 16-bit PCM to stdout.",
+    )
+    p.add_argument("text", nargs="*", metavar="TEXT", help="texts to say, one utterance each")
+    p.add_argument("--data", metavar="FILE", help="a file with one text per line (- reads stdin)")
+    p.add_argument("--out", default="speech.wav", metavar="FILE", help="the WAV to write (default speech.wav)")
+    p.add_argument("--play", action="store_true", help="stream to a player as the texts are spoken")
+    p.add_argument("--raw", action="store_true", help="stream 16-bit mono PCM to stdout as the texts are spoken")
+    p.add_argument("--rate", type=pos_int, default=16000, help="sample rate (default 16000)")
+    p.add_argument("--pitch", type=nonneg_float, default=120.0, help="the voice's base pitch in Hz (default 120)")
+    p.add_argument("--tempo", type=nonneg_float, default=1.0, help="the voice's pace (default 1)")
+    p.add_argument("--gain", type=nonneg_float, default=0.5, help="peak level as a share of full scale (default 0.5)")
+    p.add_argument("--polish", type=nonneg_int, default=0, metavar="N",
+                   help="acoustic units: Griffin-Lim iterations over each whole utterance (default 0: the "
+                        "streaming vocoder's output as it is)")
+    p.set_defaults(handler=cmd_say)
 
     # converse -------------------------------------------------------------
     p = command(
@@ -5011,8 +5147,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(handler=cmd_speech_tutor)
 
     a = actions.add_parser(
-        "decode", help="turn an encoded or predicted waveform text back into a WAV file",
-        description="Turn `aud:<codec>:<rate>x<channels>:<base64>` back into audio (a cut-off tail is padded).",
+        "decode", help="turn an encoded or predicted waveform text back into a WAV file (any other output is spoken)",
+        description="Turn `aud:<codec>:<rate>x<channels>:<base64>` back into audio (a cut-off tail is padded).  "
+                    "A text that carries no waveform is an output in the model's own units - sounds, acoustic "
+                    "units, words - and is spoken through the model's voice instead, one utterance per line "
+                    "(the output decoder, `say`).",
         formatter_class=_HelpFormatter,
     )
     source = a.add_mutually_exclusive_group(required=True)

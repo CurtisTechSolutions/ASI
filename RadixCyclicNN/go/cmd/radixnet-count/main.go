@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -270,6 +271,7 @@ commands:
   predict    top-K / bottom-K continuations of --prefix (beam) or a stochastic walk
   generate   whole texts from the prediction search (beam / sample / dijkstra)
   speak      hear the model walk: speech synthesized as it traverses the graph, closed by the END sentinel
+  say        the output decoder: hear any text in the model's units (a prediction, a sample, a turn)
   score      log-probability of --text or every text of --data
   feedback   thumbs up (--good / --good-text) and thumbs down (--bad / --bad-text)
   2nrl       penalise --bad texts, then count + reward --good texts
@@ -366,6 +368,8 @@ func main() {
 		cmdGenerate(rest)
 	case "speak":
 		cmdSpeak(rest)
+	case "say":
+		cmdSay(rest)
 	case "score":
 		cmdScore(rest)
 	case "feedback":
@@ -649,6 +653,7 @@ func cmdPredict(args []string) {
 	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	topK, topP, minP, diversity := searchFlags(fs)
 	addGuardFlags(fs)
+	speak := fs.String("speak", "", "also hear the answer: the full text spoken through the model's voice, written as a WAV (the output decoder; say has the voice's dials)")
 	_ = fs.Parse(args)
 	filter := checkedFilter(*topK, *topP, *minP)
 	m := openModel(true)
@@ -675,10 +680,16 @@ func cmdPredict(args []string) {
 	if jsonMode {
 		doc := predictDoc(*prefix, p)
 		doc["guard"] = guard
+		if *speak != "" {
+			doc["speech"] = speakOutputs(m, []string{p.FullText}, *speak)
+		}
 		emit(doc)
 		return
 	}
 	fmt.Printf("prefix       %s\ncontinuation %s\nfull text    %s\ncost %.4f  p %.4g  path %s\n", quote(*prefix), quote(p.Text), quote(p.FullText), p.Cost, p.Probability(), strings.Join(p.Labels, " -> "))
+	if *speak != "" {
+		speakOutputs(m, []string{p.FullText}, *speak)
+	}
 	if len(p.Top) > 0 {
 		fmt.Println("top:")
 		for i, r := range p.Top {
@@ -795,6 +806,7 @@ func cmdGenerate(args []string) {
 	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	topK, topP, minP, diversity := searchFlags(fs)
 	addGuardFlags(fs)
+	speak := fs.String("speak", "", "also hear the texts: every sample spoken through the model's voice, one utterance each, written as a WAV (the output decoder; say has the voice's dials)")
 	_ = fs.Parse(args)
 	filter := checkedFilter(*topK, *topP, *minP)
 	m := openModel(true)
@@ -829,8 +841,12 @@ func cmdGenerate(args []string) {
 			samples = append(samples, map[string]any{"text": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
 				"labels": r.Labels, "node_ids": r.NodeIDs, "step_costs": r.StepCosts, "expanded": r.Expanded, "reached_end": r.ReachedEnd})
 		}
-		emit(map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength,
-			"temperature": *temperature, "guard": guard})
+		doc := map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength,
+			"temperature": *temperature, "guard": guard}
+		if *speak != "" {
+			doc["speech"] = speakOutputs(m, sampleTexts(results), *speak)
+		}
+		emit(doc)
 		return
 	}
 	fmt.Printf("%3s %9s %10s %4s  %s\n", "#", "cost", "prob", "end", "text")
@@ -843,6 +859,151 @@ func cmdGenerate(args []string) {
 	}
 	if guard != nil {
 		printVetoes(verdicts, "candidates")
+	}
+	if *speak != "" {
+		speakOutputs(m, sampleTexts(results), *speak)
+	}
+}
+
+func sampleTexts(results []*radixnet.PathResult) []string {
+	texts := make([]string, 0, len(results))
+	for _, r := range results {
+		texts = append(texts, r.Text)
+	}
+	return texts
+}
+
+// speakOutputs is --speak FILE on predict and generate: the command's outputs
+// written as speech, one utterance each, by the output decoder (radixnet.Say)
+// with the default voice; say has the dials.
+func speakOutputs(m *radixnet.Model, texts []string, path string) map[string]any {
+	spoken, err := radixnet.Say(m.Encoding(), texts, radixnet.DefaultSayOptions())
+	if err != nil {
+		fail("%v", err)
+	}
+	if err := os.WriteFile(path, spoken.WAV(), 0o644); err != nil {
+		fail("cannot write %s: %v", path, err)
+	}
+	say("speech  %d utterance(s), %.2f s at %d Hz -> %s", len(spoken.Utterances), spoken.Seconds(), spoken.Rate, path)
+	doc := spoken.Dict()
+	doc["out"] = path
+	return doc
+}
+
+// cmdSay is the output decoder: texts in the model's units - a prediction, a
+// sample, a turn; sounds, syllables, acoustic units, words or letters - are
+// spoken, one utterance each, through the same voice speak walks with and
+// closed by the END sentinel.  The model file need not exist: its encoding is
+// what matters, and a fresh model of --encoding reads a text the way a trained
+// one would.
+func cmdSay(args []string) {
+	fs := subFlagSet("say")
+	data := fs.String("data", "", "a file with one text per line (- reads stdin)")
+	outFlag := fs.Lookup("out")
+	outFlag.Usage, outFlag.DefValue = "the WAV to write", "speech.wav"
+	play := fs.Bool("play", false, "stream to a player (aplay, paplay, ffplay, play or afplay) as the texts are spoken")
+	raw := fs.Bool("raw", false, "stream 16-bit mono PCM to stdout as the texts are spoken")
+	rate := fs.Int("rate", phonetok.Rate, "sample rate")
+	pitch := fs.Float64("pitch", 120, "the voice's base pitch in Hz")
+	tempo := fs.Float64("tempo", 1, "the voice's pace")
+	gain := fs.Float64("gain", 0.5, "peak level as a share of full scale")
+	polish := fs.Int("polish", 0, "acoustic units: Griffin-Lim iterations over each whole utterance (0: the streaming vocoder as it is)")
+	_ = fs.Parse(permute(fs, args))
+	if outPath == "" {
+		outPath = "speech.wav"
+	}
+	var texts []string
+	for _, t := range fs.Args() {
+		if strings.TrimSpace(t) != "" {
+			texts = append(texts, t)
+		}
+	}
+	if *data != "" {
+		var blob []byte
+		var err error
+		if *data == "-" {
+			blob, err = io.ReadAll(os.Stdin)
+		} else {
+			blob, err = os.ReadFile(*data)
+		}
+		if err != nil {
+			fail("%v", err)
+		}
+		for _, line := range strings.Split(string(blob), "\n") {
+			if strings.TrimSpace(line) != "" {
+				texts = append(texts, strings.TrimRight(line, "\r"))
+			}
+		}
+	}
+	if len(texts) == 0 {
+		fail("nothing to say: give TEXT arguments, or --data FILE (- for stdin) with one text per line")
+	}
+	m := openModel(false)
+	enc := m.Encoding()
+	outRate, err := radixnet.OutputRate(enc, *rate) // acoustic units are spoken at their codebook's rate
+	if err != nil {
+		fail("%v", err)
+	}
+	opts := radixnet.SayOptions{Rate: *rate, Pitch: *pitch, Tempo: *tempo, Gain: *gain, Polish: *polish}
+	said := []map[string]any{}
+	record := func(_ int, u radixnet.Utterance) { said = append(said, u.Dict()) }
+	// polishing needs the whole utterance, so it is not streamed
+	polished := *polish > 0 && radixnet.DecoderName(enc) == "vocoder"
+	run := func(emitPCM func([]byte)) error {
+		if polished {
+			spoken, err := radixnet.Say(enc, texts, opts)
+			if err != nil {
+				return err
+			}
+			for i, u := range spoken.Utterances {
+				record(i, u)
+			}
+			emitPCM(spoken.PCM)
+			return nil
+		}
+		return radixnet.SpeakTexts(enc, texts, opts, emitPCM, record)
+	}
+	total := 0
+	sink := outPath
+	switch {
+	case *play:
+		player := phonetok.FindPlayer()
+		if player == nil {
+			fail("no player found (aplay, paplay, ffplay, play or afplay); use --out FILE or --raw")
+		}
+		cmd := exec.Command(player[0], player[1:]...)
+		stdin, perr := cmd.StdinPipe()
+		if perr != nil {
+			fail("%v", perr)
+		}
+		if perr := cmd.Start(); perr != nil {
+			fail("%v", perr)
+		}
+		stdin.Write(phonetok.WavHeader(outRate, -1))
+		err = run(func(chunk []byte) { stdin.Write(chunk); total += len(chunk) })
+		stdin.Close()
+		cmd.Wait()
+		sink = player[0]
+	case *raw:
+		w := bufio.NewWriter(os.Stdout)
+		err = run(func(chunk []byte) { w.Write(chunk); w.Flush(); total += len(chunk) })
+		sink = "stdout"
+	default:
+		var pcm []byte
+		err = run(func(chunk []byte) { pcm = append(pcm, chunk...) })
+		if err == nil {
+			if werr := os.WriteFile(outPath, phonetok.WavBytes(pcm, outRate), 0o644); werr != nil {
+				fail("%v", werr)
+			}
+		}
+		total = len(pcm)
+	}
+	if err != nil {
+		fail("%v", err)
+	}
+	if !*raw {
+		emit(map[string]any{"texts": texts, "utterances": said, "count": len(said), "seconds": float64(total) / 2 / float64(outRate),
+			"rate": outRate, "sink": sink, "encoding": enc.String(), "decoder": radixnet.DecoderName(enc), "polish": *polish})
 	}
 }
 

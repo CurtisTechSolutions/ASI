@@ -10,6 +10,7 @@ same least-punished paths at the same costs.
 """
 
 import array
+import base64
 import json
 import math
 import os
@@ -1886,6 +1887,16 @@ class TestGoServer(unittest.TestCase):
         status, sc, _ = self.client.post("/api/score", {"text": CORPUS[0]})
         self.assertEqual(status, 200)
         self.assertEqual(set(sc), {"log_prob", "per_char", "chars", "transitions", "unknown_transitions"})
+        # the Hear buttons: the output decoder, and what is not a waveform reaching it through /api/speech/decode
+        status, spoken, _ = self.client.post("/api/say", {"texts": [CORPUS[0], "a dog"]})
+        self.assertEqual((status, spoken["count"], spoken["decoder"], spoken["encoding"]), (200, 2, "voice", "char:3:1"), spoken)
+        self.assertTrue(base64.b64decode(spoken["wav_base64"]).startswith(b"RIFF"))
+        self.assertEqual(set(spoken["utterances"][0]), {"text", "spelled", "tokens", "samples", "seconds"})
+        status, decoded, _ = self.client.post("/api/speech/decode", {"text": CORPUS[0]})
+        self.assertEqual((status, decoded["decoder"], decoded["wav_base64"] == spoken["wav_base64"]), (200, "voice", False))
+        self.assertEqual(status, 200)
+        for body in ({"texts": []}, {}, {"texts": ["the cat"], "pitch": 0}):
+            self.assertEqual(self.client.post("/api/say", body)[0], 400, body)
         status, c, _ = self.client.post("/api/converse", {"opening": CORPUS[0], "turns": 3})
         self.assertEqual((status, c["count"], c["kind"]), (200, 4, "count"))
         # thumbs on the Generate tab: a feedback job
@@ -2384,6 +2395,40 @@ class TestGoEncodingParity(unittest.TestCase):
                 self.assertEqual(len(x), len(y))
                 self.assertGreater(len(x), 16000)
                 self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 64)
+
+    def test_the_same_say(self):
+        """The output decoder: the same text said in the same units is the same audio, sample for sample, with no model file."""
+
+        def pcm(path):
+            with open(path, "rb") as fh:
+                data = fh.read()[44:]
+            return struct.unpack("<%dh" % (len(data) // 2), data)
+
+        cases = (
+            ("phone:3:1", ["the cat sat on the mat", "DH AH0 # D AO1 G"], []),
+            ("syllable:2:1", ["the cat sat on the mat"], []),
+            ("char:3:1", ["the cat sat on the mat.", "hello, world"], []),
+            ("word:2:1", ["the cat sat on the mat"], []),
+            ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1", "q3 q7"], []),
+            ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1"], ["--polish", "8"]),
+        )
+        for spec, texts, extra in cases:
+            with self.subTest(spec=spec, polish=bool(extra)):
+                py_wav = os.path.join(TMP.name, "say-py.wav")
+                other_wav = os.path.join(TMP.name, "say-go.wav")
+                a = py("--encoding", spec, "say", *texts, "--out", py_wav, *extra, model=os.path.join(TMP.name, "no-py.json"))
+                b = go("--encoding", spec, "say", *texts, "--out", other_wav, *extra, model=os.path.join(TMP.name, "no-go.json"))
+                for key in ("utterances", "count", "seconds", "rate", "encoding", "decoder", "texts", "polish"):
+                    self.assertEqual(a[key], b[key], key)
+                self.assertEqual(a["count"], len(texts))
+                self.assertEqual(a["decoder"], "vocoder" if spec.startswith("acoustic") else "voice")
+                x, y = pcm(py_wav), pcm(other_wav)
+                self.assertEqual(len(x), len(y))
+                self.assertEqual(len(x), a["utterances"][0]["samples"] + sum(u["samples"] for u in a["utterances"][1:]))
+                self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 2 if spec.startswith("acoustic") else 64)
+        # a token that is not a unit of the codebook is refused on both sides
+        self.assertTrue(py("--encoding", "acoustic:3:1", "say", "q2 nope", "--out", py_wav, model=os.path.join(TMP.name, "no-py.json"), expect=1)["error"])
+        self.assertTrue(go("--encoding", "acoustic:3:1", "say", "q2 nope", "--out", other_wav, model=os.path.join(TMP.name, "no-go.json"), expect=1)["error"])
 
     def test_both_refuse_the_same_nonsense(self):
         model = os.path.join(TMP.name, "enc-bad.json")

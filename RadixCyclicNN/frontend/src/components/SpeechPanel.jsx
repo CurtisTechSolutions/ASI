@@ -419,18 +419,21 @@ export default function SpeechPanel({ status }) {
       />
 
       <div className="card">
-        <h2>Listen to a waveform text</h2>
+        <h2>Listen to an output</h2>
         <p className="muted">
-          Anything the model predicts that carries <code>aud:&lt;codec&gt;:&lt;rate&gt;x1:…</code> can be played back:
-          paste a prediction (Predict tab, prefix the token) and hear what the graph thinks the sound is. A cut-off tail
-          is padded.
+          Anything the model predicts can be played back. A text that carries{" "}
+          <code>aud:&lt;codec&gt;:&lt;rate&gt;x1:…</code> is a waveform: paste a prediction (Predict tab, prefix the
+          token) and hear what the graph thinks the sound is (a cut-off tail is padded). Any other text is an output in
+          the model&apos;s own units - sounds, syllables, acoustic units, words or letters - and is spoken through the
+          model&apos;s voice, one utterance per line (the output decoder; the 🔊 buttons on the Predict, Generate and
+          Converse tabs do the same for what they show).
         </p>
         <TextArea
-          label="Encoded or predicted text"
+          label="Encoded, predicted or plain text"
           value={decodeText}
           onChange={setDecodeText}
           rows={4}
-          placeholder="&lt;speech:9f2a1c7d&gt; aud:mu:8000x1:gOXv7NgqFBAYTePu…"
+          placeholder="&lt;speech:9f2a1c7d&gt; aud:mu:8000x1:gOXv7NgqFBAYTePu… - or: the cat sat on the mat"
         />
         <div className="actions">
           <button type="button" className="primary" disabled={decoding || !decodeText.trim()} onClick={() => decode(decodeText)}>
@@ -441,7 +444,11 @@ export default function SpeechPanel({ status }) {
         {decoded && decoded.wav_base64 ? (
           <>
             <p className="muted">
-              {decoded.codec} · {fmtInt(decoded.rate)} Hz · {seconds(decoded.seconds)} · {fmtInt(decoded.samples)} samples
+              {decoded.decoder && decoded.decoder !== "waveform"
+                ? `spoken through the ${decoded.decoder} (${decoded.encoding}) · ${fmtInt(decoded.count)} utterance(s)`
+                : decoded.codec}
+              {" · "}
+              {fmtInt(decoded.rate)} Hz · {seconds(decoded.seconds)} · {fmtInt(decoded.samples)} samples
               {decoded.repaired ? " · the text was repaired (padded or truncated)" : ""}
             </p>
             <audio controls src={`data:audio/wav;base64,${decoded.wav_base64}`} />

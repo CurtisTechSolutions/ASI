@@ -520,6 +520,12 @@ func EncodeAudio(data []byte, rate int, codec string, normalise bool) (*EncodedA
 	}, nil
 }
 
+// IsWaveformText reports whether a text carries an encoded waveform
+// (aud:<codec>:<rate>x<channels>:) anywhere in it.  What does not is not an
+// error to the decoders: it is an output in the model's own units, which the
+// voice speaks instead (Say).
+func IsWaveformText(text string) bool { return speechTextRe.MatchString(text) }
+
 // DecodedAudio is what DecodeSpeechText produces.
 type DecodedAudio struct {
 	WAV      []byte  `json:"-"`

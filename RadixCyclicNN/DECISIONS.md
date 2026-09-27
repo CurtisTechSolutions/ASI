@@ -3673,6 +3673,50 @@ real speech (`phonetok learn`). A model's units mean nothing without the codeboo
 
 ---
 
+### D-088 — The output decoder: what the model said is heard after the fact, through the same voice
+
+**Status** Accepted · 2026-09-27 · **Layer** output · **Extends** D-081, D-082
+
+**Context** D-081 hears a walk while it walks and D-082 gives a model of acoustic units a voice, but both speak
+only what `speak` samples. Everything else the model produces - a prediction and its top-K rows, a generated
+sample, a turn of a conversation, a text pasted into a tab - is text in the model's units with no way back to
+sound, and for a model of sounds or of acoustic units that text is unreadable to a person. The waveform texts of
+D-036's speech-as-text have a decoder (`speech decode`, `POST /api/speech/decode`); the outputs of D-080 and
+D-082 did not.
+
+**Decision** One **output decoder** for every unit, `radixnet.voice.say`: a text is fed whole to the `Speaker`
+of D-081 for the model's encoding and closed by the END sentinel, exactly as a walk is - sounds are spoken as
+they are (plain words read through the tokenizer first), syllables the same, acoustic units through the
+codebook's vocoder (D-082; `polish` runs Griffin-Lim over the whole utterance, which the stream cannot), words
+and letters through the tokenizer word by word. Several texts are several utterances, each closed by its own
+sentinel. **Hearing a walk and saying its text afterwards are the same audio, byte for byte**, and the three
+ports produce the same samples for the same text. It is exposed wherever an output is: the `say` command
+(texts, a file, stdin; a WAV, a player or raw PCM), `--speak FILE` on `predict` and `generate`, `POST /api/say`,
+and a 🔊 Hear button on every prediction, sample and turn in the frontend. The existing waveform decoder learns
+the same rule: a text that carries no `aud:` header is not an error but an output in the model's units, and
+`speech decode` / `POST /api/speech/decode` speak it. No model file is needed to say a text - the encoding says
+how it is read - so the decoder works before a model exists and beside any model.
+
+**Alternatives rejected**
+* **A second voice for outputs.** Two voices would say the same text two ways; the decoder is the walk's
+  `Speaker` fed after the fact, so `speak` and `say` cannot drift apart.
+* **Per-unit commands** (`say-phones`, `replay` for units). The encoding already says what a text is made of;
+  one command that reads it is the point of the dial (D-080).
+* **Keeping `speech decode` strict.** A 400 for "not a waveform" made the two decoders disjoint; a text is
+  either a waveform or an output in the model's units, and both are decodable.
+
+**Consequences** A token that is not a unit of the acoustic codebook is refused (the `Speaker` skips such a
+token on a walk, which a model over its units never emits; a text from outside can hold anything); the record
+of an utterance - the text, what it spells, the tokens that reached the voice with the sentinel last, the
+samples - is what the CLI prints and the API returns beside the audio. `tests/test_voice.py`,
+`tests/test_acoustic_units.py`, `tests/test_api.py`, `test_the_same_say` in the Go and Rust parity suites.
+
+**Lives in** `radixnet/voice.py` (`say`, `speak_texts`, `Spoken`, `Utterance`), `radixnet/cli.py` (`say`,
+`--speak`, `speech decode`), `radixnet/api.py` (`/api/say`, `/api/speech/decode`), `frontend/src/components/HearButton.jsx`,
+`go/radixnet/voice.go` (`Say`), `go/server/media.go`, `rust/src/voice.rs` (`say`), `rust/src/service.rs`
+
+---
+
 # Part XXII — Structure
 
 ### D-087 — The dynamic window: nodes halved down a binary ladder, and grown back at the top

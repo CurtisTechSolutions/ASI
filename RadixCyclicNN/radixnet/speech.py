@@ -138,6 +138,15 @@ def pack_text(codec: str, rate: int, channels: int, payload: bytes) -> str:
     return f"{HEADER}:{codec}:{int(rate)}x{int(channels)}:" + base64.b64encode(payload).decode("ascii")
 
 
+def is_waveform_text(text: str) -> bool:
+    """Whether a text carries an encoded waveform (``aud:<codec>:<rate>x<channels>:``) anywhere in it.
+
+    What does not is not an error to the decoders: it is an output in the
+    model's own units, which the voice speaks instead (``radixnet.voice.say``).
+    """
+    return bool(_TEXT_RE.search(str(text or "")))
+
+
 def parse_text(text: str) -> tuple[str, int, int, bytes, bool]:
     """``(codec, rate, channels, payload, repaired)`` of an encoded-waveform text.
 
