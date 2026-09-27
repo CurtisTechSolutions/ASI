@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULTS, Endpointer, bytesToBase64, decodePcm, decodeWav, historyOf, levelOf, pairTranscript } from "../src/voice.js";
+import {
+  DEFAULTS,
+  Endpointer,
+  bytesToBase64,
+  decodePcm,
+  decodeWav,
+  historyOf,
+  levelOf,
+  pairTranscript,
+  wordsOf,
+} from "../src/voice.js";
 
 test("the endpointer cuts an utterance out of the levels alone", () => {
   const ep = new Endpointer({ threshold: 0.02, minSpeechMs: 250, silenceMs: 700, startFrames: 2 });
@@ -32,17 +42,70 @@ test("the level is the RMS of a frame", () => {
   assert.equal(levelOf(new Float32Array(0)), 0);
 });
 
-test("an utterance is paired with the dictation's finals by time, each used once", () => {
+test("an utterance is paired with the dictation's finals by time, each used once, the stale dropped", () => {
   const finals = [
     { text: "hello", at: 1000, used: false },
     { text: "the cat sat", at: 5200, used: false }, // committed a little after the utterance ended at 5000
     { text: "later", at: 9000, used: false },
   ];
-  assert.equal(pairTranscript(finals, 3000, 5000), "the cat sat");
-  assert.deepEqual(finals.map((f) => f.used), [false, true, false]);
-  assert.equal(pairTranscript(finals, 3000, 5000), ""); // gone
   assert.equal(pairTranscript(finals, 500, 1200), "hello");
+  assert.deepEqual(finals.map((f) => f.used), [true, false, false]);
+  assert.equal(pairTranscript(finals, 3000, 5000), "the cat sat");
+  assert.deepEqual(finals.map((f) => f.used), [true, true, false]); // "later" waits for its utterance
+  assert.equal(pairTranscript(finals, 3000, 5000), ""); // gone
+  // a final older than the utterance is stale - not its words, and never a later utterance's either
+  const stale = [{ text: "an earlier sound", at: 100, used: false }, { text: "now", at: 4100, used: false }];
+  assert.equal(pairTranscript(stale, 4000, 4500), "now");
+  assert.deepEqual(stale.map((f) => f.used), [true, true]);
   assert.equal(pairTranscript([{ text: "  ", at: 10, used: false }], 0, 20), "");
+});
+
+/** A dictation log whose finals land at set times on a clock the test moves: `nextFinal` advances it. */
+function fakeLog(arrivals, clock) {
+  const log = {
+    finals: [],
+    pending: "",
+    nextFinal(ms) {
+      const next = arrivals.find((a) => a.at > clock.t);
+      if (next && next.at - clock.t <= ms) {
+        clock.t = next.at;
+        log.finals.push({ text: next.text, at: next.at, used: false });
+        return Promise.resolve(true);
+      }
+      clock.t += ms;
+      return Promise.resolve(false);
+    },
+  };
+  return log;
+}
+
+test("the words of an utterance are waited for: a final that lands late still pairs, none is \"\"", async () => {
+  // the utterance ended at 5000; the recogniser commits its words 900 ms later
+  const clock = { t: 5000 };
+  const log = fakeLog([{ at: 5900, text: "the cat sat" }], clock);
+  assert.equal(await wordsOf(log, 3000, 5000, { now: () => clock.t }), "the cat sat");
+  assert.equal(clock.t, 5900); // the wait ended the moment the final landed
+  // words already there are taken at once
+  const ready = fakeLog([], { t: 5000 });
+  ready.finals.push({ text: "hello", at: 4900, used: false });
+  assert.equal(await wordsOf(ready, 3000, 5000, { now: () => 5000 }), "hello");
+  // a noise: nothing is being recognised, so the wait is the short one and the answer is ""
+  const quiet = { t: 5000 };
+  assert.equal(await wordsOf(fakeLog([], quiet), 3000, 5000, { now: () => quiet.t, timeout: 3000, quiet: 1200 }), "");
+  assert.ok(quiet.t - 5000 <= 1200, `waited ${quiet.t - 5000} ms`);
+  // words in progress are waited for longer
+  const busy = { t: 5000 };
+  const slow = fakeLog([{ at: 7400, text: "late words" }], busy);
+  slow.pending = "late";
+  assert.equal(await wordsOf(slow, 3000, 5000, { now: () => busy.t, timeout: 3000, quiet: 1200 }), "late words");
+  // a final from an earlier sound is not these words: it is dropped, and the wait goes on past it
+  const other = { t: 5000 };
+  const stale = fakeLog([{ at: 5100, text: "long ago" }], other);
+  stale.finals.push({ text: "much earlier", at: 100, used: false });
+  assert.equal(await wordsOf(stale, 3000, 5000, { now: () => other.t, quiet: 600 }), "long ago");
+  assert.equal(stale.finals[0].used, true);
+  // no dictation at all: "" at once
+  assert.equal(await wordsOf(null, 0, 1), "");
 });
 
 test("PCM and WAV chunks decode to samples", () => {

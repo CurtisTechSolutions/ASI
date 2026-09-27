@@ -2651,9 +2651,13 @@ with nothing to press, and a reply: the microphone stays on, and everything the 
   is a click, `maxMs` cuts a monologue - with `preRollMs` of audio kept from before the start so the first sound is
   not clipped. The utterance's frames become a 16-bit PCM WAV (`audio.js`'s `encodeWav`, resampled to 16 kHz). The
   words come from the Web Speech API running beside the ear (`startDictationLog`, restarted whenever the recogniser
-  stops by itself): its final results carry the time they landed, and `pairTranscript` gives an utterance the finals
-  inside its window (a recogniser commits a phrase a little after the speaker stops, so the window is generous after
-  the end and every final is used once). A browser without dictation sends the audio alone and the server's own
+  stops by itself): its final results carry the time they landed, on the ear's clock, and `pairTranscript` gives an
+  utterance the finals inside its window, every final used once. A recogniser commits a phrase a little after the
+  speaker stops, so the turn waits for them (`wordsOf`: the finals are paired again each time one lands, for up to
+  three seconds while words are being recognised and briefly when nothing is, which is what a noise sounds like).
+  An utterance the dictation heard no words in is not sent at all while *Send only what has words* is on (the
+  default; off, the sound is learned unheard), and while the mouth speaks the dictation is muted, so the reply is
+  never written down as the person's. A browser without dictation sends the audio alone and the server's own
   transcription (section 25.3) takes over, or the sound is learned unheard.
 * **The turn** (`radixnet/voicechat.py`, `turn`): *heard* - `speech.teach` makes the transcript and the waveform behind
   one token (a model of acoustic units hears the recording as its units instead, `hear_audio`, the one text of sound
