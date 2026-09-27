@@ -10,9 +10,9 @@ import {
   decodeWav,
   historyOf,
   listeningSupported,
-  pairTranscript,
   startDictationLog,
   startListening,
+  wordsOf,
 } from "../voice.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -32,6 +32,7 @@ const STATUS_TEXT = {
   hearing: "hearing you",
   thinking: "thinking",
   speaking: "speaking",
+  nothing: "no words heard",
 };
 
 function seconds(value) {
@@ -69,6 +70,7 @@ export default function VoicePanel({ status }) {
   const [train, setTrain] = useStoredState("voice.train", true);
   const [epochs, setEpochs] = useStoredState("voice.epochs", "2");
   const [learnReply, setLearnReply] = useStoredState("voice.learnReply", true);
+  const [wordsOnly, setWordsOnly] = useStoredState("voice.wordsOnly", true);
   const [speak, setSpeak] = useStoredState("voice.speak", true);
   const [pitch, setPitch] = useStoredState("voice.pitch", "120");
   const [tempo, setTempo] = useStoredState("voice.tempo", "1");
@@ -111,7 +113,7 @@ export default function VoicePanel({ status }) {
 
   useEffect(() => {
     settings.current = {
-      answer, ollamaModel, url, persona, train, epochs, learnReply, speak, pitch, tempo, gain, mode, maxLength,
+      answer, ollamaModel, url, persona, train, epochs, learnReply, wordsOnly, speak, pitch, tempo, gain, mode, maxLength,
     };
   });
 
@@ -154,23 +156,42 @@ export default function VoicePanel({ status }) {
     };
   }
 
-  /** One turn: what was said (an utterance, typed text, or both) goes to the server and the reply plays as it arrives. */
+  /** Back to listening (or off) once a turn is over, or was never one. */
+  function reopen() {
+    busy.current = false;
+    if (listener.current && onRef.current) {
+      listener.current.resume();
+      setStatus("listening");
+    } else {
+      setStatus(onRef.current ? "listening" : "off");
+    }
+  }
+
+  /**
+   * One turn: what was said (an utterance, typed text, or both) goes to the server and the reply plays as it
+   * arrives. An utterance's words are waited for (the recogniser commits them a moment after the speaker
+   * stops); one the dictation heard no words in is not sent at all while "Send only what has words" is on.
+   */
   async function runTurn({ audio, text }) {
     if (busy.current) return;
     busy.current = true;
     if (listener.current) listener.current.pause();
-    setInterim("");
-    setStatus("thinking");
     setError(null);
     let transcript = String(text || "").trim();
     if (audio && dictation.current && !transcript) {
-      // the recogniser commits a phrase a little after the speaker stops: give it a moment
-      transcript = pairTranscript(dictation.current.finals, audio.startedAt, audio.endedAt);
-      if (!transcript) {
-        await new Promise((resolve) => setTimeout(resolve, 900));
-        transcript = pairTranscript(dictation.current.finals, audio.startedAt, audio.endedAt);
-      }
+      setStatus("hearing");
+      transcript = await wordsOf(dictation.current, audio.startedAt, audio.endedAt);
     }
+    setInterim("");
+    if (audio && !transcript && dictation.current && settings.current.wordsOnly) {
+      // a sound with no words in it (a cough, a door): not a turn
+      setStatus("nothing");
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      reopen();
+      return;
+    }
+    if (dictation.current) dictation.current.mute(true); // what the mouth says is never the person's words
+    setStatus("thinking");
     counter.current += 1;
     const id = counter.current;
     const entry = {
@@ -266,13 +287,8 @@ export default function VoicePanel({ status }) {
       setError(err.message);
     } finally {
       await mouth.drained();
-      busy.current = false;
-      if (listener.current && onRef.current) {
-        listener.current.resume();
-        setStatus("listening");
-      } else {
-        setStatus(onRef.current ? "listening" : "off");
-      }
+      if (dictation.current) dictation.current.mute(false);
+      reopen();
     }
   }
 
@@ -391,10 +407,10 @@ export default function VoicePanel({ status }) {
           <h2>Settings</h2>
           <p className="muted">
             The microphone stays on: everything you say is cut into utterances, written down with the browser&apos;s
-            dictation, <b>learned</b> - the words and the waveform, or a model of acoustic units&apos; units - and{" "}
-            <b>answered</b>, and the reply is <b>spoken</b> back the moment its first chunk of audio arrives. While it
-            speaks it does not listen, so it never hears itself. Ollama can answer for a model that has nothing to say
-            yet, and the model learns those answers too.
+            dictation (a sound with no words in it is dropped), <b>learned</b> - the words and the waveform, or a model
+            of acoustic units&apos; units - and <b>answered</b>, and the reply is <b>spoken</b> back the moment its first
+            chunk of audio arrives. While it speaks it does not listen, so it never hears itself. Ollama can answer
+            for a model that has nothing to say yet, and the model learns those answers too.
           </p>
           <div className="grid">
             <SelectField label="Answered by" value={answer} onChange={setAnswer} options={ANSWERS} />
@@ -404,6 +420,7 @@ export default function VoicePanel({ status }) {
             <CheckField label="Learn what I say" checked={train} onChange={setTrain} hint="the words and the waveform, trained on before the reply" />
             <NumberField label="Epochs" value={epochs} onChange={setEpochs} step="1" min="0" />
             <CheckField label="Learn Ollama's replies" checked={learnReply} onChange={setLearnReply} hint="so the model learns to answer by itself" />
+            <CheckField label="Send only what has words" checked={wordsOnly} onChange={setWordsOnly} hint="a sound the dictation heard no words in is dropped; off, it is sent and the sound learned unheard" />
             <CheckField label="Speak the replies" checked={speak} onChange={setSpeak} />
             <SelectField label="Reply search" value={mode} onChange={setMode} options={[["beam", "beam (the most likely)"], ["sample", "sample (a walk)"]]} />
             <NumberField label="Reply length" value={maxLength} onChange={setMaxLength} step="1" min="0" hint={`${units} a reply may add`} />
@@ -495,7 +512,8 @@ function VoiceTurn({ turn }) {
           {you.typed ? <span className="badge">typed</span> : null}
           {you.units ? <span className="badge">units</span> : null}
         </div>
-        <p className="bubble">{you.units && !you.text ? you.units : youText}</p>
+        <p className="bubble">{youText}</p>
+        {you.units ? <p className="meta units">{you.units}</p> : null}
         <div className="meta">
           {you.seconds != null ? `${seconds(you.seconds)} · ` : ""}
           {learned || (turn.phase === "thinking" ? "hearing…" : "not learned")}

@@ -3757,7 +3757,9 @@ ear is closed** and reopened afterwards: the model never hears itself as the per
 **Consequences** `POST /api/voice/turn` and `/stream`, `GET /api/voice`, `speech talk` on the command line, the
 Voice tab (`frontend/src/voice.js`, `VoicePanel.jsx`); a turn that trains refuses while a job runs (409); a
 browser needs one click before it may listen or speak, so the ear opens on a button (and by itself next time where
-the browser allows); `tests/test_voicechat.py`, `frontend/test/voice.test.mjs`. All three servers carry the
+the browser allows); an utterance the dictation heard no words in is not sent while *Send only what has words*
+is on (the default), the words being waited for first since a recogniser commits them a moment after the speaker
+stops; `tests/test_voicechat.py`, `frontend/test/voice.test.mjs`. All three servers carry the
 turn and all three CLIs have `speech talk` (`rust/src/voicechat.rs`; `go/radixnet/voicechat.go` and
 `go/server/voice.go`), so the tab shows on whichever server serves it; the Go build takes the words with the audio,
 as it transcribes nothing itself, and records from no microphone. `tests/test_rust_parity_media.py`

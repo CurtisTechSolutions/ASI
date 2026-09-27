@@ -1729,7 +1729,9 @@ comes back in chunks that play the moment the first one lands, with nothing to
 press. While the reply plays the ear is closed, so the model never hears itself.
 A reply Ollama wrote is taught to the model, so over a conversation it learns to
 answer by itself; a model of acoustic units learns the recording as its units
-and answers in sound. A text box says something without a microphone.
+and answers in sound. A sound the dictation heard no words in is not sent (a
+setting: off, the sound is learned unheard). A text box says something without
+a microphone.
 `speech talk` is the same turn from the shell (D-089). The Go and Rust servers and CLIs carry the same turn, so the tab works on whichever server serves it (the Go build takes the words with the audio, as it transcribes nothing itself).
 
 **From the shell:**

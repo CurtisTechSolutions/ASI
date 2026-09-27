@@ -6,7 +6,8 @@
  * pressed - the tab listens all the time. The frames of an utterance (with a
  * little before its start) are written out as a 16-bit PCM WAV for the server;
  * what was said in it comes from the Web Speech API running beside the ear,
- * its final results paired with the utterance by time. The mouth is a gapless
+ * its final results paired with the utterance by time (and waited for: a
+ * recogniser commits a phrase a moment after the speaker stops). The mouth is a gapless
  * PCM player: the reply's audio arrives in chunks (the `audio` events of
  * `POST /api/voice/turn/stream`) and each is scheduled right after the last,
  * so playback starts on the first chunk and never waits for the whole reply
@@ -84,20 +85,47 @@ export function levelOf(frame) {
 }
 
 /**
- * The words of an utterance: the dictation's final results that landed inside its time window. A recogniser
- * commits a phrase a little after the speaker stops, so `after` is generous; every final is used once.
+ * The words of an utterance: the dictation's final results that landed inside its time window (both on the
+ * ear's clock, `performance.now()`). A recogniser commits a phrase a little after the speaker stops, so `after`
+ * is generous, while `before` only covers the moment the endpointer takes to notice speech; every final is used
+ * once, and one older than the window is stale - an earlier sound's, or the mouth's own - and is dropped, so
+ * it can never be taken for a later utterance's words.
  */
-export function pairTranscript(finals, startedAt, endedAt, { before = 1500, after = 2500 } = {}) {
+export function pairTranscript(finals, startedAt, endedAt, { before = 500, after = 3500 } = {}) {
   const parts = [];
   for (const final of finals) {
     if (final.used) continue;
-    if (final.at >= startedAt - before && final.at <= endedAt + after) {
+    if (final.at < startedAt - before) {
+      final.used = true; // stale
+      continue;
+    }
+    if (final.at <= endedAt + after) {
       final.used = true;
       const text = String(final.text || "").trim();
       if (text) parts.push(text);
     }
   }
   return parts.join(" ").trim();
+}
+
+/**
+ * The words of an utterance, waited for: a recogniser commits its final result a moment after the speaker
+ * stops, so the finals of `log` (a dictation log: `finals`, `pending`, `nextFinal(ms)`) are paired again each
+ * time one lands, until the utterance has words or the wait is up - `timeout` milliseconds while words are
+ * being recognised (`log.pending`), `quiet` when nothing is, which is what a noise sounds like. "" when no
+ * words came; "" at once without a log.
+ */
+export async function wordsOf(log, startedAt, endedAt, { timeout = 3000, quiet = 1200, now = () => performance.now() } = {}) {
+  if (!log) return "";
+  const began = now();
+  let words = pairTranscript(log.finals, startedAt, endedAt);
+  while (!words) {
+    const left = began + (log.pending ? timeout : quiet) - now();
+    if (left <= 0) break;
+    await log.nextFinal(left);
+    words = pairTranscript(log.finals, startedAt, endedAt);
+  }
+  return words;
 }
 
 /** Base64 of 16-bit little-endian PCM (an `audio` event) -> samples in [-1, 1]. */
@@ -280,10 +308,12 @@ export async function startListening({ onUtterance, onLevel, onState, options = 
 }
 
 /**
- * Dictation that keeps going: the Web Speech API's final results with the time each one landed (`finals`, for
- * `pairTranscript`), and `onInterim(text)` with the words as they are being recognised. A recogniser stops by
- * itself now and then (a pause, a network hiccup, a cap on how long it listens): it is started again for as long
- * as the handle is alive. Null when the browser has no recogniser.
+ * Dictation that keeps going: the Web Speech API's final results with the time each one landed (`finals`, on
+ * the ear's clock, for `pairTranscript` and `wordsOf`), `pending` and `onInterim(text)` with the words as they
+ * are being recognised, `nextFinal(ms)` resolving when the next final lands (true) or the time is up (false),
+ * and `mute(on)` to drop everything heard while the mouth speaks, so the reply is never written down as the
+ * person's. A recogniser stops by itself now and then (a pause, a network hiccup, a cap on how long it
+ * listens): it is started again for as long as the handle is alive. Null when the browser has no recogniser.
  */
 export function startDictationLog({ onInterim, lang } = {}) {
   const Recognition = typeof window === "undefined" ? null : window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -292,6 +322,14 @@ export function startDictationLog({ onInterim, lang } = {}) {
   let alive = true;
   let recognition = null;
   let failures = 0;
+  let muted = false;
+  let waiters = [];
+  const handle = { finals, pending: "" };
+  const landed = () => {
+    const woken = waiters;
+    waiters = [];
+    woken.forEach((w) => w(true));
+  };
   const begin = () => {
     if (!alive) return;
     recognition = new Recognition();
@@ -299,18 +337,25 @@ export function startDictationLog({ onInterim, lang } = {}) {
     recognition.interimResults = true;
     recognition.lang = lang || (typeof navigator !== "undefined" && navigator.language) || "en-US";
     recognition.onresult = (event) => {
+      if (muted) return;
       let pending = "";
+      let final = false;
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
         const text = String(result[0].transcript || "").trim();
         if (result.isFinal) {
           failures = 0;
-          if (text) finals.push({ text, at: Date.now(), used: false });
+          if (text) {
+            finals.push({ text, at: performance.now(), used: false });
+            final = true;
+          }
         } else {
           pending = `${pending} ${text}`.trim();
         }
       }
+      handle.pending = pending;
       if (onInterim) onInterim(pending);
+      if (final) landed();
     };
     recognition.onerror = (event) => {
       if (event && (event.error === "not-allowed" || event.error === "service-not-allowed")) alive = false;
@@ -327,21 +372,40 @@ export function startDictationLog({ onInterim, lang } = {}) {
     }
   };
   begin();
-  return {
-    finals,
-    stop() {
-      alive = false;
-      if (recognition) {
-        recognition.onresult = null;
-        recognition.onend = null;
-        try {
-          recognition.stop();
-        } catch {
-          // already stopped
-        }
-      }
-    },
+  handle.nextFinal = (ms) =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        waiters = waiters.filter((w) => w !== wake);
+        resolve(false);
+      }, Math.max(0, ms));
+      const wake = (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      };
+      waiters.push(wake);
+    });
+  handle.mute = (on) => {
+    muted = Boolean(on);
+    if (muted) {
+      handle.pending = "";
+      if (onInterim) onInterim("");
+    }
   };
+  handle.stop = () => {
+    alive = false;
+    waiters.forEach((w) => w(false));
+    waiters = [];
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onend = null;
+      try {
+        recognition.stop();
+      } catch {
+        // already stopped
+      }
+    }
+  };
+  return handle;
 }
 
 /**

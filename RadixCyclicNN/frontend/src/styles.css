@@ -1481,6 +1481,11 @@ button.mic.on {
   color: #fff;
 }
 
+.voice-status.nothing {
+  background: var(--border);
+  color: var(--muted);
+}
+
 .level {
   display: inline-block;
   width: 160px;
