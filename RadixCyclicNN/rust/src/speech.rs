@@ -939,7 +939,7 @@ fn files(ctx: &Ctx) -> Vec<String> {
 }
 
 /// An audio file's bytes, or the error Python gives for a missing one.
-fn read_audio_file(path: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn read_audio_file(path: &str) -> Result<Vec<u8>, String> {
     if !std::path::Path::new(path).is_file() {
         return Err(format!("audio file not found: {path}"));
     }
@@ -959,7 +959,7 @@ fn asr_options(ctx: &Ctx, text: &str) -> asr::AsrOptions {
 }
 
 /// How an utterance becomes text, from the command line.
-fn teach_options(ctx: &Ctx) -> Result<TeachOptions, String> {
+pub(crate) fn teach_options(ctx: &Ctx) -> Result<TeachOptions, String> {
     let a = &ctx.args;
     let transcript = a.str("text", "");
     let codec = a.str("codec", "auto");
@@ -1154,6 +1154,7 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
             }
             crate::recall::tutor_cli(ctx, &texts, &labels, "speech", &said)?
         }
+        "talk" => return crate::voicechat::talk_cli(ctx),
         "decode" => {
             let text = text_or_data(ctx)?;
             let out = a.get("out").ok_or("--out is required: where to write the WAV")?;
@@ -1186,10 +1187,10 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
                 doc
             }
         }
-        "" => return Err("speech needs an action: info, transcribe, teach, listen, tutor, decode".to_string()),
+        "" => return Err("speech needs an action: info, transcribe, teach, listen, tutor, talk, decode".to_string()),
         other => {
             return Err(format!(
-                "unknown speech action {other:?}; expected info, transcribe, teach, listen, tutor or decode"
+                "unknown speech action {other:?}; expected info, transcribe, teach, listen, tutor, talk or decode"
             ))
         }
     };

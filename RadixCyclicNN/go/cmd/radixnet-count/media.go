@@ -154,6 +154,8 @@ waveform - so in the graph the two leave the same node.
 actions:
   info     which codecs this build has
   teach    encode FILE (WAV) and -text into the texts the network learns (--train)
+  talk     one turn of talking with the model by voice: FILE and / or -text is heard, learned,
+           answered (by the model, or Ollama for it) and spoken back (the Voice tab's turn)
   tutor    ask the network to say back what it was taught, and mark what comes back
   decode   turn an encoded or predicted waveform text back into a WAV file (any other output is spoken)
 
@@ -173,6 +175,8 @@ func cmdSpeech(args []string) {
 		cmdSpeechInfo(rest)
 	case "teach":
 		cmdSpeechTeach(rest)
+	case "talk":
+		cmdSpeechTalk(rest)
 	case "tutor":
 		cmdMediaTutor(rest, "speech")
 	case "decode":
@@ -180,7 +184,7 @@ func cmdSpeech(args []string) {
 	case "help", "-h", "--help":
 		speechUsage()
 	default:
-		fail("unknown speech action %q (info, teach, tutor, decode)", action)
+		fail("unknown speech action %q (info, teach, talk, tutor, decode)", action)
 	}
 }
 

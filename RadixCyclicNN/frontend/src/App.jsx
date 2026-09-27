@@ -57,7 +57,7 @@ const TABS = [
   { id: "agent", label: "Agent", Component: AgentPanel, route: "/api/agent/start" },
   { id: "images", label: "Images", Component: ImagesPanel, route: "/api/images" },
   { id: "speech", label: "Speech", Component: SpeechPanel, route: "/api/speech" },
-  { id: "voice", label: "Voice", Component: VoicePanel, route: "/api/voice/turn" },
+  { id: "voice", label: "Voice", Component: VoicePanel, route: "/api/voice/turn", single: true },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel, route: "/api/checkpoints" },
   { id: "model", label: "Model settings", Component: ModelSettingsPanel, model: true },
   { id: "settings", label: "Settings", Component: SettingsPanel, model: true },

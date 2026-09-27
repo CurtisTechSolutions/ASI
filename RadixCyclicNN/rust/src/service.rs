@@ -2165,6 +2165,7 @@ pub fn build(service: Arc<Service>, frontend: Option<String>) -> Server<Service>
     crate::tools::routes(&mut server);
     crate::vision::routes(&mut server);
     crate::speech::routes(&mut server);
+    crate::voicechat::routes(&mut server);
     crate::tutor::routes(&mut server);
     crate::chat::routes(&mut server);
     crate::codegen::routes(&mut server);

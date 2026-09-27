@@ -287,6 +287,22 @@ class TestVoiceApi(unittest.TestCase):
         status, doc, _ = self.client.post("/api/voice/turn", {"transcript": "a bird in the hand", "answer": "none", "speak": False})
         self.assertEqual((status, doc["by"], doc["wav_base64"], doc["spoken"], len(doc["texts"])), (200, "none", None, None, 1))
 
+    def test_a_recording_as_a_raw_or_multipart_body(self):
+        wav = recording()
+        query = "?transcript=the%20cat%20sat&answer=none&train=false"
+        status, doc, _ = self.client.request("POST", "/api/voice/turn" + query, raw=wav,
+                                             headers={"Content-Type": "audio/wav"})
+        self.assertEqual(status, 200, doc)
+        self.assertEqual((doc["transcript"], doc["by"], doc["trained"], len(doc["texts"])), ("the cat sat", "none", None, 2))
+        boundary = "----radixnet-voice"
+        form = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"u.wav\"\r\n"
+                f"Content-Type: audio/wav\r\n\r\n").encode() + wav + f"\r\n--{boundary}--\r\n".encode()
+        status, raw, _ = self.client.request("POST", "/api/voice/turn/stream" + query, raw=form,
+                                             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        self.assertEqual(status, 200, raw)
+        events = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+        self.assertEqual(([e["event"] for e in events], events[-1]["texts"]), (["heard", "reply", "done"], doc["texts"]))
+
     def test_a_turn_streamed(self):
         body = {"transcript": "the cat sat", "answer": "model", "history": [["You", "hello"], ["Model", "hi there"]],
                 "epochs": 1}

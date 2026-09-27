@@ -1098,3 +1098,196 @@ fn an_upload_of_any_size_streams_to_disk() {
         "{doc:?}"
     );
 }
+
+// -- talking with the model by voice (D-089) --------------------------------------------------
+
+/// A 440 Hz tone as a WAV, `seconds` long: a recording with nothing to hear in it.
+fn tone_wav(seconds: f64) -> Vec<u8> {
+    let rate = 16_000i64;
+    let n = (rate as f64 * seconds) as usize;
+    let samples: Vec<f32> = (0..n)
+        .map(|i| (0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / rate as f64).sin()) as f32)
+        .collect();
+    radixnet::speech::wav_bytes(&samples, rate, 1)
+}
+
+/// The payload of a chunked body: every chunk's data, joined.
+fn dechunk(body: &str) -> String {
+    let mut out = String::new();
+    let mut rest = body;
+    while let Some((size, after)) = rest.split_once("\r\n") {
+        let Ok(n) = usize::from_str_radix(size.trim(), 16) else {
+            break;
+        };
+        if n == 0 || after.len() < n {
+            break;
+        }
+        out.push_str(&after[..n]);
+        rest = after[n..].strip_prefix("\r\n").unwrap_or(&after[n..]);
+    }
+    out
+}
+
+#[test]
+fn the_voice_routes_hear_learn_answer_and_speak() {
+    let port = serve(trained(false), &format!("{}/model.count.json", temp_dir("voice")));
+    let (status, info) = get(port, "/api/voice");
+    assert_eq!(status, 200, "{info:?}");
+    assert_eq!(info.at("speakers").to_strings(), ["You", "Model"]);
+    assert_eq!(info.at("answers").to_strings(), ["auto", "model", "ollama", "none"]);
+    assert_eq!(
+        (
+            info.at("encoding").as_str(),
+            info.at("decoder").as_str(),
+            info.at("acoustic").as_bool()
+        ),
+        (Some("char:3:1"), Some("voice"), Some(false))
+    );
+    assert!(info.at("ollama").at("url").as_str().unwrap_or("").starts_with("http"));
+    assert!(info.at("transcription").get("backends").is_some());
+    // a turn whole: the recording and its words are learned, the model answers, the reply is a WAV
+    let before = get(port, "/api/status").1.at("trained_texts").as_i64().unwrap_or(0);
+    let clip = radixnet::multipart::base64::encode(&tone_wav(0.2));
+    let body = format!(
+        r#"{{"name":"u.wav","content_base64":"{clip}","transcript":"the cat sat on the mat","answer":"model","epochs":1,"seed":1}}"#
+    );
+    let (status, doc) = post(port, "/api/voice/turn", &body);
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(
+        (
+            doc.at("transcript").as_str(),
+            doc.at("by").as_str(),
+            doc.at("encoding").as_str(),
+            doc.at("rate").as_i64()
+        ),
+        (
+            Some("the cat sat on the mat"),
+            Some("model"),
+            Some("char:3:1"),
+            Some(16000)
+        )
+    );
+    assert_eq!(
+        (
+            doc.at("trained").at("texts").as_i64(),
+            doc.at("trained").at("epochs").as_i64()
+        ),
+        (Some(2), Some(1))
+    );
+    assert_eq!(
+        get(port, "/api/status").1.at("trained_texts").as_i64().unwrap_or(0),
+        before + 2
+    );
+    let text = doc.at("reply").at("text").as_str().unwrap_or("").to_string();
+    assert!(!text.is_empty(), "{doc:?}");
+    assert_eq!(doc.at("reply").at("turn").at("speaker").as_str(), Some("Model"));
+    let wav = radixnet::multipart::base64::decode(doc.at("wav_base64").as_str().unwrap()).unwrap();
+    assert!(wav.starts_with(b"RIFF"));
+    assert_eq!(
+        wav.len() as i64,
+        44 + 2 * doc.at("spoken").at("samples").as_i64().unwrap()
+    );
+    let history = doc.at("history").as_array();
+    assert_eq!(
+        history[history.len() - 2].to_strings(),
+        ["You", "the cat sat on the mat"]
+    );
+    assert_eq!(history[history.len() - 1].to_strings(), ["Model", text.as_str()]);
+    // a recording alone, with no words heard in it and no transcription backend to hear them: the
+    // sound is learned, nobody can answer
+    let body = format!(r#"{{"name":"u.wav","content_base64":"{clip}","answer":"model","backend":"given"}}"#);
+    let (status, doc) = post(port, "/api/voice/turn", &body);
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(
+        (
+            doc.at("transcript").as_str(),
+            doc.at("by").as_str(),
+            doc.at("texts").as_array().len()
+        ),
+        (Some(""), Some("none"), 1)
+    );
+    assert!(doc.at("texts").to_strings()[0].contains("aud:mu:"));
+    assert!(
+        doc.at("reply").at("text").as_str() == Some("") && doc.at("spoken").is_null() && doc.at("wav_base64").is_null()
+    );
+    // typed, unheard of a recording, not spoken, nobody answering
+    let (status, doc) = post(
+        port,
+        "/api/voice/turn",
+        r#"{"transcript":"a bird in the hand","answer":"none","speak":false}"#,
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    assert!(doc.at("by").as_str() == Some("none") && doc.at("wav_base64").is_null() && doc.at("spoken").is_null());
+    assert_eq!(doc.at("texts").as_array().len(), 1);
+}
+
+#[test]
+fn the_voice_turn_streams_and_refuses() {
+    let port = serve(
+        trained(false),
+        &format!("{}/model.count.json", temp_dir("voice-stream")),
+    );
+    let (status, headers, raw) = request_raw(
+        port,
+        "POST",
+        "/api/voice/turn/stream",
+        r#"{"transcript":"the cat sat","answer":"model","history":[["You","hello"],["Model","hi there"]],"epochs":1}"#,
+    );
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        headers.to_ascii_lowercase().contains("application/x-ndjson"),
+        "{headers}"
+    );
+    let events: Vec<Json> = dechunk(&raw)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| parse(line).expect(line))
+        .collect();
+    let kinds: Vec<&str> = events.iter().map(|e| e.at("event").as_str().unwrap_or("")).collect();
+    assert_eq!(&kinds[..3], ["heard", "trained", "reply"], "{kinds:?}");
+    assert_eq!(&kinds[kinds.len() - 2..], ["spoken", "done"], "{kinds:?}");
+    assert!(kinds.contains(&"audio"));
+    let done = events.last().unwrap();
+    assert!(done.get("wav_base64").is_none());
+    assert_eq!(done.at("history").as_array()[0].to_strings(), ["You", "hello"]);
+    assert_eq!(done.at("history").as_array()[1].to_strings(), ["Model", "hi there"]);
+    let pcm: usize = events
+        .iter()
+        .filter(|e| e.at("event").as_str() == Some("audio"))
+        .map(|e| {
+            radixnet::multipart::base64::decode(e.at("pcm_base64").as_str().unwrap())
+                .unwrap()
+                .len()
+        })
+        .sum();
+    assert_eq!((pcm / 2) as i64, done.at("spoken").at("samples").as_i64().unwrap());
+    // a request refused before anything was streamed is an ordinary 400
+    let (status, err) = post(port, "/api/voice/turn/stream", r#"{"answer":"model"}"#);
+    assert_eq!(status, 400, "{err:?}");
+    assert!(err.at("error").as_str().unwrap().contains("nothing was said"));
+    for body in [
+        "{}",
+        r#"{"transcript":"hi","answer":"nobody"}"#,
+        r#"{"transcript":"hi","epochs":"many"}"#,
+        r#"{"transcript":"hi","history":"not a list"}"#,
+        r#"{"transcript":"hi","pitch":0}"#,
+        r#"{"name":"u.wav","content_base64":"bm90IGF1ZGlv","answer":"model"}"#,
+    ] {
+        let (status, err) = post(port, "/api/voice/turn", body);
+        assert_eq!(status, 400, "{body}: {err:?}");
+    }
+    // Ollama that cannot be reached: the turn still happens, the error is on record
+    let (status, doc) = post(
+        port,
+        "/api/voice/turn",
+        r#"{"transcript":"the cat sat","answer":"ollama","url":"http://127.0.0.1:1","timeout":1,"speak":false}"#,
+    );
+    assert_eq!((status, doc.at("by").as_str()), (200, Some("none")), "{doc:?}");
+    assert!(doc
+        .at("reply")
+        .at("ollama_error")
+        .as_str()
+        .unwrap()
+        .contains("cannot reach Ollama"));
+    assert_eq!(doc.at("trained").at("texts").as_i64(), Some(1));
+}

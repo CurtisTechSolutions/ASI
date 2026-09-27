@@ -687,6 +687,16 @@ impl<'a> Form<'a> {
 
     /// The files of the request (`Fields.upload_files`): what a multipart or
     /// raw body carried, else `{name, content | content_base64}`, else `{files: [...]}`.
+    /// Whether the request carries a file at all: a multipart part, a raw body,
+    /// or JSON `name` / `content` / `content_base64` / `files` fields - what
+    /// [`Form::files`] would read, asked before asking.
+    pub fn has_files(&self) -> bool {
+        self.carried.is_some()
+            || ["files", "name", "content", "content_base64"]
+                .iter()
+                .any(|key| self.field(key).is_some())
+    }
+
     pub fn files(&self) -> Result<Vec<Upload>, ApiError> {
         if let Some(files) = &self.carried {
             return Ok(files.clone());

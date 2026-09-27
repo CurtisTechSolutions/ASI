@@ -3757,11 +3757,17 @@ ear is closed** and reopened afterwards: the model never hears itself as the per
 **Consequences** `POST /api/voice/turn` and `/stream`, `GET /api/voice`, `speech talk` on the command line, the
 Voice tab (`frontend/src/voice.js`, `VoicePanel.jsx`); a turn that trains refuses while a job runs (409); a
 browser needs one click before it may listen or speak, so the ear opens on a button (and by itself next time where
-the browser allows); `tests/test_voicechat.py`, `frontend/test/voice.test.mjs`. The Go and Rust servers do not
-carry the turn yet; the tab shows on the Python server.
+the browser allows); `tests/test_voicechat.py`, `frontend/test/voice.test.mjs`. All three servers carry the
+turn and all three CLIs have `speech talk` (`rust/src/voicechat.rs`; `go/radixnet/voicechat.go` and
+`go/server/voice.go`), so the tab shows on whichever server serves it; the Go build takes the words with the audio,
+as it transcribes nothing itself, and records from no microphone. `tests/test_rust_parity_media.py`
+(`TestRustVoiceParity`) and `tests/test_go_parity.py` hold the ports to the same turn: the same recording heard the
+same, learned the same, the same reply found and spoken.
 
 **Lives in** `radixnet/voicechat.py`, `radixnet/ollama.py` (`reply_line`), `radixnet/api.py` (`voice_turn`,
-`/api/voice/*`), `radixnet/cli.py` (`speech talk`), `frontend/src/voice.js`, `frontend/src/components/VoicePanel.jsx`
+`/api/voice/*`), `radixnet/cli.py` (`speech talk`), `frontend/src/voice.js`, `frontend/src/components/VoicePanel.jsx`;
+`rust/src/voicechat.rs` and `rust/src/review.rs` (`reply_line`); `go/radixnet/voicechat.go`, `go/radixnet/review.go`
+(`ReplyLine`), `go/server/voice.go`, `go/cmd/radixnet-count/voice.go`
 
 ---
 

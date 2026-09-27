@@ -110,6 +110,7 @@ pub mod training;
 pub mod tutor;
 pub mod vision;
 pub mod voice;
+pub mod voicechat;
 pub mod web;
 pub mod weights;
 pub mod window;

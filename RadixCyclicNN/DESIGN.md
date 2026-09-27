@@ -2678,14 +2678,24 @@ with nothing to press, and a reply: the microphone stays on, and everything the 
 * **The panel** (`VoicePanel.jsx`): one button starts and stops the ear (a browser needs a click before a page may
   listen or make a sound; the choice is remembered and the ear reopens by itself next time where the browser allows
   it), a status badge (listening / hearing you / thinking / speaking) and a level meter, the interim words as they
-  are recognised, a text box that says something without a microphone, the settings (who answers, the Ollama model
-  and URL, a persona, learn what I say and how many epochs, learn Ollama's replies, speak, the reply search and
-  length, the voice's dials, the silence and the sensitivity of the endpointer), and the conversation newest first -
-  what you said (its length, what was learned, its token) and what came back (spelled for a model of sounds, the
-  units under it, who answered, cost and probability, how long it spoke, a 🔊 to hear it again). `historyOf` sends
-  the last turns as the `history` every turn continues. A server without the stream route gets the plain one.
+  are recognised, and the conversation, which fills the tab: a tall scrolling room, oldest first with the newest
+  turn at the bottom (the room follows it until the reader scrolls up), with a composer under it that says
+  something without a microphone - what you said (its length, what was learned, its token) and what came back
+  (spelled for a model of sounds, the units under it, who answered, cost and probability, how long it spoke, a 🔊
+  to hear it again). The settings live on a *Settings* sub-tab beside the *Conversation* one: who answers, the
+  Ollama model and URL, a persona, learn what I say and how many epochs, learn Ollama's replies, speak, the reply
+  search and length, the voice's dials, the silence and the sensitivity of the endpointer. `historyOf` sends the
+  last turns as the `history` every turn continues. A server without the stream route gets the plain one.
 * **From the shell**: `speech talk FILE | --seconds N | --text` is one turn with every dial (`cmd_speech_talk`),
   `--history FILE` continuing a conversation and the model saved when it learned; `tests/test_voicechat.py`.
+* **In the other ports**: the Rust server and CLI (`rust/src/voicechat.rs`: `turn`, the routes, `talk_cli`; the
+  Ollama line in `review.rs`) and the Go server and CLI (`go/radixnet/voicechat.go`: `VoiceTurn`; `go/server/voice.go`;
+  `speech talk` in `go/cmd/radixnet-count/voice.go`) carry the same turn with the same document and the same events,
+  so the tab works on whichever server serves it. The model's parts are closures there too (`Learn`, `ModelReply` /
+  `VoiceParts`), taken under each service's locks; the Go build takes the words with the audio, as it transcribes
+  nothing itself, and records from no microphone. `tests/test_rust_parity_media.py` (`TestRustVoiceParity`) and
+  `tests/test_go_parity.py` (`speech talk`, the routes) hold the three to the same recording heard the same, learned
+  the same, the same reply found and spoken.
 
 ## 26. The recall tutor (`recall.py`) — the tutor that needs no teacher
 
