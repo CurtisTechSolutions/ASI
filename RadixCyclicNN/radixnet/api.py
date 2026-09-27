@@ -44,6 +44,7 @@ import sys
 import email.parser
 import email.policy
 import threading
+import random
 import time
 import traceback
 from collections.abc import Callable, Iterator
@@ -98,7 +99,7 @@ from .assistant import (
     ANTHROPIC, OPENAI, AnthropicStream, Ask, AskError, OpenAIStream, Reply, input_units as assistant_input_units,
     kind_of_id, model_id, parse_request, respond as assistant_respond, to_format,
 )
-from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats
+from .dialogue import DEFAULT_SPEAKERS, EXPLORE, Heard, repeats as dialogue_repeats, reply as dialogue_reply
 from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS, think, think_on
 from .duo import FilterConfig, NegativeFilter
 from .model import (
@@ -138,6 +139,12 @@ from .speech import decode_text as decode_speech_text
 from .speech import is_waveform_text
 from .speech import describe as describe_speech
 from .speech import teach as teach_speech
+from .voicechat import SPEAKERS as VOICE_SPEAKERS
+from .voicechat import Outcome as VoiceOutcome
+from .voicechat import VoiceOptions
+from .voicechat import describe as describe_voice
+from .voicechat import history_pairs as voice_history_pairs
+from .voicechat import turn as voice_chat_turn
 from .speech import transcribe as transcribe_speech
 from .tools import ToolBox, WebClient, default_toolbox, parse_call
 from .tutor import (
@@ -959,6 +966,62 @@ class ModelService:
             "repeats": dialogue_repeats(spoken),
             "guard": report,
         }
+
+    # -- talking with the model by voice ----------------------------------------
+
+    def voice_turn(
+        self, data: bytes | None, options: VoiceOptions, history: Any, *, ollama: OllamaClient | None = None,
+        guard: bool = True, provenance: bool | None = None, write: Callable[[dict], Any] | None = None,
+    ) -> VoiceOutcome:
+        """One turn of talking with the model by voice (:mod:`radixnet.voicechat`): heard, trained, answered, spoken.
+
+        Training and the model's own reply hold the model's lock for exactly as
+        long as they run (a job running elsewhere refuses them, 409); Ollama is
+        asked outside it, as the chat loop does, so a slow answer never holds
+        the server.  The guard vetoes the model's reply as it does every other
+        answer (:meth:`guard`).
+        """
+        from .chat import _Veto as PairVeto
+
+        with self.session() as model:
+            encoding = model.encoding
+        config = TrainConfig(epochs=options.epochs, lr=options.lr, batch_size=options.batch_size)
+        try:
+            config.validate()
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        try:
+            index = 1 + len(voice_history_pairs(history))
+        except ValueError as exc:
+            raise ApiError(400, str(exc)) from exc
+        rng = random.Random(options.seed) if options.seed is not None else None
+
+        def learn(texts: list[str]) -> dict:
+            with self.mutating() as model:
+                model.train(texts, config)
+            return {"texts": len(texts), "epochs": config.epochs}
+
+        def model_reply(line: str, heard: Heard):
+            with self.session() as model:
+                pair = self.guard(model, provenance) if guard else None
+                try:
+                    return dialogue_reply(
+                        model, line, heard=heard, index=index, speaker=VOICE_SPEAKERS[1], mode=options.mode,
+                        max_length=options.max_length, context=options.context, temperature=options.temperature,
+                        k=options.k, beam=options.beam, step_penalty=options.step_penalty, rng=rng,
+                        avoid_repeats=options.avoid_repeats, avoid_word_repeats=options.avoid_word_repeats,
+                        explore=options.explore, learn=options.learn, veto=PairVeto(pair) if pair is not None else None,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ApiError(400, str(exc)) from exc
+
+        try:
+            return voice_chat_turn(
+                data, encoding=encoding, options=options, history=history, learn=learn, model_reply=model_reply,
+                ollama=ollama, write=write,
+            )
+        except ValueError as exc:  # unreadable audio, nothing said, a bad history, a token that is no unit
+            raise ApiError(400, str(exc)) from exc
 
     # -- today's format: messages in, an assistant message out ----------------
 
@@ -3652,6 +3715,132 @@ def _r_speech_tutor(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     )
 
 
+def _voice_options(f: Fields, q: dict) -> VoiceOptions:
+    """One voice turn's settings from a JSON body or a multipart / raw request's query string."""
+
+    def number(name: str, default: Any, cast: Any) -> Any:
+        raw = _option(f, q, name, default)
+        if raw is None or raw == "":
+            return default
+        try:
+            return cast(raw)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, f"'{name}' must be a number") from exc
+
+    provenance = _option(f, q, "provenance", None)
+    options = VoiceOptions(
+        transcript=str(_option(f, q, "transcript", "") or ""),
+        backend=str(_option(f, q, "backend", "auto") or "auto"),
+        language=_option(f, q, "language", None) or None,
+        asr_model=_option(f, q, "asr_model", None) or None,
+        asr_url=_option(f, q, "asr_url", None) or None,
+        rate=number("rate", SPEECH_DEFAULT_RATE, int),
+        codec=str(_option(f, q, "codec", "auto") or "auto"),
+        normalise=_flag_option(f, q, "normalise"),
+        waveform=_flag_option(f, q, "waveform", True),
+        pair=_flag_option(f, q, "pair"),
+        unique=_flag_option(f, q, "unique", True),
+        train=_flag_option(f, q, "train", True),
+        epochs=number("epochs", 2, int),
+        lr=number("lr", 0.5, float),
+        batch_size=number("batch_size", 8, int),
+        answer=str(_option(f, q, "answer", "auto") or "auto").strip().lower(),
+        learn_reply=_flag_option(f, q, "learn_reply", True),
+        persona=str(_option(f, q, "persona", "") or ""),
+        topic=str(_option(f, q, "topic", "") or ""),
+        mode=str(_option(f, q, "mode", "beam") or "beam"),
+        max_length=number("max_length", 60, int),
+        context=number("context", 12, int),
+        k=number("k", 5, int),
+        beam=number("beam", None, int),
+        step_penalty=number("step_penalty", 0.0, float),
+        temperature=number("temperature", 1.0, float),
+        seed=number("seed", None, int),
+        avoid_repeats=_flag_option(f, q, "avoid_repeats", True),
+        avoid_word_repeats=_flag_option(f, q, "avoid_word_repeats", True),
+        explore=number("explore", EXPLORE, int),
+        learn=_flag_option(f, q, "learn", True),
+        ollama_temperature=number("ollama_temperature", 0.8, float),
+        speak=_flag_option(f, q, "speak", True),
+        voice_rate=number("voice_rate", 16000, int),
+        pitch=number("pitch", 120.0, float),
+        tempo=number("tempo", 1.0, float),
+        gain=number("gain", 0.5, float),
+        polish=number("polish", 0, int),
+    )
+    try:
+        options.validate()
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from exc
+    return options
+
+
+def _voice_request(svc: ModelService, f: Fields, q: dict) -> tuple:
+    """What one voice turn is made of: the recording (if any), the options, the history, the Ollama to ask."""
+    data: bytes | None = None
+    if any(f.present(name) for name in ("files", "name", "content", "content_base64")):
+        _, data = _audio_bytes(f, "recording")
+    options = _voice_options(f, q)
+    if data is None and not options.transcript.strip():
+        raise ApiError(400, "nothing was said: send a recording (multipart, a raw body or JSON {name, content_base64}), "
+                            "a transcript, or both")
+    history = _option(f, q, "history", None)
+    if isinstance(history, str):
+        try:
+            history = json.loads(history) if history.strip() else []
+        except ValueError as exc:
+            raise ApiError(400, "'history' must be a JSON list of [speaker, text] pairs") from exc
+    if history is None:
+        history = []
+    if not isinstance(history, list):
+        raise ApiError(400, "'history' must be a list of [speaker, text] pairs")
+    ollama = None
+    if options.answer in ("auto", "ollama"):
+        timeout = _option(f, q, "timeout", None)
+        try:
+            ollama = svc.ollama_client(
+                _option(f, q, "url", None) or None, _option(f, q, "ollama_model", None) or None,
+                float(timeout) if timeout not in (None, "") else None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, f"'timeout' must be a number: {exc}") from exc
+    if options.train or (options.learn_reply and options.answer in ("auto", "ollama")):
+        svc._ensure_idle()
+    provenance = _option(f, q, "provenance", None)
+    return (
+        data, options, history, ollama, _flag_option(f, q, "guard", True),
+        None if provenance in (None, "") else _flag_option(f, q, "provenance"),
+    )
+
+
+def _r_voice(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """What the Voice tab has to work with."""
+    with svc.session() as model:
+        encoding = model.encoding
+    return 200, describe_voice(encoding, svc.ollama_client())
+
+
+def _r_voice_turn(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """One turn of talking with the model by voice, answered whole: the document and the reply's WAV."""
+    data, options, history, ollama, guard, provenance = _voice_request(svc, f, q)
+    outcome = svc.voice_turn(data, options, history, ollama=ollama, guard=guard, provenance=provenance)
+    doc = dict(outcome.document)
+    doc["rate"] = outcome.rate
+    doc["wav_base64"] = base64.b64encode(outcome.wav()).decode("ascii") if outcome.pcm else None
+    return 200, doc
+
+
+def _r_voice_turn_stream(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """The same turn as it happens: every step one JSON line, the reply's audio in chunks played as they arrive."""
+    data, options, history, ollama, guard, provenance = _voice_request(svc, f, q)
+
+    def run(write: Callable[[Any], None]) -> None:
+        outcome = svc.voice_turn(data, options, history, ollama=ollama, guard=guard, provenance=provenance, write=write)
+        write({"event": "done", **outcome.document, "rate": outcome.rate})
+
+    return 200, StreamedResponse(run)
+
+
 def _voice_fields(f: Fields) -> dict:
     """The voice ``POST /api/say`` and the voice fallback of ``POST /api/speech/decode`` speak with."""
     out = dict(
@@ -4733,6 +4922,24 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "decode an encoded or predicted waveform text back to audio: {text, codec} -> {wav_base64, rate, seconds, "
      "repaired, decoder: waveform}; a text carrying no waveform is an output in the model's units and is spoken "
      "through its voice instead, one utterance per line, as /api/say answers (decoder: voice | vocoder)"),
+    ("GET", "/api/voice", _r_voice,
+     "talking with the model by voice (the Voice tab): the speakers, the answer modes (auto | model | ollama | "
+     "none), the model's encoding and decoder, the transcription backends and the Ollama it would ask"),
+    ("POST", "/api/voice/turn", _r_voice_turn,
+     "one turn of talking with the model by voice: {recording (multipart, a raw body or JSON {name, "
+     "content_base64}) and / or transcript, history: [[speaker, text], ...], answer: auto (the model, Ollama "
+     "when it has nothing to say) | model | ollama | none, train (default on), epochs, lr, batch_size, learn_reply "
+     "(teach the model a reply Ollama wrote), persona, topic, url, ollama_model, timeout, mode, max_length, "
+     "context, k, beam, temperature, seed, explore, learn, guard, speak, voice_rate, pitch, tempo, gain, polish, "
+     "rate, codec, pair, unique, normalise, waveform, backend, language} -> {transcript, line, token, texts, "
+     "audio, units, asr, trained, reply: {by, text, spelled, turn, ollama_error}, by, spoken, taught, history, "
+     "encoding, rate, wav_base64}: the utterance is heard and learned (the transcript and the waveform behind one "
+     "token, or a model of acoustic units' units), answered, spoken through the model's voice, and the reply "
+     "taught when Ollama wrote it"),
+    ("POST", "/api/voice/turn/stream", _r_voice_turn_stream,
+     "the same turn as it happens: application/x-ndjson, one event per line - heard, trained, reply, audio "
+     "(pcm_base64: 16-bit PCM chunks at rate, to play as they arrive), spoken, taught - then {event: done, ...} "
+     "with the /api/voice/turn document (without wav_base64: the audio was the events)"),
     ("POST", "/api/say", _r_say,
      "the output decoder: texts in the model's units - predictions, samples, turns; sounds, syllables, acoustic "
      "units, words or letters - spoken through the model's voice, one utterance each, closed by the END sentinel: "

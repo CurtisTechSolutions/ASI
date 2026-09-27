@@ -21,6 +21,7 @@ import CodeGenPanel from "./components/CodeGenPanel.jsx";
 import AgentPanel from "./components/AgentPanel.jsx";
 import ImagesPanel from "./components/ImagesPanel.jsx";
 import SpeechPanel from "./components/SpeechPanel.jsx";
+import VoicePanel from "./components/VoicePanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
 import ModelSettingsPanel from "./components/ModelSettingsPanel.jsx";
 import SettingsPanel from "./components/SettingsPanel.jsx";
@@ -56,6 +57,7 @@ const TABS = [
   { id: "agent", label: "Agent", Component: AgentPanel, route: "/api/agent/start" },
   { id: "images", label: "Images", Component: ImagesPanel, route: "/api/images" },
   { id: "speech", label: "Speech", Component: SpeechPanel, route: "/api/speech" },
+  { id: "voice", label: "Voice", Component: VoicePanel, route: "/api/voice/turn" },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel, route: "/api/checkpoints" },
   { id: "model", label: "Model settings", Component: ModelSettingsPanel, model: true },
   { id: "settings", label: "Settings", Component: SettingsPanel, model: true },

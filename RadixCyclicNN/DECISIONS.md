@@ -3717,6 +3717,54 @@ samples - is what the CLI prints and the API returns beside the audio. `tests/te
 
 ---
 
+### D-089 — Talking with the model by voice: heard, learned, answered and spoken, with nothing to press
+
+**Status** Accepted · 2026-09-27 · **Layer** interface · **Extends** D-035, D-081, D-082, D-088
+
+**Context** D-035 teaches the model by talking to it, one utterance at a time by hand (record, stop, teach), and
+D-088 lets any output be heard. Between the two there was no conversation: nothing listened on its own, nothing
+answered what was said, and nothing played the answer without a press. A model whose subject is speech should be
+talked *with*, the way it will be used - the microphone on, every utterance learned as it is said, an answer
+spoken back at once - and it should be able to answer before it knows how, so that the conversation itself is
+what teaches it.
+
+**Decision** A **Voice tab** whose ear is always on, and one **turn** per utterance. The browser cuts speech into
+utterances by level alone (an endpointer over the microphone: a few loud frames start one, a short silence ends
+it) and writes the words down with its own dictation; each utterance is one request that is **heard** (the
+transcript and the waveform behind one token, D-035; a model of acoustic units hears its units, D-082),
+**trained on before the reply** so the answer knows what was just said, **answered** - by the model as in every
+conversation here (`dialogue.reply`), or by Ollama speaking *as the model's voice* when asked to, or only when the
+model has nothing to say to the person (`answer: auto`: no reply, or a fresh text that picked up none of the line)
+- and **spoken** through the output decoder (D-088), the audio streamed back in half-second chunks that the browser
+plays as they arrive, gaplessly, with nobody pressing play. **A reply Ollama wrote is taught to the model**, so a
+conversation that starts with Ollama answering ends with the model answering by itself. **While the reply plays the
+ear is closed** and reopened afterwards: the model never hears itself as the person. The model's parts of a turn
+(training, replying) run under the service's locks; Ollama is asked outside them, as the chat loop does.
+
+**Alternatives rejected**
+* **Push-to-talk.** It is what the Speech tab already is; the point here is a conversation, and a conversation is
+  not pressed.
+* **Streaming the recogniser's transcript alone, without the audio.** The waveform is what D-035 learns the sound
+  from, and a model of acoustic units learns nothing else; the ear keeps the audio and pairs the words with it.
+* **Answering only from the model.** A model that has heard three sentences cannot answer; with nobody to answer
+  for it the conversation ends before the model has learned anything. Ollama answers *for* it and teaches it, and
+  `auto` hands over as soon as the model can answer by itself.
+* **Full duplex.** Letting the person interrupt the reply means hearing the reply through the microphone and
+  learning it as the person's; half duplex costs a second of waiting and nothing else.
+* **Playing the reply as one WAV.** Waiting for the whole reply is the delay a conversation cannot afford; the
+  decoder streams, so the reply streams.
+
+**Consequences** `POST /api/voice/turn` and `/stream`, `GET /api/voice`, `speech talk` on the command line, the
+Voice tab (`frontend/src/voice.js`, `VoicePanel.jsx`); a turn that trains refuses while a job runs (409); a
+browser needs one click before it may listen or speak, so the ear opens on a button (and by itself next time where
+the browser allows); `tests/test_voicechat.py`, `frontend/test/voice.test.mjs`. The Go and Rust servers do not
+carry the turn yet; the tab shows on the Python server.
+
+**Lives in** `radixnet/voicechat.py`, `radixnet/ollama.py` (`reply_line`), `radixnet/api.py` (`voice_turn`,
+`/api/voice/*`), `radixnet/cli.py` (`speech talk`), `frontend/src/voice.js`, `frontend/src/components/VoicePanel.jsx`
+
+---
+
 # Part XXII — Structure
 
 ### D-087 — The dynamic window: nodes halved down a binary ladder, and grown back at the top
