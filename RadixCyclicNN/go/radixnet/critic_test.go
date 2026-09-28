@@ -472,15 +472,15 @@ func TestParseCorrectionsReadsEveryShape(t *testing.T) {
 
 func TestCorrectionEntryVerdictsReasonsAndNotes(t *testing.T) {
 	same := "the cat sat"
-	if entry := correctionEntry(0, same, &same, "none", ""); entry.Verdict != "unchanged" || entry.Reason != "none" ||
+	if entry := correctionEntry(0, same, same, &same, "none", ""); entry.Verdict != "unchanged" || entry.Reason != "none" ||
 		entry.Note != "nothing" || entry.Edits != 0 || entry.Correction == nil || len(entry.Changes) != 0 {
 		t.Fatalf("an unchanged text: %+v", entry)
 	}
-	if entry := correctionEntry(0, same, &same, "", "fine as it is"); entry.Note != "fine as it is" {
+	if entry := correctionEntry(0, same, same, &same, "", "fine as it is"); entry.Note != "fine as it is" {
 		t.Fatalf("the editor's note is kept: %+v", entry)
 	}
 	fixed := "the cat sat."
-	entry := correctionEntry(2, same, &fixed, "", "")
+	entry := correctionEntry(2, same, same, &fixed, "", "")
 	if entry.Verdict != "corrected" || entry.Note != "corrected" || entry.Index != 2 || entry.Edits != 1 {
 		t.Fatalf("a corrected text: %+v", entry)
 	}
@@ -493,11 +493,11 @@ func TestCorrectionEntryVerdictsReasonsAndNotes(t *testing.T) {
 	if entry.WrongChars != 0 || entry.RightChars != 1 {
 		t.Fatalf("the characters on either side: %+v", entry)
 	}
-	if entry := correctionEntry(1, same, nil, "", ""); entry.Verdict != "uncorrected" || entry.Note != "no correction returned" ||
+	if entry := correctionEntry(1, same, same, nil, "", ""); entry.Verdict != "uncorrected" || entry.Note != "no correction returned" ||
 		entry.Correction != nil || entry.Reason != "" || len(entry.Changes) != 0 {
 		t.Fatalf("no usable answer: %+v", entry)
 	}
-	if entry := correctionEntry(1, "  ", nil, "", "empty output"); entry.Note != "empty output" {
+	if entry := correctionEntry(1, "  ", "  ", nil, "", "empty output"); entry.Note != "empty output" {
 		t.Fatalf("a blank text says so: %+v", entry)
 	}
 }
@@ -505,7 +505,7 @@ func TestCorrectionEntryVerdictsReasonsAndNotes(t *testing.T) {
 func TestCorrectTextsAsksAndDiffs(t *testing.T) {
 	editor := &scriptedEditor{}
 	texts := []string{"Hi howe are you??", "the cat sat on the mat", "howe??", "   "}
-	entries, err := CorrectTexts(editor, texts, "short greetings", "", DefaultCorrectionBatch)
+	entries, err := CorrectTexts(editor, texts, "short greetings", "", DefaultCorrectionBatch, Encoding{})
 	if err != nil {
 		t.Fatalf("CorrectTexts: %v", err)
 	}
@@ -562,14 +562,14 @@ func TestCorrectTextsAsksAndDiffs(t *testing.T) {
 	if empty := SummariseCorrections("given", "editor", nil, nil); empty.ChangeRate != nil || len(empty.Texts) != 0 {
 		t.Fatalf("nothing answered: no rate: %+v", empty)
 	}
-	if _, err := CorrectTexts(editor, texts, "", "", 0); err == nil {
+	if _, err := CorrectTexts(editor, texts, "", "", 0, Encoding{}); err == nil {
 		t.Fatal("a batch of zero is refused")
 	}
 }
 
 func TestCorrectTextsBatchesAndSkipsBlankBatches(t *testing.T) {
 	editor := &scriptedEditor{}
-	entries, err := CorrectTexts(editor, []string{"a howe", "b howe", " ", "c howe"}, "", "", 2)
+	entries, err := CorrectTexts(editor, []string{"a howe", "b howe", " ", "c howe"}, "", "", 2, Encoding{})
 	if err != nil {
 		t.Fatalf("CorrectTexts: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestCorrectTextsBatchesAndSkipsBlankBatches(t *testing.T) {
 	if entries[3].Index != 3 || entries[3].Verdict != "corrected" || entries[2].Verdict != "uncorrected" {
 		t.Fatalf("indices are global: %+v", entries)
 	}
-	if _, err := CorrectTexts(editor, []string{" ", ""}, "", "", 20); err != nil || len(editor.prompts) != 2 {
+	if _, err := CorrectTexts(editor, []string{" ", ""}, "", "", 20, Encoding{}); err != nil || len(editor.prompts) != 2 {
 		t.Fatalf("nothing to ask about: no call: %v %d", err, len(editor.prompts))
 	}
 }

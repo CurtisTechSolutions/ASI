@@ -80,6 +80,9 @@ type Review struct {
 	Critique string   `json:"critique"`
 	// Said is the line this text was a reply to, when it was one (chat.go).
 	Said string `json:"said,omitempty"`
+	// Spelled is what the reviewer read when it is not the text itself: the
+	// words a model of sounds spells (ReaderText).
+	Spelled string `json:"spelled,omitempty"`
 }
 
 // DefaultReviewBatch is how many texts go into one review call.
@@ -165,7 +168,13 @@ func numberOf(value any) (float64, bool) {
 // ReviewTexts asks the LLM to mark every text, in input order.  A blank text is
 // failed without asking; a text the answer said nothing usable about comes back
 // unrated, which still counts as a failure but records that nobody said why.
-func ReviewTexts(client LLMClient, texts []string, context, model string, threshold float64, batch int) ([]Review, error) {
+//
+// enc is the encoding of the model that wrote the texts: a model of sounds is
+// reviewed on the English its sounds spell (ReaderText), and an entry whose
+// words differ from its text carries them as Spelled; the zero Encoding reads
+// every text as it is.
+func ReviewTexts(client LLMClient, texts []string, context, model string, threshold float64, batch int,
+	enc Encoding) ([]Review, error) {
 	if batch < 1 {
 		return nil, fmt.Errorf("batch must be >= 1")
 	}
@@ -177,10 +186,12 @@ func ReviewTexts(client LLMClient, texts []string, context, model string, thresh
 			end = len(texts)
 		}
 		chunk := texts[start:end]
+		shown := make([]string, len(chunk))
 		var numbered []string
 		for i, text := range chunk {
-			if strings.TrimSpace(text) != "" {
-				numbered = append(numbered, fmt.Sprintf("[%d] %s", i, text))
+			shown[i] = ReaderText(enc, text)
+			if strings.TrimSpace(shown[i]) != "" {
+				numbered = append(numbered, fmt.Sprintf("[%d] %s", i, shown[i]))
 			}
 		}
 		parsed := map[int]Review{}
@@ -198,8 +209,11 @@ func ReviewTexts(client LLMClient, texts []string, context, model string, thresh
 		}
 		for i, text := range chunk {
 			entry := Review{Index: start + i, Text: text}
+			if shown[i] != text {
+				entry.Spelled = shown[i]
+			}
 			switch found, ok := parsed[i]; {
-			case strings.TrimSpace(text) == "":
+			case strings.TrimSpace(shown[i]) == "":
 				zero := 0.0
 				entry.Rating, entry.Verdict, entry.Critique = &zero, "fail", "empty output"
 			case ok:
@@ -283,13 +297,17 @@ type AdversarialReviewOptions struct {
 	Model       string // the reviewer's model, "" for the client's own
 	Seed        *int64
 	Batch       int
+	// Encoding says how the texts are read: a model of sounds is reviewed on
+	// the words it spells.  The texts it samples are read in the model's own,
+	// given ones as they are unless one is named here.
+	Encoding Encoding
 }
 
 // AdversarialReview lets the LLM judge the network's own output (or the given
 // texts) and splits it into good / bad sets, ready for a 2NRL pass or for the
 // negative network to be blamed with.
 func AdversarialReview(model *Model, client LLMClient, o AdversarialReviewOptions) (*ReviewResult, error) {
-	samples, source := o.Texts, "given"
+	samples, source, enc := o.Texts, "given", o.Encoding
 	if o.Texts == nil {
 		if model == nil {
 			return nil, fmt.Errorf("either a model to sample from or texts to review is required")
@@ -303,12 +321,15 @@ func AdversarialReview(model *Model, client LLMClient, o AdversarialReviewOption
 			return nil, err
 		}
 		samples, source = drawn, "model"
+		if enc.Unit == "" {
+			enc = model.Encoding()
+		}
 	}
 	batch := o.Batch
 	if batch < 1 {
 		batch = DefaultReviewBatch
 	}
-	reviews, err := ReviewTexts(client, samples, o.Context, o.Model, o.Threshold, batch)
+	reviews, err := ReviewTexts(client, samples, o.Context, o.Model, o.Threshold, batch, enc)
 	if err != nil {
 		return nil, err
 	}
@@ -421,6 +442,10 @@ type CorrectionEntry struct {
 	Edits      int      `json:"edits"`
 	WrongChars int      `json:"wrong_chars"`
 	RightChars int      `json:"right_chars"`
+	// Spelled is what the editor read when it is not the text itself: the
+	// words a model of sounds spells.  The diff, the verdict and the counts
+	// are over what it read.
+	Spelled string `json:"spelled,omitempty"`
 }
 
 // parsedCorrection is what the editor said about one text before the diff is taken.
@@ -518,9 +543,15 @@ func parseCorrections(raw string, count int) map[int]parsedCorrection {
 }
 
 // correctionEntry is one CorrectTexts result: the diff against the correction,
-// and what the editor said.  A nil correction is an uncorrected text.
-func correctionEntry(index int, text string, correction *string, reason, note string) CorrectionEntry {
+// and what the editor said.  A nil correction is an uncorrected text.  shown is
+// the text as the editor read it (the words a model of sounds spells): the
+// diff, the verdict and the counts are over it, and the entry carries it as
+// Spelled when it is not the text itself.
+func correctionEntry(index int, text, shown string, correction *string, reason, note string) CorrectionEntry {
 	entry := CorrectionEntry{Index: index, Text: text, Changes: []Change{}}
+	if shown != text {
+		entry.Spelled = shown
+	}
 	if correction == nil {
 		if note == "" {
 			note = "no correction returned"
@@ -528,7 +559,7 @@ func correctionEntry(index int, text string, correction *string, reason, note st
 		entry.Verdict, entry.Note = "uncorrected", note
 		return entry
 	}
-	for _, edit := range Edits(text, *correction) {
+	for _, edit := range Edits(shown, *correction) {
 		if edit.Op == "equal" {
 			continue
 		}
@@ -540,7 +571,7 @@ func correctionEntry(index int, text string, correction *string, reason, note st
 	}
 	entry.Correction = correction
 	entry.Edits = len(entry.Changes)
-	if *correction != text {
+	if *correction != shown {
 		entry.Verdict = "corrected"
 		entry.Reason = CorrectionReason(reason, note, entry.Changes)
 		if note == "" {
@@ -560,7 +591,12 @@ func correctionEntry(index int, text string, correction *string, reason, note st
 // text, in input order (see CorrectionEntry for what comes back).  Blank texts
 // are uncorrected without asking; a text the answer said nothing usable about
 // comes back uncorrected too, with Correction nil.
-func CorrectTexts(client LLMClient, texts []string, context, model string, batch int) ([]CorrectionEntry, error) {
+//
+// enc is the encoding of the model that wrote the texts: a model of sounds is
+// corrected in the English its sounds spell (ReaderText); the correction stays
+// English, and a model or a negative network reads it as the sounds it makes.
+// The zero Encoding reads every text as it is.
+func CorrectTexts(client LLMClient, texts []string, context, model string, batch int, enc Encoding) ([]CorrectionEntry, error) {
 	if batch < 1 {
 		return nil, fmt.Errorf("batch must be >= 1")
 	}
@@ -578,10 +614,12 @@ func CorrectTexts(client LLMClient, texts []string, context, model string, batch
 			end = len(texts)
 		}
 		chunk := texts[start:end]
+		shown := make([]string, len(chunk))
 		var numbered []string
 		for i, text := range chunk {
-			if strings.TrimSpace(text) != "" {
-				numbered = append(numbered, fmt.Sprintf("[%d] %s", i, text))
+			shown[i] = ReaderText(enc, text)
+			if strings.TrimSpace(shown[i]) != "" {
+				numbered = append(numbered, fmt.Sprintf("[%d] %s", i, shown[i]))
 			}
 		}
 		parsed := map[int]parsedCorrection{}
@@ -599,13 +637,13 @@ func CorrectTexts(client LLMClient, texts []string, context, model string, batch
 		}
 		for i, text := range chunk {
 			switch found, ok := parsed[i]; {
-			case strings.TrimSpace(text) == "":
-				out = append(out, correctionEntry(start+i, text, nil, "", "empty output"))
+			case strings.TrimSpace(shown[i]) == "":
+				out = append(out, correctionEntry(start+i, text, shown[i], nil, "", "empty output"))
 			case ok:
 				correction := found.correction
-				out = append(out, correctionEntry(start+i, text, &correction, found.reason, found.note))
+				out = append(out, correctionEntry(start+i, text, shown[i], &correction, found.reason, found.note))
 			default:
-				out = append(out, correctionEntry(start+i, text, nil, "", ""))
+				out = append(out, correctionEntry(start+i, text, shown[i], nil, "", ""))
 			}
 		}
 	}
@@ -643,6 +681,10 @@ type AdversarialCorrectionOptions struct {
 	Model       string // the editor's model, "" for the client's own
 	Seed        *int64
 	Batch       int
+	// Encoding says how the texts are read: a model of sounds is corrected in
+	// the words it spells.  The texts it samples are read in the model's own,
+	// given ones as they are unless one is named here.
+	Encoding Encoding
 }
 
 // AdversarialCorrection lets the LLM copy-edit the network's own output (or
@@ -650,7 +692,7 @@ type AdversarialCorrectionOptions struct {
 // changed, the ones it handed back and the ones it said nothing usable about -
 // ready for TeachCorrections.
 func AdversarialCorrection(model *Model, client LLMClient, o AdversarialCorrectionOptions) (*CorrectionResult, error) {
-	samples, source := o.Texts, "given"
+	samples, source, enc := o.Texts, "given", o.Encoding
 	if o.Texts == nil {
 		if model == nil {
 			return nil, fmt.Errorf("either a model to sample from or texts to correct is required")
@@ -664,12 +706,15 @@ func AdversarialCorrection(model *Model, client LLMClient, o AdversarialCorrecti
 			return nil, err
 		}
 		samples, source = drawn, "model"
+		if enc.Unit == "" {
+			enc = model.Encoding()
+		}
 	}
 	batch := o.Batch
 	if batch < 1 {
 		batch = DefaultCorrectionBatch
 	}
-	corrections, err := CorrectTexts(client, samples, o.Context, o.Model, batch)
+	corrections, err := CorrectTexts(client, samples, o.Context, o.Model, batch, enc)
 	if err != nil {
 		return nil, err
 	}
@@ -823,15 +868,17 @@ func firstLine(raw string) string {
 // - plus Overall, the judge's verdict on the conversation itself (nil when it
 // did not give one).
 func ReviewConversation(
-	client LLMClient, exchanges []Exchange, topic, model string, threshold float64,
+	client LLMClient, exchanges []Exchange, topic, model string, threshold float64, enc Encoding,
 ) (*ReviewResult, error) {
 	replies := make([]string, 0, len(exchanges))
+	shown := make([]string, len(exchanges)) // the judge reads a model of sounds' replies in the words they spell
 	blocks := []string{}
 	for i, exchange := range exchanges {
 		replies = append(replies, exchange.Reply)
-		if strings.TrimSpace(exchange.Reply) != "" {
+		shown[i] = ReaderText(enc, exchange.Reply)
+		if strings.TrimSpace(shown[i]) != "" {
 			blocks = append(blocks, fmt.Sprintf("[%d] %s: %s\n    %s: %s", i, ChatSpeakers[0], exchange.Said,
-				ChatSpeakers[1], exchange.Reply))
+				ChatSpeakers[1], shown[i]))
 		}
 	}
 	parsed := map[int]Review{}
@@ -853,8 +900,11 @@ func ReviewConversation(
 	reviews := make([]Review, 0, len(exchanges))
 	for i, exchange := range exchanges {
 		entry := Review{Index: i, Text: exchange.Reply, Said: exchange.Said}
+		if shown[i] != exchange.Reply {
+			entry.Spelled = shown[i]
+		}
 		switch found, ok := parsed[i]; {
-		case strings.TrimSpace(exchange.Reply) == "":
+		case strings.TrimSpace(shown[i]) == "":
 			zero := 0.0
 			entry.Rating, entry.Verdict, entry.Critique = &zero, "fail", "it said nothing"
 		case ok:

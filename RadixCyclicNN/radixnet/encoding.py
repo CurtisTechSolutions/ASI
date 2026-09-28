@@ -468,6 +468,19 @@ DEFAULT_ENCODING = Encoding()
 # ---------------------------------------------------------------------------
 
 
+def reader_text(encoding: Encoding | None, text: str) -> str:
+    """What a reader - a teacher, a reviewer, a partner - is shown of a text a model wrote.
+
+    A model of sounds is shown the English its sounds spell (:meth:`Encoding.spell`), so an LLM marks,
+    corrects and answers words rather than ``DH.AH0 # K.AE1.T``; every other text, and every text of a
+    caller that names no encoding, is shown as it is.  What the reader writes back stays in words: a model
+    of sounds reads it as the sounds it makes.
+    """
+    if encoding is None or not encoding.phonetic:
+        return text
+    return encoding.spell(text)
+
+
 def spelled_prediction(encoding: Encoding, full_text: str, continuation: str) -> dict:
     """The words a prediction of a model of sounds spells: ``{"spelled", "spelled_continuation"}``.
 
@@ -479,6 +492,30 @@ def spelled_prediction(encoding: Encoding, full_text: str, continuation: str) ->
     if not encoding.phonetic:
         return {}
     return {"spelled": encoding.spell(full_text), "spelled_continuation": encoding.spell_tail(full_text, continuation)}
+
+
+def spelled_completion(encoding: Encoding, prefix: str, full_text: str, continuation: str) -> tuple[str, str]:
+    """A completion of ``prefix`` by a model of sounds, as a reader is shown it: ``(prefix, continuation)`` in words.
+
+    The sentence is the two joined.  When the sounds kept the prefix's words,
+    the prefix is the one given - capitals, punctuation and trailing space as
+    they were - and the continuation is the words after it (a pause that
+    attaches to the prefix's last word stays on it: ``"The cat"`` + ``"."``);
+    when the continuation finished a word the prefix began, both are cut from
+    the words of the whole (:meth:`Encoding.spell_tail`), so the word it
+    finished is shown whole on the continuation's side.  Any other encoding is
+    its own spelling: ``(prefix, continuation)`` as they are.
+    """
+    if not encoding.phonetic:
+        return prefix, continuation
+    tail = encoding.spell_tail(full_text, continuation)
+    whole = encoding.spell(full_text)
+    head = whole[: len(whole) - len(tail)] if whole.endswith(tail) else ""
+    if [w.lower() for w in split_words(head)] != [w.lower() for w in split_words(prefix)]:
+        return head, tail
+    if not tail or tail[0].isspace():  # a word of its own after the prefix, which keeps its trailing space
+        return prefix, tail.lstrip()
+    return prefix.rstrip(), tail
 
 
 def spelled_thought(encoding: Encoding, thought: dict | None) -> dict | None:

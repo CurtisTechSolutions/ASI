@@ -411,7 +411,15 @@ func VoiceTurn(data []byte, enc Encoding, o VoiceOptions, history []Line, parts 
 		if ollama == nil {
 			ollamaError = "no Ollama to ask"
 		} else {
-			transcript := append(slices.Clone(history), Line{Speaker: VoiceSpeakers[0], Text: heard.Transcript})
+			// Ollama reads the model's lines as words: a model of sounds is heard in the words it spells
+			transcript := make([]Line, 0, len(history)+1)
+			for _, line := range history {
+				if line.Speaker == VoiceSpeakers[1] {
+					line.Text = Spelled(enc, line.Text)
+				}
+				transcript = append(transcript, line)
+			}
+			transcript = append(transcript, Line{Speaker: VoiceSpeakers[0], Text: heard.Transcript})
 			text, err := ReplyLine(ollama, transcript, ReplyLineOptions{
 				Persona: o.Persona, Topic: o.Topic, Speakers: VoiceSpeakers, Temperature: o.OllamaTemperature,
 			})

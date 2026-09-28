@@ -108,6 +108,7 @@ from typing import Any
 
 from . import diff
 from .beam import path_probability
+from .encoding import Encoding, spelled_completion
 from .llm import (
     DEFAULT_PROVIDER,
     PROVIDERS,
@@ -467,7 +468,7 @@ class Lesson:
     attempt: int  # 0-based: attempt 0 is the cheapest path, later ones are samples
     mode: str
     continuation: str
-    sentence: str  # cue(prefix) + continuation - what is graded and, when it passes, learned
+    sentence: str  # the prefix + continuation, in words - what is graded and, when it passes, learned
     cost: float = 0.0
     probability: float = 1.0
     reached_end: bool = False
@@ -477,10 +478,26 @@ class Lesson:
     """Why the sentence is wrong: the rule behind the mistake (:func:`explain_mistakes`)."""
     variants: list["Correction"] = dataclasses.field(default_factory=list)
     """More sentences that make the same mistake, each with its correct form - the negative network's lesson."""
+    said: str = ""
+    """The sentence in the model's own units when they are not the words the teacher read: a model of sounds
+    (``DH.AH0 # K.AE1.T``) is marked on the English it spells (``sentence``) and learns from what it said."""
 
     @property
     def empty(self) -> bool:
         return not self.continuation.strip()
+
+    @property
+    def own(self) -> str:
+        """What the network wrote, in its own units: what it is rewarded or punished for, and what is blamed."""
+        return self.said or self.sentence
+
+    @property
+    def prefix(self) -> str:
+        """The part of ``sentence`` before the continuation - the exercise's cue, unless the network finished a
+        word the cue began (a model of sounds can), in which case it is the words it kept."""
+        if self.continuation and self.sentence.endswith(self.continuation):
+            return self.sentence[: len(self.sentence) - len(self.continuation)]
+        return self.exercise.cue
 
     @property
     def changes(self) -> list[dict]:
@@ -496,6 +513,7 @@ class Lesson:
             "probability": self.probability, "reached_end": self.reached_end, "seconds": self.seconds,
             "grade": self.grade.to_dict(), "changes": self.changes, "why": self.why,
             "variants": [v.to_dict() for v in self.variants],
+            **({"said": self.said} if self.said else {}),
         }
 
 
@@ -635,7 +653,7 @@ def grade_completions(
         if not asked:
             continue
         body = "\n".join(
-            f"[{i}] <<{lesson.exercise.cue}>>{lesson.continuation}"
+            f"[{i}] <<{lesson.prefix}>>{lesson.continuation}"
             + (f"   (drilling: {lesson.exercise.focus})" if lesson.exercise.focus else "")
             for i, lesson in asked
         )
@@ -1559,12 +1577,17 @@ class TutorTrainer:
             exercise.cue, length=cfg.length, mode=mode, temperature=cfg.temperature,
             max_length=cfg.max_length, to_end=cfg.to_end and mode != "sample", beam=cfg.beam,
         )
-        continuation = result.text
+        prefix, continuation, said = exercise.cue, result.text, ""
+        encoding = getattr(self.model, "encoding", None)
+        if encoding is not None and encoding.phonetic:
+            # a model of sounds: the teacher marks the words they spell, and the model learns from what it said
+            prefix, continuation = spelled_completion(encoding, exercise.cue, result.full_text, result.text)
+            said = result.full_text
         return Lesson(
             exercise=exercise, attempt=attempt, mode=mode, continuation=continuation,
-            sentence=exercise.cue + continuation, cost=result.cost,
+            sentence=prefix + continuation, cost=result.cost,
             probability=path_probability(result), reached_end=result.reached_end,
-            seconds=time.perf_counter() - t0,
+            seconds=time.perf_counter() - t0, said=said,
         )
 
     def grade(self, lessons: list[Lesson], thinking: list[str] | None = None) -> list[Lesson]:
@@ -1649,6 +1672,10 @@ class TutorTrainer:
             return 0.0
         return max(0.0, min(1.0, grade.score / 10.0))
 
+    def _encoding(self) -> Encoding:
+        """The network's encoding (the character trigram for a stand-in without one)."""
+        return getattr(self.model, "encoding", None) or Encoding()
+
     def diffs(self) -> bool:
         """Is a correction taught from its diff (``diff_corrections``, and a model that can learn one)?"""
         return bool(self.config.diff_corrections) and callable(getattr(self.model, "correct", None))
@@ -1668,7 +1695,7 @@ class TutorTrainer:
             grade = lesson.grade
             if grade.passed or not lesson.continuation.strip() or not grade.correction.strip():
                 continue
-            pair = (lesson.sentence.strip(), grade.correction.strip())
+            pair = (lesson.own.strip(), grade.correction.strip())
             weight = self.weight_of(grade)
             if pair in seen:  # the same mistake twice (several attempts) keeps its worst mark
                 at = seen[pair]
@@ -1697,16 +1724,16 @@ class TutorTrainer:
         for lesson in lessons:
             grade = lesson.grade
             if grade.passed:
-                if lesson.sentence.strip():
-                    good.append((lesson.sentence.strip(), self.reward_of(grade)))
+                if lesson.own.strip():
+                    good.append((lesson.own.strip(), self.reward_of(grade)))
                 continue
-            pair = (lesson.sentence.strip(), grade.correction.strip())
+            pair = (lesson.own.strip(), grade.correction.strip())
             if pair in diffed:  # the diff teaches this one, sentence against correction
                 if cfg.teach_answer and lesson.exercise.answer.strip():
                     good.append((lesson.exercise.answer.strip(), TEACHER_WEIGHT))
                 continue
             if lesson.continuation.strip():  # nothing written is nothing to punish - the prefix itself is correct
-                bad.append(lesson.sentence.strip())
+                bad.append(lesson.own.strip())
                 bad_weights.append(self.weight_of(grade))
             if grade.correction.strip():
                 good.append((grade.correction.strip(), TEACHER_WEIGHT))
@@ -1902,7 +1929,8 @@ class TutorTrainer:
                 "mean_weight": statistics.fmean(bad_weights) if bad_weights else None,
                 "mean_reward": statistics.fmean(good_weights) if good_weights else None,
                 "corrections": len(corrections),
-                "edits": sum(len(diff.summary(c.wrong, c.right, limit=0)) for c in corrections),
+                # counted in the model's units, as its own correct() counts them when it learns
+                "edits": sum(len(diff.summary(c.wrong, c.right, limit=0, encoding=self._encoding())) for c in corrections),
                 "penalised": 0, "rewarded": 0, "marked_correct": 0, "marked_incorrect": 0,
             }
         if self.config.twonrl_per != "lesson":

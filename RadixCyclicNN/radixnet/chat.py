@@ -208,13 +208,22 @@ class Chat:
 
     # -- one conversation ----------------------------------------------------
 
+    def _spelled(self, text: str) -> str:
+        """What the partner and the judge read of the model's line: the words a model of sounds spells."""
+        from .encoding import reader_text
+
+        return reader_text(getattr(self.model, "encoding", None), text)
+
     def _partner_line(self, transcript: list[tuple[str, str]]) -> str:
         from .ollama import chat_line
 
         cfg = self.config
+        # the partner reads the model's lines as words; what it writes is words, which the model reads as it does any
+        heard = [(speaker, self._spelled(text) if speaker == DEFAULT_SPEAKERS[1] else text)
+                 for speaker, text in transcript]
         with self._external():  # only the partner's thinking happens outside the lock
             return chat_line(
-                self.client, transcript, topic=cfg.topic, persona=cfg.persona, speakers=DEFAULT_SPEAKERS,
+                self.client, heard, topic=cfg.topic, persona=cfg.persona, speakers=DEFAULT_SPEAKERS,
                 model=cfg.partner_model or None, temperature=cfg.partner_temperature,
             )
 
@@ -269,12 +278,14 @@ class Chat:
             exchanges.append((line, turn.text))
             heard.remember(turn.text, turn.reply if turn.context else "")
             if progress is not None:
+                spelled = self._spelled(turn.text)
                 progress({
                     "kind": "exchange", "conversation": self.number, "exchange": index + 1,
                     "said": line, "reply": turn.text, "context": turn.context, "fresh": turn.fresh,
                     "repeat": turn.repeat, "stutter": turn.stutter, "vetoed": turn.vetoed, "cost": turn.cost,
                     "probability": turn.probability,
                     "rethink": turn.rethink.to_dict() if turn.rethink is not None else None,
+                    **({"spelled": spelled} if spelled != turn.text else {}),
                 })
             if index == cfg.turns - 1:
                 break  # the last word is the model's: no line after it to reply to
@@ -305,7 +316,7 @@ class Chat:
                 review = review_conversation(
                     self.judge_client, held["exchanges"], topic=cfg.topic,
                     model=cfg.judge_model or cfg.partner_model or None, threshold=cfg.threshold,
-                    speakers=DEFAULT_SPEAKERS,
+                    speakers=DEFAULT_SPEAKERS, encoding=getattr(self.model, "encoding", None),
                 )
         taught: dict = {}
         if self.negative is not None and cfg.blame and review["reviews"]:
@@ -321,7 +332,7 @@ class Chat:
             "topic": cfg.topic,
             "judge": review.get("model"),
             "threshold": float(cfg.threshold),
-            "transcript": [{"speaker": speaker, "text": text} for speaker, text in held["transcript"]],
+            "transcript": [self._line(speaker, text) for speaker, text in held["transcript"]],
             "exchanges": len(held["exchanges"]),
             "reviews": review.get("reviews") or [],
             "mean_rating": review.get("mean_rating"),
@@ -344,6 +355,15 @@ class Chat:
         }
         self.history.append(record)
         return record
+
+    def _line(self, speaker: str, text: str) -> dict:
+        """One line of the transcript record; a line of a model of sounds carries the words it spells."""
+        line = {"speaker": speaker, "text": text}
+        if speaker == DEFAULT_SPEAKERS[1]:
+            spelled = self._spelled(text)
+            if spelled != text:
+                line["spelled"] = spelled
+        return line
 
     # -- learning ------------------------------------------------------------
 

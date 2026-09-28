@@ -353,7 +353,7 @@ type Lesson struct {
 	Attempt      int      `json:"attempt"` // 0-based: attempt 0 uses the configured mode, later ones are sampled
 	Mode         string   `json:"mode"`
 	Continuation string   `json:"continuation"`
-	Sentence     string   `json:"sentence"` // Cue(prefix) + continuation: what is graded and, when it passes, learned
+	Sentence     string   `json:"sentence"` // the prefix + continuation, in words: what is graded and, when it passes, learned
 	Cost         float64  `json:"cost"`
 	Probability  float64  `json:"probability"`
 	ReachedEnd   bool     `json:"reached_end"`
@@ -366,10 +366,33 @@ type Lesson struct {
 	// Variants are more sentences that make the same mistake, each with its
 	// correct form - the negative network's lesson, and nothing else's.
 	Variants []TutorCorrection `json:"variants"`
+	// Said is the sentence in the model's own units when they are not the
+	// words the teacher read: a model of sounds (DH.AH0 # K.AE1.T) is marked on
+	// the English it spells (Sentence) and learns from what it said.
+	Said string `json:"said,omitempty"`
 }
 
 // Empty reports whether the network wrote nothing at all.
 func (l *Lesson) Empty() bool { return strings.TrimSpace(l.Continuation) == "" }
+
+// Own is what the network wrote, in its own units: what it is rewarded or
+// punished for, and what is blamed.
+func (l *Lesson) Own() string {
+	if l.Said != "" {
+		return l.Said
+	}
+	return l.Sentence
+}
+
+// Prefix is the part of Sentence before the continuation - the exercise's
+// cue, unless the network finished a word the cue began (a model of sounds
+// can), in which case it is the words it kept.
+func (l *Lesson) Prefix() string {
+	if l.Continuation != "" && strings.HasSuffix(l.Sentence, l.Continuation) {
+		return l.Sentence[:len(l.Sentence)-len(l.Continuation)]
+	}
+	return l.Exercise.Cue()
+}
 
 // ChangesOfLesson is what the teacher changed in one lesson (empty when it passed or was left uncorrected).
 func ChangesOfLesson(lesson *Lesson) []Edit {
@@ -572,7 +595,7 @@ func GradeCompletions(client LLMClient, lessons []*Lesson, o GradeOptions) error
 				continue
 			}
 			asked = append(asked, i)
-			line := fmt.Sprintf("[%d] <<%s>>%s", i, lesson.Exercise.Cue(), lesson.Continuation)
+			line := fmt.Sprintf("[%d] <<%s>>%s", i, lesson.Prefix(), lesson.Continuation)
 			if lesson.Exercise.Focus != "" {
 				line += "   (drilling: " + lesson.Exercise.Focus + ")"
 			}
@@ -1253,11 +1276,17 @@ func (t *TutorTrainer) Complete(exercise Exercise, attempt int) (*Lesson, error)
 	if err != nil {
 		return nil, err
 	}
+	prefix, continuation, said := exercise.Cue(), prediction.Text, ""
+	if enc := t.Model.Encoding(); enc.Unit.Phonetic() {
+		// a model of sounds: the teacher marks the words they spell, and the model learns from what it said
+		prefix, continuation = SpelledCompletion(enc, exercise.Cue(), prediction.FullText, prediction.Text)
+		said = prediction.FullText
+	}
 	return &Lesson{
-		Exercise: exercise, Attempt: attempt, Mode: mode, Continuation: prediction.Text,
-		Sentence: exercise.Cue() + prediction.Text, Cost: prediction.Cost,
+		Exercise: exercise, Attempt: attempt, Mode: mode, Continuation: continuation,
+		Sentence: prefix + continuation, Cost: prediction.Cost,
 		Probability: prediction.Probability(), ReachedEnd: prediction.ReachedEnd,
-		Seconds: time.Since(started).Seconds(),
+		Seconds: time.Since(started).Seconds(), Said: said,
 	}, nil
 }
 
@@ -1356,7 +1385,7 @@ func (t *TutorTrainer) CorrectionsOf(lessons []*Lesson) []TutorCorrection {
 			continue
 		}
 		correction := TutorCorrection{
-			Wrong: strings.TrimSpace(lesson.Sentence), Right: strings.TrimSpace(grade.Correction),
+			Wrong: strings.TrimSpace(lesson.Own()), Right: strings.TrimSpace(grade.Correction),
 			Weight: t.WeightOf(grade),
 		}
 		key := correction.Wrong + "\x00" + correction.Right
@@ -1391,19 +1420,19 @@ func (t *TutorTrainer) TextsOf(lessons []*Lesson) Graded {
 	for _, lesson := range lessons {
 		grade := lesson.Grade
 		if grade.Passed {
-			if strings.TrimSpace(lesson.Sentence) != "" {
-				pairs = append(pairs, weightedText{strings.TrimSpace(lesson.Sentence), t.RewardOf(grade)})
+			if strings.TrimSpace(lesson.Own()) != "" {
+				pairs = append(pairs, weightedText{strings.TrimSpace(lesson.Own()), t.RewardOf(grade)})
 			}
 			continue
 		}
-		if diffed[strings.TrimSpace(lesson.Sentence)+"\x00"+strings.TrimSpace(grade.Correction)] {
+		if diffed[strings.TrimSpace(lesson.Own())+"\x00"+strings.TrimSpace(grade.Correction)] {
 			if t.Config.TeachAnswer && strings.TrimSpace(lesson.Exercise.Answer) != "" {
 				pairs = append(pairs, weightedText{strings.TrimSpace(lesson.Exercise.Answer), TeacherWeight})
 			}
 			continue // the diff teaches this one, sentence against correction
 		}
 		if strings.TrimSpace(lesson.Continuation) != "" { // nothing written is nothing to punish
-			out.Bad = append(out.Bad, strings.TrimSpace(lesson.Sentence))
+			out.Bad = append(out.Bad, strings.TrimSpace(lesson.Own()))
 			out.BadWeights = append(out.BadWeights, t.WeightOf(grade))
 		}
 		if strings.TrimSpace(grade.Correction) != "" {
@@ -1774,8 +1803,8 @@ func (t *TutorTrainer) learnLessons(lessons []*Lesson, drills []string) (map[str
 	if !cfg.Learn { // a dry run: what would have been learned, without touching the network
 		graded := withDrills(t.TextsOf(lessons))
 		edits := 0
-		for _, c := range graded.Corrections {
-			edits += len(DiffSummary(c.Wrong, c.Right, 0))
+		for _, c := range graded.Corrections { // counted in the model's units, as its Correct counts them
+			edits += len(t.Model.Encoding().DiffSummary(c.Wrong, c.Right, 0))
 		}
 		return map[string]any{
 			"bad": len(graded.Bad), "good": len(graded.Good), "action": nil, "neg_loss": nil, "pos_loss": nil,

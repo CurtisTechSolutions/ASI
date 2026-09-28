@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/CurtisTechSolutions/ASI/PhoneticTokenizer/go/phonetok"
@@ -193,6 +194,60 @@ func SpelledPrediction(enc Encoding, fullText, continuation string) map[string]a
 		return map[string]any{}
 	}
 	return map[string]any{"spelled": enc.Spell(fullText), "spelled_continuation": enc.SpellTail(fullText, continuation)}
+}
+
+// ReaderText is what a reader - a teacher, a reviewer, a partner - is shown
+// of a text a model wrote: a model of sounds is shown the English its sounds
+// spell, so an LLM marks, corrects and answers words rather than
+// DH.AH0 # K.AE1.T; every other text is shown as it is.  What the reader
+// writes back stays in words: a model of sounds reads it as the sounds it
+// makes.  Python's reader_text.
+func ReaderText(enc Encoding, text string) string {
+	if !enc.Unit.Phonetic() {
+		return text
+	}
+	return enc.Spell(text)
+}
+
+// SpelledCompletion is a completion of prefix by a model of sounds, as a
+// reader is shown it: the prefix and the continuation in words, the sentence
+// being the two joined.  When the sounds kept the prefix's words, the prefix
+// is the one given - capitals, punctuation and trailing space as they were -
+// and the continuation is the words after it (a pause that attaches to the
+// prefix's last word stays on it); when the continuation finished a word the
+// prefix began, both are cut from the words of the whole (SpellTail).  Any
+// other encoding is its own spelling.  Python's spelled_completion.
+func SpelledCompletion(enc Encoding, prefix, fullText, continuation string) (string, string) {
+	if !enc.Unit.Phonetic() {
+		return prefix, continuation
+	}
+	tail := enc.SpellTail(fullText, continuation)
+	whole := enc.Spell(fullText)
+	head := ""
+	if strings.HasSuffix(whole, tail) {
+		head = whole[:len(whole)-len(tail)]
+	}
+	if !sameWords(head, prefix) {
+		return head, tail
+	}
+	if first, _ := utf8.DecodeRuneInString(tail); tail == "" || unicode.IsSpace(first) {
+		return prefix, strings.TrimLeftFunc(tail, unicode.IsSpace) // a word of its own after the prefix
+	}
+	return strings.TrimRightFunc(prefix, unicode.IsSpace), tail
+}
+
+// sameWords reports whether two texts hold the same words, capitals aside.
+func sameWords(a, b string) bool {
+	x, y := strings.Fields(a), strings.Fields(b)
+	if len(x) != len(y) {
+		return false
+	}
+	for i := range x {
+		if strings.ToLower(x[i]) != strings.ToLower(y[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // SpelledThought is a thought's record (Thought.ToDict) with "spelled" beside

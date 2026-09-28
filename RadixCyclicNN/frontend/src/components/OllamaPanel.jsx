@@ -744,7 +744,9 @@ function ReviewResultCard({ review, status, heldBad, heldGood, onClearBad, onCle
                       <td>
                         <span className={`badge ${verdict}`}>{verdict}</span>
                       </td>
-                      <td className="wrap">{String(r.text ?? "")}</td>
+                      <td className="wrap">
+                        <SpelledText record={r} />
+                      </td>
                       <td className="wrap">{String(r.critique ?? "")}</td>
                     </tr>
                   );
@@ -1147,6 +1149,26 @@ function changesOf(entry) {
  * side, a deleted letter on the right side) is shown as a caret at the spot,
  * so the position of the mistake is visible even when its characters are not.
  */
+/** What a model of sounds said, in its own units, beneath the words the LLM read. */
+function Sounds({ text }) {
+  return (
+    <span className="sounds" title="what the model said, in its own units">
+      {String(text ?? "")}
+    </span>
+  );
+}
+
+/** A reviewed text as the reviewer read it: a model of sounds' words, with the sounds beneath them. */
+function SpelledText({ record }) {
+  if (typeof record.spelled !== "string") return String(record.text ?? "");
+  return (
+    <>
+      {record.spelled}
+      <Sounds text={record.text} />
+    </>
+  );
+}
+
 function MarkedText({ text, changes, side }) {
   const value = String(text ?? "");
   const key = side === "wrong" ? "at" : "to";
@@ -1373,7 +1395,9 @@ function CorrectResultCard({ result }) {
                         <span className={`badge ${verdict}`}>{verdict}</span>
                       </td>
                       <td className="wrap">
-                        <MarkedText text={c.text} changes={changes} side="wrong" />
+                        {/* the editor's changes are over what it read: a model of sounds' words */}
+                        <MarkedText text={typeof c.spelled === "string" ? c.spelled : c.text} changes={changes} side="wrong" />
+                        {typeof c.spelled === "string" ? <Sounds text={c.text} /> : null}
                       </td>
                       <td className="wrap">
                         {typeof c.correction === "string" ? (

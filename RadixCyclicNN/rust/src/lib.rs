@@ -132,6 +132,9 @@ pub mod resonance;
 pub mod schedule;
 // Chrome over WebDriver behind the web tools (`--browser`)
 pub mod browser;
+// the teaching loops of a model of sounds show the LLM words
+#[cfg(test)]
+mod teaching_in_words;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;

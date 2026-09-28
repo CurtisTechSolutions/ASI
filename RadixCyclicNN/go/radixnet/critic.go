@@ -174,7 +174,9 @@ func (c *Critic) RunRound() (map[string]any, error) {
 	// call that touches nothing of ours.
 	var reviews []Review
 	if err := c.external(func() error {
-		out, err := ReviewTexts(c.Client, samples, cfg.Context, cfg.ReviewerModel, cfg.Threshold, DefaultReviewBatch)
+		// a model of sounds is reviewed on the words it spells
+		out, err := ReviewTexts(c.Client, samples, cfg.Context, cfg.ReviewerModel, cfg.Threshold, DefaultReviewBatch,
+			c.Model.Encoding())
 		reviews = out
 		return err
 	}); err != nil {
@@ -222,7 +224,9 @@ func (c *Critic) correctRound(samples []string, started time.Time) (map[string]a
 	cfg := c.Config
 	var corrections []CorrectionEntry
 	if err := c.external(func() error {
-		out, err := CorrectTexts(c.Client, samples, cfg.Context, cfg.ReviewerModel, DefaultCorrectionBatch)
+		// a model of sounds is corrected in the words it spells
+		out, err := CorrectTexts(c.Client, samples, cfg.Context, cfg.ReviewerModel, DefaultCorrectionBatch,
+			c.Model.Encoding())
 		corrections = out
 		return err
 	}); err != nil {

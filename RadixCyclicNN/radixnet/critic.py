@@ -164,6 +164,7 @@ class Critic:
             reviews = review_texts(
                 self.client, samples, context=cfg.context or None,
                 model=cfg.reviewer_model or None, threshold=cfg.threshold,
+                encoding=getattr(self.model, "encoding", None),  # a model of sounds is reviewed on its words
             )
         review = summarise_reviews(
             "model", cfg.reviewer_model or self.client.model, cfg.threshold, samples, reviews,
@@ -205,6 +206,7 @@ class Critic:
         with self._external():
             corrections = correct_texts(
                 self.client, samples, context=cfg.context or None, model=cfg.reviewer_model or None,
+                encoding=getattr(self.model, "encoding", None),  # a model of sounds is corrected in its words
             )
         result = summarise_corrections("model", cfg.reviewer_model or self.client.model, samples, corrections)
         taught = blame_module.teach_corrections(

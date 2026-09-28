@@ -49,6 +49,7 @@ use crate::blame::{TeachOptions, TeachReport};
 use crate::cli::{negative_stats, Ctx};
 use crate::dialogue::{repeats, reply, Heard, ReplyOptions, Turn, EXPLORE};
 use crate::duo::{Filter, FilterConfig};
+use crate::encoding::Encoding;
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
 use crate::kinds;
@@ -57,6 +58,7 @@ use crate::llm::{new_client, normalise_provider, LlmClient, CHATGPT, DEFAULT_PRO
 use crate::model::Model;
 use crate::mt19937::Mt19937;
 use crate::negative::python_repr;
+use crate::phonetic::reader_text;
 use crate::radix::Feedback;
 use crate::review::{chat_line, review_conversation, teach_reviews, Review, ReviewSummary, CHAT_SPEAKERS};
 use crate::service::Service;
@@ -334,12 +336,25 @@ impl<'a> Chat<'a> {
     }
 
     /// The partner's next line; only the partner's thinking happens with
-    /// nothing locked.
-    fn partner_line(&self, transcript: &[(String, String)]) -> Result<String, String> {
+    /// nothing locked.  The partner reads the model's lines as words (a model
+    /// of sounds, the words they spell); what it writes is words, which the
+    /// model reads as it reads any.
+    fn partner_line(&self, transcript: &[(String, String)], enc: Encoding) -> Result<String, String> {
         let cfg = &self.config;
+        let heard: Vec<(String, String)> = transcript
+            .iter()
+            .map(|(speaker, text)| {
+                let text = if speaker == CHAT_SPEAKERS[1] {
+                    reader_text(enc, text)
+                } else {
+                    text.clone()
+                };
+                (speaker.clone(), text)
+            })
+            .collect();
         Ok(chat_line(
             self.client,
-            transcript,
+            &heard,
             &cfg.topic,
             &cfg.persona,
             &cfg.partner_model,
@@ -358,12 +373,13 @@ impl<'a> Chat<'a> {
         };
         // the pair guards only when it has something to veto with
         let guarding = cfg.guard && nets.with_negative(|n| crate::duo::ready(n))? == Some(true);
+        let enc = nets.with_model(|m| m.encoding());
         let mut judged: Vec<(String, bool)> = Vec::new();
         let mut held = Held::default();
         let mut heard = Heard::new(&[]); // what has been said, on both sides
         let mut line = cfg.opening.trim().to_string();
         if line.is_empty() {
-            line = self.partner_line(&held.transcript)?;
+            line = self.partner_line(&held.transcript, enc)?;
         }
         if line.is_empty() {
             held.stalled = "the partner said nothing".to_string();
@@ -435,7 +451,7 @@ impl<'a> Chat<'a> {
             held.transcript.push((CHAT_SPEAKERS[1].to_string(), turn.text.clone()));
             held.exchanges.push((line.clone(), turn.text.clone()));
             heard.remember(&turn.text, if turn.context.is_empty() { "" } else { &turn.reply });
-            let record = Json::obj([
+            let mut record = Json::obj([
                 ("kind", Json::str("exchange")),
                 ("conversation", Json::Int(self.number as i64)),
                 ("exchange", Json::Int(index as i64 + 1)),
@@ -453,12 +469,16 @@ impl<'a> Chat<'a> {
                     turn.rethink.as_ref().map(|r| r.to_json()).unwrap_or(Json::Null),
                 ),
             ]);
+            let spelled = reader_text(enc, &turn.text);
+            if let (Json::Obj(pairs), true) = (&mut record, spelled != turn.text) {
+                pairs.push(("spelled".to_string(), Json::str(spelled)));
+            }
             (self.progress)(&record);
             held.turns.push(turn);
             if index + 1 == cfg.turns {
                 break; // the last word is the model's: no line after it to reply to
             }
-            line = self.partner_line(&held.transcript)?;
+            line = self.partner_line(&held.transcript, enc)?;
             if line.is_empty() {
                 held.stalled = "the partner went quiet".to_string();
                 break;
@@ -481,6 +501,7 @@ impl<'a> Chat<'a> {
         let started = Instant::now();
         let held = self.converse(nets)?;
         let cfg = self.config.clone();
+        let enc = nets.with_model(|m| m.encoding());
         let review: Option<ReviewSummary> = if held.exchanges.is_empty() {
             None
         } else {
@@ -491,6 +512,7 @@ impl<'a> Chat<'a> {
                 &cfg.topic,
                 cfg.judge_model(),
                 cfg.threshold,
+                enc,
             )?)
         };
         let reviews: &[Review] = review.as_ref().map(|r| r.reviews.as_slice()).unwrap_or(&[]);
@@ -533,10 +555,16 @@ impl<'a> Chat<'a> {
                     held.transcript
                         .iter()
                         .map(|(speaker, text)| {
-                            Json::obj([
-                                ("speaker", Json::str(speaker.clone())),
-                                ("text", Json::str(text.clone())),
-                            ])
+                            let mut line = vec![
+                                ("speaker".to_string(), Json::str(speaker.clone())),
+                                ("text".to_string(), Json::str(text.clone())),
+                            ];
+                            // a line of a model of sounds carries the words it spells
+                            let spelled = reader_text(enc, text);
+                            if speaker == CHAT_SPEAKERS[1] && spelled != *text {
+                                line.push(("spelled".to_string(), Json::str(spelled)));
+                            }
+                            Json::Obj(line)
                         })
                         .collect(),
                 ),
