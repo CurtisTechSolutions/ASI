@@ -1,0 +1,324 @@
+{
+ "corpus": {
+  "path": "data/corpus.txt",
+  "train_texts": 640,
+  "train_chars": 44335,
+  "test_texts": 160,
+  "test_chars": 10897,
+  "digest": "31ea49d2800ca3ac37040a87a31dcfa498c08e3e400ca5b2f2e68329af3dd92b"
+ },
+ "settings": {
+  "seed": 1,
+  "epochs": 10,
+  "lr": 0.5,
+  "act_lr": 0.05,
+  "batch_size": 32,
+  "depth": 8,
+  "min_count": 1
+ },
+ "models": {
+  "tree": {
+   "available": true,
+   "kind": "radix-tree",
+   "stats": {
+    "nodes": 51609,
+    "ends": 4268,
+    "edges": 55877,
+    "grams": 4228,
+    "label_chars": 276651,
+    "branches": 16541,
+    "max_depth": 9,
+    "compression_ratio": 0.08192369547947063
+   },
+   "train_seconds": 641.3871938050006,
+   "epoch_loss": [
+    3.1920213397140857,
+    3.11879821863479,
+    3.0301882834211646,
+    2.9653472326413692,
+    2.9264469409222302,
+    2.895420614882642,
+    2.8701310103250925,
+    2.8499776169854436,
+    2.8329079952134766,
+    2.8179391036703043
+   ],
+   "transitions_per_epoch": 169528,
+   "train_bits": {
+    "bits_per_char": 0.2963532721244787,
+    "chars": 44335,
+    "transitions": 6707,
+    "unknown_transitions": 0,
+    "miss_rate": 0.0
+   },
+   "test_bits": {
+    "bits_per_char": 6.360096326675231,
+    "chars": 10897,
+    "transitions": 6065,
+    "unknown_transitions": 3090,
+    "miss_rate": 0.5094806265457543
+   },
+   "recall": {
+    "texts": 640,
+    "recited": 17,
+    "fraction": 0.0265625
+   },
+   "predictions": [
+    {
+     "prefix": "the quick",
+     "text": "ed up from the tail of what was likely",
+     "cost": 4.195981713127298,
+     "expanded": 53,
+     "reached_end": true,
+     "seconds": 0.00035409700012678513
+    },
+    {
+     "prefix": "the cat",
+     "text": "ches itself repeating does",
+     "cost": 2.3285460472957498,
+     "expanded": 31,
+     "reached_end": true,
+     "seconds": 0.00022971300040808273
+    },
+    {
+     "prefix": "knowledge",
+     "text": "s, a",
+     "cost": 1.3957715475569095,
+     "expanded": 5,
+     "reached_end": true,
+     "seconds": 5.794200023956364e-05
+    },
+    {
+     "prefix": "two plus",
+     "text": " a monotone",
+     "cost": 0.6778956206205686,
+     "expanded": 10,
+     "reached_end": true,
+     "seconds": 8.301500020024832e-05
+    },
+    {
+     "prefix": "the moon",
+     "text": ". Or the fact that you have also unlocked",
+     "cost": 2.5133219861621914,
+     "expanded": 45,
+     "reached_end": true,
+     "seconds": 0.000294906999442901
+    },
+    {
+     "prefix": "th",
+     "text": "eory predicts). I then test whether dividing the thing improves withou",
+     "cost": 5.1314554246461785,
+     "expanded": 99,
+     "reached_end": false,
+     "seconds": 0.0007833230001779157
+    },
+    {
+     "prefix": "zzzq",
+     "text": "layer is a hash function",
+     "cost": 7.69549804002566,
+     "expanded": 790,
+     "reached_end": true,
+     "seconds": 0.001959434999662335
+    }
+   ]
+  },
+  "cyclic": {
+   "available": true,
+   "kind": "radix",
+   "stats": {
+    "nodes": 3516,
+    "edges": 9699,
+    "grams": 4228,
+    "label_chars": 11260,
+    "compression_ratio": 1.2025028441410694
+   },
+   "train_seconds": 8.298646451000423,
+   "epoch_loss": [
+    1.6816631312368508,
+    1.582312973043588,
+    1.5306329493053745,
+    1.4999164941070524,
+    1.4760136993807187,
+    1.4535787427466542,
+    1.4372945881873274,
+    1.424800787604005,
+    1.4145998299932285,
+    1.4053492332116313
+   ],
+   "transitions_per_epoch": 42310,
+   "train_bits": {
+    "bits_per_char": 1.9235511938745053,
+    "chars": 44335,
+    "transitions": 42310,
+    "unknown_transitions": 0,
+    "miss_rate": 0.0
+   },
+   "test_bits": {
+    "bits_per_char": 4.056868957608318,
+    "chars": 10897,
+    "transitions": 10539,
+    "unknown_transitions": 1285,
+    "miss_rate": 0.12192807666761553
+   },
+   "recall": {
+    "texts": 640,
+    "recited": 0,
+    "fraction": 0.0
+   },
+   "predictions": [
+    {
+     "prefix": "the quick",
+     "text": "ets,",
+     "cost": 2.9854812400652797,
+     "expanded": 12,
+     "reached_end": true,
+     "seconds": 6.586200015590293e-05
+    },
+    {
+     "prefix": "the cat",
+     "text": "e.",
+     "cost": 3.9401594399927697,
+     "expanded": 36,
+     "reached_end": true,
+     "seconds": 0.00017681699955574004
+    },
+    {
+     "prefix": "knowledge",
+     "text": "t",
+     "cost": 3.5462606576290407,
+     "expanded": 26,
+     "reached_end": true,
+     "seconds": 0.0001252510000995244
+    },
+    {
+     "prefix": "two plus",
+     "text": " up:",
+     "cost": 4.574471016737244,
+     "expanded": 73,
+     "reached_end": true,
+     "seconds": 0.0003508589998091338
+    },
+    {
+     "prefix": "the moon",
+     "text": ".",
+     "cost": 1.63309883856071,
+     "expanded": 4,
+     "reached_end": true,
+     "seconds": 2.351100010855589e-05
+    },
+    {
+     "prefix": "th",
+     "text": "e",
+     "cost": 3.302722829937882,
+     "expanded": 12,
+     "reached_end": true,
+     "seconds": 0.0007296469993889332
+    },
+    {
+     "prefix": "zzzq",
+     "text": "uest",
+     "cost": 3.4723439926980086,
+     "expanded": 23,
+     "reached_end": true,
+     "seconds": 0.0020707709991256706
+    }
+   ]
+  }
+ },
+ "repetition": [
+  {
+   "motif": "a",
+   "times": 4,
+   "chars": 4,
+   "tree_nodes": 3,
+   "tree_label_chars": 10,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "a",
+   "times": 10,
+   "chars": 10,
+   "tree_nodes": 9,
+   "tree_label_chars": 33,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "a",
+   "times": 100,
+   "chars": 100,
+   "tree_nodes": 9,
+   "tree_label_chars": 33,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "a",
+   "times": 1000,
+   "chars": 1000,
+   "tree_nodes": 9,
+   "tree_label_chars": 33,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "abc",
+   "times": 2,
+   "chars": 6,
+   "tree_nodes": 5,
+   "tree_label_chars": 23,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  },
+  {
+   "motif": "abc",
+   "times": 5,
+   "chars": 15,
+   "tree_nodes": 11,
+   "tree_label_chars": 53,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  },
+  {
+   "motif": "abc",
+   "times": 50,
+   "chars": 150,
+   "tree_nodes": 11,
+   "tree_label_chars": 53,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  },
+  {
+   "motif": "abc",
+   "times": 500,
+   "chars": 1500,
+   "tree_nodes": 11,
+   "tree_label_chars": 53,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  }
+ ],
+ "generalisation": {
+  "trained_on": "aaaa",
+  "scored": "aaaaaaa",
+  "tree": {
+   "log_prob": -41.44653167389282,
+   "per_char": -5.920933096270403,
+   "chars": 7,
+   "transitions": 5,
+   "unknown_transitions": 3
+  },
+  "tree_representable": false,
+  "cyclic": {
+   "log_prob": -3.588020778134727,
+   "per_char": -0.5125743968763896,
+   "chars": 7,
+   "transitions": 6,
+   "unknown_transitions": 0,
+   "units": "chars"
+  },
+  "cyclic_representable": true
+ },
+ "seconds": 650.3858663450001
+}

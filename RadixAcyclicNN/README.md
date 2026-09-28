@@ -189,16 +189,36 @@ decides, and on a tree of every suffix the deepest context has usually been
 seen once; a held-out line that walks into that corridor and leaves it pays a
 miss, then starts again from the longest suffix it knows. At `min_count 1` the
 tree misses on 54 % of its held-out transitions against the graph's 12 %, and
-its held-out bits per character are worse for it. The two knobs the design has
-for this are measured below: trust nothing seen once (`min_count 2`), and bound
-the window (`depth 8`).
+its held-out bits per character are worse for it. The knobs the design has for
+this are measured below: trust nothing seen once (`min_count 2`), bound the
+window (`depth 8`), and bound it to the graph's own order (`depth 2`).
 
 | | real nodes | label chars | training s | train bits/char | held-out bits/char | held-out misses | recited |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | cyclic graph | 3 516 | 11 260 | 9 | 1.924 | 4.057 | 12 % | 0 / 640 |
 | tree, unbounded, `min_count 1` | 61 213 | 1 510 919 | 871 | 0.145 | 6.514 | 54 % | 572 / 640 |
 | tree, unbounded, `min_count 2` | 61 213 | 1 510 919 | 879 | 1.288 | 5.629 | 32 % | 198 / 640 |
+| tree, `depth 8` | 51 609 | 276 651 | 641 | 0.296 | 6.360 | 51 % | 17 / 640 |
 | tree, `depth 2` | 12 006 | 38 338 | 248 | 1.843 | 3.832 | 11 % | 0 / 640 |
+
+Read down the table. Bounded to two symbols — a context is one gram, the
+graph's own order — the tree holds the graph's information as a tree, in three
+times the nodes because it has no corridors, and predicts the held-out lines
+slightly *better* than the graph (3.83 against 4.06 bits per character, 11 %
+against 12 % misses): a corridor is where a held-out line goes wrong, and at
+this depth there are none. It recites nothing, as the graph recites nothing.
+At eight symbols the labels fall by a factor of five and the training text is
+certain again (0.30 bits per character, no misses), but the window is too short
+to recite a line (17 of 640) and the held-out misses barely move (51 %): a
+context of seven grams has usually been seen once too. Unbounded and trusting
+only what it has seen twice, the tree gives up most of its recitation (198
+lines) and still misses on a third of the held-out transitions — a context
+seen twice has seen the continuations of those two occurrences and no others,
+where the graph's node for a gram has seen every continuation of that gram
+anywhere in the corpus. That is what the cycle is, read as statistics: **a
+merge of every context a gram occurs in**, and merging contexts is what
+generalises to text the model has not seen. The tree can only approach it by
+throwing its depth away.
 
 **What the tree has that the graph cannot.** No clock and no budget in the
 search — "keep going until there is nowhere to go" is a complete algorithm. A
