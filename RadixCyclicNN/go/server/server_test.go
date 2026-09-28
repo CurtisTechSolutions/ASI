@@ -1027,6 +1027,71 @@ func TestTrainAndPredictInWords(t *testing.T) {
 	}
 }
 
+// A model of syllables thinks in sounds and answers in the English they spell,
+// beside the sounds: every prediction, sample, turn and chat reply.
+func TestAModelOfSoundsAnswersInWords(t *testing.T) {
+	e := newEnv(t, false)
+	if status, doc := e.post("/api/reset", map[string]any{"encoding": "syllable:2:1", "seed": 1}); status != 200 {
+		t.Fatalf("reset: %d %v", status, doc)
+	}
+	status, doc := e.post("/api/train", map[string]any{
+		"texts":  []string{"the cat sat on the mat", "the cat sat on the floor", "the dog sat on the mat"},
+		"epochs": 2,
+	})
+	if status != 200 && status != 202 {
+		t.Fatalf("train: %d %v", status, doc)
+	}
+	if job, ok := doc["job"]; ok && job != nil {
+		e.waitJob()
+	}
+	status, pred := e.post("/api/predict", map[string]any{"prefix": "the cat", "k": 2, "length": 4, "guard": false})
+	if status != 200 {
+		t.Fatalf("predict: %d %v", status, pred)
+	}
+	spelled, _ := pred["spelled"].(string)
+	tail, _ := pred["spelled_continuation"].(string)
+	if !strings.HasPrefix(spelled, "the cat sat on the") || !strings.HasSuffix(spelled, tail) ||
+		spelled[:len(spelled)-len(tail)] != "the cat" {
+		t.Fatalf("predict spelled %q, continuation %q (full text %q)", spelled, tail, pred["full_text"])
+	}
+	for _, row := range pred["top"].([]any) {
+		if s, _ := row.(map[string]any)["spelled"].(string); !strings.HasPrefix(s, "the cat ") {
+			t.Errorf("top spelled %q", s)
+		}
+	}
+	status, gen := e.post("/api/generate", map[string]any{"count": 2, "mode": "beam", "prefix": "the", "guard": false})
+	if status != 200 {
+		t.Fatalf("generate: %d %v", status, gen)
+	}
+	for _, sample := range gen["samples"].([]any) {
+		if s, _ := sample.(map[string]any)["spelled"].(string); !strings.HasPrefix(s, "the ") || strings.Contains(s, "#") {
+			t.Errorf("sample spelled %q", s)
+		}
+	}
+	status, talk := e.post("/api/converse", map[string]any{"opening": "the cat", "turns": 2, "learn": false, "guard": false})
+	if status != 200 {
+		t.Fatalf("converse: %d %v", status, talk)
+	}
+	for _, raw := range talk["turns"].([]any) {
+		turn := raw.(map[string]any)
+		s, _ := turn["spelled"].(string)
+		reply, ok := turn["spelled_reply"].(string)
+		if !ok || strings.Contains(s, "#") || !strings.HasSuffix(s, reply) {
+			t.Errorf("turn spelled %q, reply %q", s, reply)
+		}
+	}
+	status, chat := e.post("/v1/chat/completions", map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "the cat"}}, "learn": false, "guard": false})
+	if status != 200 {
+		t.Fatalf("chat: %d %v", status, chat)
+	}
+	content := chat["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
+	said := chat["radixnet"].(map[string]any)["choices"].([]any)[0].(map[string]any)["turn"].(map[string]any)["text"].(string)
+	if !strings.HasPrefix(said, "DH.AH0 # K.AE1.T") || content != e.svc.Model().Encoding().Spell(said) {
+		t.Errorf("chat content %q for %q", content, said)
+	}
+}
+
 // The encoding endpoints: what a text becomes before the graph ever sees it,
 // and what comes back out of it (the Network settings tab reads both).
 func TestEncodingAndItsPreview(t *testing.T) {

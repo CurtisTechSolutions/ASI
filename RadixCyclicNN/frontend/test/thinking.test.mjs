@@ -25,6 +25,7 @@ import {
   thinkRequest,
   thoughtNodes,
   thoughtTree,
+  thoughtWords,
   thoughtsOf,
   triggerSays,
   tutorThinkingBody,
@@ -93,6 +94,16 @@ test("a thought is summarised the way radixnet.thinking.summarize says it", () =
   assert.equal(summarizeThought({ text: "hmm", then: "end", questioned: 1 }), "thought “hmm”; questioned itself once; then went on");
   assert.equal(summarizeThought({ text: "hmm", then: "wander" }), "thought “hmm”; then wander");
   assert.equal(summarizeThought(null), "");
+});
+
+test("a thought of a model of sounds says the words it spells", () => {
+  const thought = { text: "DH.AH0 # S.K.AY1", spelled: "the sky", then: "end" };
+  assert.equal(thoughtWords(thought), "the sky");
+  assert.equal(summarizeThought(thought), "thought “the sky”; then went on");
+  // any other model's thought is its text; a spelling of nothing leaves the text to speak
+  assert.equal(thoughtWords({ text: "the sky" }), "the sky");
+  assert.equal(thoughtWords({ text: "#", spelled: "" }), "#");
+  assert.equal(thoughtWords(null), "");
 });
 
 test("the words for a trigger, a stop, a hand-over and a lesson", () => {

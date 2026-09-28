@@ -885,6 +885,7 @@ def respond(
                 )
             guard = _guard_report(pair, verdicts)
         choice = Choice(index=index, guard=guard)
+        raw = ""  # what the walk said, in the model's units
         if turn is None:
             if any(seen.values()):
                 narrator.line("nothing to say: the guard vetoed everything it could say")
@@ -927,8 +928,13 @@ def respond(
                     end = start + call.span[0]
                     choice.tool_calls.append(ToolCall(_token(), call.name, dict(call.arguments)))
                     choice.stop_reason, choice.stop_sequence = TOOL_USE, None
-            choice.text = whole[start:end]
+            raw = whole[start:end]
+            choice.text = raw
             choice.turn = turn.to_dict()
+            if enc.phonetic:  # a model of sounds answers in the words they spell; the turn keeps the sounds
+                choice.text = enc.spell_tail(whole[:end], raw)
+                pieces = [choice.text] if choice.text else []
+                start, end = 0, len(choice.text)
             for piece in _windowed(pieces, start, end):
                 emit({"type": "text", "index": index, "text": piece})
             for tool_call in choice.tool_calls:
@@ -936,7 +942,7 @@ def respond(
             heard.remember(turn.text, turn.reply if turn.context else "")
         choice.thinking = "\n".join(narrator.lines)
         choice.thinking_units = enc.length(choice.thinking)
-        choice.output_units = enc.length(choice.text) + choice.thinking_units
+        choice.output_units = enc.length(raw) + choice.thinking_units
         reply.choices.append(choice)
         emit({
             "type": "done", "index": index, "stop_reason": choice.stop_reason, "stop_sequence": choice.stop_sequence,

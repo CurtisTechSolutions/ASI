@@ -870,6 +870,84 @@ class TestEncodingIsAChoice(unittest.TestCase):
         self.assertEqual(self.service.model.encoding, before)  # and the model is left alone
 
 
+class TestAModelOfSoundsAnswersInWords(unittest.TestCase):
+    """A model of syllables thinks in sounds and answers in the English they spell, beside the sounds."""
+
+    TEXTS = ["the cat sat on the mat", "the cat sat on the floor", "the dog sat on the mat", "a dog ran home"]
+
+    def setUp(self):
+        try:
+            from radixnet.encoding import phonetok_module
+
+            phonetok_module()
+        except ValueError:
+            self.skipTest("the phonetic tokenizer is not importable")
+        self.client, self.server, self.service = start_server(self.addCleanup)
+        status, data, _ = self.client.post("/api/reset", {"kind": "count", "encoding": "syllable:2:1", "seed": 1})
+        self.assertEqual(status, 200, data)
+        with self.service.mutating() as model:
+            model.train(self.TEXTS, TrainConfig(epochs=2))
+
+    def test_a_prediction_is_spelled(self):
+        status, data, _ = self.client.post("/api/predict", {"prefix": "the cat", "length": 4, "k": 2, "guard": False})
+        self.assertEqual(status, 200, data)
+        self.assertTrue(data["full_text"].startswith("DH.AH0 # K.AE1.T"), data["full_text"])
+        self.assertTrue(data["spelled"].startswith("the cat sat on the"), data["spelled"])
+        # the continuation's words are the tail of the whole, with the space before them
+        self.assertTrue(data["spelled"].endswith(data["spelled_continuation"]))
+        self.assertEqual(data["spelled"][: len(data["spelled"]) - len(data["spelled_continuation"])], "the cat")
+        for row in data["top"] + data["bottom"]:
+            self.assertTrue(row["spelled"].startswith("the cat "), row)
+            self.assertTrue(row["spelled"].endswith(row["spelled_continuation"]), row)
+
+    def test_samples_turns_and_thoughts_are_spelled(self):
+        body = {"count": 3, "mode": "beam", "prefix": "the", "guard": False}
+        status, data, _ = self.client.post("/api/generate", body)
+        self.assertEqual(status, 200, data)
+        self.assertTrue(data["samples"])
+        for sample in data["samples"]:
+            self.assertNotIn("#", sample["spelled"])
+            self.assertTrue(sample["spelled"].startswith("the "), sample)
+        body = {"opening": "the cat", "turns": 3, "learn": False, "guard": False, "seed": 1}
+        status, talk, _ = self.client.post("/api/converse", body)
+        self.assertEqual(status, 200, talk)
+        for turn in talk["turns"]:
+            self.assertNotIn("#", turn["spelled"])
+            self.assertTrue(turn["spelled"].endswith(turn["spelled_reply"]), turn)
+        # streamed, every turn is spelled as the document's are
+        status, raw, _ = self.client.post("/api/converse/stream", body)
+        events = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line.strip()]
+        streamed = [e["turn"]["spelled"] for e in events if e["event"] == "turn"]
+        self.assertEqual(streamed, [t["spelled"] for t in talk["turns"]])
+        status, thought, _ = self.client.post("/api/think", {"learn": False})
+        self.assertEqual(status, 200, thought)
+        self.assertIn("spelled", thought)
+
+    def test_todays_format_answers_in_words(self):
+        asked = {"messages": [{"role": "user", "content": "the cat"}], "learn": False, "guard": False}
+        status, data, _ = self.client.post("/v1/chat/completions", asked)
+        self.assertEqual(status, 200, data)
+        content = data["choices"][0]["message"]["content"]
+        said = data["radixnet"]["choices"][0]["turn"]["text"]
+        self.assertTrue(said.startswith("DH.AH0 # K.AE1.T"), said)  # the turn keeps the sounds
+        self.assertEqual(content, self.service.model.encoding.spell(said))
+        self.assertNotIn("#", content)
+        # and the usage still counts what the model said in its own units
+        usage = data["usage"]
+        self.assertEqual(usage["completion_tokens"] - usage["completion_tokens_details"]["reasoning_tokens"],
+                         self.service.model.encoding.length(said))
+
+    def test_a_model_of_letters_has_nothing_to_spell(self):
+        self.assertEqual(self.client.post("/api/reset", {"kind": "count", "seed": 1})[0], 200)
+        with self.service.mutating() as model:
+            model.train(self.TEXTS, TrainConfig(epochs=1))
+        _, data, _ = self.client.post("/api/predict", {"prefix": "the cat", "length": 4, "k": 2, "guard": False})
+        self.assertNotIn("spelled", data)
+        self.assertNotIn("spelled", data["top"][0])
+        _, samples, _ = self.client.post("/api/generate", {"count": 1, "guard": False})
+        self.assertNotIn("spelled", samples["samples"][0])
+
+
 class TestJobs(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

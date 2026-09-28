@@ -744,6 +744,16 @@ pre.sample {
   word-break: break-word;
 }
 
+/* A model of sounds: its answer is shown as the words it spells, and the sounds it said beneath them */
+.sounds {
+  display: block;
+  margin: 2px 0 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-word;
+}
+
 /* Charts ----------------------------------------------------------------- */
 
 .chart-box {

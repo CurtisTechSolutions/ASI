@@ -89,7 +89,7 @@ from .codegen import (
 )
 from .encoding import (
     BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, CHARS, WORDS, Decoder, Encoder, Encoding, parse_encoding,
-    word_rows,
+    spelled_prediction, spelled_thought, spelled_turn, word_rows,
 )
 from .gan import EvolveConfig, Evolver
 from .graph import END, START, RadixCyclicGraph
@@ -848,6 +848,13 @@ class ModelService:
                 result, verdicts = pair.rank(prefix, result)  # the survivors, best first
                 report = self._guard_report(pair, verdicts, candidates=len(verdicts),
                                             kept=len(verdicts) - sum(v["decision"] == "reject" for v in verdicts))
+            # a model of sounds: the words its answer spells, spelled under the lock like any read of the tokenizer
+            enc = model.encoding
+            spelled = spelled_prediction(enc, result.full_text, result.text)
+            ranked = (
+                {"top": [_path_dict(r, enc) for r in result.top], "bottom": [_path_dict(r, enc) for r in result.bottom]}
+                if isinstance(result, Prediction) else {}
+            )
         payload = {
             "prefix": prefix,
             "kind": model.kind,
@@ -860,13 +867,11 @@ class ModelService:
             "node_ids": list(result.node_ids),
             "expanded": result.expanded,
             "reached_end": result.reached_end,
+            **spelled,  # a model of sounds: spelled, spelled_continuation
             "guard": report,
         }
         if isinstance(result, Prediction):
-            payload.update(
-                mode=result.mode, k=result.k, beam=result.beam, traversal=result.traversal,
-                top=[_path_dict(r) for r in result.top], bottom=[_path_dict(r) for r in result.bottom],
-            )
+            payload.update(mode=result.mode, k=result.k, beam=result.beam, traversal=result.traversal, **ranked)
         return payload
 
     def generate(self, guard: bool = True, provenance: bool | None = None, **options: Any) -> dict:
@@ -882,11 +887,12 @@ class ModelService:
         with self.session() as model:
             pair = self.guard(model, provenance) if guard else None
             if pair is None:
-                return {"samples": [_sample_dict(r) for r in model.generate(**options)], "guard": None}
+                return {"samples": [_sample_dict(r, model.encoding) for r in model.generate(**options)], "guard": None}
             count = options.pop("count", 1)
             outcome = pair.generate(count=count, **options)
+            samples = [_sample_dict(r, model.encoding) for r in outcome["results"]]
         return {
-            "samples": [_sample_dict(r) for r in outcome["results"]],
+            "samples": samples,
             "guard": self._guard_report(
                 pair, outcome["verdicts"], candidates=outcome["candidates"], kept=len(outcome["kept"]),
                 asked=outcome["asked"], rate=outcome["rate"],
@@ -905,7 +911,7 @@ class ModelService:
                 thought = think(model, **options)
             except (TypeError, ValueError) as exc:
                 raise ApiError(400, str(exc)) from exc
-            return {"kind": model.kind, **thought.to_dict()}
+            return {"kind": model.kind, **spelled_thought(model.encoding, thought.to_dict())}
 
     def start_train_thoughts(self, thoughts: list[str], config: TrainConfig, questions: bool = True) -> dict:
         """Start a ``train`` job that teaches ``thoughts`` as thoughts (:func:`radixnet.thinking.think_on`)."""
@@ -944,6 +950,16 @@ class ModelService:
                     raise ApiError(
                         400, f"no {kind} model in memory to converse with; select that kind once to load it"
                     )
+            voices = (model, other or model)  # who says a turn: the voice of its index, as the dialogue picks it
+
+            def spelled(turn: dict) -> dict:  # a turn of a model of sounds carries the words it spells
+                return spelled_turn(voices[turn["index"] % 2].encoding, turn)
+
+            write = options.get("stream")
+            if write is not None:  # a streamed turn is spelled on its way out, as the document's are
+                options["stream"] = lambda event: write(
+                    {**event, "turn": spelled(event["turn"])} if event.get("event") == "turn" else event
+                )
             pair = self.guard(model, provenance) if guard else None
             report = None
             try:
@@ -957,12 +973,13 @@ class ModelService:
                     report = self._guard_report(pair, outcome["verdicts"], refusals=outcome["vetoed"])
             except (TypeError, ValueError) as exc:
                 raise ApiError(400, str(exc)) from exc
+            said = [spelled(t.to_dict()) for t in spoken]
         speakers = list(options.get("speakers") or DEFAULT_SPEAKERS)
         return {
             "kind": model.kind,
             "partner": other.kind if other is not None else None,
             "speakers": speakers,
-            "turns": [t.to_dict() for t in spoken],
+            "turns": said,
             "count": len(spoken),
             # the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
             "repeats": dialogue_repeats(spoken),
@@ -2276,8 +2293,9 @@ class ModelService:
             sys.stderr.write(f"{message}\n{traceback.format_exc()}")
 
 
-def _sample_dict(result: PathResult) -> dict:
-    return {
+def _sample_dict(result: PathResult, encoding: Encoding) -> dict:
+    """One generated text; a model of sounds adds the words it spells (``spelled``)."""
+    doc = {
         "text": result.text,
         "full_text": result.full_text,
         "cost": result.cost,
@@ -2287,10 +2305,13 @@ def _sample_dict(result: PathResult) -> dict:
         "step_costs": list(result.step_costs),
         "reached_end": result.reached_end,
     }
+    if encoding.phonetic:
+        doc["spelled"] = encoding.spell(result.text)
+    return doc
 
 
-def _path_dict(result: PathResult) -> dict:
-    """One of the top / bottom continuations of a count-model prediction."""
+def _path_dict(result: PathResult, encoding: Encoding) -> dict:
+    """One of the top / bottom continuations of a count-model prediction, spelled when it is sounds."""
     return {
         "continuation": result.text,
         "full_text": result.full_text,
@@ -2300,6 +2321,7 @@ def _path_dict(result: PathResult) -> dict:
         "path": list(result.labels),
         "node_ids": list(result.node_ids),
         "reached_end": result.reached_end,
+        **spelled_prediction(encoding, result.full_text, result.text),
     }
 
 
@@ -4735,14 +4757,17 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations spread out - "
      "a path pays diversity times its overlap with one already picked; off at 0), guard "
      "(default on: the negative network vetoes the continuations it recognises as failures), provenance (false: "
-     "the guard reports how many it vetoed, not which or why)}"),
+     "the guard reports how many it vetoed, not which or why)}; a model of sounds adds spelled and "
+     "spelled_continuation (the English, and the part of it the continuation wrote) to the answer and to every "
+     "top / bottom row"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
      "dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, "
      "penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), "
      "guard (default on: the model over-samples and the "
      "negative network vetoes what it recognises as failure), provenance (default: the server's setting; false "
-     "reports how many candidates the guard vetoed, not which or why)}"),
+     "reports how many candidates the guard vetoed, not which or why)}; a model of sounds adds spelled (the "
+     "English) to every sample"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
@@ -4755,7 +4780,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "(how deep a thought may question itself), "
      "guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were "
      "vetoed, not which or why)} "
-     "-> {..., turns, repeats: the duplicates spoken anyway, to punish}"),
+     "-> {..., turns, repeats: the duplicates spoken anyway, to punish}; a turn of a model of sounds adds spelled and "
+     "spelled_reply (the English, and the part of it the reply wrote)"),
     ("POST", "/api/converse/stream", _r_converse_stream,
      "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON "
      "object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes "
@@ -4771,7 +4797,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "question itself), questions (per thought), learn (default on: the node is taught to stop and think there - a "
      "thought changes the model)} -> {kind, trigger, at, about, text, stopped: end | length | nothing, then: end | back "
      "| think (what it triggered when it stopped), taught, handed_over, questions: [the same], cost, probability, "
-     "labels, node_ids, step_costs}"),
+     "labels, node_ids, step_costs}; a thought of a model of sounds, and each of its questions, adds spelled (the "
+     "English)"),
     ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
     ("POST", "/api/2nrl", _r_two_nrl,
      "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr, "

@@ -541,12 +541,16 @@ func cmdTrain(args []string) {
 	}
 }
 
-func predictDoc(prefix string, p *radixnet.Prediction) map[string]any {
+func predictDoc(prefix string, p *radixnet.Prediction, enc radixnet.Encoding) map[string]any {
 	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "traversal": p.Traversal, "k": p.K, "beam": p.Beam,
-		"top": pathDicts(p.Top), "bottom": pathDicts(p.Bottom),
+		"top": pathDicts(p.Top, enc), "bottom": pathDicts(p.Bottom, enc),
+	}
+	// a model of sounds: the words its answer spells, and the part of them the continuation wrote
+	for k, v := range radixnet.SpelledPrediction(enc, p.FullText, p.Text) {
+		doc[k] = v
 	}
 	// what the walk was punished for, and which search wrote it: reported only
 	// where they are not the defaults, as the Python and Rust CLIs report them
@@ -559,13 +563,16 @@ func predictDoc(prefix string, p *radixnet.Prediction) map[string]any {
 	return doc
 }
 
-func pathDicts(paths []*radixnet.PathResult) []map[string]any {
+func pathDicts(paths []*radixnet.PathResult, enc radixnet.Encoding) []map[string]any {
 	out := make([]map[string]any, 0, len(paths))
 	for _, r := range paths {
 		row := map[string]any{"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
 			"step_costs": r.StepCosts, "path": r.Labels, "node_ids": r.NodeIDs, "reached_end": r.ReachedEnd}
 		if r.Punish != 0 {
 			row["punish"] = r.Punish
+		}
+		for k, v := range radixnet.SpelledPrediction(enc, r.FullText, r.Text) {
+			row[k] = v
 		}
 		out = append(out, row)
 	}
@@ -677,8 +684,9 @@ func cmdPredict(args []string) {
 		}
 		guard = guardDoc(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
 	}
+	enc := m.Encoding()
 	if jsonMode {
-		doc := predictDoc(*prefix, p)
+		doc := predictDoc(*prefix, p, enc)
 		doc["guard"] = guard
 		if *speak != "" {
 			doc["speech"] = speakOutputs(m, []string{p.FullText}, *speak)
@@ -686,20 +694,28 @@ func cmdPredict(args []string) {
 		emit(doc)
 		return
 	}
-	fmt.Printf("prefix       %s\ncontinuation %s\nfull text    %s\ncost %.4f  p %.4g  path %s\n", quote(*prefix), quote(p.Text), quote(p.FullText), p.Cost, p.Probability(), strings.Join(p.Labels, " -> "))
+	fmt.Printf("prefix       %s\ncontinuation %s\nfull text    %s\n", quote(*prefix), quote(p.Text), quote(p.FullText))
+	if enc.Unit.Phonetic() { // a model that thinks in sounds: say what its answer spells
+		fmt.Printf("spelled      %s\n", quote(enc.Spell(p.FullText)))
+	}
+	fmt.Printf("cost %.4f  p %.4g  path %s\n", p.Cost, p.Probability(), strings.Join(p.Labels, " -> "))
 	if *speak != "" {
 		speakOutputs(m, []string{p.FullText}, *speak)
 	}
-	if len(p.Top) > 0 {
-		fmt.Println("top:")
-		for i, r := range p.Top {
-			fmt.Printf("  %2d %8.4f %10.4g %s\n", i+1, r.Cost, r.Probability(), quote(r.FullText))
+	for _, side := range []struct {
+		title string
+		paths []*radixnet.PathResult
+	}{{"top", p.Top}, {"bottom", p.Bottom}} {
+		if len(side.paths) == 0 {
+			continue
 		}
-	}
-	if len(p.Bottom) > 0 {
-		fmt.Println("bottom:")
-		for i, r := range p.Bottom {
-			fmt.Printf("  %2d %8.4f %10.4g %s\n", i+1, r.Cost, r.Probability(), quote(r.FullText))
+		fmt.Println(side.title + ":")
+		for i, r := range side.paths {
+			fmt.Printf("  %2d %8.4f %10.4g %s", i+1, r.Cost, r.Probability(), quote(r.FullText))
+			if enc.Unit.Phonetic() {
+				fmt.Printf("  spelled %s", quote(enc.Spell(r.FullText)))
+			}
+			fmt.Println()
 		}
 	}
 	if guard != nil {
@@ -835,11 +851,16 @@ func cmdGenerate(args []string) {
 		guard = guardDoc(pair, verdicts, map[string]any{"candidates": outcome.Candidates, "asked": outcome.Asked,
 			"kept": len(outcome.Kept), "rate": outcome.Rate})
 	}
+	enc := m.Encoding()
 	if jsonMode {
 		samples := make([]map[string]any, 0, len(results))
 		for _, r := range results {
-			samples = append(samples, map[string]any{"text": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
-				"labels": r.Labels, "node_ids": r.NodeIDs, "step_costs": r.StepCosts, "expanded": r.Expanded, "reached_end": r.ReachedEnd})
+			sample := map[string]any{"text": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
+				"labels": r.Labels, "node_ids": r.NodeIDs, "step_costs": r.StepCosts, "expanded": r.Expanded, "reached_end": r.ReachedEnd}
+			if enc.Unit.Phonetic() { // what the sounds spell, sample by sample
+				sample["spelled"] = enc.Spell(r.Text)
+			}
+			samples = append(samples, sample)
 		}
 		doc := map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength,
 			"temperature": *temperature, "guard": guard}
@@ -856,6 +877,9 @@ func cmdGenerate(args []string) {
 			end = "yes"
 		}
 		fmt.Printf("%3d %9.4f %10.4g %4s  %s\n", i+1, r.Cost, r.Probability(), end, quote(r.Text))
+		if enc.Unit.Phonetic() {
+			fmt.Printf("%29s  spelled %s\n", "", quote(enc.Spell(r.Text)))
+		}
 	}
 	if guard != nil {
 		printVetoes(verdicts, "candidates")
@@ -1676,8 +1700,12 @@ func toF(v any) float64 {
 
 // sayTurn prints one spoken turn of a conversation, as the transcript prints it: the line, its numbers and
 // flags, and what the voice noticed about a repeat of its own.
-func sayTurn(t *radixnet.Turn) {
-	fmt.Printf("%s: %s\n", t.Speaker, t.Text)
+func sayTurn(t *radixnet.Turn, enc radixnet.Encoding) {
+	said := enc.Spell(t.Text) // the text itself, but for a model of sounds
+	fmt.Printf("%s: %s\n", t.Speaker, said)
+	if said != t.Text { // a line of sounds: the words it spells, then the sounds
+		fmt.Printf("    sounds %s\n", quote(t.Text))
+	}
 	detail := fmt.Sprintf("    cost %.4f  p %.4g", t.Cost, t.Probability)
 	if t.Context != "" {
 		detail += "  picked up " + quote(t.Context)
@@ -1723,6 +1751,9 @@ func sayTurn(t *radixnet.Turn) {
 		fmt.Println(thought)
 		if r.Thought != nil {
 			fmt.Printf("    %s\n", radixnet.Summarize(r.Thought))
+			if spelled := enc.Spell(r.Thought.Text); enc.Unit.Phonetic() && spelled != "" {
+				fmt.Printf("      spelled %s\n", quote(spelled))
+			}
 		}
 	}
 }
@@ -1751,11 +1782,12 @@ func isTerminal() bool {
 // on stdout instead (radixnet.Stream).
 type conversePrinter struct {
 	dimmed  bool
-	looking *string // the context the current turn last continued
+	looking *string                                // the context the current turn last continued
+	voice   func(*radixnet.Turn) radixnet.Encoding // the encoding of the voice that said a turn
 }
 
-func newConversePrinter() *conversePrinter {
-	return &conversePrinter{dimmed: !jsonMode && isTerminal()}
+func newConversePrinter(voice func(*radixnet.Turn) radixnet.Encoding) *conversePrinter {
+	return &conversePrinter{dimmed: !jsonMode && isTerminal(), voice: voice}
 }
 
 // dim prints a line that belongs to the window rather than the answer.
@@ -1768,6 +1800,15 @@ func (p *conversePrinter) dim(text string) {
 
 func (p *conversePrinter) event(event map[string]any) {
 	if jsonMode {
+		if t, ok := event["turn"].(*radixnet.Turn); ok && event["event"] == "turn" {
+			// a streamed turn is spelled on its way out, as the document's are
+			spelled := make(map[string]any, len(event))
+			for k, v := range event {
+				spelled[k] = v
+			}
+			spelled["turn"] = radixnet.SpelledTurn(p.voice(t), t)
+			event = spelled
+		}
 		emitLine(event)
 		return
 	}
@@ -1785,7 +1826,7 @@ func (p *conversePrinter) event(event map[string]any) {
 	case "turn":
 		p.looking = nil
 		if t, ok := event["turn"].(*radixnet.Turn); ok {
-			sayTurn(t)
+			sayTurn(t, p.voice(t))
 		}
 	case "look":
 		from := text("from")
@@ -1848,11 +1889,19 @@ func cmdConverse(args []string) {
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
 	opts.AvoidWordRepeats, opts.Explore, opts.Learn = !*allowWordRepeats, *explore, !*noLearn
 	opts.Think, opts.ThinkDepth = !*noThink, *thinkDepth
+	// who says a turn: the voice of its index, as the dialogue picks it - a turn of a model of sounds is
+	// written out with the words it spells
+	voice := func(t *radixnet.Turn) radixnet.Encoding {
+		if t.Index%2 == 1 && opts.Partner != nil {
+			return opts.Partner.Encoding()
+		}
+		return m.Encoding()
+	}
 	// --stream: the conversation is printed as it happens - each turn the moment it is spoken, and before it
 	// what the voice does: the context it continues, a draft it catches itself on, where it backs up to
 	var live *conversePrinter
 	if *stream {
-		live = newConversePrinter()
+		live = newConversePrinter(voice)
 		opts.Stream = live.event
 	}
 	names := []string{}
@@ -1917,7 +1966,11 @@ func cmdConverse(args []string) {
 		}
 	}
 	sort.Ints(thoughtAt)
-	doc := map[string]any{"turns": turnsOut, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode,
+	said := make([]any, 0, len(turnsOut))
+	for _, t := range turnsOut {
+		said = append(said, radixnet.SpelledTurn(voice(t), t))
+	}
+	doc := map[string]any{"turns": said, "count": len(turnsOut), "speakers": opts.Speakers, "mode": *mode,
 		"opening": *opening, "kind": "count", "partner_kind": partnerKind, "repeats": saidTwice,
 		"taught": taught, "thought_at": thoughtAt, "transcript": radixnet.Transcript(turnsOut), "guard": guard}
 	if (len(taught) > 0 || len(thoughtAt) > 0) && *saveLearned {
@@ -1935,7 +1988,7 @@ func cmdConverse(args []string) {
 	}
 	if live == nil {
 		for _, t := range turnsOut {
-			sayTurn(t)
+			sayTurn(t, voice(t))
 		}
 	}
 	if len(turnsOut) == 0 {
@@ -2005,7 +2058,7 @@ func cmdThink(args []string) {
 	if thought.HandedOver >= 0 {
 		learned = append(learned, "to hand over at "+quoteLabel(g, thought.HandedOver))
 	}
-	doc := thought.ToDict()
+	doc := radixnet.SpelledThought(m.Encoding(), thought) // a thought in sounds carries the words it spells
 	doc["kind"] = m.Kind()
 	doc["saved"] = nil
 	if len(learned) > 0 && *saveLearned {
@@ -2028,7 +2081,7 @@ func cmdThink(args []string) {
 	fmt.Printf("at              %s\n", at)
 	fmt.Printf("thoughts known  %d\n", len(g.Children(radixnet.Think)))
 	fmt.Println()
-	sayThought(thought, 0)
+	sayThought(thought, 0, m.Encoding())
 	if thought.Stopped == radixnet.StoppedNothing && thought.Text == "" {
 		fmt.Println()
 		fmt.Println("(it has no thoughts to think with yet: `radixnet-count ollama think -prompt TOPIC -train` teaches it some)")
@@ -2043,10 +2096,14 @@ func cmdThink(args []string) {
 }
 
 // sayThought prints a thought and its questions, indented one level per depth.
-func sayThought(thought *radixnet.Thought, depth int) {
-	fmt.Printf("%s%s\n", strings.Repeat("    ", depth), radixnet.Summarize(thought))
+func sayThought(thought *radixnet.Thought, depth int, enc radixnet.Encoding) {
+	pad := strings.Repeat("    ", depth)
+	fmt.Printf("%s%s\n", pad, radixnet.Summarize(thought))
+	if enc.Unit.Phonetic() && thought.Text != "" { // a thought in sounds: the words it spells
+		fmt.Printf("%s  spelled %s\n", pad, quote(enc.Spell(thought.Text)))
+	}
 	for _, question := range thought.Questions {
-		sayThought(question, depth+1)
+		sayThought(question, depth+1, enc)
 	}
 }
 

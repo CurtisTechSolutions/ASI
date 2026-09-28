@@ -277,15 +277,15 @@ func init() {
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures), provenance (false: the guard's report counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each; default: the server's setting)}")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures), provenance (false: the guard's report counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each; default: the server's setting)}; a model of sounds adds spelled and spelled_continuation (the English, and the part of it the continuation wrote) to the answer and to every top / bottom row")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure), provenance (default: the server's setting; false counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each)}")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure), provenance (default: the server's setting; false counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each)}; a model of sounds adds spelled (the English) to every sample")
 	route("POST", "/api/converse", rConverse)
-	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were vetoed, not which nor why; default: the server's setting)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}")
+	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were vetoed, not which nor why; default: the server's setting)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}; a turn of a model of sounds adds spelled and spelled_reply (the English, and the part of it the reply wrote)")
 	route("POST", "/api/converse/stream", rConverseStream)
 	doc("POST", "/api/converse/stream", "the same conversation streamed as it happens: the same body, answered as application/x-ndjson - one JSON object per line, each with event, index and speaker. turn events (turn: the turn as /api/converse writes it) are the answer and are never taken back; between them is the window a backtrack may still rewrite: look (from: the context it continues, \"\" for a fresh text), draft (text, cost: what it was about to say), caught (kind, noticed, cut: what it keeps), backtrack (step, cut, wider), found (text, cost, explored) or stuck (explored); the last line is {event: done, ...} with the /api/converse document; a failure after the first line is {event: error, error}")
 	route("POST", "/api/think", rThink)
-	doc("POST", "/api/think", "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught (POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this text ends, and teach the model to stop and think there), mode: beam | sample, k, beam, max_length, temperature, step_penalty, seed, depth (how deep it may question itself; 0 = never), questions (per thought), learn (default on: it teaches the model where it stopped to think - a thought changes the model)} -> {kind, trigger, at, about, text, depth, stopped: end | length | nothing, then: end | back | think, taught, handed_over, cost, probability, expanded, questioned, questions, labels, node_ids, step_costs}")
+	doc("POST", "/api/think", "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught (POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this text ends, and teach the model to stop and think there), mode: beam | sample, k, beam, max_length, temperature, step_penalty, seed, depth (how deep it may question itself; 0 = never), questions (per thought), learn (default on: it teaches the model where it stopped to think - a thought changes the model)} -> {kind, trigger, at, about, text, depth, stopped: end | length | nothing, then: end | back | think, taught, handed_over, cost, probability, expanded, questioned, questions, labels, node_ids, step_costs}; a thought of a model of sounds, and each of its questions, adds spelled (the English)")
 	route("POST", "/api/score", rScore)
 	doc("POST", "/api/score", "log-probability of a text: {text}")
 	route("POST", "/api/2nrl", rTwoNRL)
@@ -728,11 +728,15 @@ func rJobStop(rq *request) (int, any, error) {
 	return 200, out, err
 }
 
-func pathDict(r *radixnet.PathResult) map[string]any {
-	return map[string]any{
+func pathDict(r *radixnet.PathResult, enc radixnet.Encoding) map[string]any {
+	doc := map[string]any{
 		"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
 		"step_costs": r.StepCosts, "path": r.Labels, "node_ids": r.NodeIDs, "reached_end": r.ReachedEnd,
 	}
+	for k, v := range radixnet.SpelledPrediction(enc, r.FullText, r.Text) { // a model of sounds: the words
+		doc[k] = v
+	}
+	return doc
 }
 
 // traversalFields reads the traversal option and its two scales, shared by
@@ -877,27 +881,37 @@ func rPredict(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	enc := rq.svc.unitEncoding()
 	top := make([]map[string]any, 0, len(p.Top))
 	for _, r := range p.Top {
-		top = append(top, pathDict(r))
+		top = append(top, pathDict(r, enc))
 	}
 	bottom := make([]map[string]any, 0, len(p.Bottom))
 	for _, r := range p.Bottom {
-		bottom = append(bottom, pathDict(r))
+		bottom = append(bottom, pathDict(r, enc))
 	}
-	return 200, map[string]any{
+	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "traversal": p.Traversal,
 		"k": p.K, "beam": p.Beam, "top": top, "bottom": bottom, "guard": report,
-	}, nil
+	}
+	// a model of sounds: the words its answer spells, and the part of them the continuation wrote
+	for k, v := range radixnet.SpelledPrediction(enc, p.FullText, p.Text) {
+		doc[k] = v
+	}
+	return 200, doc, nil
 }
 
-func sampleDict(r *radixnet.PathResult) map[string]any {
-	return map[string]any{
+func sampleDict(r *radixnet.PathResult, enc radixnet.Encoding) map[string]any {
+	doc := map[string]any{
 		"text": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(), "path": r.Labels,
 		"node_ids": r.NodeIDs, "step_costs": r.StepCosts, "reached_end": r.ReachedEnd,
 	}
+	if enc.Unit.Phonetic() { // a model of sounds: the words the text spells
+		doc["spelled"] = enc.Spell(r.Text)
+	}
+	return doc
 }
 
 func rGenerate(rq *request) (int, any, error) {
@@ -953,9 +967,10 @@ func rGenerate(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	enc := rq.svc.unitEncoding()
 	samples := make([]map[string]any, 0, len(results))
 	for _, r := range results {
-		samples = append(samples, sampleDict(r))
+		samples = append(samples, sampleDict(r, enc))
 	}
 	return 200, map[string]any{"samples": samples, "guard": report}, nil
 }
@@ -1041,13 +1056,11 @@ func converseRequest(rq *request) (opening string, o radixnet.ConverseOptions, g
 	return opening, o, guard, nil
 }
 
-// converseDocument is what a conversation is answered with, by both routes.
-func converseDocument(o radixnet.ConverseOptions, turns []*radixnet.Turn, report map[string]any) map[string]any {
-	if turns == nil {
-		turns = []*radixnet.Turn{}
-	}
+// converseDocument is what a conversation is answered with, by both routes; a
+// turn of a model of sounds carries the words it spells (radixnet.SpelledTurn).
+func converseDocument(o radixnet.ConverseOptions, enc radixnet.Encoding, turns []*radixnet.Turn, report map[string]any) map[string]any {
 	// repeats: the duplicates the search could not avoid, ready to be punished (POST /api/feedback "bad")
-	return map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": turns,
+	return map[string]any{"kind": "count", "partner": nil, "speakers": o.Speakers, "turns": radixnet.SpelledTurns(enc, turns),
 		"count": len(turns), "repeats": radixnet.Repeats(turns), "guard": report}
 }
 
@@ -1064,7 +1077,7 @@ func rConverse(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	return 200, converseDocument(o, turns, report), nil
+	return 200, converseDocument(o, rq.svc.unitEncoding(), turns, report), nil
 }
 
 // rConverseStream is the same conversation streamed as it happens
@@ -1085,10 +1098,21 @@ func rConverseStream(rq *request) (int, any, error) {
 		// a client that goes away mid-conversation does not stop the conversation, which finishes under the
 		// model lock as it would have; its events are simply not written any more
 		var gone error
+		enc := rq.svc.unitEncoding()
 		o.Stream = func(event map[string]any) {
-			if gone == nil {
-				gone = write(event)
+			if gone != nil {
+				return
 			}
+			if t, ok := event["turn"].(*radixnet.Turn); ok && event["event"] == "turn" {
+				// a streamed turn is spelled on its way out, as the document's are
+				spelled := make(map[string]any, len(event))
+				for k, v := range event {
+					spelled[k] = v
+				}
+				spelled["turn"] = radixnet.SpelledTurn(enc, t)
+				event = spelled
+			}
+			gone = write(event)
 		}
 		turns, report, err := rq.svc.Converse(opening, o, guard, provenance)
 		if err != nil {
@@ -1097,7 +1121,7 @@ func rConverseStream(rq *request) (int, any, error) {
 		if gone != nil {
 			return nil
 		}
-		doc := converseDocument(o, turns, report)
+		doc := converseDocument(o, enc, turns, report)
 		doc["event"] = "done"
 		return write(doc)
 	}}, nil

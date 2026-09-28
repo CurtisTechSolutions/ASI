@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { spelledParts } from "../spelled.js";
 import { applyEvent } from "../stream.js";
 import { THINK_DEPTH, thoughtNodes, thoughtsOf } from "../thinking.js";
 import { asArray, fmtInt, fmtNum, parseInteger, parseNumber, unitName } from "../util.js";
@@ -398,6 +399,8 @@ export default function ConversePanel({ status }) {
               const position = spoken.length - i; // where the turn stands in the conversation, counted from its start
               const side = t.index % 2 === 0 ? "a" : "b";
               const rating = ratingOf(t.text);
+              // a model of sounds says its turn in the words they spell, the context it picked up set apart as ever
+              const words = spelledParts(t, "spelled_reply");
               const flags = [
                 t.given ? "given" : null,
                 t.fresh && !t.given ? "new topic" : null,
@@ -417,7 +420,18 @@ export default function ConversePanel({ status }) {
                     ))}
                   </div>
                   <p className="bubble">
-                    {t.context ? (
+                    {words ? (
+                      t.context && words.head ? (
+                        <>
+                          <span className="context" title="picked up from the previous line">
+                            {words.head}
+                          </span>
+                          {words.tail}
+                        </>
+                      ) : (
+                        words.whole
+                      )
+                    ) : t.context ? (
                       <>
                         <span className="context" title="picked up from the previous line">
                           {t.context}
@@ -428,6 +442,11 @@ export default function ConversePanel({ status }) {
                       t.text
                     )}
                   </p>
+                  {words && words.whole !== t.text ? (
+                    <span className="sounds" title="what the model said, in its own units">
+                      in {unitName(status)}: {t.text}
+                    </span>
+                  ) : null}
                   <div className="meta">
                     cost {fmtNum(t.cost, 3)} · p {fmtNum(t.probability, 4)}
                     {t.context ? <> · picked up “{t.context}”</> : null}
@@ -446,7 +465,7 @@ export default function ConversePanel({ status }) {
                       text={t.text}
                       rating={rating}
                       disabled={!String(t.text ?? "").trim() || feedback.running}
-                      onRate={(text, r) => rate(text, r, { cost: t.cost })}
+                      onRate={(text, r) => rate(text, r, { cost: t.cost, ...(words ? { shown: words.whole } : {}) })}
                       label={`turn ${position}`}
                     />
                     <HearButton text={t.text} label={`turn ${position}`} compact />

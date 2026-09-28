@@ -14,6 +14,7 @@ import TraversalFields from "./TraversalFields.jsx";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { problemText, searchProblemsFor } from "../settings.js";
 import { reverseUnits } from "../backwards.js";
+import { spelledParts } from "../spelled.js";
 
 /**
  * Generate whole texts with the prediction search (beam: the K most likely
@@ -187,13 +188,20 @@ export default function GeneratePanel({ status }) {
         ) : (
           <ol className="samples">
             {samples.map((s, i) => {
-              // the model's own text is what a rating keeps and feedback trains on; backwards, it is shown turned back
+              // the model's own text is what a rating keeps and feedback trains on; backwards, it is shown turned
+              // back, and a model of sounds is shown as the words they spell (its sounds beneath them)
               const text = textOf(s);
-              const shown = flip ? reverseUnits(text, flip) : text;
+              const words = flip ? null : spelledParts(s);
+              const shown = flip ? reverseUnits(text, flip) : words ? words.whole : text;
               const rating = ratingOf(text);
               return (
                 <li key={i} className={rating ? `rated ${rating}` : ""}>
                   <pre className="sample">{shown}</pre>
+                  {words ? (
+                    <span className="sounds" title="what the model said, in its own units">
+                      in {unitName(status)}: {text}
+                    </span>
+                  ) : null}
                   <div className="meta">
                     cost {fmtNum(s && s.cost, 3)} · p {fmtNum(s && s.probability, 4)} ·{" "}
                     {fmtInt(asArray(s && s.path).length)} path nodes · {fmtInt(unitLength(text, status))} {unitName(status)}
@@ -201,7 +209,7 @@ export default function GeneratePanel({ status }) {
                       text={text}
                       rating={rating}
                       disabled={!text.trim() || feedback.running}
-                      onRate={(t, r) => rate(t, r, { cost: s && s.cost, ...(flip ? { shown } : {}) })}
+                      onRate={(t, r) => rate(t, r, { cost: s && s.cost, ...(shown !== text ? { shown } : {}) })}
                       label={`sample ${i + 1}`}
                     />
                     <HearButton text={text} label={`sample ${i + 1}`} compact />

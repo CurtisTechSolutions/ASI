@@ -574,6 +574,34 @@ class TestRustWordParity(unittest.TestCase):
                 self.assertGreater(len(x), 16000)
                 self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 64)
 
+    def test_the_same_words_the_sounds_spell(self):
+        """A model of sounds answers in the English they spell: the same words on both sides, split the same
+        way where the continuation (or a turn's reply) begins - a prefix that ends inside a word included."""
+        for spec in ("phone:3:1", "syllable:2:1"):
+            with self.subTest(encoding=spec):
+                tag = spec.replace(":", "-")
+                py_model = os.path.join(TMP.name, f"spell-py-{tag}.json")
+                other_model = os.path.join(TMP.name, f"spell-rust-{tag}.json")
+                py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+                   model=py_model)
+                rust("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=other_model)
+                keys = ("spelled", "spelled_continuation")
+                for prefix in ("the cat", "the ca", ""):
+                    a = py("predict", "--prefix", prefix, "--k", 3, "--length", 6, model=py_model)
+                    b = rust("predict", "--prefix", prefix, "--k", 3, "--length", 6, model=other_model)
+                    self.assertEqual([a[k] for k in keys], [b[k] for k in keys], prefix)
+                    self.assertEqual([[r[k] for k in keys] for r in a["top"] + a["bottom"]],
+                                     [[r[k] for k in keys] for r in b["top"] + b["bottom"]], prefix)
+                    self.assertNotIn("#", a["spelled"])
+                    self.assertTrue(a["spelled"].endswith(a["spelled_continuation"]), a)
+                a = py("generate", "--mode", "beam", "--count", 3, "--prefix", "the", model=py_model)
+                b = rust("generate", "--mode", "beam", "--count", 3, "--prefix", "the", model=other_model)
+                self.assertEqual([s["spelled"] for s in a["samples"]], [s["spelled"] for s in b["samples"]])
+                a = py("converse", "--opening", "the cat", "--turns", 3, "--no-learn", model=py_model)
+                b = rust("converse", "--opening", "the cat", "--turns", 3, "--no-learn", model=other_model)
+                turn = ("text", "spelled", "spelled_reply")
+                self.assertEqual([[t[k] for k in turn] for t in a["turns"]], [[t[k] for k in turn] for t in b["turns"]])
+
     def test_the_same_say(self):
         """The output decoder: the same text said in the same units is the same audio, sample for sample, with no model file."""
 

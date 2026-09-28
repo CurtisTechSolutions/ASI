@@ -44,6 +44,7 @@ use radixnet::log::{self, Level};
 use radixnet::model::{GenerateOptions, Model, PredictOptions, SearchTuning};
 use radixnet::negative::{BlameOptions as NegBlameOptions, JudgeOptions};
 use radixnet::penalty::{resolve_traversal, DEFAULT_TRAVERSAL};
+use radixnet::phonetic::spelled_prediction;
 use radixnet::radix::{Feedback, TrainConfig};
 use radixnet::report::{node_rows, path_rows, stats};
 use radixnet::search::SamplingFilter;
@@ -305,6 +306,22 @@ fn run() -> Result<(), String> {
                 );
                 found = ranked;
             }
+            // a model of sounds: the words each answer spells, and the part of them the continuation wrote
+            let enc = model.encoding();
+            let ranked = |paths: &[radixnet::search::PathResult]| -> Json {
+                Json::Arr(
+                    paths
+                        .iter()
+                        .map(|r| match path_json(r) {
+                            Json::Obj(mut pairs) => {
+                                pairs.extend(spelled_prediction(enc, &r.full_text, &r.text));
+                                Json::Obj(pairs)
+                            }
+                            other => other,
+                        })
+                        .collect(),
+                )
+            };
             let mut doc = vec![
                 ("prefix".to_string(), Json::str(prefix)),
                 ("kind".to_string(), Json::str(model.kind())),
@@ -323,12 +340,10 @@ fn run() -> Result<(), String> {
                 ("mode".to_string(), Json::str(found.mode.clone())),
                 ("k".to_string(), Json::Int(found.k as i64)),
                 ("beam".to_string(), Json::Int(found.beam as i64)),
-                ("top".to_string(), Json::Arr(found.top.iter().map(path_json).collect())),
-                (
-                    "bottom".to_string(),
-                    Json::Arr(found.bottom.iter().map(path_json).collect()),
-                ),
+                ("top".to_string(), ranked(&found.top)),
+                ("bottom".to_string(), ranked(&found.bottom)),
             ];
+            doc.extend(spelled_prediction(enc, &found.best.full_text, &found.best.text));
             doc.push(("traversal".to_string(), Json::str(found.traversal.clone())));
             doc.push(("guard".to_string(), guard));
             if let Some(path) = args.get("speak") {
@@ -381,8 +396,19 @@ fn run() -> Result<(), String> {
                 }
                 None => (model.generate(&opts)?, Json::Null),
             };
+            // a model of sounds: the words each text spells
+            let enc = model.encoding();
+            let sample = |r: &radixnet::search::PathResult| -> Json {
+                match path_json(r) {
+                    Json::Obj(mut pairs) if enc.unit.phonetic() => {
+                        pairs.push(("spelled".to_string(), Json::str(enc.spell(&r.text))));
+                        Json::Obj(pairs)
+                    }
+                    other => other,
+                }
+            };
             let mut doc = Json::obj([
-                ("samples", Json::Arr(samples.iter().map(path_json).collect())),
+                ("samples", Json::Arr(samples.iter().map(sample).collect())),
                 ("count", Json::Int(samples.len() as i64)),
                 ("mode", Json::str(opts.mode.clone())),
                 ("prefix", Json::str(opts.prefix.clone())),

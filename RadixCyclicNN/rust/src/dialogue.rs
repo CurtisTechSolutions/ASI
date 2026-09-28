@@ -35,12 +35,14 @@ use std::sync::Arc;
 
 use crate::cli::Ctx;
 use crate::duo::{guard_report, Filter, FilterVerdict};
+use crate::encoding::Encoding;
 use crate::graph::{FIRST, START};
 use crate::http::{Answer, ApiError, Request, Server, Sink};
 use crate::json::Json;
 use crate::model::{Model, PredictOptions};
 use crate::mt19937::Mt19937;
 use crate::penalty::DEFAULT_TRAVERSAL;
+use crate::phonetic::spelled_turn;
 use crate::search::PathResult;
 use crate::service::Service;
 use crate::thinking::{think, ThinkOptions, Thought, THINK_DEPTH, THINK_QUESTIONS};
@@ -1380,8 +1382,30 @@ pub fn converse_guarded(
 
 /// The document a conversation is answered with, shared by the CLI and the
 /// route.
-fn turns_json(turns: &[Turn]) -> Json {
-    Json::Arr(turns.iter().map(|t| t.to_json()).collect())
+/// The turns as they are written out: a turn of a model of sounds carries the
+/// words it spells ([`crate::phonetic::spelled_turn`]), spelled through the
+/// encoding of the voice that said it - `voices[index % 2]`, as the dialogue
+/// picks it.
+fn turns_json(turns: &[Turn], voices: [Encoding; 2]) -> Json {
+    Json::Arr(
+        turns
+            .iter()
+            .map(|t| spelled_turn(voices[t.index % 2], t.to_json()))
+            .collect(),
+    )
+}
+
+/// A streamed event with its turn spelled (`turn` events), as the document's turns are.
+fn spelled_event(event: Json, voices: [Encoding; 2]) -> Json {
+    if event.at("event").as_str() != Some("turn") {
+        return event;
+    }
+    let Json::Obj(mut pairs) = event else { return event };
+    if let Some(slot) = pairs.iter_mut().find(|(k, _)| k == "turn") {
+        let index = slot.1.at("index").as_i64().unwrap_or(0).max(0) as usize;
+        slot.1 = spelled_turn(voices[index % 2], std::mem::replace(&mut slot.1, Json::Null));
+    }
+    Json::Obj(pairs)
 }
 
 // -- the CLI --------------------------------------------------------------------------------------
@@ -1394,7 +1418,8 @@ fn quote(text: &str) -> String {
 
 /// One spoken turn of a conversation, as the transcript prints it: the line,
 /// its numbers and flags, and what the voice noticed about a repeat of its own.
-fn say_turn(turn: &Turn) {
+/// A line of sounds prints the words it spells, then the sounds.
+fn say_turn(turn: &Turn, enc: Encoding) {
     let mut flags: Vec<String> = Vec::new();
     if turn.given {
         flags.push("given".to_string());
@@ -1411,7 +1436,11 @@ fn say_turn(turn: &Turn) {
     if turn.vetoed > 0 {
         flags.push(format!("{} vetoed", turn.vetoed));
     }
-    println!("{}: {}", turn.speaker, turn.text);
+    let said = enc.spell(&turn.text); // the text itself, but for a model of sounds
+    println!("{}: {}", turn.speaker, said);
+    if said != turn.text {
+        println!("    sounds {}", quote(&turn.text));
+    }
     let mut detail = format!("    cost {:.4}  p {:.4}", turn.cost, turn.probability);
     if !turn.context.is_empty() {
         detail.push_str(&format!("  picked up {}", quote(&turn.context)));
@@ -1450,6 +1479,10 @@ fn say_turn(turn: &Turn) {
         println!("{thought}");
         if let Some(t) = r.thought.as_ref() {
             println!("    {}", crate::thinking::summarize(t));
+            let spelled = enc.spell(&t.text);
+            if enc.unit.phonetic() && !spelled.is_empty() {
+                println!("      spelled {}", quote(&spelled));
+            }
         }
     }
 }
@@ -1469,15 +1502,18 @@ struct ConversePrinter {
     dimmed: bool,
     /// The context the current turn last continued.
     looking: Option<String>,
+    /// The encodings of the two voices, a turn spelled through the one that said it.
+    voices: [Encoding; 2],
 }
 
 impl ConversePrinter {
-    fn new(json: bool) -> ConversePrinter {
+    fn new(json: bool, voices: [Encoding; 2]) -> ConversePrinter {
         use std::io::IsTerminal;
         ConversePrinter {
             json,
             dimmed: !json && std::io::stdout().is_terminal(),
             looking: None,
+            voices,
         }
     }
 
@@ -1492,7 +1528,7 @@ impl ConversePrinter {
 
     fn event(&mut self, event: Json) {
         if self.json {
-            println!("{}", event.render(0));
+            println!("{}", spelled_event(event, self.voices).render(0));
             return;
         }
         let text = |key: &str| event.at(key).as_str().unwrap_or("").to_string();
@@ -1501,7 +1537,7 @@ impl ConversePrinter {
             "turn" => {
                 self.looking = None;
                 if let Some(turn) = Turn::from_json(event.at("turn")) {
-                    say_turn(&turn);
+                    say_turn(&turn, self.voices[turn.index % 2]);
                 }
             }
             "look" => {
@@ -1657,7 +1693,12 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
     // before it what the voice does: the context it continues, a draft it catches itself on, where it
     // backs up to (with --json: one JSON object per line, the usual document last)
     let streaming = args.on("stream");
-    let mut printer = ConversePrinter::new(ctx.json);
+    // who says a turn: the voice of its index, as the dialogue picks it
+    let voices = [
+        model.encoding(),
+        partner.as_ref().map_or(model.encoding(), |p| p.encoding()),
+    ];
+    let mut printer = ConversePrinter::new(ctx.json, voices);
     let mut watch = |event: Json| printer.event(event);
     let stream: Option<&mut Stream> = if streaming {
         Some(&mut watch as &mut Stream)
@@ -1699,7 +1740,7 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
     thought_at.dedup();
     let mut doc = vec![
         ("guard".to_string(), guard),
-        ("turns".to_string(), turns_json(&turns)),
+        ("turns".to_string(), turns_json(&turns, voices)),
         ("count".to_string(), Json::Int(turns.len() as i64)),
         ("speakers".to_string(), Json::strs(speakers)),
         ("mode".to_string(), Json::str(o.mode.clone())),
@@ -1821,6 +1862,23 @@ fn hold(svc: &Arc<Service>, request: &ConverseRequest, stream: Option<&mut Strea
         guard_on,
         provenance,
     } = request;
+    // who says a turn: the voice of its index, as the dialogue picks it - read before the conversation
+    // holds the models, so a streamed turn is spelled without taking a lock
+    let own = svc.active_encoding();
+    let voices = [
+        own,
+        partner_kind
+            .and_then(|kind| svc.with_parked_kind(kind, |other| other.encoding()))
+            .unwrap_or(own),
+    ];
+    let mut forward = stream;
+    let streaming = forward.is_some();
+    let mut spell = |event: Json| {
+        if let Some(write) = forward.as_deref_mut() {
+            write(spelled_event(event, voices));
+        }
+    };
+    let stream: Option<&mut Stream> = if streaming { Some(&mut spell) } else { None };
     let talk = |partner: Option<&mut Model>, stream: Option<&mut Stream>| -> Result<(Vec<Turn>, Json), ApiError> {
         let mut partner = partner;
         let mut stream = stream;
@@ -1857,7 +1915,7 @@ fn hold(svc: &Arc<Service>, request: &ConverseRequest, stream: Option<&mut Strea
         ("kind", Json::str(kind)),
         ("partner", partner_kind.map(Json::str).unwrap_or(Json::Null)),
         ("speakers", Json::strs(o.speakers.clone())),
-        ("turns", turns_json(&turns)),
+        ("turns", turns_json(&turns, voices)),
         ("count", Json::Int(turns.len() as i64)),
         // the duplicates the search could not avoid, ready to be punished
         ("repeats", Json::strs(repeats(&turns))),

@@ -631,7 +631,8 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
     let thought = think(&mut model, &o, &mut None)?;
     let learned = thought.taught >= 0 || thought.handed_over >= 0;
     let mut doc = vec![("kind".to_string(), Json::str(model.kind()))];
-    if let Json::Obj(pairs) = thought.to_json() {
+    // a thought in sounds carries the words it spells
+    if let Json::Obj(pairs) = crate::phonetic::spelled_thought(model.encoding(), thought.to_json()) {
         doc.extend(pairs);
     }
     let saved = if learned && args.on("save") {
@@ -667,14 +668,17 @@ fn think_route(svc: &Arc<Service>, r: &Request) -> Answer {
     if o.k < 1 {
         return Err(ApiError::bad_request("'k' must be >= 1"));
     }
-    let (kind, thought) = svc
-        .with_model(|m| -> Result<(&'static str, Thought), String> {
-            let thought = think(m, &o, &mut None)?;
-            Ok((m.kind(), thought))
-        })
+    let (kind, thought, enc) = svc
+        .with_model(
+            |m| -> Result<(&'static str, Thought, crate::encoding::Encoding), String> {
+                let thought = think(m, &o, &mut None)?;
+                Ok((m.kind(), thought, m.encoding()))
+            },
+        )
         .map_err(ApiError::bad_request)?;
     let mut doc = vec![("kind".to_string(), Json::str(kind))];
-    if let Json::Obj(pairs) = thought.to_json() {
+    // a thought in sounds carries the words it spells
+    if let Json::Obj(pairs) = crate::phonetic::spelled_thought(enc, thought.to_json()) {
         doc.extend(pairs);
     }
     Ok(Json::Obj(doc))

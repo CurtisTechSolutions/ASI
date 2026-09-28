@@ -1200,6 +1200,7 @@ func Respond(m *Model, pair *Filter, ask *Ask, name string, emit func(map[string
 		for _, refused := range seen {
 			vetoedAny = vetoedAny || refused
 		}
+		raw := "" // what the walk said, in the model's units
 		if turn == nil {
 			if vetoedAny {
 				n.line("nothing to say: the guard vetoed everything it could say")
@@ -1257,8 +1258,17 @@ func Respond(m *Model, pair *Filter, ask *Ask, name string, emit func(map[string
 					choice.StopSequence = nil
 				}
 			}
-			choice.Text = whole[start:end]
+			raw = whole[start:end]
+			choice.Text = raw
 			choice.Turn = turn
+			if enc.Unit.Phonetic() { // a model of sounds answers in the words they spell; the turn keeps the sounds
+				choice.Text = enc.SpellTail(whole[:end], raw)
+				pieces = []string{}
+				if choice.Text != "" {
+					pieces = append(pieces, choice.Text)
+				}
+				start, end = 0, len(choice.Text)
+			}
 			for _, piece := range windowed(pieces, start, end) {
 				emit(map[string]any{"type": "text", "index": index, "text": piece})
 			}
@@ -1273,7 +1283,7 @@ func Respond(m *Model, pair *Filter, ask *Ask, name string, emit func(map[string
 		}
 		choice.Thinking = strings.Join(n.lines, "\n")
 		choice.ThinkingUnits = enc.Len(choice.Thinking)
-		choice.OutputUnits = enc.Len(choice.Text) + choice.ThinkingUnits
+		choice.OutputUnits = enc.Len(raw) + choice.ThinkingUnits
 		reply.Choices = append(reply.Choices, choice)
 		var stopSequence any
 		if choice.StopSequence != nil {

@@ -140,7 +140,8 @@ export function questionsOf(thought) {
  */
 export function summarizeThought(thought) {
   if (!thought || typeof thought !== "object") return "";
-  const text = typeof thought.text === "string" ? thought.text : "";
+  // a thought of a model of sounds is quoted in the words it spells
+  const text = thoughtWords(thought);
   let said;
   if (text) said = `thought “${text}”`;
   else if (thought.stopped === "nothing" && thought.depth) said = "had nothing new to think";
@@ -150,6 +151,16 @@ export function summarizeThought(thought) {
   if (asked) parts.push(`questioned itself ${asked === 1 ? "once" : `${asked} times`}`);
   if (thought.then) parts.push(THEN_SAYS[thought.then] || `then ${thought.then}`);
   return parts.join("; ");
+}
+
+/**
+ * What a thought said: the words it spells for a model of sounds (`spelled`,
+ * which every server adds beside a thought's text), its text for any other.
+ */
+export function thoughtWords(thought) {
+  if (!thought || typeof thought !== "object") return "";
+  if (typeof thought.spelled === "string" && thought.spelled) return thought.spelled;
+  return typeof thought.text === "string" ? thought.text : "";
 }
 
 /** What set a thought off, in words. */

@@ -16,7 +16,8 @@ sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.
 
 from radixnet.countnet import CountRewardNet  # noqa: E402
 from radixnet.encoding import (  # noqa: E402
-    CHARS, PHONES, SYLLABLES, WORDS, Encoding, parse_encoding, phonetic_tokenizer, word_rows,
+    CHARS, PHONES, SYLLABLES, WORDS, Encoding, parse_encoding, phonetic_tokenizer, spelled_prediction, spelled_thought,
+    spelled_turn, word_rows,
 )
 
 try:
@@ -89,6 +90,55 @@ class TestTheUnits(unittest.TestCase):
         self.assertEqual(enc.spell("Z IH1 B R AH0"), "zibra")  # sounds no known word has are respelled
         self.assertEqual(Encoding().spell("the cat"), "the cat")  # nothing to do for letters
         self.assertEqual(Encoding(unit=SYLLABLES).spell("B.AH1.T ER0 # K.AH1.P"), "butter cup")
+        # a text given in words is read as its sounds first, so it spells itself back - and so does a mix
+        self.assertEqual(enc.spell("the cat sat"), "the cat sat")
+        self.assertEqual(enc.spell("the K AE1 T sat"), "the cat sat")
+        self.assertEqual(Encoding(unit=SYLLABLES).spell("the K.AE1.T sat"), "the cat sat")
+
+    def test_a_continuation_is_spelled_as_the_part_it_wrote(self):
+        for enc in (Encoding(unit=PHONES), Encoding(unit=SYLLABLES, n=2)):
+            with self.subTest(unit=enc.unit):
+                whole = enc.join("the cat sat on the mat. hello")
+                for prefix in ("", "the", "the cat", "the cat sat on the mat"):
+                    head = enc.join(prefix)
+                    tail = whole[len(head):]
+                    spelled = enc.spell_tail(whole, tail)
+                    # the words the head spells, then the continuation's - with the space between them
+                    self.assertEqual(enc.spell(head) + spelled, "the cat sat on the mat. hello", prefix)
+                self.assertEqual(enc.spell_tail(whole, ""), "")
+                self.assertEqual(enc.spell_tail(whole, whole), "the cat sat on the mat. hello")
+        enc = Encoding(unit=PHONES)
+        enc.units("the ca")  # the tokenizer reads "ca" as K AH1, and remembers it
+        # a continuation that finishes a word the prefix began is cut where that word starts
+        self.assertEqual(enc.spell("DH AH0 # K AH1"), "the ca")
+        self.assertEqual(enc.spell("DH AH0 # K AH1 T # S AE1 T"), "the cut sat")
+        self.assertEqual(enc.spell_tail("DH AH0 # K AH1 T # S AE1 T", "T # S AE1 T"), "cut sat")
+        # a tail that does not end the text is spelled on its own; letters and words are their own spelling
+        self.assertEqual(enc.spell_tail("DH AH0 # K AE1 T", "S AE1 T"), "sat")
+        self.assertEqual(Encoding().spell_tail("the cat sat", " sat"), " sat")
+        self.assertEqual(Encoding(unit=WORDS).spell_tail("the cat sat", "sat"), "sat")
+
+    def test_the_records_carry_the_words_they_spell(self):
+        enc = Encoding(unit=PHONES)
+        whole = "DH AH0 # K AE1 T # S AE1 T"
+        self.assertEqual(spelled_prediction(enc, whole, "# S AE1 T"),
+                         {"spelled": "the cat sat", "spelled_continuation": " sat"})
+        self.assertEqual(spelled_prediction(Encoding(), "the cat sat", " sat"), {})  # nothing to say for letters
+        question = {"text": "S AE1 T .", "questions": []}
+        thought = spelled_thought(enc, {"text": "DH AH0 # K AE1 T", "questions": [question]})
+        self.assertEqual(thought["spelled"], "the cat")
+        self.assertEqual(thought["questions"][0]["spelled"], "sat.")
+        self.assertIsNone(spelled_thought(enc, None))
+        letters = {"text": "hmm", "questions": []}
+        self.assertEqual(spelled_thought(Encoding(), letters), letters)
+        turn = {"index": 1, "text": whole, "context": "the cat", "reply": "# S AE1 T",
+                "rethink": {"kind": "repeat", "thought": {"text": "K AE1 T", "questions": []}}}
+        spelled = spelled_turn(enc, turn)
+        self.assertEqual((spelled["spelled"], spelled["spelled_reply"]), ("the cat sat", " sat"))
+        self.assertEqual(spelled["rethink"]["thought"]["spelled"], "cat")
+        self.assertEqual(spelled["rethink"]["kind"], "repeat")
+        self.assertNotIn("spelled", turn)  # the record it was given is left as it was
+        self.assertIs(spelled_turn(Encoding(), turn), turn)
 
     def test_the_alphabet(self):
         enc = Encoding(unit=PHONES)

@@ -27,6 +27,7 @@ use crate::json::Json;
 use crate::kinds;
 use crate::model::{GenerateOptions, Model, PredictOptions, SearchTuning};
 use crate::penalty::{resolve_traversal, DEFAULT_TRAVERSAL, TRAVERSALS};
+use crate::phonetic::spelled_prediction;
 use crate::radix::{Feedback, TrainConfig};
 use crate::report::{node_rows, path_rows, split_texts, stats};
 use crate::search::{PathResult, SamplingFilter};
@@ -1043,7 +1044,9 @@ fn search_fields(r: &Request) -> Result<SearchTuning, ApiError> {
     Ok(tuning)
 }
 
-fn path_json(result: &PathResult) -> Json {
+/// One walk as predict and generate answer with it; `spelled` is what a model
+/// of sounds adds (the words it spells), nothing for any other.
+fn path_json(result: &PathResult, spelled: Vec<(String, Json)>) -> Json {
     let mut pairs = vec![
         ("text".to_string(), Json::str(result.text.clone())),
         ("continuation".to_string(), Json::str(result.text.clone())),
@@ -1061,6 +1064,7 @@ fn path_json(result: &PathResult) -> Json {
     if result.punish != 0.0 {
         pairs.push(("punish".to_string(), Json::Num(result.punish)));
     }
+    pairs.extend(spelled);
     Json::Obj(pairs)
 }
 
@@ -1119,7 +1123,17 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         }
         None => (svc.with_model(|m| m.predict(&prefix, &opts))?, Json::Null),
     };
-    Ok(Json::obj([
+    // a model of sounds: the words each answer spells, and the part of them the continuation wrote
+    let enc = svc.active_encoding();
+    let ranked = |paths: &[PathResult]| -> Json {
+        Json::Arr(
+            paths
+                .iter()
+                .map(|r| path_json(r, spelled_prediction(enc, &r.full_text, &r.text)))
+                .collect(),
+        )
+    };
+    let mut doc = vec![
         ("prefix", Json::str(prefix)),
         ("kind", Json::str(kind)),
         ("continuation", Json::str(found.best.text.clone())),
@@ -1135,10 +1149,15 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         ("traversal", Json::str(found.traversal.clone())),
         ("k", Json::Int(found.k as i64)),
         ("beam", Json::Int(found.beam as i64)),
-        ("top", Json::Arr(found.top.iter().map(path_json).collect())),
-        ("bottom", Json::Arr(found.bottom.iter().map(path_json).collect())),
+        ("top", ranked(&found.top)),
+        ("bottom", ranked(&found.bottom)),
         ("guard", guard),
-    ]))
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect::<Vec<_>>();
+    doc.extend(spelled_prediction(enc, &found.best.full_text, &found.best.text));
+    Ok(Json::Obj(doc))
 }
 
 fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
@@ -1192,8 +1211,20 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
         Some(outcome) => outcome?,
         None => (svc.with_model(|m| m.generate(&opts))?, Json::Null),
     };
+    // a model of sounds: the words each text spells
+    let enc = svc.active_encoding();
+    let spelled = |r: &PathResult| -> Vec<(String, Json)> {
+        if enc.unit.phonetic() {
+            vec![("spelled".to_string(), Json::str(enc.spell(&r.text)))]
+        } else {
+            Vec::new()
+        }
+    };
     Ok(Json::obj([
-        ("samples", Json::Arr(samples.iter().map(path_json).collect())),
+        (
+            "samples",
+            Json::Arr(samples.iter().map(|r| path_json(r, spelled(r))).collect()),
+        ),
         ("guard", guard),
     ]))
 }

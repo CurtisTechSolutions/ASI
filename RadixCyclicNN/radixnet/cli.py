@@ -35,7 +35,10 @@ from .beam import Prediction, path_probability
 from .penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, repeats as dialogue_repeats, transcript
 from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS
-from .encoding import CHARS, WINDOW, WORDS, Encoding, hear_audio, is_audio_file, parse_encoding, word_rows
+from .encoding import (
+    CHARS, WINDOW, WORDS, Encoding, hear_audio, is_audio_file, parse_encoding, spelled_prediction, spelled_thought,
+    spelled_turn, word_rows,
+)
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from .training import ORDERS
@@ -906,23 +909,32 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         "mode": mode,
         "traversal": args.traversal,
     }
-    if model.encoding.phonetic:
-        doc["spelled"] = model.encoding.spell(result.full_text)
+    doc.update(spelled_prediction(model.encoding, result.full_text, result.text))
     if args.traversal != "reward":
         doc["traversal"] = args.traversal
         doc["punish"] = result.punish
     if isinstance(result, Prediction):
+        enc = model.encoding
         for title, paths in (("top", result.top), ("bottom", result.bottom)):
             console.say()
             console.say(f"{title} {len(paths)} continuation(s) (k={result.k}, beam={result.beam}):")
+            if enc.phonetic:  # the sounds, and the words they spell
+                console.table(
+                    ("#", "cost", "prob", "end", "continuation", "spelled"),
+                    [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 60)),
+                      quote(clip(enc.spell(r.full_text), 60))] for i, r in enumerate(paths)],
+                )
+                continue
             console.table(
                 ("#", "cost", "prob", "end", "continuation"),
                 [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 80))] for i, r in enumerate(paths)],
             )
         doc.update(
             k=result.k, beam=result.beam,
-            top=[{**r.to_dict(), "probability": path_probability(r)} for r in result.top],
-            bottom=[{**r.to_dict(), "probability": path_probability(r)} for r in result.bottom],
+            top=[{**r.to_dict(), "probability": path_probability(r), **spelled_prediction(enc, r.full_text, r.text)}
+                 for r in result.top],
+            bottom=[{**r.to_dict(), "probability": path_probability(r), **spelled_prediction(enc, r.full_text, r.text)}
+                    for r in result.bottom],
         )
     if guard is not None:
         _print_vetoes(console, guard, "continuations")
@@ -1137,7 +1149,7 @@ def cmd_think(args: argparse.Namespace, console: Console) -> dict:
         ("thoughts known", _thought_openings(model)),
     ])
     console.say()
-    _say_thought(console, thought, 0)
+    _say_thought(console, thought, 0, model.encoding)
     if thought.stopped == "nothing" and not thought.text:
         console.say()
         console.say(f"(it has no thoughts to think with yet: `{PROG} ollama think --prompt TOPIC --train` teaches it some)")
@@ -1154,7 +1166,7 @@ def cmd_think(args: argparse.Namespace, console: Console) -> dict:
     elif learned:
         console.say()
         console.say(f"it learned {' and '.join(learned)}; --save writes that into the model")
-    return {"kind": model.kind, **thought.to_dict(), "saved": saved}
+    return {"kind": model.kind, **spelled_thought(model.encoding, thought.to_dict()), "saved": saved}
 
 
 def _thought_openings(model: GraphModel) -> int:
@@ -1164,12 +1176,14 @@ def _thought_openings(model: GraphModel) -> int:
     return len(model.graph.children[THINK])
 
 
-def _say_thought(console: Console, thought: Any, depth: int) -> None:
-    """A thought and its questions, indented one level per depth."""
+def _say_thought(console: Console, thought: Any, depth: int, encoding: Encoding | None = None) -> None:
+    """A thought and its questions, indented one level per depth; a thought in sounds with the words it spells."""
     pad = "    " * depth
     console.say(f"{pad}{summarize_thought(thought)}")
+    if encoding is not None and encoding.phonetic and thought.text:
+        console.say(f"{pad}  spelled {quote(encoding.spell(thought.text))}")
     for question in thought.questions:
-        _say_thought(console, question, depth + 1)
+        _say_thought(console, question, depth + 1, encoding)
 
 
 def summarize_thought(thought: Any) -> str:
@@ -1185,7 +1199,9 @@ def _say_turn(console: Console, turn: dict) -> None:
                              ("repeat", turn["repeat"]), ("repeats itself", turn["stutter"])) if on]
     if turn["vetoed"]:
         flags.append(f"{turn['vetoed']} vetoed")
-    console.say(f"{turn['speaker']}: {turn['text']}")
+    console.say(f"{turn['speaker']}: {turn.get('spelled', turn['text'])}")
+    if turn.get("spelled", turn["text"]) != turn["text"]:  # a line of sounds: the words it spells, then the sounds
+        console.say(f"    sounds {quote(turn['text'])}")
     detail = f"    cost {fmt(turn['cost'])}  p {fmt(turn['probability'])}"
     if turn["context"]:
         detail += f"  picked up {quote(turn['context'])}"
@@ -1208,6 +1224,8 @@ def _say_turn(console: Console, turn: dict) -> None:
             from .thinking import Thought
 
             console.say(f"    {summarize_thought(Thought.from_dict(r['thought']))}")
+            if r["thought"].get("spelled"):
+                console.say(f"      spelled {quote(r['thought']['spelled'])}")
 
 
 class ConversePrinter:
@@ -1270,6 +1288,11 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict | None:
         partner = load_model(args.partner, backend=args.backend, device=args.device)
     speakers = [name.strip() for name in args.speakers.split(",") if name.strip()] or list(DEFAULT_SPEAKERS)
     pair = open_guard(args, console, model)
+    voices = (model, partner or model)  # who says a turn: the voice of its index, as the dialogue picks it
+
+    def spelled(turn: dict) -> dict:  # a turn of a model of sounds carries the words it spells
+        return spelled_turn(voices[turn["index"] % 2].encoding, turn)
+
     # --stream: the conversation is printed as it happens - each turn the moment it is spoken, and before it
     # what the voice does: the context it continues, a draft it catches itself on, where it backs up to
     streaming = ConversePrinter(console) if args.stream else None
@@ -1278,7 +1301,9 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict | None:
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
         explore=args.explore, learn=not args.no_learn, think=not args.no_think, think_depth=args.think_depth,
-        stream=streaming,
+        stream=None if streaming is None else lambda event: streaming(
+            {**event, "turn": spelled(event["turn"])} if event["event"] == "turn" else event
+        ),
     )
     guard: dict | None = None
     if pair is None:
@@ -1290,7 +1315,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict | None:
         guard = _guard_doc(pair, outcome["verdicts"], refusals=outcome["vetoed"])
     if streaming is None:
         for turn in turns:
-            _say_turn(console, turn.to_dict())
+            _say_turn(console, spelled(turn.to_dict()))
     if not turns:
         console.say("(nothing to say: train the model first)")
     if guard is not None:
@@ -1316,7 +1341,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict | None:
         console.say(f"it learned {' and '.join(learned)}; --save writes that into the model")
     doc = {
         "guard": guard,
-        "turns": [t.to_dict() for t in turns],
+        "turns": [spelled(t.to_dict()) for t in turns],
         "count": len(turns),
         "speakers": speakers,
         "mode": args.mode,

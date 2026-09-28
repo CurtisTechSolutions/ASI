@@ -301,11 +301,35 @@ class Encoding:
 
         The tokenizer spells each word back through its lexicon and its memory of
         what it read, and respells sounds no known word has, so a prediction made
-        of sounds can be read.  A character or word encoding returns the text as it is.
+        of sounds can be read.  A text given in words is read as the sounds it
+        makes first (:meth:`units`), so it spells itself back - and so does a text
+        that mixes the two.  A character or word encoding returns the text as it is.
         """
         if not self.phonetic:
             return text
-        return phonetic_tokenizer(self.unit).decode(split_words(text))
+        return phonetic_tokenizer(self.unit).decode(self.units(text))
+
+    def spell_tail(self, whole: str, tail: str) -> str:
+        """What ``tail`` - the last units of ``whole`` - spells, as the part of ``spell(whole)`` it wrote.
+
+        A continuation spelled on its own loses the space before its first word,
+        and cannot finish a word the text before it began, so the whole text is
+        spelled and what the text before the tail spells is cut off its front:
+        ``spell_tail("DH AH0 # K AE1 T # S AE1 T", "# S AE1 T") -> " sat"``, and
+        the two pieces join back into ``spell(whole)``.  When the tail finished a
+        word the head began, the cut falls back to where that word starts.  A
+        tail that does not end ``whole`` is spelled on its own.  A character or
+        word encoding returns the tail as it is.
+        """
+        if not self.phonetic:
+            return tail
+        if not whole.endswith(tail):
+            return self.spell(tail)
+        spelled = self.spell(whole)
+        head = self.spell(whole[: len(whole) - len(tail)])
+        if not spelled.startswith(head):  # the tail finished a word the head began: cut where that word starts
+            head = spelled[: os.path.commonprefix([spelled, head]).rfind(" ") + 1]
+        return spelled[len(head):]
 
     def vocabulary(self, grams: Iterable[str]) -> dict[str, int]:
         """The words of a word encoding's grams, and how many grams hold each.
@@ -437,6 +461,54 @@ class Encoding:
 
 DEFAULT_ENCODING = Encoding()
 """Character trigrams of stride 1: what every model used before the encoding became a choice."""
+
+
+# ---------------------------------------------------------------------------
+# what a model of sounds said, in words
+# ---------------------------------------------------------------------------
+
+
+def spelled_prediction(encoding: Encoding, full_text: str, continuation: str) -> dict:
+    """The words a prediction of a model of sounds spells: ``{"spelled", "spelled_continuation"}``.
+
+    ``spelled`` is the whole text read back as English, ``spelled_continuation``
+    the part of it the continuation wrote (:meth:`Encoding.spell_tail`), so the
+    prefix's words are ``spelled`` without it.  Every other encoding is its own
+    spelling, and gets ``{}``: the fields are there only when they say something.
+    """
+    if not encoding.phonetic:
+        return {}
+    return {"spelled": encoding.spell(full_text), "spelled_continuation": encoding.spell_tail(full_text, continuation)}
+
+
+def spelled_thought(encoding: Encoding, thought: dict | None) -> dict | None:
+    """A thought record (``Thought.to_dict``) with ``spelled`` beside its text, and its questions' too."""
+    if thought is None or not encoding.phonetic:
+        return thought
+    return {
+        **thought, "spelled": encoding.spell(thought.get("text", "")),
+        "questions": [spelled_thought(encoding, q) for q in thought.get("questions") or []],
+    }
+
+
+def spelled_turn(encoding: Encoding, turn: dict) -> dict:
+    """A turn record (``Turn.to_dict``) with the words it spells beside its sounds.
+
+    ``spelled`` is the whole line, ``spelled_reply`` the part of it the search
+    added after the context it picked up, and the thought of a rethink is
+    spelled too.  Any other encoding: the record as it is.
+    """
+    if not encoding.phonetic:
+        return turn
+    out = {
+        **turn, "spelled": encoding.spell(turn["text"]),
+        "spelled_reply": encoding.spell_tail(turn["text"], turn["reply"]),
+    }
+    rethink = turn.get("rethink")
+    if rethink is not None and rethink.get("thought") is not None:
+        out["rethink"] = {**rethink, "thought": spelled_thought(encoding, rethink["thought"])}
+    return out
+
 
 _ALIASES = {
     "": Encoding(),

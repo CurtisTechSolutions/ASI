@@ -257,10 +257,12 @@ pub fn model_tools(
                 max_length: Some(length.max(1) as usize),
                 ..Default::default()
             };
-            let found = lock(&m)
+            let mut model = lock(&m);
+            let found = model
                 .predict(&text_arg(args, "prefix_text"), &options)
                 .map_err(value_error)?;
-            Ok((found.best.full_text, Json::Null))
+            // a model of sounds answers in the words they spell (every other encoding is its own spelling)
+            Ok((model.encoding().spell(&found.best.full_text), Json::Null))
         },
     ));
 
@@ -281,11 +283,13 @@ pub fn model_tools(
                 count: int_arg(args, "count", 3).max(0) as usize,
                 ..Default::default()
             };
-            let results = lock(&m).generate(&options).map_err(value_error)?;
+            let mut model = lock(&m);
+            let results = model.generate(&options).map_err(value_error)?;
+            let enc = model.encoding();
             let lines: Vec<String> = results
                 .iter()
                 .enumerate()
-                .map(|(i, r)| format!("{}. {}", i + 1, r.text))
+                .map(|(i, r)| format!("{}. {}", i + 1, enc.spell(&r.text)))
                 .collect();
             let text = if lines.is_empty() {
                 "(the network generated nothing)".to_string()

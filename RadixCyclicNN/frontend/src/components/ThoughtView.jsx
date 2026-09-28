@@ -9,6 +9,7 @@ import {
   summarizeThought,
   thenSays,
   thoughtTree,
+  thoughtWords,
   triggerSays,
 } from "../thinking.js";
 
@@ -92,7 +93,12 @@ export default function ThoughtView({ thought }) {
       <p className="thought-summary">
         <b>{summarizeThought(t)}</b>
       </p>
-      {t.text ? <p className="thought-text">{t.text}</p> : null}
+      {t.text ? <p className="thought-text">{thoughtWords(t)}</p> : null}
+      {t.text && thoughtWords(t) !== t.text ? (
+        <span className="sounds" title="what the model thought, in its own units">
+          in its units: {t.text}
+        </span>
+      ) : null}
       <dl className="kv">
         <dt>trigger</dt>
         <dd>{triggerSays(t.trigger)}</dd>

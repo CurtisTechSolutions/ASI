@@ -315,6 +315,7 @@ func MCPModelTools(o MCPModelOptions) []*Tool {
 	}
 	model := o.Model
 
+	// a model of sounds answers in the words they spell (Encoding.Spell; every other encoding is its own spelling)
 	predict := func(arguments map[string]any) (string, map[string]any, error) {
 		length := mcpInt(arguments["length"], 40)
 		found, err := model.Predict(mcpString(arguments["prefix_text"]), PredictOptions{
@@ -324,7 +325,7 @@ func MCPModelTools(o MCPModelOptions) []*Tool {
 		if err != nil {
 			return "", nil, err
 		}
-		return found.FullText, nil, nil
+		return model.Encoding().Spell(found.FullText), nil, nil
 	}
 
 	generate := func(arguments map[string]any) (string, map[string]any, error) {
@@ -337,7 +338,7 @@ func MCPModelTools(o MCPModelOptions) []*Tool {
 		}
 		lines := make([]string, 0, len(results))
 		for i, result := range results {
-			lines = append(lines, fmt.Sprintf("%d. %s", i+1, result.Text))
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, model.Encoding().Spell(result.Text)))
 		}
 		if len(lines) == 0 {
 			return "(the network generated nothing)", nil, nil
