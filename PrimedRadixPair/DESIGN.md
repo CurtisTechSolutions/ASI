@@ -1,18 +1,23 @@
 # PrimedRadixPair — Design Specification
 
-**Two radix trees, primed with every option, connected at every equal node.**
+**Two radix trees, primed with every option, connected at every equal node —
+one written by reading, the other by what worked.**
 
 A radix tree that is **primed** holds every sequence of `1..L` units over a
-closed alphabet before it sees a single text, and never changes its structure
-again; a second primed tree over the same sequences reads them from the other
-end; and the two are connected wherever they hold an equal sequence, at every
-level. This document is the contract the code is written against. Read it
-fully before writing code. `PRD.md` says what it is for and what will count as
-success; this says what exactly the code must do.
+closed vocabulary before it sees a single text and never changes its structure
+again. The **count tree** is written by reading: how often each sequence
+occurred. The **reward tree** is written by outcomes: what each step of the
+model's own outputs earned when a judge said the output was right or wrong. The
+two are connected wherever they hold an equal sequence, at every level, and the
+connection is where a step's two numbers are read together. Text goes in and
+comes out through a **codec** — an encoder/decoder behind a tokenizer. This
+document is the contract the code is written against. Read it fully before
+writing code. `PRD.md` says what it is for and what will count as success; this
+says what exactly the code must do.
 
 Directory: `PrimedRadixPair/`. Python package: `radixpair`. Python 3.11+,
-**standard library only**, no optional accelerator in this version,
-deterministic given its inputs.
+**standard library only**; `tiktoken` and `tokenizers` are optional extras for
+one codec, imported lazily and never required. Deterministic given its inputs.
 
 ---
 
@@ -20,15 +25,17 @@ deterministic given its inputs.
 
 | Requirement | How it is realised |
 |---|---|
-| **Two Radix Trees** | Tree **A** appends a unit to a sequence, tree **B** prepends one (§8.1). A path down A spells a sequence forwards, a path down B spells it backwards. Both are radix trees in the sense of every other one in this repository: a node *is* the sequence spelled so far. |
-| **"Priming" the Radix Tree with every potential option** | `prime(alphabet, L)`: every sequence of length `0..L` over the `R` symbols of the alphabet exists from the start, as a slot in flat arrays. `N = (R^(L+1) − 1) / (R − 1)` nodes, a function of `(R, L)` alone. Nothing is ever added or removed (§7). |
-| **brute-force insertion of every option** | A complete `R`-ary tree needs no pointers: the path to a node, read as a number in base `R` — the *radix* — is its address (§6). The literal brute-force insertion — every sequence, one at a time, with the standard radix insertion of `RadixTrieLLM_RNN/main.py` — is kept in `check.py` as the oracle the arithmetic is tested against (§6.4, §14). |
-| **connect the 2nd Radix Tree to the first where the nodes are equal** | Two nodes are equal when they spell the same sequence. Every sequence has exactly one node in each tree, so the connection — a **rung** — is a bijection, and the same id names both ends (§8.1). Because every node is connected, the two trees are stored as one node set with two families of edges; the rung is the one place a connection carries a weight of its own (§11). |
-| **at every single level/node, not just the final nodes** | The rungs at the two deepest levels are what let a walk slide its window: a node at level `L` has no children, so a forward walk crosses to B, steps toward B's root (dropping the *oldest* unit), and crosses back. Every shallower rung is a shorter memory the walk can fall back to. Connected only at the final nodes, the pair cannot continue past one window (§8.5). |
-| A model of the family | `train / predict / generate / score`, shortest-path prediction over the structure (Dijkstra, as `RadixCyclicNN/DESIGN.md` §7), two kinds on one structure (the `count` kind first, the family's sine kind second, as `RadixCyclicNN/DECISIONS.md` D-020), JSON model files, a CLI, `unittest` with no dependencies. |
-| No back-propagation | The count kind has no gradient at all. The sine kind's rule is the one-hop rule of `FilterBankRadix/DESIGN.md` §5.4, touching one node, its children and the far end of its rung; nothing multiplies a chain (§11). |
-| Custom activation `−sin(x/3)` | The sine kind: every node owns `f(x) = a·sin(b(x − h)) + k`, initialised to `a = −1, b = 1/3, h = k = 0`, all four learnable (§11). |
-| 2NRL | The sine kind: train on bad, `invert()`, fine-tune on good; the count kind does not invert (D-023) (§11.5). |
+| **Two Radix Trees** | The **count tree** (§7) and the **reward tree** (§8), over the same primed sequences: a path from the root spells a sequence forwards, and a node *is* the sequence spelled so far. Both are radix trees in the sense of every other one in this repository. |
+| **"Priming" the Radix Tree with every potential option** | `prime(codec, L)`: every sequence of length `0..L` over the codec's `R` ids exists from the start, as a slot in flat arrays. `N = (R^(L+1) − 1) / (R − 1)` nodes, a function of `(R, L)` alone. Nothing is ever added or removed. |
+| **brute-force insertion of every option** | A complete `R`-ary tree needs no pointers: the path to a node, read as a number in base `R` — the *radix* — is its address (§6). The literal brute-force insertion — every sequence, one at a time, with the standard radix insertion of `RadixTrieLLM_RNN/main.py` — is kept in `check.py` as the oracle the arithmetic is tested against (§6.4, §15). |
+| **connect the 2nd Radix Tree to the first where the nodes are equal** | Two nodes are equal when they spell the same sequence. Every sequence has exactly one id, the same in both trees, so the connection — the **rung** — is the same id read twice: once for its count, once for its reward (§9.1). |
+| **at every single level/node, not just the final nodes** | A prediction visits every context length from the deepest down to the root (§9.3), and at each one the rung combines the count tree's share with the reward tree's reward into one answer (§9.2). A judged step is credited at every context length (§8.2). `rungs = final` keeps only the deepest level's rungs, so what the rest buy is measured (§9.6). |
+| **the second tree is reward-focused, rewarded based on correct outcomes** | The reward tree is written only by `reward` / `punish` — the family's primitives (D-026), marks as weights (D-050) — and never by `train`. A step carries its **reward** and its **penalty** as two numbers kept apart, because their net loses what the punishment traversal needs (`SPEC-LeastPunished.md` §1). |
+| **use an encoder/decoder** | `Codec` (§5): `encode(text) → ids`, `decode(ids) → text`, the two halves of one tokenizer, chosen at priming and saved with the model — as `RadixCyclicNN`'s `Encoding` has its `Encoder` and `Decoder` halves. |
+| **a tokenizer commonly used in LLMs, and my phonetic tokenizer** | `bpe` — the repository's byte-level byte-pair encoding, trained at priming to a chosen vocabulary size (§5.3); `phones` — `../PhoneticTokenizer` at the phoneme level, its fixed alphabet of 92 ids as the vocabulary (§5.4); `external` — a published LLM tokenizer through `tiktoken` or `tokenizers`, optional (§5.5). And `chars` and `bytes` for the small alphabets. |
+| A model of the family | `train / predict / generate / score` and `reward / punish / two_nrl / feedback`; shortest-path prediction (Dijkstra, as `RadixCyclicNN/DESIGN.md` §7); the reward and punishment traversals (`RadixCyclicNN/DESIGN.md` §31); JSON model files; a CLI; `unittest` with no dependencies. |
+| The score is the family's dual function | At a node, `P(x) ∝ share^share_scale · e^(reward_scale · reward)`: the edge's share of its node's traversals times `e` to the reward (D-022, without the recency window). Here the share comes from one tree and the reward from the other, and the rung is where they meet (§9.2). |
+| No back-propagation | The count kind has no gradient at all. The sine kind's rule (§12) is the one-hop rule of `FilterBankRadix/DESIGN.md` §5.4 on the count tree's edges; the reward tree is a ledger, never a gradient's target. |
 
 ---
 
@@ -40,32 +47,30 @@ compressed away, and the structure is a record of what was seen. A primed tree
 is the opposite end of that line: every context of every length up to `L − 1`
 exists before any text, so no observation ever makes a structural decision.
 There is nothing to compress — a complete tree has no unary chains — and no
-lookup: the address of a sequence is arithmetic on its units (§6). What a
-grown tree spends on structure, a primed tree spends on memory: `R^L` slots
-whatever the data (§15).
+lookup: the address of a sequence is arithmetic on its units (§6). What a grown
+tree spends on structure, a primed tree spends on memory: `R^L` slots whatever
+the data (§16).
 
-**Two trees, one node set.** The requirement connects every node of B to its
-equal in A. A connection that exists at every node and costs nothing to cross
-is an identification: the two trees *are* one set of nodes with two sets of
-edges. The design stores them that way (§7, §8.1) — one count per sequence,
-read as "what follows it" by A and "what precedes it" by B — and keeps the
-rung as the one place a connection can carry its own weight, which is what the
-sine kind learns there (§11). Two separate node sets would hold the same
-numbers twice.
+**The count / reward model, pulled apart.** `RadixCyclicNN`'s count model keeps
+one number per edge that adds `log` of a share to a reward; its punishment
+traversal then has to take the reward back out to ask which way the least has
+gone wrong on (`RadixCyclicNN/DESIGN.md` §31). Here the split is the structure: one tree is written
+by reading and one by judging, and the rung is the one place they are added.
+Each tree can be read alone, inspected node by node, and saved sparsely.
 
 **The rungs are the fold.** Falling back from a context to a shorter one is a
-walk through the second tree (§8.2), and summed over every depth the walk can
-fall to it is exactly the every-context-length prediction of
-`FilterBankRadix/DESIGN.md` §5.3 (§8.3). That identity is the design's main
-check: whatever the search does, the exact answer is known and the pair must
-give it. What the pair adds over that fold is what a corridor cannot do and a
-tree can: read from the other end (§8.4), and — the first follow-up — meet a
-walk coming the other way (`PRD.md` §8, phase 3).
+shift the address arithmetic provides (§9.4), and summed over every depth the
+walk can fall to it is exactly the every-context-length prediction of
+`FilterBankRadix/DESIGN.md` §5.3 — at the settings where the two coincide
+(§9.3). That identity is the design's main check: whatever the search does, the
+exact answer is known and the pair must give it. What the reward tree adds is
+a second term at every level of that fold.
 
-**What it is not.** It is not a de Bruijn graph and not `RadixCyclicNN`'s
-gram graph, though at a fixed depth all three encode a sliding window: those
-hold one order and the seen grams; this holds every order and every gram. It
-is not a suffix automaton: no state is shared between different sequences.
+**What it is not.** It is not a de Bruijn graph and not `RadixCyclicNN`'s gram
+graph, though at a fixed depth all three encode a sliding window: those hold
+one order and the seen grams; this holds every order and every gram. It is not
+a policy-gradient method: a reward here is a number written on a node, never a
+gradient's target.
 
 ---
 
@@ -73,20 +78,23 @@ is not a suffix automaton: no state is shared between different sequences.
 
 | symbol | meaning |
 |---|---|
-| `Σ`, `R` | the alphabet and its size, marks included. Ids: `0 = <s>`, `1 = </s>`, `2 = <unk>`, then the units (§5). |
+| `Σ`, `R` | the codec's vocabulary and its size, marks included |
+| `START`, `END`, `UNK` | the codec's ids for the start of a text, its end and a unit outside the vocabulary. `0, 1, 2` for `chars`, `bytes` and `bpe`; `V, V+1, V+2` for `external`; the phonetic tokenizer's own `2, 3, 1` for `phones`, whose `<pad>` (`0`) is a *dead* id |
+| `Σ_out`, `R'` | what a walk may emit: `Σ` without `START` and without the dead ids; its size |
 | `L`, `D` | the longest sequence held, and `D = L − 1` the longest context |
-| `s`, `\|s\|`, `ε` | a sequence of unit ids, its length, and the empty sequence (the root, id `0`) |
-| `s·x`, `x·s` | append `x` (an edge of A), prepend `x` (an edge of B) |
-| `s[1:]`, `s[:-1]` | drop the oldest unit (B's step toward its root), drop the newest (A's) |
-| `base(ℓ)`, `code(s)`, `id(s)` | the addressing of §6 |
-| `N` | `base(L + 1)`, the number of nodes |
-| `cnt[i]` | the number of occurrences of sequence `i` as a substring of the padded training texts (§7.2) |
-| `Σ_A`, `Σ_B`, `R'` | what a forward walk can emit (`Σ` without `<s>`), what a backward walk can emit (`Σ` without `</s>`), and their size `R − 1` |
-| `ctx_A(s)`, `ctx_B(s)` | `Σ_{x∈Σ_A} cnt[s·x]` and `Σ_{x∈Σ_B} cnt[x·s]`: how often `s` was a context in each direction (§7.3) |
-| `p_A(x\|s)`, `p_B(x\|s)` | `cnt[s·x] / ctx_A(s)` and `cnt[x·s] / ctx_B(s)`; `0` when the context count is `0` |
-| `own_A(s)` | `ctx_A(s) / (ctx_A(s) + ALPHA)`, `ALPHA = 2` — the share of the answer a context keeps for itself; `own_B` likewise |
+| `s`, `\|s\|`, `ε` | a sequence of ids, its length, and the empty sequence (the root, id `0`) |
+| `s·x` | append `x`: the child of `s`, and **the step "`x` after `s`"** — in a tree the edge into a node is unique, so a step and its node are one thing |
+| `s[1:]` | drop the oldest unit: the shift (§9.4) |
+| `base(ℓ)`, `code(s)`, `id(s)`, `N` | the addressing of §6; `N = base(L + 1)` |
+| `cnt[i]` | how often sequence `i` occurred as a substring of the padded training texts (the count tree) |
+| `plus[i]`, `minus[i]` | the rewards and the penalties the step `i` received (the reward tree), both `≥ 0`, kept apart |
+| `reward(i)`, `penalty(i)` | `plus[i] − minus[i]` and `minus[i]` |
+| `ctx(s)` | `Σ_{x∈Σ_out} cnt[s·x]`: how often `s` was a context |
+| `share(x\|s)` | `(cnt[s·x] + σ) / (ctx(s) + σ·R')`, `σ = smoothing` (default `0.5`, Jeffreys, as D-022): the step's share of its context's traversals |
+| `own(s)` | `ctx(s) / (ctx(s) + ALPHA)`, `ALPHA = 2`: the share of the answer a context keeps for itself before falling back |
 | `FLOOR` | `0.02`, the uniform share mixed into every final answer. `ALPHA` and `FLOOR` are `FilterBankRadix`'s, so bits per unit are comparable (its invariant 5) |
-| a padded text | `<s> u₁ … u_T </s>` — what `train` and `score` see (§5) |
+| `share_scale`, `reward_scale`, `merit_scale`, `penalty_scale` | the scales of the two traversals (§9.2), all default `1` |
+| a padded text | `START u₁ … u_T END` — what `train`, `reward` and `score` see |
 
 ---
 
@@ -97,65 +105,137 @@ PrimedRadixPair/
   PRD.md                 what and why; the decisions and the success criteria
   DESIGN.md              this file — the contract
   README.md              the front page; the numbers, once there are numbers
-  Makefile               make test | check | prime | train | predict | generate | score | info | bench | compare | localise
+  Makefile               make test | check | prime | train | reward | punish | feedback | predict | generate | score | info | bench | …
   radixpair/
-    __init__.py          the public surface: Alphabet, PairModel, prime, load_model, Score, PathResult
+    __init__.py          the public surface: Codec and the presets, PairModel, prime, load_model, Score, PathResult
     __main__.py          python3 -m radixpair -> cli.main()
-    alphabet.py          the closed alphabet: presets, the marks, units(text) and text(units)
-    address.py           the arithmetic of a primed tree: base, code, id, append, prepend, drop_*, level
-    nodes.py             PrimedNodes: the node table, the counts, observe()
-    tree.py              PrimedTree: one direction over the node table — children, parent, forget, own, dist
-    pair.py              RadixPair: the two trees, the rungs, the corridor, the fold, scoring from both ends
-    search.py            Dijkstra and sampling over the pair, forwards and backwards
-    model.py             PairModel: the four verbs, settings, kinds, persistence
+    codec.py             the encoder/decoder: Codec, chars, bytes_, phones, external; the marks
+    bpe.py               the byte-level byte-pair encoding: train, encode, decode
+    address.py           the arithmetic of a primed tree: base, code, id, append, drop_oldest, drop_newest, level
+    count.py             CountTree: the counts, observe(), ctx / share / own
+    reward.py            RewardTree: plus and minus, credit() at every level, reward / penalty, invert
+    pair.py              RadixPair: the rung (the score of a step under a traversal), the fold, the shift, scoring
+    search.py            Dijkstra, greedy and sampling over the pair
+    model.py             PairModel: the verbs, the feedback primitives, settings, kinds, persistence
     checkpoint.py        CheckpointManager: rotation, the latest pointer, resume
     check.py             the brute-force oracle: prime a small tree literally and compare
-    bench.py             throughput, compare (bits per unit against the references), localise
+    bench.py             throughput; compare (bits per unit against the references); feedback; rungs
     cli.py               python3 -m radixpair <command>
     activation.py        (phase 4) the parametric sine and its partials
-    sine.py              (phase 4) the sine kind: parameters, initialisation by id, the one-hop rule, invert
+    sine.py              (phase 4) the sine kind: parameters on the count tree, the one-hop rule, invert
   tests/
     __init__.py          puts the project root on sys.path
-    test_alphabet.py  test_address.py  test_nodes.py  test_pair.py  test_search.py
-    test_model.py  test_localise.py  test_checkpoint.py  test_cli.py  test_bench.py  test_sine.py (phase 4)
+    test_codec.py  test_bpe.py  test_address.py  test_count.py  test_reward.py  test_pair.py  test_search.py
+    test_model.py  test_checkpoint.py  test_cli.py  test_bench.py  test_sine.py (phase 4)
 ```
 
 ---
 
-## 5. `alphabet.py`
+## 5. `codec.py`, `bpe.py` — the encoder/decoder
 
-The alphabet is **closed and explicit**: fixed at priming, written into the
-model file, and never extended. Three symbols are marks and come first, so
-every preset agrees on their ids:
+### 5.1 The contract
+
+A codec is one tokenizer's two halves plus what the tree needs to know about
+its ids. It is chosen at priming, saved whole in the model file, and never
+changed afterwards: the tree's addresses are measured in its units.
 
 ```python
-START, END, UNK = 0, 1, 2
-
-class Alphabet:
-    name: str                  # "letters" | "phones" | "bytes" | "custom"
-    symbols: list[str]         # symbols[i] is the text of id i; the marks first
-    R: int                     # len(symbols)
-    def units(self, text: str) -> list[int]       # normalised and mapped; nothing outside the alphabet survives (-> UNK); no marks
-    def padded(self, text: str) -> list[int]      # [START] + units(text) + [END]
-    def text(self, ids: Iterable[int]) -> str     # back to text; marks render as nothing, UNK as "?"
-    def unk_share(self, ids) -> float
-    def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> Alphabet
+class Codec:
+    name: str                       # "chars" | "bytes" | "bpe" | "phones" | "external"
+    R: int                          # the vocabulary size, marks included
+    start: int ; end: int           # the ids of the marks
+    unk: int | None                 # the id of "a unit outside the vocabulary"; None where every input is a unit (bytes)
+    dead: frozenset[int]            # ids never read and never emitted (a tokenizer's <pad>)
+    def encode(self, text: str) -> list[int]         # the encoder: units only, no marks; nothing outside Σ survives (-> unk)
+    def decode(self, ids: Iterable[int]) -> str      # the decoder: marks and dead ids dropped; unk rendered as "?" where the tokenizer has no rendering
+    def padded(self, text: str) -> list[int]         # [start] + encode(text) + [end]
+    def emits(self) -> list[int]                     # Σ_out, in id order
+    def symbol(self, i: int) -> str                  # the text of one id, for display and the graph view
+    def describe(self) -> str
+    def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> Codec
 ```
 
-| preset | units | `R` | normalisation |
-|---|---|---|---|
-| `letters()` | space, `a`–`z`, `'`, `.`, `,` (30) | **33** | `casefold`; curly quotes to `'`; a run of whitespace to one space; everything else to `<unk>` |
-| `phones(stress=False)` | the inventory of `../PhoneticTokenizer` — 39 phonemes, or with stress — plus its word gap `#` and its pause symbol, **taken from the tokenizer at priming** and written into the file, so the alphabet is whatever the tokenizer says it is | 44 without stress | text goes through the tokenizer exactly as `RadixCyclicNN`'s `Encoding(unit=PHONES)` reads it; `text()` joins units with spaces as that encoding does. Importable only when `PhoneticTokenizer` is; `test_alphabet.py` skips it otherwise |
-| `bytes_()` | the 256 byte values | **258** | UTF-8; no `<unk>` — every byte is a unit, the marks are `0` and `1`, the bytes are ids `2..257`, so id `2` is a unit here (`has_unk = False`) |
-| `custom(units)` | any list of distinct strings | `len + 3` | exact match per unit; anything else `<unk>` |
+`PairModel.encoder` and `PairModel.decoder` are the two halves as objects —
+`encoder.encode(text)`, `decoder.decode(ids)` — so the model reads as the
+family's do; both are views of the one codec.
 
-`bytes_()` is the one preset whose id `2` is a unit, not `<unk>`; `Alphabet`
-carries `has_unk` so nothing tests for `UNK` by number. The marks are symbols
-of the alphabet on purpose (`PRD.md` §9.6): the first unit of a text is
-predicted from a context that says it is first, and the end of a text is a
-unit the model learns to predict. A sequence with a mark *inside* it — `</s>`
-anywhere but last, `<s>` anywhere but first — can never occur in a padded
-text; its slot exists, stays at zero, and is never written to a file.
+### 5.2 The presets
+
+| preset | vocabulary | `R` | encode / decode |
+|---|---|---|---|
+| `chars()` | 3 marks, then space, `a`–`z`, `'`, `.`, `,` | **33** | `casefold`; curly quotes to `'`; a run of whitespace to one space; everything else to `unk` |
+| `bytes_()` | 3 marks, then the 256 byte values | **259** | UTF-8 bytes; `unk` is never produced (`unk = None`); decode with replacement for a walk that is not valid UTF-8 |
+| `bpe(vocab_size=1024)` | 3 marks, then `vocab_size` tokens: the 256 bytes and `vocab_size − 256` merges (§5.3) | `vocab_size + 3` | byte-level BPE; `unk` is never produced |
+| `phones(stress=True)` | the phonetic tokenizer's fixed alphabet at the phoneme level: `<pad> <unk> <s> </s> # , . ?` then the 84 ARPAbet symbols of `cmudict.symbols` (§5.4) | **92** | `PhoneticTokenizer.encode` / `.decode`; `stress=False` keeps the same 92 ids and uses fewer of them |
+| `external(spec)` | a published tokenizer's vocabulary, then the 3 marks appended (§5.5) | `V + 3` | the library's own; optional |
+
+Every preset is deterministic and normalises before it maps, so
+`decode(encode(text))` is the normalised text (`test_codec.py`, S-9).
+
+### 5.3 `bpe.py` — the repository's byte-pair encoding
+
+Byte-level, the algorithm the LLM tokenizers use, in the standard library and
+sized to what priming can afford.
+
+* **Pieces.** A text is cut into pieces before any merge: a piece is a run of
+  whitespace, or one optional leading space followed by a run of non-space
+  characters. Merges never cross a piece, so a token never spans two words.
+* **Training** (`train(texts, vocab_size)`): every piece becomes its UTF-8
+  bytes (ids `0..255` inside the tokenizer). Repeat `vocab_size − 256` times:
+  count adjacent pairs over all pieces (each piece weighted by how often it
+  occurs), merge the most frequent pair into a new id — ties broken by the
+  smaller pair, so training is deterministic — and record `(a, b) → id` in
+  rank order. The merge list *is* the tokenizer. Training runs once, at
+  `prime`, on the training texts or the `--tokenizer-data` file, and takes
+  seconds on a megabyte of text; a pair-count that is updated incrementally
+  rather than recounted keeps it there.
+* **Encoding**: per piece, bytes to ids, then repeatedly merge the adjacent
+  pair with the lowest rank until none applies; a per-piece cache makes a
+  repeated word one lookup.
+* **Decoding**: the tokens' byte strings concatenated, UTF-8 decoded with
+  replacement.
+* **Round trip**: `decode(encode(b)) == b` for any byte string, because every
+  byte is a token (S-9).
+
+Its merges are trained here; it is byte-identical to no published tokenizer,
+and does not claim to be — `external` is for that.
+
+### 5.4 `phones` — the phonetic tokenizer
+
+`PhoneticTokenizer(level="phoneme", stress=stress)` from `../PhoneticTokenizer`
+(`phonetok`), imported lazily; `test_codec.py` skips it when the package is not
+importable. Its phoneme-level vocabulary is **frozen** — 92 ids, the same on
+every machine — which is what makes it primeable, and its ids are used as they
+are: `<pad> = 0` is dead, `<unk> = 1`, `<s> = 2`, `</s> = 3`, `# = 4` (the gap
+between words), `, . ? = 5..7` (the pauses), then the 84 ARPAbet symbols.
+`encode` is `tok.encode(text, grow=False)`; `decode` is `tok.decode(ids)`,
+which spells the sounds back into words. The other levels — constituent,
+syllable, word — give a token its id the first time it is read, so "every
+option" over them is open-ended; `phones(level=…)` refuses them with the reason.
+The tokenizer's settings (`level`, `stress`, `boundaries`, `pauses`) are saved
+in the codec block (§13) so a model reads exactly as it was primed.
+
+### 5.5 `external` — a published LLM tokenizer
+
+`external("tiktoken:cl100k_base")` or `external("hf:/path/to/tokenizer.json")`:
+the tokenizer's own ids, unchanged, with the three marks **appended** at
+`V, V+1, V+2`. Imports `tiktoken` or `tokenizers` on first use and raises a
+plain error naming the package when it is missing. The codec block stores the
+spec, `V` and a digest of the vocabulary (the sorted `(id, bytes)` pairs
+hashed with `hashlib.sha256`), and `from_dict` refuses a library whose
+vocabulary digests differently — a model must read with the exact tokenizer it
+was primed with. `V` is tens of thousands, so this codec primes to `L = 1`
+under the default ceiling (§16.1): one token of context, a bigram over tokens.
+That is stated, not hidden.
+
+### 5.6 The marks, and the sequences that cannot occur
+
+The marks are units of the vocabulary on purpose (`PRD.md` §9.6): the first unit
+of a text is predicted from a context that says it is first, and the end of a
+text is a unit the model learns to predict. A sequence with a mark *inside* it —
+`END` anywhere but last, `START` anywhere but first, a dead id anywhere — can
+never occur in a padded text. Its slot exists, stays at zero in both trees, and
+is never written to a file.
 
 ---
 
@@ -163,8 +243,8 @@ text; its slot exists, stays at zero, and is never written to a file.
 
 ### 6.1 The numbering
 
-Sequences are numbered by length, then lexicographically by unit id. The
-first unit is the most significant digit:
+Sequences are numbered by length, then lexicographically by id. The first unit
+is the most significant digit:
 
 ```
 base(ℓ) = (R^ℓ − 1) / (R − 1)         # the number of sequences shorter than ℓ; the id of the first of length ℓ
@@ -180,7 +260,8 @@ aa → 4  ab → 5  ac → 6  ba → 7  bb → 8  bc → 9  ca → 10  cb → 11
 ```
 
 `id` is a bijection from the sequences of length `0..L` onto `0..N−1`
-(invariant 2) — every id is a sequence, so the arrays of §7 have no holes.
+(invariant 2) — every id is a sequence, so the arrays of §7 and §8 have no
+holes.
 
 ### 6.2 The moves
 
@@ -188,36 +269,33 @@ For a node `i` at level `ℓ` with `k = i − base(ℓ)` its code:
 
 | move | id | who uses it |
 |---|---|---|
-| `append(i, ℓ, x)` = `base(ℓ+1) + k·R + x` | the child `s·x`, `ℓ < L` | A's edge; a forward walk emitting `x` |
-| `prepend(i, ℓ, x)` = `base(ℓ+1) + x·R^ℓ + k` | the child `x·s`, `ℓ < L` | B's edge; a backward walk emitting `x` |
-| `drop_newest(i, ℓ)` = `base(ℓ−1) + k // R` | `s[:-1]`, `ℓ ≥ 1` | A's parent; a *backward* walk forgetting |
-| `drop_oldest(i, ℓ)` = `base(ℓ−1) + k mod R^(ℓ−1)` | `s[1:]`, `ℓ ≥ 1` | B's parent; a *forward* walk forgetting |
+| `append(i, ℓ, x)` = `base(ℓ+1) + k·R + x` | the child `s·x`, `ℓ < L` | a walk emitting `x`; counting and crediting |
+| `drop_oldest(i, ℓ)` = `base(ℓ−1) + k mod R^(ℓ−1)` | `s[1:]`, `ℓ ≥ 1` | the shift and the fall (§9.4) |
+| `drop_newest(i, ℓ)` = `base(ℓ−1) + k // R` | `s[:-1]`, `ℓ ≥ 1` | the tree's parent; the graph view |
 | `level(i)` | the `ℓ` with `base(ℓ) ≤ i < base(ℓ+1)`, by bisection over the `L + 2` bases | everything |
 | `newest(i, ℓ)` = `k mod R`, `oldest(i, ℓ)` = `k // R^(ℓ−1)` | the last and first unit of `s` | decoding a path |
 
-Two things worth noticing, both used in §7.3: A's children of `i` are the
-**contiguous** block `base(ℓ+1) + k·R … + R − 1`, and B's children are the
-**strided** block `base(ℓ+1) + k + x·R^ℓ`. Summing over either is one slice
-of the count array.
+The children of `i` are the **contiguous** block `base(ℓ+1) + k·R … + R − 1`,
+one entry per id in `0..R−1`; summing over `Σ_out` is one slice sum minus the
+few excluded entries (§7.3).
 
 ```python
 class Address:              # (R, L) bound once; bases and powers precomputed; every method is integer arithmetic
     R: int; L: int; N: int; bases: list[int]; powers: list[int]
     def of(self, seq: Sequence[int]) -> int ; def seq(self, i: int) -> tuple[int, ...] ; def level(self, i: int) -> int
-    def append(self, i, ℓ, x) -> int ; def prepend(self, i, ℓ, x) -> int
-    def drop_newest(self, i, ℓ) -> int ; def drop_oldest(self, i, ℓ) -> int
-    def block_a(self, i, ℓ) -> tuple[int, int]        # (start, stop) of the contiguous append block
-    def block_b(self, i, ℓ) -> tuple[int, int, int]   # (start, stop, step) of the strided prepend block
+    def append(self, i, ℓ, x) -> int ; def drop_oldest(self, i, ℓ) -> int ; def drop_newest(self, i, ℓ) -> int
+    def block(self, i, ℓ) -> tuple[int, int]          # (start, stop) of the children block
+    def substrings(self, ids: Sequence[int]) -> Iterator[int]   # the id of every substring of length 1..L, position by position (§6.3)
 ```
 
-`Address` raises `ValueError` for `R < 2`, `L < 1`, a level out of range or a
-unit outside `0..R−1`; it never returns an id outside `0..N−1`.
+`Address` raises `ValueError` for `R < 2`, `L < 1`, a level out of range or an
+id outside `0..R−1`; it never returns an id outside `0..N−1`.
 
 ### 6.3 The rolling code
 
-Counting a text needs the id of every suffix of length `1..L` at every
-position. They roll: the last `ℓ` units ending at position `t` are the last
-`ℓ − 1` units ending at `t − 1` followed by `u_t`, so
+Counting or crediting a text needs the id of every suffix of length `1..L` at
+every position. They roll: the last `ℓ` units ending at position `t` are the
+last `ℓ − 1` units ending at `t − 1` followed by `u_t`, so
 
 ```
 code_ℓ(t) = code_{ℓ−1}(t − 1) · R + u_t,     code_0 = 0
@@ -225,8 +303,8 @@ code_ℓ(t) = code_{ℓ−1}(t − 1) · R + u_t,     code_0 = 0
 
 computed for `ℓ = min(L, t) … 1` in place, in that order (each `code_ℓ` reads
 the previous position's `code_{ℓ−1}` before it is overwritten). `L`
-multiplications and `L` increments per unit, no lookup, no allocation — the
-loop of §7.2 and the whole of training.
+multiplications and `L` array writes per unit, no lookup, no allocation — the
+loop of §7.2, shared by §8.2, and the whole of training.
 
 ### 6.4 The brute-force oracle — `check.py`
 
@@ -241,44 +319,38 @@ edge), then walks the result and asserts against `Address`:
    compression to do;
 2. `id(seq)` over the trie's nodes is a bijection onto `0..N−1`;
 3. for every node, every pointer agrees with the arithmetic: each child with
-   `append`, each `x·s` with `prepend`, the parent with `drop_newest`, and the
-   node for `s[1:]` with `drop_oldest`; depth with `level`.
+   `append`, the parent with `drop_newest`, the node for `s[1:]` with
+   `drop_oldest`; depth with `level`.
 
 The test suite runs it at `(R, L) ∈ {(2,5), (3,4), (5,3), (7,2)}`; the CLI's
 `check --R --L` runs it as large as memory allows. It is the definition of
-correctness for §6, and §6 is the definition of the tree for everything else.
+correctness for §6, and §6 is the definition of both trees for everything else.
 
 ---
 
-## 7. `nodes.py` — PrimedNodes
+## 7. `count.py` — CountTree
 
 ### 7.1 Storage
 
 ```python
-class PrimedNodes:
-    alphabet: Alphabet
-    L: int
-    address: Address
+class CountTree:
+    codec: Codec ; L: int ; address: Address
     cnt: array            # array('q'), N entries: cnt[i] = occurrences of sequence i as a substring of the padded texts
-    texts: int            # texts observed
-    units: int            # units observed, marks excluded
-    unk: int              # of which <unk>
-    version: int          # bumped by every observe(); the caches of §8 key on it
+    texts: int ; units: int ; unk: int      # what was read: texts, units (marks excluded), of which unk
+    version: int          # bumped by every observe(); the caches of §9 key on it
 ```
 
 One `array('q')` of `N` signed 64-bit counts, allocated once at priming
 (`array('q', bytes(8 * N))`), and nothing else per node in the count kind.
 `prime` refuses an `N` above `Settings.node_ceiling` (default `4_194_304`)
-with a `ValueError` naming `R`, `L`, `N` and the ceiling — the budget of §15
-is enforced where the memory would be spent. Counts are plain integers: no
-cyclic counter here, because `2^63` occurrences of one substring is not a
-budget this design will reach before it is ported.
+with a `ValueError` naming `R`, `L`, `N` and the ceiling — the budget of §16
+is enforced where the memory would be spent.
 
 ### 7.2 Counting — `observe`
 
 ```python
 def observe(self, ids: Sequence[int]) -> int      # a padded text; returns the number of increments
-def observe_text(self, text: str) -> int          # observe(alphabet.padded(text))
+def observe_text(self, text: str) -> int          # observe(codec.padded(text))
 ```
 
 ```
@@ -293,370 +365,418 @@ for t, x in enumerate(ids, 1):
 
 Every substring of length `1..L` of the padded text is counted once per
 occurrence. A text is observed whole — substrings never cross texts — and the
-loop is the hot loop of §15: `bases`, `cnt`, `R` and `codes` are locals, and
-there is no call, no lookup and no allocation inside it. Both trees are trained
-by this one pass, because both read the same counts (§8.1). `observe` is
-additive (a text twice doubles its counts) and touches no other state but the
-three tallies and `version`.
+loop is the hot loop of §16: `bases`, `cnt`, `R` and `codes` are locals, and
+there is no call, no lookup and no allocation inside it. `observe` is additive
+(a text twice doubles its counts), touches no other state than the three
+tallies and `version`, and **is the only thing that writes `cnt`** (invariant 3).
 
-### 7.3 The two context counts
+### 7.3 The context count, the share and `own`
 
 ```python
-def ctx_a(self, i, ℓ) -> int      # Σ over A's children in Σ_A: sum(cnt[start + 1 : stop]) — the block minus <s>, which is never emitted
-def ctx_b(self, i, ℓ) -> int      # Σ over B's children in Σ_B: sum(cnt[start : stop : step]) − cnt[the x = </s> entry]
+def ctx(self, i, ℓ) -> int              # Σ over Σ_out: sum(cnt[start:stop]) minus the entries of START and the dead ids
+def share(self, i, ℓ) -> list[float]    # (cnt[s·x] + σ) / (ctx + σ·R') for x in Σ_out; σ = settings.smoothing
+def own(self, i, ℓ) -> float            # ctx / (ctx + ALPHA)
 ```
 
-Each is one slice sum over `R − 1` entries. For every sequence that does not
-touch a mark the two are equal to each other and to `cnt[i]` (a substring
-that is not at the very end of a text is followed by something, and one not
-at the very start is preceded by something); `test_nodes.py` asserts it, and
-the definition stays the sum so that the root and the marks need no special
-case.
+`ctx` is one slice sum over the contiguous children block less the two or
+three excluded entries. For every sequence that does not touch a mark it equals
+`cnt[i]` (a substring not at the very end of a text is followed by something);
+`test_count.py` asserts it, and the definition stays the sum so that the root
+and the marks need no special case. With `σ = 0` the share is the raw
+frequency and an unread step's share is `0`; with `σ = 0.5` an unread step keeps
+a small share, which is what lets a reward lift it (§9.2).
 
-### 7.4 Invariants (asserted by `test_nodes.py`)
+### 7.4 Invariants (asserted by `test_count.py`)
 
 1. `len(cnt) == N` before and after any number of `observe` calls.
 2. `cnt[id(s)]` equals a literal sliding-window count of `s` over the padded texts, for every `s` up to length `L`, on small texts.
-3. `ctx_a(s) == ctx_b(s) == cnt[s]` for `1 ≤ |s| ≤ D` whenever `s` neither starts with `<s>` nor ends with `</s>`.
-4. Every sequence with a mark inside it has `cnt == 0`.
-5. `observe` is additive and bumps `version` exactly once.
+3. `ctx(s) == cnt[s]` for `1 ≤ |s| ≤ D` whenever `s` neither starts with `START` nor ends with `END`.
+4. Every sequence with a mark or a dead id inside it has `cnt == 0`.
+5. `observe` is additive and bumps `version` exactly once; nothing else changes `cnt`.
 
 ---
 
-## 8. `tree.py` and `pair.py` — the two trees and the rungs
+## 8. `reward.py` — RewardTree
 
-### 8.1 One node set, two trees
-
-```
-        tree A  (append: a path reads forwards)         tree B  (prepend: a path reads backwards)
-
-                    ε ============================ rung ============================ ε
-                 /  |  \                                                         /  |  \
-                a   b   c ===================== rungs ========================= a   b   c
-              / | \                                                                 / | \
-            aa ab ac ======================= rungs =============================== aa ba ca
-                                                                                   ^
-   A: ab's children are ab·a ab·b ab·c;  A's parent of ab is a         B: ab's children are a·ab b·ab c·ab; B's parent of ab is b
-```
-
-Every sequence is one node of A and one node of B, and the rung joins them.
-Since that holds for every node, the implementation keeps **one** `PrimedNodes`
-table and two `PrimedTree` views of it:
+### 8.1 Storage
 
 ```python
-FORWARD, BACKWARD = "forward", "backward"
+class RewardTree:
+    codec: Codec ; L: int ; address: Address
+    plus: array           # array('d'), N entries: the rewards the step i received, >= 0
+    minus: array          # array('d'), N entries: the penalties the step i received, >= 0
+    judged: int ; rewards_total: float ; penalties_total: float
+    version: int
+```
 
-class PrimedTree:                      # one direction over the node table; no storage of its own
-    nodes: PrimedNodes ; direction: str
-    def children(self, i, ℓ) -> list[tuple[int, int]]   # [(x, id)] over Σ_A (append) or Σ_B (prepend); [] at level L
-    def parent(self, i, ℓ) -> int                       # toward THIS tree's root: drop_newest (A) / drop_oldest (B)
-    def forget(self, i, ℓ) -> int                       # the far end of the corridor: drop_oldest (A) / drop_newest (B) — the OTHER tree's parent
-    def ctx(self, i, ℓ) -> int ; def own(self, i, ℓ) -> float
-    def dist(self, i, ℓ) -> list[float]                 # p_here over the tree's emitting alphabet; all zero when ctx == 0
-    def emits(self) -> list[int]                        # Σ_A or Σ_B, as ids
+Two `array('d')` — 16 bytes per node. The reward and the penalty are **kept
+apart** on purpose: the net `plus − minus` is what the reward traversal reads
+and it is right for likelihood, but a step rewarded five times and punished
+once must not read like one rewarded four times and never punished when the
+question is which way the least has gone wrong on (`SPEC-LeastPunished.md`
+§1). Both arrays are monotone non-decreasing except through `invert` (§8.4).
 
+### 8.2 Crediting a judged text — at every level
+
+```python
+def credit(self, ids: Sequence[int], amount: float, rungs: str = "all") -> int
+    # a padded text and a signed amount: +strength·weight for a reward, −strength·weight for a penalty.
+    # rungs="all":   every substring of length 1..L ending at every position — the same ids observe() counts —
+    #                gets plus += amount (amount > 0) or minus += −amount (amount < 0).
+    # rungs="final": only the substrings of length L (the final nodes): the step is credited at the deepest
+    #                context alone.
+    # Returns the number of entries written.  amount == 0 writes nothing.
+```
+
+The loop is §7.2's with a float and a sign. Where a step's credit lives is the
+node of the sequence `s·x` — the step "`x` after `s`" — and with `rungs = all` a
+step is credited at **every** context length: on `x` alone, on `s₁·x`, …, up
+to the deepest. Shallow nodes therefore accumulate the credit of many outcomes
+and generalise; deep nodes hold the credit of one context and specialise. That
+is the whole of what "connected at every level, not just the final nodes" does
+on the writing side, and `rungs = final` is the pair the idea started from,
+kept so the difference is measured (S-7).
+
+`credit` **is the only thing that writes `plus` and `minus`** (invariant 4),
+and it never touches `cnt`. `PairModel.reward` / `punish` / `two_nrl` /
+`feedback` (§11) are the callers; the count tree is written by none of them
+unless asked (`read=True`, `PRD.md` §9.7).
+
+### 8.3 Reading a step
+
+```python
+def reward(self, i) -> float      # plus[i] − minus[i]: the net, what the reward traversal reads
+def penalty(self, i) -> float     # minus[i]: what the punishment traversal reads
+def rewards(self, i, ℓ) -> list[float] ; def penalties(self, i, ℓ) -> list[float]   # over the children block, Σ_out order
+```
+
+### 8.4 `invert`
+
+`invert()` swaps `plus` and `minus` — every reward becomes a penalty of the
+same size and every penalty a reward — and bumps `version`. It is an involution
+(`test_reward.py`). It exists for parity with the family's count model, whose
+`invert` negates the rewards; the pair's `two_nrl` does not use it (§11).
+
+### 8.5 Invariants (asserted by `test_reward.py`)
+
+1. `plus[i] ≥ 0` and `minus[i] ≥ 0` everywhere, always.
+2. `credit(ids, a)` with `rungs = all` writes exactly the ids `observe(ids)` would count, each by `|a|`; with `rungs = final`, exactly those at level `L`.
+3. `credit` is additive; a reward and a penalty of the same size on the same text leave `reward(i) == 0` and `penalty(i) > 0` — the net is gone, the punishment is not.
+4. `invert` twice is bit-identical.
+5. Nothing but `credit` and `invert` changes `plus` or `minus`; `credit` never changes `cnt`.
+
+---
+
+## 9. `pair.py` — the rungs
+
+### 9.1 One address space, two trees
+
+```
+     the count tree  (what was read)                      the reward tree  (what it earned)
+
+               ε  ---------------------------- rung ----------------------------  ε
+            /  |  \                                                            /  |  \
+           a   b   c  -------------------- rungs at level 1 ----------------  a   b   c
+         / | \                                                              / | \
+       aa ab ac  ----------------------- rungs at level 2 --------------  aa ab ac
+        cnt[ab] = 12                                                       plus[ab] = 4.0, minus[ab] = 1.0
+```
+
+Every sequence is one node of each tree and the rung joins them. Both trees are
+complete over the same `(codec, L)`, so the node sets are identical and the
+rung between equal nodes is **the same id**: the implementation keeps one
+`Address`, one `CountTree` and one `RewardTree`, and a rung is the pair
+`(cnt[i], plus[i], minus[i])`. Nothing is stored for a rung; what it carries is
+the rule of §9.2.
+
+```python
 class RadixPair:
-    nodes: PrimedNodes
-    forward: PrimedTree ; backward: PrimedTree
-    rungs: str = "all"                                  # "all" | "final" — "final" exists only to show what it cannot do (§8.5)
-    settings: Settings                                  # alpha, floor, backoff (§10)
-    def tree(self, direction) -> PrimedTree
-    def fold(self, direction, context: Sequence[int]) -> list[float]      # §8.3 — the exact next-unit distribution
-    def score(self, text: str) -> Score                                    # §8.4
+    codec: Codec ; L: int ; address: Address
+    count: CountTree ; reward: RewardTree
+    settings: Settings                                  # alpha, floor, smoothing, the scales, backoff, rungs (§11)
+    def scores(self, i, ℓ, traversal="reward") -> list[float]   # §9.2: the step scores of node i's children, Σ_out order
+    def q(self, i, ℓ, traversal="reward") -> list[float]        # softmax(scores)
+    def fold(self, context: Sequence[int], traversal="reward") -> list[float]   # §9.3: the exact next-unit distribution
+    def score(self, text: str) -> Score                          # §9.5
 ```
 
-The rung's two ends have the same id, so the rung needs no storage in the count
-kind. In the sine kind it is the weight `wr[i]` (§11).
+### 9.2 The rung — the score of a step
 
-### 8.2 The corridor
-
-A forward walk standing on `s` in A wants to forget its oldest unit. A cannot
-do that — A's parent of `s` is `s[:-1]`, the *newest* dropped. B can: B's
-parent of `s` is `s[1:]`. So the walk goes
-
-```
-s (in A)  --rung-->  s (in B)  --B's parent-->  s[1:] (in B)  --rung-->  s[1:] (in A)
-```
-
-three hops, emitting nothing. That is the **corridor**, `PrimedTree.forget`,
-and in the count kind its probability is the stay-or-cross decision at `s`:
-`1 − own_A(s)`. A backward walk's corridor is the mirror image through A:
-`s (B) → s (A) → s[:-1] (A) → s[:-1] (B)`, with `1 − own_B(s)`.
-
-A node at level `L` has no children in either tree. A forward walk that has
-just emitted the `L`-th unit of a window stands on one, and its only way on is
-the corridor: cross at level `L`, step to level `D`, cross back, emit. Every
-steady-state step of a walk is therefore *corridor, then emission* — the two
-deepest rungs are crossed on every step, and the shallower ones whenever the
-walk falls back further than one unit.
-
-### 8.3 The fold — the exact next-unit distribution
-
-Forward, from a context `c` of at most `D` units, for every `x ∈ Σ_A`:
+At a context `c` (level `ℓ ≤ D`), for every `x ∈ Σ_out`, the count tree says
+how often the step was taken and the reward tree what it earned; the rung adds
+them the way `RadixCyclicNN`'s count model adds them inside one weight (D-022,
+without the recency window and without the `log1p(count)` term that defaults
+to zero there):
 
 ```
-P(x | c) = own_A(c) · p_A(x | c)  +  (1 − own_A(c)) · P(x | c[1:])          |c| ≥ 1
-P(x | ε) = own_A(ε) · p_A(x | ε)  +  (1 − own_A(ε)) / R'
+merit(x | c)   = share_scale · log share(x | c)                     the count tree's term
+reward(x | c)  = plus[c·x] − minus[c·x]                              the reward tree's net
+penalty(x | c) = minus[c·x]                                          its penalty side alone
+
+traversal "reward"      (the default)
+    score(x | c) = merit(x | c) + reward_scale · reward(x | c)
+    q_c = softmax(score)          i.e.  q_c(x) ∝ share(x | c)^share_scale · e^(reward_scale · reward(x | c))
+
+traversal "punishment"
+    score(x | c) = merit_scale · merit(x | c) − penalty_scale · penalty(x | c)
+    q_c = softmax(score)          the rewards leave the score; only what was punished prices a step
+```
+
+With `rungs = final`, `reward` and `penalty` are read as `0` at every level but
+the deepest (`ℓ = D`), where the children are the final nodes.
+
+Three things to notice. `share_scale = 1` and no rewards give `q_c` = the
+smoothed share, the plain count model. The smoothing `σ` is what lets a reward
+act on a step that was never read: with `σ = 0` such a step has `share = 0`,
+`log 0 = −∞`, and no reward can lift it; with `σ = 0.5` it keeps
+`σ / (ctx + σ·R')` and `e^(reward)` multiplies that — a rewarded output the
+corpus never contained becomes likely, which is what "rewarded based on correct
+outcomes" has to be able to do. And the punishment traversal is *unbuyable*:
+adding rewards to a step changes nothing under it, and a step punished once
+stays punished however often it is rewarded afterwards (`test_pair.py`, S-6).
+
+`scores` is `O(R')` per node — one slice of each of three arrays — and is
+cached per `(node, traversal)` in a dict keyed on the two trees' `version`s.
+
+### 9.3 The fold — the exact next-unit distribution
+
+From a context `c` of at most `D` units, for every `x ∈ Σ_out`:
+
+```
+P(x | c) = own(c) · q_c(x)  +  (1 − own(c)) · P(x | c[1:])          |c| ≥ 1
+P(x | ε) = own(ε) · q_ε(x)  +  (1 − own(ε)) / R'
 answer(x | c) = (1 − FLOOR) · P(x | c)  +  FLOOR / R'
 ```
 
-Read as the walk it is: at `c`, stay with probability `own_A(c)` and emit `x`
-with `p_A(x | c)`, or take the corridor with `1 − own_A(c)` and decide again at
-`c[1:]`; at the root, taking the corridor means answering uniformly — knowing
-nothing. The floor is the one term that is not a path (§18, question 6).
+Read as the walk it is: at `c`, stay with probability `own(c)` and emit from
+`q_c` — the rung's answer at this level — or fall with `1 − own(c)` to the
+context without its oldest unit and decide again; at the root, falling means
+answering uniformly — knowing nothing. Every level from the deepest to the root
+is visited, and at every one the rung is read: that is "connected at every
+level" on the reading side. The floor is the one term that is not a path
+(§19, question 7).
 
 **This is `FilterBankRadix/DESIGN.md` §5.3, unrolled from the other end.** That
-fold runs shortest level first, `p ← own · p_here + (1 − own) · p`, starting
-from the prior `1/A`; expanding it from the longest level down gives the
-recursion above term for term. The identity was checked while writing this
-document — 200 random count tables, every context length, forward walk against
-the shortest-first fold, identical to `1e−12` and summing to 1 — and that check
-is `test_pair.py::test_the_rungs_are_the_fold`, with the shortest-first fold
-copied into the test as the reference. Whatever `search.py` does, this is the
-answer it approximates, and the pair must give it exactly.
+fold runs shortest level first, `p ← own · p_here + (1 − own) · p`, from the
+prior `1/A`; expanding it from the longest level down gives the recursion above
+term for term, with `q_c` in place of `p_here`. The two coincide exactly when
+`q_c` is the raw share — `smoothing = 0`, `share_scale = 1` and no rewards —
+and at those settings the identity was checked while writing this document:
+200 random count tables, every context length, identical to `1e−12` and summing
+to 1. That check is `test_pair.py::test_the_rungs_are_the_fold`, with the
+shortest-first fold copied into the test as the reference (S-3). At the default
+`σ = 0.5` the two differ by the Jeffreys smoothing inside each level, which is
+reported beside the identity (S-4).
 
-Cost: `|c| + 1` levels × (one slice sum of `R'` counts + one read) = `O(D · R)`
-per unit. `fold` caches `(ctx, own)` per `(node, direction)` in a dict keyed on
-`nodes.version`; the cache is dropped when `version` changes.
+Cost: `|c| + 1` levels × `O(R')` = `O(D · R)` per unit.
 
-Backward is the mirror: `c` is the units *following* the position, `p_B`,
-`own_B`, `Σ_B`, and the corridor drops `c[:-1]`.
+### 9.4 The shift
 
-### 8.4 Scoring from both ends
+A tree of depth `L` reads a text of any length because the walk **slides**: a
+node at level `L` has no children, so a walk that has just emitted the `L`-th
+unit of a window continues from `drop_oldest` — the same sequence without its
+oldest unit, at level `D` — deterministically and at no cost, and emits again
+from there. Falling back in the fold is the same move taken *before* the window
+is full, at the price `1 − own(c)` the count tree sets. Both are arithmetic
+(§6.2); neither is an edge, and neither tree has anything to say about them.
 
-For a padded text `u₁ … u_{T+2}` (`u₁ = <s>`, `u_{T+2} = </s>`):
+### 9.5 Scoring a text
+
+For a padded text `u₁ … u_{T+2}`, at every position `t = 2 … T+2` with `c_t`
+the last `≤ D` units before it:
 
 ```
-f_t = −log₂ answer_A(u_t | the last ≤ D units before t)      t = 2 … T+2     (everything after <s>)
-b_t = −log₂ answer_B(u_t | the first ≤ D units after t)      t = 1 … T+1     (everything before </s>)
-both_t = min(f_t, b_t)                                        t = 2 … T+1     (the units themselves)
+bits_t    = −log₂ answer(u_t | c_t)           the model's belief, under the reward traversal
+reward_t  = reward(c_t · u_t)                 the reward tree's net at the deepest node of the step
+penalty_t = penalty(c_t · u_t)                and its penalty
 ```
 
 ```python
 @dataclass
 class Score:
-    forward_bits: float        # Σ f_t / (T + 1)
-    backward_bits: float       # Σ b_t / (T + 1)
-    per_unit: list[tuple[str, float, float, float]]   # (unit, f_t, b_t, both_t) for the T units
+    bits: float                 # Σ bits_t / (T + 1)
+    mean_reward: float          # Σ reward_t / (T + 1)
+    worst_penalty: float        # max_t penalty_t — the least-punished ranking's number for a whole text
+    per_unit: list[tuple[str, float, float, float]]   # (unit, bits_t, reward_t, penalty_t)
     units: int
 ```
 
-Why the *lesser* of the two costs is the localiser: substitute one unit at
-position `t`. The forward reading is surprised at `t`, and then at `t+1 … t+D`,
-whose contexts contain the wrong unit (less and less, as the fold falls back to
-contexts that no longer contain it). The backward reading is surprised at `t`
-and at `t−D … t−1` for the same reason. Each reading blames a stretch on one
-side of the mistake; **only the mistake itself is blamed by both**, so the
-maximum of `both_t` is where the text is wrong. `PRD.md` S-6 measures the hit
-rate; `bench localise` reports it beside the forward reading alone.
+Two trees, two readings of one text: what the corpus makes of it, and what the
+judges said about the steps it takes.
 
-### 8.5 `backoff`, and why the final nodes are not enough
+### 9.6 `rungs` and `backoff`
 
-`Settings.backoff` selects how far a walk may fall, on the same counts:
+Two settings, both measured on the same numbers (`PRD.md` S-5, S-7):
 
-| `backoff` | the answer | what it is |
+| setting | values | what it decides |
 |---|---|---|
-| `all` (default) | the fold of §8.3 | every rung |
-| `deepest` | `own(c) · p(x\|c) + (1 − own(c)) / R'` at the given `c`, then the floor | one fall, from the given context straight to knowing nothing — a pair joined at one level only. `FilterBankRadix` measured folding only the deepest level at 2.998 bits per character against 2.808 for every level (its §5.3) |
-| `none` | `p(x\|c)`, then the floor | no fall: a table of the deepest context |
+| `rungs` | `all` (default), `final` | where a judged step is credited (§8.2) and where the reward terms are read (§9.2): at every level, or at the final nodes only — the pair connected everywhere, or only where the idea started |
+| `backoff` | `all` (default), `deepest`, `none` | how far a prediction may fall: the fold of §9.3; one fall from the given context straight to the uniform (`own(c) · q_c + (1 − own(c)) / R'`, then the floor — the shape `FilterBankRadix` measured at 2.998 against 2.808 bits per character, its §5.3); or no fall (`q_c`, then the floor) |
 
-These are fold variants, computed for `PRD.md` S-5. The *structural* point is
-separate and is asserted, not measured: `RadixPair(rungs="final")` keeps only
-the level-`L` rungs, and a forward walk that reaches level `L` then crosses to
-B, steps to level `D`, and finds no rung back. It can climb B to its root and
-descend B's prepend edges — that is reading backwards — but it can never emit
-forwards again. `test_pair.py::test_connected_only_at_the_final_nodes_cannot_slide`
-asserts that `search.dijkstra` from any level-`L` node of such a pair emits
-nothing, at any `min_units`. The rungs at every level are not an elaboration of
-the requirement; they are what makes it a model.
+`rungs` is a property of the model (it decides what was written) and is saved
+in the file; `backoff` is a setting of a prediction and may be changed at any
+time.
 
 ---
 
-## 9. `search.py` — walks over the pair
+## 10. `search.py` — walks over the pair
 
-A walk lives on one tree and moves through the corridor when it must or when
-it is cheaper to. State: `(node, level, emitted)`; the tree is fixed per
-search. Moves from `(i, ℓ, e)` on tree `T` (forward shown; backward is the
-mirror with `prepend`, `Σ_B`, `own_B`, `p_B`):
+State: `(node, level, emitted)`. Moves from `(i, ℓ, e)`, under the traversal
+the call names:
 
 | move | to | cost | when |
 |---|---|---|---|
-| emit `x` | `(append(i, ℓ, x), ℓ + 1, e + 1)` | `−log(own(i) · p(x \| i)) + step_penalty` | `ℓ ≤ D`, `p(x \| i) > 0` |
-| emit `x` from the root | `(append(0, 0, x), 1, e + 1)` | `−log(own(ε) · p(x \| ε) + (1 − own(ε)) / R') + step_penalty` | `ℓ = 0` — the root's fall to the uniform is folded into its emissions, so every unit has a finite cost somewhere |
-| forget (the corridor) | `(forget(i, ℓ), ℓ − 1, e)` | `−log(1 − own(i))` | `ℓ ≥ 1` |
-| emit `</s>` | goal | as emit | forwards; backwards the goal is `<s>` |
+| emit `x` | `(append(i, ℓ, x), ℓ + 1, e + 1)` | `−log(own(i) · q_i(x)) + step_penalty` | `ℓ ≤ D` |
+| emit `x` from the root | `(append(0, 0, x), 1, e + 1)` | `−log(own(ε) · q_ε(x) + (1 − own(ε)) / R') + step_penalty` | `ℓ = 0` — the root's fall to the uniform is folded into its emissions, so every unit has a finite cost somewhere |
+| fall | `(drop_oldest(i, ℓ), ℓ − 1, e)` | `−log(1 − own(i))` | `1 ≤ ℓ ≤ D` |
+| shift | `(drop_oldest(i, L), D, e)` | `0` | `ℓ = L` — forced: a final node has no children |
+| emit `END` | goal | as emit | |
 
-The search's costs are the fold's terms without the floor: a path's cost is
-one choice of how far to fall at every step, and the floor — a mixture over
-the whole answer — does not decompose along a path. Consequently the cheapest
+The search's costs are the fold's terms without the floor: a path's cost is one
+choice of how far to fall at every step, and the floor — a mixture over the
+whole answer — does not decompose along a path. Consequently the cheapest
 path's cost is never below the un-floored fold's cost of the same units (it
 picks the best fall instead of summing over falls); `test_search.py` asserts
 both the decomposition and the inequality against `P(x | c)` before the floor.
 
 ```python
-class PathResult:      # text: str, units: list[int], node_ids: list[int], hops: list[tuple[str, int]] (every hop,
-                       # corridor hops included: ("emit", id) | ("rung", id) | ("up", id)), cost: float,
-                       # step_costs: list[float] (one per emitted unit: its emission plus the corridors before it),
-                       # expanded: int, reached_end: bool, full_text: str (set by PairModel: prefix + text)
+class PathResult:      # text: str, units: list[int], node_ids: list[int], hops: list[tuple[str, int]] (every hop:
+                       # ("emit", id) | ("fall", id) | ("shift", id)), cost: float, step_costs: list[float] (one per
+                       # emitted unit: its emission plus the falls before it), traversal: str, expanded: int,
+                       # reached_end: bool, full_text: str (set by PairModel: prefix + text)
                        # to_dict() -> JSON-serialisable
 
-def dijkstra(pair, direction, context: Sequence[int], min_units: int, max_units: int | None = None,
-             to_end: bool = False, step_penalty: float = 0.0, max_expansions: int = 200_000) -> PathResult
-    # Start at the node of the last (first, backwards) ≤ D units of the context. heapq of
-    # (cost, tie, node, level, emitted); best-cost dict keyed by (node, emitted) — level is a function of node.
-    # Goal: to_end -> the end mark; else the first popped state with emitted >= min_units (Dijkstra pops in cost
-    # order, so it is the cheapest such path); the end mark before min_units is also a goal. States with
-    # emitted >= max_units are not expanded. Fallback on the expansion cap: the popped state with the most
-    # emitted units (ties -> lowest cost) — never raise. Backwards, the units come out in reading order.
+def dijkstra(pair, context: Sequence[int], min_units: int, max_units: int | None = None, to_end: bool = False,
+             traversal: str = "reward", step_penalty: float = 0.0, max_expansions: int = 200_000) -> PathResult
+    # Start at the node of the last ≤ D units of the context. heapq of (cost, tie, node, level, emitted); a
+    # best-cost dict keyed by (node, emitted) — level is a function of node. Goal: to_end -> END; else the first
+    # popped state with emitted >= min_units (Dijkstra pops in cost order, so it is the cheapest such path); END
+    # before min_units is also a goal. States with emitted >= max_units are not expanded. Fallback on the
+    # expansion cap: the popped state with the most emitted units (ties -> lowest cost) — never raise.
 
-def greedy(pair, direction, context, units: int, rng=None, temperature: float = 0.0) -> PathResult
+def greedy(pair, context, units: int, traversal="reward", rng=None, temperature: float = 0.0) -> PathResult
     # One unit at a time from the exact fold (answer(), floor included): the argmax at temperature 0, else a
-    # sample from softmax(log answer / temperature) with the model's seeded rng. Stops at the end mark or at
-    # `units`. This is `mode=greedy` and `mode=sample`; it is exact where dijkstra is a cheapest path.
+    # sample from softmax(log answer / temperature) with the model's seeded rng. Stops at END or at `units`.
+    # This is mode="greedy" and mode="sample"; it is exact where dijkstra is a cheapest path.
 ```
 
-Every hop of a walk is reported (`hops`), corridor hops included, so a walk can
-be watched crossing and climbing the way `RadixCyclicNN`'s voice reports every
-step; `step_costs` fold the corridors into the unit they precede so that the
-per-unit numbers line up with `Score.per_unit`.
+Every hop of a walk is reported, falls and shifts included, so a walk can be
+watched the way `RadixCyclicNN`'s voice reports every step; `step_costs` fold
+the falls into the unit they precede so the per-unit numbers line up with
+`Score.per_unit`.
 
 ---
 
-## 10. `model.py` — PairModel
+## 11. `model.py` — PairModel
 
 ```python
 @dataclass
 class Settings:
-    alpha: float = 2.0            # ALPHA of own()
-    floor: float = 0.02           # FLOOR of answer()
-    backoff: str = "all"          # "all" | "deepest" | "none" (§8.5)
+    alpha: float = 2.0             # ALPHA of own()
+    floor: float = 0.02            # FLOOR of answer()
+    smoothing: float = 0.5         # σ of share(); 0 reproduces FilterBankRadix's fold exactly
+    share_scale: float = 1.0       # the count tree's scale in the reward traversal
+    reward_scale: float = 1.0      # the reward tree's scale in the reward traversal
+    merit_scale: float = 1.0       # the two scales of the punishment traversal
+    penalty_scale: float = 1.0
+    strength: float = 1.0          # one unit of reward multiplies a step's odds by e, as the family's count model
+    rungs: str = "all"             # "all" | "final" — saved with the model (§9.6)
+    backoff: str = "all"           # "all" | "deepest" | "none"
     step_penalty: float = 0.0
     max_expansions: int = 200_000
-    node_ceiling: int = 4_194_304 # prime() refuses a larger N (§7.1)
+    node_ceiling: int = 4_194_304  # prime() refuses a larger N (§7.1)
 
 class PairModel:
-    kind: str                     # "count" | "sine"
-    alphabet: Alphabet ; L: int ; seed: int ; settings: Settings
-    nodes: PrimedNodes ; pair: RadixPair ; sine: SineParams | None
-    history: list[dict]           # one record per train() call: texts, units, unk, increments (and the sine kind's epochs, losses)
+    kind: str                      # "count" | "sine"
+    codec: Codec ; L: int ; seed: int ; settings: Settings
+    pair: RadixPair ; encoder ; decoder          # the codec's two halves as objects
+    history: list[dict]            # one record per train / reward / punish call: what it did, how much, how long
 
     @classmethod
-    def prime(cls, alphabet: Alphabet, L: int, kind: str = "count", seed: int = 0, settings: Settings | None = None) -> PairModel
-    def train(self, texts: Iterable[str], progress: ProgressFn | None = None, **sine_options) -> dict
+    def prime(cls, codec: Codec, L: int, kind: str = "count", seed: int = 0, settings: Settings | None = None) -> PairModel
+
+    # -- reading --
+    def train(self, texts: Iterable[str], progress: ProgressFn | None = None) -> dict
         # count kind: observe_text per text; returns {"texts", "units", "unk", "unk_share", "increments", "seconds"}
-    def predict(self, prefix: str, length: int, mode: str = "dijkstra", direction: str = "forward",
-                start: bool = True, temperature: float = 1.0, to_end: bool = False) -> PathResult
-        # start=True: the prefix begins a text (padded with <s>); False: a fragment. The context is the last
-        # (first, backwards) ≤ D units. mode: "dijkstra" | "greedy" | "sample". full_text = prefix + text
-        # (text + prefix backwards).
-    def generate(self, prefix: str = "", length: int = 60, **options) -> PathResult     # predict from <s> alone when prefix == ""
-    def score(self, text: str) -> Score
-    def distribution(self, context: Sequence[int], direction: str = "forward") -> list[float]   # the fold; for tests and the API
-    def info(self) -> dict        # kind, alphabet, R, L, N, nonzero, texts, units, unk_share, settings, memory (bytes), history
+
+    # -- outcomes: the family's primitives (D-026), marks as weights (D-050) --
+    def reward(self, texts, *, strength: float | None = None, weights: Sequence[float] | None = None, read: bool = False) -> dict
+        # credit(+strength·weight) per text at the model's `rungs`; a weight of 0 is skipped; read=True also observes the
+        # text into the count tree (the family's count model's behaviour; off by default — PRD.md section 9.7)
+    def punish(self, texts, *, strength=None, weights=None) -> dict          # credit(−strength·weight); never reads
+    def two_nrl(self, bad, good, *, strength=None, bad_weights=None, good_weights=None) -> dict   # punish(bad) then reward(good); no inversion
+    def feedback(self, good=(), bad=(), *, good_weights=None, bad_weights=None, strength=None) -> dict
+        # both -> two_nrl; only good -> reward; only bad -> punish — D-026's dispatch, so a tutor's marks, a sandbox's
+        # verdict and a person's thumb all end here
+    def invert(self) -> None                                                  # the reward tree's swap (§8.4)
+
+    # -- prediction and scoring --
+    def predict(self, prefix: str, length: int, mode: str = "dijkstra", traversal: str = "reward", start: bool = True,
+                temperature: float = 1.0, to_end: bool = False) -> PathResult
+        # start=True: the prefix begins a text (padded with START); False: a fragment. The context is the last ≤ D
+        # units. mode: "dijkstra" | "greedy" | "sample". full_text = prefix + text.
+    def generate(self, prefix: str = "", length: int = 60, **options) -> PathResult     # from START alone when prefix == ""
+    def score(self, text: str, traversal: str = "reward") -> Score
+    def distribution(self, context: Sequence[int], traversal: str = "reward") -> list[float]   # the fold; for tests and the API
+    def weights(self, **scales) -> dict      # change smoothing / the four scales / backoff at run time and report them,
+                                             # as the family's `weights` command; `rungs` is not changeable after priming
+    def info(self) -> dict        # kind, codec, R, L, N, nonzero counts, nonzero rewards, texts, units, unk_share, judged,
+                                  # rewards_total, penalties_total, settings, memory (bytes), history
     def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> PairModel
     def save(self, path: str) -> None ; @classmethod load(cls, path: str) -> PairModel
 ```
 
 The count kind has no learning rate, no epochs, no shuffling and no seed in
-training; `seed` is used by `mode=sample` and by the sine kind's
-initialisation. The same four verbs and the same result objects as the
-family, so the CLI reads as `RadixCyclicNN`'s does.
+training or feedback; `seed` is used by `mode=sample` and by the sine kind's
+initialisation. `strength` defaults to the settings' (`1.0`: one unit of
+reward multiplies a step's odds by `e` at `reward_scale = 1`, as the family's
+count model).
 
 ---
 
-## 11. The sine kind (phase 4) — `activation.py`, `sine.py`
+## 12. The sine kind (phase 4) — `activation.py`, `sine.py`
 
-The second kind on the same node set, the count kind's numbers being the
-baseline it must match (`PRD.md` phase P4). Nothing in §5–§9 changes; what
-changes is where `own` and `p` come from.
+The second kind on the same nodes; the count kind's numbers are the baseline
+it must match (`PRD.md` phase P4). The reward tree is untouched: a reward is a
+number written on a node, never a gradient's target. What changes is the count
+tree's term at the rung.
 
-### 11.1 Parameters
+* **Parameters**, seven `array('d')` of `N` — 56 bytes per node: `z, a, b, h, k`
+  (the node's activation `f(x) = a·sin(b(x − h)) + k`, initialised to
+  `−1, 1/3, 0, 0`) and `wa[i]`, the weight of the edge *into* node `i` from its
+  parent — a tree has one parent per node, so the edge's weight lives on the
+  child, as `FilterBankRadix` §5.1.
+* **Initialisation by id**, so the file can stay sparse: every initial value is
+  a function of `(seed, i, j)` — `u(seed, i, j) = (splitmix64(seed · 2^32 + i · 2 + j) >> 11) / 2^53`,
+  with `splitmix64` the standard mixer (`x += 0x9E3779B97F4A7C15; x = (x ^ x>>30) · 0xBF58476D1CE4E5B9;
+  x = (x ^ x>>27) · 0x94D049BB133111EB; x ^= x>>31`, all mod `2^64`); `z[i] = −4.5 + 9·u(·, 0)`,
+  `wa[i] = 0.5 + u(·, 1)` — the family's ranges, spelled out to the bit so a port
+  draws the same numbers.
+* **The rung**: `merit(x | c) = wa[c·x] · f_c · f_{c·x}` — *the activation of the
+  child times the activation of the parent*, the family's rule — in place of
+  `share_scale · log share`; the reward and penalty terms, the softmax, the
+  fold, `own` (still from the counts: the count tree keeps counting in this
+  kind) and both traversals are unchanged.
+* **The one-hop rule**: per position, every level's `q` against the unit that
+  was read, `g = q − onehot(x)`, `∂/∂wa[c·y] = g_y · f_c · f_{c·y}`, `∂/∂f_c =
+  Σ_y g_y · wa[c·y] · f_{c·y}`, `∂/∂f_{c·y} = g_y · wa[c·y] · f_c`, chained through
+  `sine_partials` into `z, a, b, h, k` of `c` and its children; summed over a
+  batch, divided by its size, clipped to `±5`, applied once; the activation
+  parameters at `ACT_RATE = 0.1` of the weights' rate; `b ≥ MIN_B = 1e-3`.
+  Nothing crosses further than a node and its children (`FilterBankRadix` §5.4).
+  `check.check_sine` reads the analytic gradient out of `step` and compares it
+  with central differences.
+* **`invert`**: `wa → −wa`, `a → −a`, `k → −k` on the count side — the exact
+  negation of the unit, as `RadixCyclicNN/DESIGN.md` §5.2 — *and* the reward
+  tree's swap; twice is bit-identical. `two_nrl` on this kind is the family's:
+  train on `bad`, `invert`, fine-tune on `good` at a smaller rate.
 
-Eight `array('d')` of `N` — 64 bytes per node:
-
-| array | meaning |
-|---|---|
-| `z, a, b, h, k` | the node's state and its activation `f(x) = a·sin(b(x − h)) + k` |
-| `wa[i]` | the weight of A's edge *into* node `i` from its A-parent — a tree has one parent per node, so the edge's weight lives on the child, as `FilterBankRadix` §5.1 |
-| `wb[i]` | the weight of B's edge into `i` from its B-parent |
-| `wr[i]` | the **rung** — the one weight a connection carries; the learned "forget" at `i`, shared by both directions (§18, question 4) |
-
-`activation.py` repeats `sine`, `sine_partials` and `MIN_B = 1e-3` from
-`RadixCyclicNN/radixnet/activation.py` rather than importing them; the
-directory is standalone.
-
-### 11.2 Initialisation by id — so the file can be sparse
-
-A primed model must not write `N` random numbers to disk. Every initial value
-is a **function of `(seed, i, j)`**, recomputed on load, so the file holds only
-the nodes that moved (§12):
-
-```
-u(seed, i, j) = (splitmix64(seed · 2^32 + i · 4 + j) >> 11) / 2^53          uniform in [0, 1)
-splitmix64(s): x = (s + 0x9E3779B97F4A7C15) mod 2^64
-               x = (x ^ (x >> 30)) · 0xBF58476D1CE4E5B9 mod 2^64
-               x = (x ^ (x >> 27)) · 0x94D049BB133111EB mod 2^64
-               return x ^ (x >> 31)
-
-z[i]  = −4.5 + 9 · u(seed, i, 0)          wa[i] = 0.5 + u(seed, i, 1)
-wb[i] = 0.5 + u(seed, i, 2)               wr[i] = 0.5 + u(seed, i, 3)
-a = −1, b = 1/3, h = 0, k = 0
-```
-
-The draws are the family's ranges (`z ~ U(−4.5, 4.5)`, `w ~ U(0.5, 1.5)`),
-spelled out to the bit so that a port draws the same numbers.
-
-### 11.3 Scores, and the learned fall
-
-At a context `s` (level `ℓ ≤ D`) in A, the options are its `R'` children and
-its rung:
-
-```
-score(x)    = wa[s·x] · f_s · f_{s·x}          x ∈ Σ_A
-score(rung) = wr[s]   · f_s · f_{s[1:]}        (f of the corridor's far end; 1 at the root)
-q           = softmax over the R' + 1 scores
-own_A(s)    = 1 − q(rung)          p_A(x | s) = q(x) / own_A(s)
-```
-
-— *the activation of the child times the activation of the parent*, the
-family's rule, with the rung as one more child. The fold, the corridor, the
-search and `backoff` of §8–§9 then run unchanged on these `own` and `p`. The
-mirror holds in B with `wb` and `s[:-1]`.
-
-### 11.4 The one-hop rule (provisional — §18, question 5)
-
-For one position with target `x` and the contexts `c_0 = ε, …, c_m` (`m =
-min(D, t − 1)`), compute every level's `q`. Let `k* = argmax_k q_k(x)`, the
-level that knows `x` best. Targets: at levels `k ≤ k*`, the child `x`; at
-levels `k > k*`, the rung — *the deepest level that knows best answers, and
-everything deeper defers*. Then per level, `g = q − onehot(target)` and
-
-```
-∂L/∂wa[c·y] = g_y · f_c · f_{c·y}        ∂L/∂wr[c] = g_r · f_c · f_far
-∂L/∂f_c     = Σ_y g_y · wa[c·y] · f_{c·y} + g_r · wr[c] · f_far
-∂L/∂f_{c·y} = g_y · wa[c·y] · f_c         ∂L/∂f_far = g_r · wr[c] · f_c
-```
-
-chained through `sine_partials` into `z, a, b, h, k` of `c`, its children and
-the far node. Summed over a batch, divided by its size, clipped to `±clip`
-(5), applied once; the activation parameters move at `ACT_RATE = 0.1` of the
-weights' rate and `b` is floored at `MIN_B`. Both trees per position — B's
-contexts are the units after the position, its target the unit at it. Every
-gradient is one hop: a node, its children, the far end of its rung; nothing
-crosses further. `check.check_sine` reads the analytic gradient out of `step`
-itself and compares it with central differences.
-
-### 11.5 `invert`, 2NRL
-
-`invert()`: `wa, wb, wr → −w` for every node; `a → −a` and `k → −k` — the
-exact negation of the unit, as `RadixCyclicNN/DESIGN.md` §5.2 explains it;
-`inverted = not inverted`. Twice is bit-identical. `two_nrl(bad, good, lr,
-fine_lr)`: train on `bad` at `lr`, `invert()`, train on `good` at `fine_lr`.
-The count kind neither inverts nor has 2NRL in this version (D-023; §17).
+Provisional in one respect (§19, question 6): whether the fall should be
+learned in this kind rather than read off the counts.
 
 ---
 
-## 12. Persistence
+## 13. Persistence
 
 JSON, format `"radixpair"` version `1`, gzip when the path ends in `.gz`;
 `load` sniffs the gzip magic and ignores the suffix. Written through a
@@ -664,154 +784,186 @@ temporary file and `os.replace`, as `RadixCyclicNN`'s `write_bytes_atomic`.
 
 ```json
 {"format": "radixpair", "version": 1,
- "alphabet": {"name": "letters", "symbols": ["<s>", "</s>", "<unk>", " ", "a", "..."]},
- "L": 4, "kind": "count", "seed": 0,
- "settings": {"alpha": 2.0, "floor": 0.02, "backoff": "all", "step_penalty": 0.0, "max_expansions": 200000, "node_ceiling": 4194304},
- "trained": {"texts": 12, "units": 913, "unk": 3},
- "history": [{"texts": 12, "units": 913, "unk": 3, "increments": 3796, "seconds": 0.01}],
- "counts": {"ids": [1, 4, 17], "values": [12, 3, 1]},
- "sine": {"inverted": false, "ids": [], "z": [], "a": [], "b": [], "h": [], "k": [], "wa": [], "wb": [], "wr": []}}
+ "codec": {"name": "bpe", "vocab_size": 1024, "merges": [[104, 101], [116, 104]], "start": 0, "end": 1, "unk": 2},
+ "L": 2, "kind": "count", "seed": 0,
+ "settings": {"alpha": 2.0, "floor": 0.02, "smoothing": 0.5, "share_scale": 1.0, "reward_scale": 1.0,
+              "merit_scale": 1.0, "penalty_scale": 1.0, "strength": 1.0, "rungs": "all", "backoff": "all",
+              "step_penalty": 0.0, "max_expansions": 200000, "node_ceiling": 4194304},
+ "read":   {"texts": 12, "units": 913, "unk": 0},
+ "judged": {"texts": 3, "rewards_total": 15.0, "penalties_total": 1.0},
+ "history": [{"call": "train", "texts": 12, "units": 913, "increments": 1826, "seconds": 0.01},
+             {"call": "reward", "texts": 2, "strength": 5.0, "entries": 40, "seconds": 0.0}],
+ "counts":  {"ids": [1, 4, 17], "values": [12, 3, 1]},
+ "rewards": {"ids": [4, 17], "plus": [5.0, 5.0], "minus": [0.0, 1.0]},
+ "sine": {"inverted": false, "ids": [], "z": [], "a": [], "b": [], "h": [], "k": [], "wa": []}}
 ```
 
-* `counts.ids` are sorted and hold **only the non-zero counts**; `sine.ids`
-  only the nodes whose parameters differ from §11.2's initial values (the
-  `sine` block is absent in the count kind).
-* `load` is `prime(alphabet, L, kind, seed, settings)` followed by writing the
-  entries back. The stored `symbols` list is authoritative — a preset changing
-  later does not change an old model — and `R`, `N` are recomputed, never read.
+* The **codec block** holds the whole tokenizer: `chars` its symbols; `bytes`
+  nothing but its name; `bpe` its merge list in rank order; `phones` the
+  tokenizer's settings (`level`, `stress`, `boundaries`, `pauses`); `external`
+  its spec, `V` and the vocabulary digest (§5.5). `R` and `N` are recomputed,
+  never read.
+* `counts.ids` are sorted and hold **only the non-zero counts**; `rewards.ids`
+  only the nodes with a non-zero `plus` or `minus`; `sine.ids` only the nodes
+  whose parameters differ from §12's initial values (the block is absent in
+  the count kind).
+* `load` is `prime(codec, L, kind, seed, settings)` followed by writing the
+  entries back.
 * A file never holds `N` of anything: its size is proportional to what was
-  seen (`PRD.md` S-7), and a model of ten sentences is a few kilobytes at any
-  `L`.
+  read and judged (`PRD.md` S-8), and a model of ten sentences and three
+  judgements is a few kilobytes at any `L`.
 * `checkpoint.py` is `RadixCyclicNN`'s `CheckpointManager` shape: rotation, a
   `latest` pointer, `load_latest`, resume; a checkpoint is a model file.
 
 ---
 
-## 13. `cli.py` and the `Makefile`
+## 14. `cli.py` and the `Makefile`
 
 ```
-python3 -m radixpair prime    --model m.json --alphabet letters|phones|bytes --L 4 [--kind count|sine] [--seed 0] [--ceiling N] [--unit ...]
+python3 -m radixpair prime    --model m.json --codec chars|bytes|bpe|phones|external --L 4 [--vocab-size 1024]
+                              [--tokenizer-data corpus.txt] [--external tiktoken:cl100k_base] [--no-stress]
+                              [--kind count|sine] [--seed 0] [--rungs all|final] [--ceiling N]
 python3 -m radixpair train    --model m.json --data corpus.txt [--data more.txt ...] [--checkpoint-dir DIR]
                               [sine kind: --epochs 5 --lr 0.05 --act-lr 0.005 --batch 256 --clip 5]
+python3 -m radixpair reward   --model m.json (--text "..." | --data file) [--strength 1] [--ratings 9 7 10] [--read]
+python3 -m radixpair punish   --model m.json (--text "..." | --data file) [--strength 1] [--ratings ...]
+python3 -m radixpair 2nrl     --model m.json --bad bad.txt --good good.txt [--strength 1]
+python3 -m radixpair feedback --model m.json [--good ...] [--bad ...] [--good-ratings ...] [--bad-ratings ...]
 python3 -m radixpair predict  --model m.json --prefix "the quick brown" --length 20 [--mode dijkstra|greedy|sample]
-                              [--direction forward|backward] [--temperature 1.0] [--fragment] [--to-end] [--hops]
+                              [--traversal reward|punishment] [--merit-scale 1] [--penalty-scale 1]
+                              [--temperature 1.0] [--fragment] [--to-end] [--hops]
 python3 -m radixpair generate --model m.json [--prefix ""] [--length 60] [the predict options]
-python3 -m radixpair score    --model m.json --text "..." | --data file [--per-unit]
+python3 -m radixpair score    --model m.json (--text "..." | --data file) [--per-unit] [--traversal ...]
+python3 -m radixpair weights  --model m.json [--smoothing 0.5] [--share-scale 1] [--reward-scale 1] [--merit-scale 1]
+                              [--penalty-scale 1] [--backoff all|deepest|none]        show, or set and save
 python3 -m radixpair info     --model m.json
 python3 -m radixpair check    [--R 3 --L 4]                                   the brute-force oracle (§6.4)
-python3 -m radixpair bench    [--alphabet letters --L 4 --units 200000]       throughput (§15)
-python3 -m radixpair bench compare  --data corpus.txt [--holdout 0.1] [--L 4]  bits per unit: all / deepest / none, and the references (PRD S-4, S-5)
-python3 -m radixpair bench localise --data corpus.txt [--n 200]                the planted-substitution hit rate (PRD S-6)
-python3 -m radixpair invert / 2nrl  (sine kind)
+python3 -m radixpair bench    [--codec chars --L 4 --units 200000]            throughput: counting and crediting (§16)
+python3 -m radixpair bench compare  --data corpus.txt [--holdout 0.1] [--L 4] [--smoothing 0]   bits per unit: all / deepest / none, and the references (PRD S-4, S-5)
+python3 -m radixpair bench feedback [--data corpus.txt]                        the mat / log case under both traversals (PRD S-6)
+python3 -m radixpair bench rungs    --data corpus.txt                          rewards at every level against the final nodes (PRD S-7)
+python3 -m radixpair invert   --model m.json
 ```
 
 `--json` on every command prints one JSON document to stdout and progress to
 stderr, as the family does. `--data` reads one text per line, blank lines
-skipped. The `Makefile` has a target per command with the variables
-overridable on the command line (`make train DATA=… L=4`), plus `test`
+skipped; `--ratings` are marks out of 10, one per text, turned into weights as
+D-050. The `Makefile` has a target per command with the variables overridable
+on the command line (`make train DATA=… L=4`), plus `test`
 (`python3 -m unittest discover -s tests`) and `check`.
 
 ---
 
-## 14. Tests (`unittest`, no dependencies, seconds)
+## 15. Tests (`unittest`, no dependencies, seconds)
 
-* `test_alphabet.py` — the presets' `R` and mark ids; normalisation; `<unk>`; `padded`; the round trip; `to_dict` / `from_dict`; `phones` skipped when the tokenizer is not importable; `bytes_` has no `<unk>`.
-* `test_address.py` — **the brute-force oracle** at `(2,5), (3,4), (5,3), (7,2)` (§6.4); the worked example of §6.1; `level` by bisection at every id; A's blocks contiguous and B's strided; every move undone by its inverse (`append` then `drop_newest`, `prepend` then `drop_oldest`); the refusals.
-* `test_nodes.py` — the invariants of §7.4; the rolling code against a naive recount; the ceiling refused with the numbers in the message.
-* `test_pair.py` — `test_the_rungs_are_the_fold`: the pair against the shortest-first fold of `FilterBankRadix` §5.3 (copied into the test), 200 random tables × every context length, to `1e-9`, and every answer a distribution; `deepest` and `none` as §8.5 defines them; **backward is forward reversed** (§16 invariant 5); the corridor's three hops and its far end; forgetting at the root is the uniform; `test_connected_only_at_the_final_nodes_cannot_slide`; the cache dropped on `version`.
-* `test_search.py` — Dijkstra returns a trained text's continuation; a path's cost is the sum of its emissions and corridors and is never below the un-floored fold's cost of the same units; a start at level `L` forgets first; the fallback on the expansion cap never raises; `to_end`; backward generation puts its units before the context in reading order; `greedy` at temperature 0 is the fold's argmax; `sample` is seeded and terminates.
-* `test_model.py` — train lowers a trained text's bits; a trained text costs fewer bits than garbage, in both directions; `predict` reproduces a training continuation; `start` against `fragment`; `history`; save / load identical predictions, scores and `info`; the file has no zero count; file size grows with the non-zero counts and not with `L`; `distribution`.
-* `test_localise.py` — a planted substitution in a text the model was trained around is the maximum of `both`; over 100 sentences the `both` hit rate is at least the forward-only hit rate.
+* `test_codec.py` — every preset: `R`, the marks, the dead ids, `emits`; normalisation; `unk`; `padded`; the round trip; `to_dict` / `from_dict`; `phones` agrees with `phonetok` token for token and refuses the growing levels, skipped when the package is not importable; `external` agrees with its library id for id and refuses a vocabulary that digests differently, skipped when neither library is installed.
+* `test_bpe.py` — pieces never crossed by a merge; training reaches the vocabulary size and is deterministic (ties); `decode(encode(b)) == b` for random bytes and for unicode text; the merge list round-trips through the file; a repeated word is one cache hit.
+* `test_address.py` — **the brute-force oracle** at `(2,5), (3,4), (5,3), (7,2)` (§6.4); the worked example of §6.1; `level` by bisection at every id; the children block contiguous; `append` undone by `drop_newest`; `substrings` against a naive enumeration; the refusals.
+* `test_count.py` — the invariants of §7.4; the rolling code against a naive recount; the ceiling refused with the numbers in the message.
+* `test_reward.py` — the invariants of §8.5: `credit` writes the ids `observe` counts (and, with `rungs = final`, the level-`L` ones only); reward and penalty kept apart; weights and a zero weight skipped; `invert` twice; `cnt` untouched.
+* `test_pair.py` — `test_the_rungs_are_the_fold`: at `smoothing = 0` and no rewards, the pair against the shortest-first fold of `FilterBankRadix` §5.3 (copied into the test), 200 random tables × every context length, to `1e-9`, and every answer a distribution; `deepest` and `none` as §9.6 defines them; at `σ = 0.5` a reward lifts a never-read step and at `σ = 0` it cannot; the punishment traversal ignores rewards entirely and is unbuyable; a step credited with `rungs = all` moves a sibling context that shares its last unit, and with `rungs = final` does not (S-7's test half); the cache dropped on either `version`; the mat / log case of S-6 under both traversals.
+* `test_search.py` — Dijkstra returns a trained text's continuation; a path's cost is the sum of its emissions and falls and is never below the un-floored fold's cost of the same units; the shift at level `L` is free and forced; the fallback on the expansion cap never raises; `to_end`; both traversals through every mode; `greedy` at temperature 0 is the fold's argmax; `sample` is seeded and terminates.
+* `test_model.py` — train lowers a trained text's bits; `reward` lowers the bits of the rewarded text and `punish` raises them, at the model's `rungs`; `two_nrl` and `feedback` dispatch as D-026, with ratings as weights; `read=True` counts and the default does not; `start` against `fragment`; `weights` changes the fold and `rungs` cannot be changed; `history`; save / load identical predictions and scores; the file has no zero count, reward or penalty; file size grows with what was read and judged and not with `L`.
 * `test_checkpoint.py` — rotation, the latest pointer, `load_latest`, resume.
-* `test_cli.py` — subprocess smoke of `prime / train / predict / generate / score / info / check` with `--json`.
-* `test_bench.py` — every bench runs in `--quick`, and `compare` reports the three `backoff` settings.
-* `test_sine.py` (phase 4) — the default equals `−sin(x/3)` and the partials pass a finite-difference check; initialisation is a function of `(seed, id)` and the same across processes; the one-hop rule's analytic gradient, read out of `step`, against central differences; the rung's target rule on a hand-built case; `invert` twice is identity; 2NRL makes garbage less likely; the file holds only the nodes that moved and loads to identical predictions.
+* `test_cli.py` — subprocess smoke of every command with `--json`.
+* `test_bench.py` — every bench runs in `--quick`; `compare` reports the three `backoff` settings and `rungs` the two `rungs` settings.
+* `test_sine.py` (phase 4) — the default equals `−sin(x/3)` and the partials pass a finite-difference check; initialisation is a function of `(seed, id)` and the same across processes; the one-hop rule's analytic gradient, read out of `step`, against central differences; the reward terms unchanged by training; `invert` twice is identity; 2NRL makes garbage less likely; the file holds only the nodes that moved and loads to identical predictions.
 
 ---
 
-## 15. Performance notes (must be followed)
+## 16. Performance notes (must be followed)
 
-### 15.1 The budget
+### 16.1 The budget
 
-`N` nodes per model; the count kind at 8 bytes per node, the sine kind at 64:
+`N` nodes per model, at 24 bytes each — a count and two reward numbers; the
+sine kind adds 56. `L` is the longest sequence; the longest context is `L − 1`.
 
-| alphabet | `R` | `L = 3` | `L = 4` | `L = 5` |
-|---|---|---|---|---|
-| `letters` | 33 | 37,060 · 0.3 MiB | **1,222,981 · 9.3 MiB** (sine 75 MiB) | 40,358,374 · 308 MiB (sine 2.4 GiB) — a port's job |
-| `phones` | 44 | 87,165 · 0.7 MiB | 3,835,261 · 29 MiB (sine 234 MiB) | 168,751,485 · 1.3 GiB — no |
-| `phones(stress=True)` | 94 | 839,515 · 6.4 MiB | 78,914,411 · 602 MiB — no | — |
-| `bytes_` | 258 | 17,240,335 · 132 MiB — a port's job | — | — |
+| codec | `R` | `L = 1` | `L = 2` | `L = 3` | `L = 4` |
+|---|---|---|---|---|---|
+| `chars` | 33 | 34 | 1,123 | 37,060 · 0.8 MiB | **1,222,981 · 28 MiB** |
+| `phones` | 92 | 93 | 8,557 · 0.2 MiB | **787,245 · 18 MiB** | 72,426,541 · 1.6 GiB — a port's job |
+| `bytes` | 259 | 260 | 67,341 · 1.5 MiB | 17,441,320 · 399 MiB — a port's job | — |
+| `bpe` 1,024 | 1,027 | 1,028 | **1,055,757 · 24 MiB** | 1,084,262,440 — no | — |
+| `bpe` 2,048 | 2,051 | 2,052 | 4,208,653 · 96 MiB — just over the ceiling | — | — |
+| `external` GPT-2 | 50,260 | **50,261 · 1.2 MiB** | 2,526,117,861 · 56 GiB — no | — | — |
+| `external` cl100k | 100,280 | **100,281 · 2.3 MiB** | 10,056,178,681 — no | — | — |
 
-The ceiling of §7.1 (`4,194,304` nodes) admits the bold cell and `phones, L =
-4`, and refuses the rest until there is a port or a torch backend to run them.
-`L` is the longest sequence; the longest context is `L − 1`.
+The default ceiling (`4,194,304` nodes, §7.1) admits a vocabulary of at most
+45 at `L = 4`, 160 at `L = 3`, 2,047 at `L = 2` and anything at `L = 1`, and
+refuses the rest until there is a port or a torch backend to run them. **The
+tokenizer decides the depth.**
 
-### 15.2 What was measured while writing this
+### 16.2 What was measured while writing this
 
-Pure Python, `array('q')`, one process, the container this document was
-written in — a scratch figure that `bench` replaces:
+Pure Python, `array('q')`, one process, the container this document was written
+in — a scratch figure that `bench` replaces:
 
 | | |
 |---|---|
-| `letters, L = 4`, 200,000 random units | 800,000 increments in 0.33 s |
+| `chars, L = 4`, 200,000 random units | 800,000 increments in 0.33 s |
 | increments per second | **2.43 million** |
 | units per second | 609 thousand |
 
-`PRD.md` NFR-3 asks for 1 million increments per second; there is margin.
+Crediting is the same loop over a float array and is expected within a factor
+of two of it. `PRD.md` NFR-3 asks for 1 million per second; there is margin.
 
-### 15.3 Rules
+### 16.3 Rules
 
-* The counting loop of §7.2 binds `cnt`, `bases`, `R` and `codes` to locals and contains no call, no attribute lookup and no allocation. It is the whole of training and the one loop that matters.
-* Context counts are slice sums over `array` (`sum(cnt[a:b])`, `sum(cnt[a:b:step])`), never Python loops over children; `(ctx, own)` is cached per `(node, direction)` keyed on `nodes.version`.
+* The loops of §7.2 and §8.2 bind `cnt` (or `plus` / `minus`), `bases`, `R` and `codes` to locals and contain no call, no attribute lookup and no allocation. They are the whole of training and feedback.
+* Context counts, shares and rewards are slice operations over `array` (`sum(cnt[a:b])`, `plus[a:b]`), never Python loops over children; `scores` is cached per `(node, traversal)` keyed on both `version`s.
 * The fold allocates one list of `R'` floats per level and reuses it; nothing per unit inside.
 * Dijkstra uses `heapq` with `(cost, tie, node, level, emitted)` tuples and a `best` dict; `max_expansions` is a guard, never a loop bound the search grows into.
+* The BPE encoder caches the token ids of every piece it has seen; training keeps pair counts incrementally rather than recounting the corpus per merge.
 * No per-node objects, ever. `N` is a million; a million Python objects is the one way to make this design look slow.
 * `prime` allocates its arrays with `array(code, bytes(size * N))` — one allocation per array, zero-filled by the C library.
 
 ---
 
-## 16. Invariants
+## 17. Invariants
 
 Asserted in the suite, true at every point in a model's life:
 
 1. **Primed means fixed.** `N = (R^(L+1) − 1) / (R − 1)`; no operation changes the length of any array; the arithmetic tree is the brute-force tree (§6.4).
 2. **Every id is a sequence.** `id` is a bijection from the sequences of length `0..L` onto `0..N−1`, and every move of §6.2 lands inside it.
-3. **Counts are substring counts.** `cnt[s]` is the number of occurrences of `s` in the padded training texts; child sums equal the node's count except across a mark; a sequence with a mark inside stays at zero (§7.4).
-4. **The rungs are the fold.** The forward fold equals `FilterBankRadix` §5.3 on the same counts to `1e-9`, and every answer is a distribution over `Σ_A` (`Σ_B` backwards).
-5. **Backward is forward reversed.** For a model `M` and a model `M'` primed alike and trained on the reversed texts (marks swapped), `M.score(text).backward_bits == M'.score(reversed text).forward_bits` to `1e-9`, unit by unit.
-6. **The corridor is the only way between the trees, and it needs the rung it returns by.** With rungs only at level `L`, a forward walk from any level-`L` node emits nothing.
-7. **Determinism.** Same alphabet, `L`, texts and seed ⇒ the same bytes, across processes and across a save / load cycle; `mode=sample` with the same seed gives the same walk.
-8. **The file is the data.** A restored model predicts and scores identically; the file holds no zero count and no unmoved parameter.
-9. **The sine kind.** `invert` is an involution; every gradient is one hop; the activation parameters move at a tenth of the weights' rate; `b ≥ MIN_B`; the initial value of every parameter is a function of `(seed, id)`.
+3. **The count tree is written by reading alone.** `cnt[s]` is the number of occurrences of `s` in the padded training texts; only `observe` changes it; child sums equal the node's count except across a mark; a sequence with a mark or a dead id inside stays at zero.
+4. **The reward tree is written by outcomes alone.** Only `credit` and `invert` change `plus` or `minus`; `train` never does; `plus, minus ≥ 0` everywhere.
+5. **Rewards and penalties are kept apart.** A reward and a penalty of equal size on one step leave its net at zero and its penalty standing; the punishment traversal's answer never changes when rewards are added.
+6. **The rungs are the fold.** At `smoothing = 0` and no rewards, the pair's distribution equals `FilterBankRadix` §5.3 on the same counts to `1e-9`; at every setting every answer is a distribution over `Σ_out`.
+7. **The shift is free and forced; the fall is priced by the count tree.** A walk at level `L` continues from `drop_oldest` at cost `0`; a fall from level `1..D` costs `−log(1 − own)`.
+8. **Determinism.** Same codec, `L`, texts, outcomes and seed ⇒ the same bytes, across processes and across a save / load cycle; `mode=sample` with the same seed gives the same walk.
+9. **The file is the data.** A restored model predicts and scores identically; the file holds no zero count, no zero reward, no unmoved parameter, and the whole codec.
+10. **The codec is faithful.** `decode(encode(text))` is the normalised text for every preset; `bpe` round-trips bytes exactly; `phones` and `external` agree with their libraries id for id.
+11. **The sine kind.** `invert` is an involution; every gradient is one hop; the activation parameters move at a tenth of the weights' rate; `b ≥ MIN_B`; the initial value of every parameter is a function of `(seed, id)`; the reward tree is unchanged by training.
 
 ---
 
-## 17. Deliberately absent
+## 18. Deliberately absent
 
 Named so that adding one is a decision rather than a drift.
 
 * **No growth.** No split, no merge, no dynamic window, no node after priming. The moment a node is created because a text needed it, this is `RadixCyclicNN`.
-* **No words as units.** "Every option" over words is unbounded.
+* **No open vocabularies.** Every codec is closed at priming; the phonetic tokenizer's growing levels are refused.
+* **No recency window.** D-022's second share — an edge's share inside the last 10,000 traversals — is not carried; a primed tree could keep one, and does not yet (§19, question 8).
 * **No `BACK`, no `THINK`.** The sentinels of `RadixCyclicNN` §5.1.1–§5.1.2 are learned from conversation; this model has no conversation yet.
-* **No back-propagation.** Not through depth, not across the corridor, not "just for the rung".
+* **No back-propagation.** Not through depth, not into the reward tree, not "just for the fall".
+* **No least-punished ranking and no beams.** The worst-step ordering of `SPEC-LeastPunished.md` §3.2 and the count model's `K` best and `K` worst continuations are phase 3, once the two traversals exist.
+* **No teachers called from here.** The tutor, the critic, the sandbox and the chat loop of `RadixCyclicNN` may *call* `reward` and `punish`; this model calls nothing.
 * **No torch, no Go, no Rust, no HTTP API, no frontend** in this version (`PRD.md` phase P5).
-* **No meeting walk.** Fill-in-the-middle and correction are the first follow-up and get their own `SPEC-MeetingWalk.md`; nothing here forecloses them — the pair's geometry is theirs.
-* **No count-kind inversion, no count-kind 2NRL** (D-023).
-* **No teachers.** The tutor, the critic and the negative network of `RadixCyclicNN` may *call* this model as a judge; it does not call them.
 
 ---
 
-## 18. Open questions
+## 19. Open questions
 
 Honest gaps, to be resolved by measurement rather than by guessing now.
 
-1. **What is an option?** (`PRD.md` §9.1) A lexicon-primed pair — every word into a prefix tree and, reversed, into a suffix tree, connected where a sequence is both a prefix of some word and a suffix of another — is not complete, so its addresses are stored, radix compression returns, and the rungs are sparse and meaningful. Everything from §8 on is unchanged. Whether that pair does anything the complete one does not is the most interesting question here and the one this version does not answer.
+1. **What is an option?** (`PRD.md` §9.1) A lexicon-primed pair — every word, or every pronunciation, into a radix tree — is not complete, so its addresses are stored and radix compression returns. Everything from §7 on is unchanged. Whether that pair does anything the complete one does not is the most interesting question here and the one this version does not answer.
 2. **Does priming beat growing on little data?** The hypothesis of `PRD.md` §2: with no structural decision to make, the model should be as good after one text as it will ever be on that text. Bits per unit after 1, 10, 100, 1000 texts against `RadixCyclicNN`'s count model on the same texts is the cheapest measurement once P2 runs.
-3. **Is `L = 4` over letters deep enough to be worth 9 MiB, or is the model's home sounds at `L = 3–4`?** S-4 answers the first half; the second needs a phonetic corpus scored both ways.
-4. **One rung weight for both directions.** §11.1 shares `wr[i]` between a forward fall and a backward fall. Whether the two propensities are the same thing — how much `s` knows — or should be two weights is a measurement on the sine kind.
-5. **The rung's target rule** (§11.4) is a guess: "the deepest level that knows best answers, everything deeper defers". The alternatives are training the rung toward the count-derived `own` (which makes the sine kind a curve fit of the count kind), or a sum-over-paths rule (which would be the first rule in the family that is not one hop, and is not taken without a reason).
-6. **Should the floor be a rung?** The floor is the one term of the answer that is not a path. A rung from the root to "nothing", with a weight of its own, would make it one and make it learnable; it would also make every path's cost the fold's, which §9 currently only bounds.
-7. **`<unk>`'s share.** A closed alphabet on real text may route too much through `<unk>`; `info` reports it, and the `letters` preset is widened if it is large. Where the line is — at what share `<unk>` starts to carry the model — is not known.
-8. **The meeting walk's cost.** The sum of the forward and backward walks' costs to the equal node they meet on, or the fold of both readings at every filled unit? The former is a shortest path and the family's shape; the latter is exact. `SPEC-MeetingWalk.md` decides.
-9. **When to port.** `letters, L = 5` is 308 MiB of counts and 40 million slots — Go or Rust, or torch over the count arrays. The number that decides it is S-4's gap between `L = 4` and what a grown model reaches at the same memory.
-10. **Does the corridor need a direction in the count kind?** `ctx_A` and `ctx_B` differ only at the marks, so `own_A ≈ own_B` everywhere else; the two decisions could be one number. Kept as two until measured, because the marks are where texts begin and end and that is not nowhere.
+3. **Should judged evidence count toward `own`?** (`PRD.md` §9.8) A context judged fifty times and read twice is trusted as a context read twice. Adding `plus + minus` to the evidence in `own` is a one-line change whose effect on S-5 and S-7 is unknown.
+4. **One smoothing or two?** `σ` serves two masters: it keeps an unread step's share finite so a reward can lift it, and it changes the fold's numbers against `FilterBankRadix`. A reward tree with its own back-off — a reward read from the deepest level that has *any* credit, rather than the deepest level the count tree trusts — would let `σ` be `0` again. Untried.
+5. **Should a deep reward weigh more than a shallow one?** `credit` writes the same amount at every level. The shallow levels then carry the sum of many outcomes and the deep ones a few, which is the generalisation S-7 measures — but it also means a specific context's judgement is drowned by the unigram's whenever the fold falls back. A per-level weight is a setting waiting for a reason.
+6. **Should the sine kind learn the fall?** §12 keeps `own` on the counts. A learned fall — a weight per node competing with the children, trained by "the deepest level that knows best answers, everything deeper defers" — was the first draft's rule and is a guess; it is not taken without a measurement.
+7. **Should the floor be a rung?** The floor is the one term of the answer that is not a path. A fall from the root to "nothing" with a weight of its own would make it one, and make every path's cost the fold's, which §10 currently only bounds.
+8. **The recency window.** D-022's `R_recent` is what lets the family's count model move on from what it saw early. A primed tree could keep a per-node window count in one more array; whether recency matters on corpora that are read once is not known.
+9. **Is a BPE of two thousand tokens at two tokens of context a language model worth having?** It is the deepest an LLM-style tokenizer primes to under the ceiling, and the alternative — an LLM's own tokenizer at one token — is a bigram. The first `bench compare` on `bpe 1024, L = 2` against `chars, L = 4` on the same text decides where this model's home is.
+10. **When to port.** `phones, L = 4` is 1.6 GiB and 72 million slots — Go or Rust, or torch over the arrays. The number that decides it is S-4's gap between `L = 3` and what a grown model reaches at the same memory.
+11. **`<unk>`'s share.** A closed vocabulary on real text may route too much through `<unk>`; `info` reports it. Where the line is — at what share `<unk>` starts to carry the model — is not known, and `bytes` and `bpe` are the codecs that never produce one.
