@@ -9,6 +9,7 @@ The numbers in `../README.md`, committed beside the code that produced them.
 | `prose_min2_results.json`, `prose_min2_run.log` | the same run with `--min-count 2`: the tree consults no context it has seen only once |
 | `prose_depth8_results.json`, `prose_depth8_run.log` | the same run with `--depth 8`: a root path holds at most eight symbols |
 | `prose_depth2_results.json`, `prose_depth2_run.log` | the same run with `--depth 2`: a context is one gram — the cyclic graph's own order, held as a tree |
+| `window_results.json` | the token-by-token walk's next-token accuracy on the held-out prose, over windows of one gram to the whole history, with the learned rule — `make window` |
 
 Each JSON holds the corpus (size, split, SHA-256 of the exact text), the
 settings, and per model: the size of everything it built, training seconds,

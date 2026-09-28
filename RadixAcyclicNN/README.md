@@ -275,9 +275,19 @@ A window of one gram is the graph, to the digit. Held-out accuracy plateaus
 at three to four grams; deeper windows only add recitation. And depth narrows
 the options: the deepest window's top guess is as good as a shallow one's,
 but the actual next gram is among its options far less often — which is where
-the tree's held-out miss rate in the comparison came from. `python3 -m
-radixtree accuracy` measures the same thing with the learned rule on any
-saved model.
+the tree's held-out miss rate in the comparison came from.
+
+The same walk with the learned rule deciding at every branch, on the tree
+trained for the comparison (`make window`, `results/window_results.json`):
+
+| window | 1 | 2 | 3 | 4 | 6 | 8 | all |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| held-out accuracy | 0.461 | 0.517 | 0.544 | 0.546 | 0.552 | 0.555 | 0.558 |
+| actual gram is an option | 0.88 | 0.81 | 0.76 | 0.73 | 0.70 | 0.69 | 0.68 |
+
+The shape is the same; the level is lower at every window, and lowest where
+a context has many options — ten epochs of the one-hop rule at batch 32 have
+not brought the root's and the shallow contexts' softmaxes up to their counts.
 
 ## Sounds
 

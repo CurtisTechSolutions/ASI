@@ -606,6 +606,18 @@ class RadixTreeNet:
             node, offset, _include, cut = self._start(prefix)
             loc = (node, offset)
             grams = []
+            if tree.is_real(node):
+                # a prefix shorter than a gram matched the opening of a text: the rest of that first gram is
+                # the first token, matched rather than predicted, and the queries begin after it
+                gram = tree.first_gram(node)
+                piece = enc.piece_of(gram, cut)
+                emitted = enc.join_units(emitted, piece)
+                n_emitted += len(enc.view(piece))
+                grams.append(gram)
+                labels.append(tree.labels[node])
+                node_ids.append(node)
+                step_costs.append(0.0)
+                cut = n - 1
         if to_end and max_length is None:
             max_length = max(length, MAX_SLIDE)
         while True:
@@ -645,7 +657,7 @@ class RadixTreeNet:
         length: int = 20,
         mode: str = "dijkstra",
         step_penalty: float = 0.0,
-        temperature: float = 1.0,
+        temperature: float | None = None,
         to_end: bool = False,
         max_length: int | None = None,
         costs: str = "logprob",
@@ -657,13 +669,13 @@ class RadixTreeNet:
 
         ``mode="dijkstra"`` returns the cheapest continuation of at least
         ``length`` characters (or to an END leaf with ``to_end``);
-        ``mode="sample"`` walks stochastically at ``temperature`` (0 is
-        greedy), stopping after ``length`` characters or at END;
+        ``mode="sample"`` walks stochastically at ``temperature`` (1 unless
+        given; 0 is greedy), stopping after ``length`` characters or at END;
         ``mode="slide"`` goes token by token - one query of the tree per
         token, from the last ``window`` grams of everything said so far (all
-        of it: ``None``), the token it gives fed back for the next query, the
-        most likely token at temperature 0 and a sample above it
-        (:meth:`_slide`).  ``max_length`` caps the text.  ``costs`` is ``"logprob"`` (the cyclic graph's
+        of it: ``None``), the token it gives fed back for the next query: the
+        most likely token at temperature 0, which is its default, and a
+        sample above it (:meth:`_slide`).  ``max_length`` caps the text.  ``costs`` is ``"logprob"`` (the cyclic graph's
         non-negative cost) or ``"signal"`` (the signed edge signal, legal only
         because there are no cycles); ``step_penalty`` may be negative for the
         same reason.  ``seed`` makes a sampled walk reproducible on its own.
@@ -679,6 +691,8 @@ class RadixTreeNet:
         check_costs(costs)
         tree = self.tree
         rng = random.Random(seed) if seed is not None else tree.rng
+        if temperature is None:
+            temperature = 0.0 if mode == "slide" else 1.0
         if temperature < 0:
             raise ValueError("temperature must be >= 0")
         if mode == "slide":
@@ -750,7 +764,7 @@ class RadixTreeNet:
         max_length: int = 40,
         count: int = 1,
         mode: str = "sample",
-        temperature: float = 1.0,
+        temperature: float | None = None,
         seed: int | None = None,
         step_penalty: float = 0.0,
         to_end: bool = False,
@@ -761,6 +775,8 @@ class RadixTreeNet:
         or token-by-token walks with ``mode="slide"`` (one text at temperature 0, which is deterministic)."""
         if count < 0:
             raise ValueError(f"count must be >= 0, got {count}")
+        if temperature is None:
+            temperature = 0.0 if mode == "slide" else 1.0
         if mode == "dijkstra" or (mode == "slide" and temperature == 0):
             count = min(count, 1)
         out: list[PathResult] = []

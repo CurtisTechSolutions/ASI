@@ -144,9 +144,23 @@ def cmd_score(args) -> int:
 
 
 def cmd_accuracy(args) -> int:
-    """Next-token accuracy of the token-by-token walk, over windows."""
-    model = _model(args)
-    texts = corpus.read_texts(args.texts) if args.texts else corpus.read_texts(args.data)
+    """Next-token accuracy of the token-by-token walk, over windows.
+
+    With ``--heldout-every N`` the model is trained on all but every Nth text
+    of ``--data`` and measured on those - the split ``compare`` uses - so the
+    number is reproducible from the corpus file alone.
+    """
+    if args.heldout_every and not args.load:
+        train, test = corpus.split(corpus.read_texts(args.data), args.heldout_every)
+        model = RadixTreeNet(seed=args.seed, depth=args.depth, encoding=_encoding(args), min_count=args.min_count)
+        model.train(train, epochs=args.epochs, lr=args.lr, act_lr=args.act_lr, batch_size=args.batch_size,
+                    auto_compress=not args.no_compress, verbose=args.verbose)
+        texts = corpus.read_texts(args.texts) if args.texts else test
+        measured = args.texts or f"every {args.heldout_every}th text of {args.data}, held out"
+    else:
+        model = _model(args)
+        texts = corpus.read_texts(args.texts) if args.texts else corpus.read_texts(args.data)
+        measured = args.texts or args.data
     windows = [None if w in ("all", "none", "0") else int(w) for w in args.windows.split(",")]
     rows = [model.next_token_accuracy(texts, window=w) for w in windows]
     print(f"{'window':>8} {'tokens':>8} {'accuracy':>9} {'known':>7}")
@@ -155,7 +169,12 @@ def cmd_accuracy(args) -> int:
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w", encoding="utf-8") as fh:
-            json.dump({"texts": args.texts or args.data, "rows": rows}, fh, indent=1)
+            json.dump({
+                "measured_on": measured, "texts": len(texts), "model": model.stats(),
+                "settings": {"epochs": args.epochs, "lr": args.lr, "act_lr": args.act_lr, "batch_size": args.batch_size,
+                             "seed": args.seed, "depth": args.depth, "min_count": args.min_count, "unit": args.unit},
+                "rows": rows,
+            }, fh, indent=1)
         print(f"wrote {args.out}")
     return 0
 
@@ -281,7 +300,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to-end", action="store_true", help="run to an END leaf")
     p.add_argument("--max-length", type=int, default=None)
     p.add_argument("--sample", action="store_true", help="a sampled walk instead of the cheapest path")
-    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--temperature", type=float, default=None, help="1 for --sample, 0 for --slide unless given")
     p.add_argument("--sample-seed", type=int, default=None)
     p.add_argument("--step-penalty", type=float, default=0.0, help="added to every step; may be negative here")
     p.add_argument("--costs", choices=COSTS, default="logprob")
@@ -299,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--slide", action="store_true", help="token by token, one query per token")
     p.add_argument("--window", type=int, default=None, help="grams of context per query in --slide")
     p.add_argument("--to-end", action="store_true")
-    p.add_argument("--temperature", type=float, default=1.0)
+    p.add_argument("--temperature", type=float, default=None, help="1 for samples, 0 for --slide unless given")
     p.add_argument("--sample-seed", type=int, default=None)
     p.add_argument("--step-penalty", type=float, default=0.0)
     p.add_argument("--costs", choices=COSTS, default="logprob")
@@ -316,6 +335,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_train_options(p)
     _add_load(p)
     p.add_argument("--texts", help="texts to measure on, one per line (default: the training data)")
+    p.add_argument("--heldout-every", type=int, default=0, help="train on all but every Nth text of --data, measure on those")
     p.add_argument("--windows", default="1,2,3,4,6,8,all", help="comma-separated grams of context; 'all' is the whole history")
     p.add_argument("--out")
     p.set_defaults(func=cmd_accuracy)

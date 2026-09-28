@@ -27,7 +27,7 @@ RESULTS   ?= results
 TRAIN_OPTS = --data $(DATA) --epochs $(EPOCHS) --lr $(LR) --act-lr $(ACT_LR) --batch-size $(BATCH) \
              --min-count $(MIN_COUNT) --seed $(SEED) $(if $(DEPTH),--depth $(DEPTH),)
 
-.PHONY: help test check demo train predict generate score stats 2nrl corpus compare compare-quick compare-all clean
+.PHONY: help test check demo train predict generate score stats 2nrl corpus window compare compare-quick compare-all clean
 
 help: ## Show this help
 	@echo "RadixAcyclicNN make targets  (override like: make demo DEPTH=8 EPOCHS=20)"
@@ -67,6 +67,10 @@ stats: ## Size and shape of the saved MODEL
 ##@ The comparison with RadixCyclicNN
 corpus: ## Rebuild the prose corpus snapshot from the pinned research papers
 	$(RT) corpus
+
+window: ## Next-token accuracy of the token-by-token walk over windows, trained on the prose corpus with one fifth held out
+	$(RT) accuracy --data data/corpus.txt --heldout-every 5 --epochs $(EPOCHS) --lr $(LR) --act-lr $(ACT_LR) \
+		--batch-size $(BATCH) --seed $(SEED) --windows 1,2,3,4,6,8,all --out $(RESULTS)/window_results.json
 
 compare-quick: ## Both models on the sample corpus - seconds
 	$(RT) compare --data data/sample_corpus.txt --heldout-every 0 --seed $(SEED) --out $(RESULTS)/sample_results.json
