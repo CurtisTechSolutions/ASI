@@ -479,10 +479,11 @@ def faults_from_corrections(
         if not text or not isinstance(correction, str):
             continue
         verdict = str(entry.get("verdict") or "").strip().lower()
-        if verdict == "unchanged" or (not verdict and correction == text):
+        read = str(entry.get("spelled") or text)  # what the editor read: a model of sounds' words
+        if verdict == "unchanged" or (not verdict and correction == read):
             unchanged.append(text)
             continue
-        if correction == text:
+        if correction == read:
             continue
         note = str(entry.get("note") or "")
         reason = str(entry.get("reason") or "").strip().lower()
@@ -631,19 +632,22 @@ def faults_from_lessons(lessons: Iterable[Any], threshold: float = 6.0, source: 
     for lesson in lessons or []:
         data = lesson.to_dict() if hasattr(lesson, "to_dict") else dict(lesson or {})
         sentence = " ".join(str(data.get("sentence") or "").split())
+        # what the network wrote in its own units - a model of sounds is marked on the words they spell, and
+        # blamed for the sounds it said (a correction in words is read as the sounds it makes)
+        own = " ".join(str(data.get("said") or "").split()) or sentence
         grade = data.get("grade") or {}
         exercise = data.get("exercise") or {}
         correction = " ".join(str(grade.get("correction") or "").split())
         answer = " ".join(str(exercise.get("answer") or "").split())
         if sentence and grade.get("passed"):
-            passed.append(sentence)
+            passed.append(own)
         elif sentence:
             error = str(grade.get("error") or "").strip().lower()
             comment = str(grade.get("comment") or "")
             reason = error if error and error != "none" else classify(comment, verdict=grade.get("graded_by"))
             score = grade.get("score")
             fault = _fault(
-                sentence,
+                own,
                 reason,
                 severity_from_rating(score if isinstance(score, (int, float)) else None, threshold),
                 comment,

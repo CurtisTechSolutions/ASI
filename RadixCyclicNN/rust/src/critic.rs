@@ -53,6 +53,7 @@ use std::time::Instant;
 
 use crate::blame::{TeachOptions, TeachReport};
 use crate::cli::{negative_stats, Ctx};
+use crate::encoding::Encoding;
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::Json;
 use crate::llm::fields::Fields;
@@ -246,6 +247,10 @@ impl CriticConfig {
 /// Where the loop's two networks live: owned by a command for the length of
 /// the run, or behind the server's locks, taken a step at a time.
 pub trait Networks {
+    /// The positive model's encoding: how its texts are read, and what the
+    /// reviewer is shown of them (a model of sounds, the words they spell).
+    fn encoding(&mut self) -> Encoding;
+
     /// The positive model writes the round's texts.
     fn sample(
         &mut self,
@@ -287,6 +292,10 @@ pub struct Owned<'m> {
 }
 
 impl Networks for Owned<'_> {
+    fn encoding(&mut self) -> Encoding {
+        self.model.encoding()
+    }
+
     fn sample(
         &mut self,
         count: usize,
@@ -341,6 +350,10 @@ struct Shared<'s> {
 }
 
 impl Networks for Shared<'_> {
+    fn encoding(&mut self) -> Encoding {
+        self.svc.active_encoding()
+    }
+
     fn sample(
         &mut self,
         count: usize,
@@ -429,7 +442,7 @@ impl<'a> Critic<'a> {
         if cfg.correct {
             return self.correct_round(nets, samples, started);
         }
-        // only the reviewer's thinking happens with nothing held
+        // only the reviewer's thinking happens with nothing held; a model of sounds is reviewed on its words
         let reviews = review_texts(
             self.client,
             &samples,
@@ -437,6 +450,7 @@ impl<'a> Critic<'a> {
             &cfg.reviewer_model,
             cfg.threshold,
             DEFAULT_BATCH,
+            nets.encoding(),
         )?;
         let reviewer = if cfg.reviewer_model.is_empty() {
             self.client.model()
@@ -493,7 +507,16 @@ impl<'a> Critic<'a> {
         started: Instant,
     ) -> Result<Json, String> {
         let cfg = &self.config;
-        let corrections = correct_texts(self.client, &samples, &cfg.context, &cfg.reviewer_model, DEFAULT_BATCH)?;
+        // a model of sounds is corrected in the words it spells
+        let enc = nets.encoding();
+        let corrections = correct_texts(
+            self.client,
+            &samples,
+            &cfg.context,
+            &cfg.reviewer_model,
+            DEFAULT_BATCH,
+            enc,
+        )?;
         let editor = if cfg.reviewer_model.is_empty() {
             self.client.model()
         } else {

@@ -1988,6 +1988,11 @@ class ModelService:
             )
         return self.chatgpt_client(url, model, timeout)
 
+    def unit_encoding(self) -> Encoding:
+        """The active model's encoding - how its texts are read, and what a teacher is shown of them."""
+        with self.session() as model:
+            return model.encoding
+
     def sample_texts(
         self, count: int, prefix: str = "", max_length: int = 60, temperature: float = 1.0, seed: int | None = None
     ) -> list[str]:
@@ -4079,6 +4084,7 @@ def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     threshold = f.number("threshold", 6.0, minimum=0.0)
     if apply == "2nrl":
         svc._ensure_idle()
+    encoding = None  # given texts are reviewed as they are
     if given:
         samples, source = given, "given"
     else:
@@ -4088,9 +4094,11 @@ def _r_ollama_review(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
             seed=f.integer("seed", None),
         )
         source = "model"
+        encoding = svc.unit_encoding()  # the model's own: a model of sounds is reviewed on the words it spells
     try:
         result = adversarial_review(
             None, client, texts=samples, threshold=threshold, context=f.text("context", None), ollama_model=client.model,
+            encoding=encoding,
         )
     except OllamaError as exc:
         raise ApiError(502, str(exc)) from exc
@@ -4127,6 +4135,7 @@ def _r_ollama_correct(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     given = f.texts_optional("texts", "text")
     client = _ollama_client(svc, f)
     severity = f.number("severity", 1.0, minimum=0.0)
+    encoding = None  # given texts are corrected as they are
     if given:
         samples, source = given, "given"
     else:
@@ -4136,9 +4145,11 @@ def _r_ollama_correct(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
             seed=f.integer("seed", None),
         )
         source = "model"
+        encoding = svc.unit_encoding()  # the model's own: a model of sounds is corrected in the words it spells
     try:
         result = adversarial_correction(
             None, client, texts=samples, context=f.text("context", None), ollama_model=client.model,
+            encoding=encoding,
         )
     except OllamaError as exc:
         raise ApiError(502, str(exc)) from exc

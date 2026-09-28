@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use crate::blame::TeachOptions;
 use crate::cli::{negative_stats, read_named, Ctx};
+use crate::encoding::Encoding;
 use crate::fetch::Request as FetchRequest;
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use crate::json::{parse, Json};
@@ -715,6 +716,7 @@ fn review_cli(ctx: &Ctx) -> Result<(), String> {
         // from the generator state the model file carries, as Python's does
         seed: args.get("seed").map(|_| ctx.seed),
         batch: 0,
+        encoding: None, // the samples in the model's own, given texts as they are
     };
     let result = review::adversarial_review(model.as_mut(), &client, &o)?;
     let mut doc = match result.to_json() {
@@ -821,6 +823,7 @@ fn correct_cli(ctx: &Ctx) -> Result<(), String> {
         model: client.model.clone(),
         seed: args.get("seed").map(|_| ctx.seed),
         batch: 0,
+        encoding: None, // the samples in the model's own, given texts as they are
     };
     let result = review::adversarial_correction(model.as_mut(), &client, &o)?;
     let mut doc = match result.to_json() {
@@ -1183,8 +1186,9 @@ fn review_route(svc: &Arc<Service>, r: &Request) -> Answer {
     if apply == "2nrl" {
         svc.ensure_idle()?;
     }
-    let (samples, source) = if !given.is_empty() {
-        (given, "given")
+    // given texts are reviewed as they are; the model's own in its encoding (a model of sounds, its words)
+    let (samples, source, enc) = if !given.is_empty() {
+        (given, "given", Encoding::default())
     } else {
         let count = f.count_or("count", 8, 1)?;
         let prefix = f.text_or("prefix", "")?;
@@ -1193,7 +1197,7 @@ fn review_route(svc: &Arc<Service>, r: &Request) -> Answer {
         let seed = f.integer("seed", None)?;
         // the model writes under its lock; the reviewer thinks without it
         let drawn = svc.with_model(|m| review::sample_texts(m, count, &prefix, max_length, temperature, seed))?;
-        (drawn, "model")
+        (drawn, "model", svc.active_encoding())
     };
     let context = f.text_or("context", "")?;
     let reviews = review::review_texts(
@@ -1203,6 +1207,7 @@ fn review_route(svc: &Arc<Service>, r: &Request) -> Answer {
         &client.model,
         threshold,
         review::DEFAULT_BATCH,
+        enc,
     )?;
     let result = review::summarise_reviews(source, &client.model, threshold, samples, reviews);
     let mut doc = match result.to_json() {
@@ -1322,8 +1327,9 @@ fn correct_route(svc: &Arc<Service>, r: &Request) -> Answer {
     let given = f.texts_optional("texts", "text")?;
     let client = client_of_request(svc, &f)?;
     let severity = f.number_or("severity", crate::blame::CORRECTION_SEVERITY, Some(0.0))?;
-    let (samples, source) = if !given.is_empty() {
-        (given, "given")
+    // given texts are corrected as they are; the model's own in its encoding (a model of sounds, its words)
+    let (samples, source, enc) = if !given.is_empty() {
+        (given, "given", Encoding::default())
     } else {
         let count = f.count_or("count", 8, 1)?;
         let prefix = f.text_or("prefix", "")?;
@@ -1332,10 +1338,10 @@ fn correct_route(svc: &Arc<Service>, r: &Request) -> Answer {
         let seed = f.integer("seed", None)?;
         // the model writes under its lock; the editor thinks without it
         let drawn = svc.with_model(|m| review::sample_texts(m, count, &prefix, max_length, temperature, seed))?;
-        (drawn, "model")
+        (drawn, "model", svc.active_encoding())
     };
     let context = f.text_or("context", "")?;
-    let corrections = review::correct_texts(&client, &samples, &context, &client.model, review::DEFAULT_BATCH)?;
+    let corrections = review::correct_texts(&client, &samples, &context, &client.model, review::DEFAULT_BATCH, enc)?;
     let result = review::summarise_corrections(source, &client.model, samples, corrections);
     let mut doc = match result.to_json() {
         Json::Obj(pairs) => pairs,

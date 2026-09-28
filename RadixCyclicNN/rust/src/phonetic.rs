@@ -123,6 +123,46 @@ pub fn spelled_prediction(enc: Encoding, full_text: &str, continuation: &str) ->
     ]
 }
 
+/// What a reader - a teacher, a reviewer, a partner - is shown of a text a
+/// model wrote: a model of sounds is shown the English its sounds spell, so
+/// an LLM marks, corrects and answers words rather than `DH.AH0 # K.AE1.T`;
+/// every other text is shown as it is.  What the reader writes back stays in
+/// words: a model of sounds reads it as the sounds it makes.  Python's
+/// `reader_text`.
+pub fn reader_text(enc: Encoding, text: &str) -> String {
+    if !enc.unit.phonetic() {
+        return text.to_string();
+    }
+    enc.spell(text)
+}
+
+/// A completion of `prefix` by a model of sounds, as a reader is shown it:
+/// `(prefix, continuation)` in words, the sentence being the two joined.
+/// When the sounds kept the prefix's words, the prefix is the one given -
+/// capitals, punctuation and trailing space as they were - and the
+/// continuation is the words after it (a pause that attaches to the prefix's
+/// last word stays on it); when the continuation finished a word the prefix
+/// began, both are cut from the words of the whole
+/// ([`Encoding::spell_tail`]).  Any other encoding is its own spelling.
+/// Python's `spelled_completion`.
+pub fn spelled_completion(enc: Encoding, prefix: &str, full_text: &str, continuation: &str) -> (String, String) {
+    if !enc.unit.phonetic() {
+        return (prefix.to_string(), continuation.to_string());
+    }
+    let tail = enc.spell_tail(full_text, continuation);
+    let whole = enc.spell(full_text);
+    let head = whole.strip_suffix(tail.as_str()).unwrap_or("").to_string();
+    let words = |text: &str| -> Vec<String> { text.split_whitespace().map(str::to_lowercase).collect() };
+    if words(&head) != words(prefix) {
+        return (head, tail);
+    }
+    if tail.chars().next().is_none_or(char::is_whitespace) {
+        // a word of its own after the prefix, which keeps its trailing space
+        return (prefix.to_string(), tail.trim_start().to_string());
+    }
+    (prefix.trim_end().to_string(), tail)
+}
+
 /// A thought's record ([`crate::thinking::Thought::to_json`]) with `spelled`
 /// beside its text, and its questions' too; any other encoding, the record as
 /// it is.  Python's `spelled_thought`.

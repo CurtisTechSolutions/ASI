@@ -282,18 +282,21 @@ func FaultsFromLessons(lessons []*Lesson, threshold float64, source string) ([]F
 			continue
 		}
 		sentence := strings.Join(strings.Fields(lesson.Sentence), " ")
+		// what the network wrote in its own units - a model of sounds is marked on the words they spell,
+		// and blamed for the sounds it said (a correction in words is read as the sounds it makes)
+		own := strings.Join(strings.Fields(lesson.Own()), " ")
 		correction := strings.Join(strings.Fields(lesson.Grade.Correction), " ")
 		answer := strings.Join(strings.Fields(lesson.Exercise.Answer), " ")
 		switch {
 		case sentence != "" && lesson.Grade.Passed:
-			add(sentence)
+			add(own)
 		case sentence != "":
 			reason := strings.ToLower(strings.TrimSpace(lesson.Grade.Error))
 			if reason == "" || reason == "none" {
 				reason = Classify(lesson.Grade.Comment, ClassifyOptions{Verdict: lesson.Grade.GradedBy})
 			}
 			fault := Fault{
-				Text: sentence, Reason: reason, Severity: SeverityFromRating(lesson.Grade.Score, threshold),
+				Text: own, Reason: reason, Severity: SeverityFromRating(lesson.Grade.Score, threshold),
 				Note: lesson.Grade.Comment, Source: source,
 			}
 			if correction != "" && correction != sentence {
@@ -544,11 +547,15 @@ func FaultsFromCorrections(corrections []CorrectionEntry, severity float64, sour
 		}
 		correction := *entry.Correction
 		verdict := strings.ToLower(strings.TrimSpace(entry.Verdict))
-		if verdict == "unchanged" || (verdict == "" && correction == entry.Text) {
+		read := entry.Text // what the editor read: a model of sounds' words
+		if entry.Spelled != "" {
+			read = entry.Spelled
+		}
+		if verdict == "unchanged" || (verdict == "" && correction == read) {
 			unchanged = append(unchanged, entry.Text)
 			continue
 		}
-		if correction == entry.Text {
+		if correction == read {
 			continue
 		}
 		reason := strings.ToLower(strings.TrimSpace(entry.Reason))

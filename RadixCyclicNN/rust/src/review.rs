@@ -55,6 +55,7 @@ use crate::json::Json;
 use crate::llm::fields::{py_str_of, truthy};
 use crate::llm::{format_g, loads_lenient, parse_lines, LlmClient, LlmError, LlmOptions};
 use crate::model::{GenerateOptions, Model, PredictOptions};
+use crate::phonetic::reader_text;
 
 /// What this module's own lines are filed under.
 const LOG: &str = "llm";
@@ -223,10 +224,13 @@ pub struct Review {
     pub critique: String,
     /// The line this text was a reply to, when it was one (a conversation).
     pub said: Option<String>,
+    /// What the reviewer read when it is not the text itself: the words a
+    /// model of sounds spells ([`crate::phonetic::reader_text`]).
+    pub spelled: Option<String>,
 }
 
 impl Review {
-    /// `{"index", "text", ["said",] "rating", "verdict", "critique"}`.
+    /// `{"index", "text", ["said",] ["spelled",] "rating", "verdict", "critique"}`.
     pub fn to_json(&self) -> Json {
         let mut pairs = vec![
             ("index".to_string(), Json::Int(self.index as i64)),
@@ -234,6 +238,9 @@ impl Review {
         ];
         if let Some(said) = &self.said {
             pairs.push(("said".to_string(), Json::str(said.clone())));
+        }
+        if let Some(spelled) = &self.spelled {
+            pairs.push(("spelled".to_string(), Json::str(spelled.clone())));
         }
         pairs.push(("rating".to_string(), self.rating.map(Json::Num).unwrap_or(Json::Null)));
         pairs.push(("verdict".to_string(), Json::str(self.verdict.clone())));
@@ -250,6 +257,7 @@ impl Review {
             verdict: doc.at("verdict").as_str().unwrap_or("").to_string(),
             critique: doc.at("critique").as_str().unwrap_or("").to_string(),
             said: doc.at("said").as_str().map(str::to_string),
+            spelled: doc.at("spelled").as_str().map(str::to_string),
         }
     }
 
@@ -261,6 +269,7 @@ impl Review {
             verdict: if rating >= threshold { "pass" } else { "fail" }.to_string(),
             critique: critique.to_string(),
             said: None,
+            spelled: None,
         }
     }
 
@@ -272,6 +281,7 @@ impl Review {
             verdict: verdict.to_string(),
             critique: critique.to_string(),
             said: None,
+            spelled: None,
         }
     }
 }
@@ -470,6 +480,7 @@ pub fn review_texts(
     model: &str,
     threshold: f64,
     batch: usize,
+    enc: Encoding,
 ) -> Result<Vec<Review>, ReviewError> {
     if batch < 1 {
         return Err(invalid("batch must be >= 1"));
@@ -478,7 +489,9 @@ pub fn review_texts(
     let mut out = Vec::with_capacity(texts.len());
     for (chunk_no, chunk) in texts.chunks(batch).enumerate() {
         let start = chunk_no * batch;
-        let asked: Vec<String> = chunk
+        // a model of sounds is reviewed on the words it spells
+        let shown: Vec<String> = chunk.iter().map(|t| reader_text(enc, t)).collect();
+        let asked: Vec<String> = shown
             .iter()
             .enumerate()
             .filter(|(_, t)| !t.trim().is_empty())
@@ -505,13 +518,15 @@ pub fn review_texts(
         }
         for (i, text) in chunk.iter().enumerate() {
             let index = start + i;
-            out.push(if text.trim().is_empty() {
+            let mut review = if shown[i].trim().is_empty() {
                 Review::unmarked(index, text, Some(0.0), "fail", "empty output")
             } else if let Some((rating, critique)) = parsed.get(&i) {
                 Review::marked(index, text, *rating, threshold, critique)
             } else {
                 Review::unmarked(index, text, None, "unrated", "no review returned")
-            });
+            };
+            review.spelled = (shown[i] != *text).then(|| shown[i].clone());
+            out.push(review);
         }
     }
     crate::log_debug!(
@@ -617,6 +632,10 @@ pub struct ReviewOptions {
     pub seed: Option<i64>,
     /// Texts per review call (0 = [`DEFAULT_BATCH`]).
     pub batch: usize,
+    /// How the texts are read: a model of sounds is reviewed on the words it
+    /// spells.  The texts it samples are read in the model's own, given ones
+    /// as they are unless one is named here.
+    pub encoding: Option<Encoding>,
 }
 
 impl Default for ReviewOptions {
@@ -633,6 +652,7 @@ impl Default for ReviewOptions {
             model: String::new(),
             seed: None,
             batch: 0,
+            encoding: None,
         }
     }
 }
@@ -644,16 +664,18 @@ pub fn adversarial_review(
     client: &dyn LlmClient,
     o: &ReviewOptions,
 ) -> Result<ReviewSummary, ReviewError> {
-    let (samples, source) = match (&o.texts, model) {
-        (Some(texts), _) => (texts.clone(), "given"),
+    let (samples, source, sampled) = match (&o.texts, model) {
+        (Some(texts), _) => (texts.clone(), "given", None),
         (None, Some(model)) => (
             sample_texts(model, o.count, &o.prefix, o.max_length, o.temperature, o.seed).map_err(invalid)?,
             "model",
+            Some(model.encoding()),
         ),
         (None, None) => return Err(invalid("either a model to sample from or texts to review is required")),
     };
+    let enc = o.encoding.or(sampled).unwrap_or_default();
     let batch = if o.batch == 0 { DEFAULT_BATCH } else { o.batch };
-    let reviews = review_texts(client, &samples, &o.context, &o.model, o.threshold, batch)?;
+    let reviews = review_texts(client, &samples, &o.context, &o.model, o.threshold, batch, enc)?;
     let reviewer = if o.model.is_empty() {
         client.model()
     } else {
@@ -687,15 +709,24 @@ pub struct CorrectionEntry {
     /// place, over all the changes.
     pub wrong_chars: usize,
     pub right_chars: usize,
+    /// What the editor read when it is not the text itself: the words a
+    /// model of sounds spells.  The diff, the verdict and the counts are over
+    /// what it read.
+    pub spelled: Option<String>,
 }
 
 impl CorrectionEntry {
-    /// `{"index", "text", "correction", "verdict", "reason", "note",
-    /// "changes", "edits", "wrong_chars", "right_chars"}`.
+    /// `{"index", "text", ["spelled",] "correction", "verdict", "reason",
+    /// "note", "changes", "edits", "wrong_chars", "right_chars"}`.
     pub fn to_json(&self) -> Json {
-        Json::obj([
-            ("index", Json::Int(self.index as i64)),
-            ("text", Json::str(self.text.clone())),
+        let mut pairs = vec![
+            ("index".to_string(), Json::Int(self.index as i64)),
+            ("text".to_string(), Json::str(self.text.clone())),
+        ];
+        if let Some(spelled) = &self.spelled {
+            pairs.push(("spelled".to_string(), Json::str(spelled.clone())));
+        }
+        let Json::Obj(rest) = Json::obj([
             (
                 "correction",
                 self.correction.clone().map(Json::str).unwrap_or(Json::Null),
@@ -710,7 +741,11 @@ impl CorrectionEntry {
             ("edits", Json::Int(self.edits as i64)),
             ("wrong_chars", Json::Int(self.wrong_chars as i64)),
             ("right_chars", Json::Int(self.right_chars as i64)),
-        ])
+        ]) else {
+            unreachable!("Json::obj is an object")
+        };
+        pairs.extend(rest);
+        Json::Obj(pairs)
     }
 
     /// A correction as it arrives in a request or a record (the inverse of
@@ -728,16 +763,29 @@ impl CorrectionEntry {
             edits: count("edits"),
             wrong_chars: count("wrong_chars"),
             right_chars: count("right_chars"),
+            spelled: doc.at("spelled").as_str().map(str::to_string),
         }
     }
 
     /// One [`correct_texts`] result: the diff against the correction, and
-    /// what the editor said (Python's `_correction_entry`).
-    fn new(index: usize, text: &str, correction: Option<&str>, reason: &str, note: &str) -> CorrectionEntry {
+    /// what the editor said (Python's `_correction_entry`).  `shown` is the
+    /// text as the editor read it (the words a model of sounds spells): the
+    /// diff, the verdict and the counts are over it, and the entry carries it
+    /// as `spelled` when it is not the text itself.
+    fn new(
+        index: usize,
+        text: &str,
+        shown: &str,
+        correction: Option<&str>,
+        reason: &str,
+        note: &str,
+    ) -> CorrectionEntry {
+        let spelled = (shown != text).then(|| shown.to_string());
         let Some(correction) = correction else {
             return CorrectionEntry {
                 index,
                 text: text.to_string(),
+                spelled,
                 correction: None,
                 verdict: "uncorrected".to_string(),
                 reason: String::new(),
@@ -752,14 +800,15 @@ impl CorrectionEntry {
                 right_chars: 0,
             };
         };
-        let changes: Vec<Edit> = crate::diff::edits(text, correction, &Encoding::default())
+        let changes: Vec<Edit> = crate::diff::edits(shown, correction, &Encoding::default())
             .into_iter()
             .filter(|e| e.op != "equal")
             .collect();
-        let changed = correction != text;
+        let changed = correction != shown;
         CorrectionEntry {
             index,
             text: text.to_string(),
+            spelled,
             correction: Some(correction.to_string()),
             verdict: if changed { "corrected" } else { "unchanged" }.to_string(),
             reason: if changed {
@@ -921,6 +970,7 @@ pub fn correct_texts(
     context: &str,
     model: &str,
     batch: usize,
+    enc: Encoding,
 ) -> Result<Vec<CorrectionEntry>, ReviewError> {
     if batch < 1 {
         return Err(invalid("batch must be >= 1"));
@@ -929,7 +979,10 @@ pub fn correct_texts(
     let mut out = Vec::with_capacity(texts.len());
     for (chunk_no, chunk) in texts.chunks(batch).enumerate() {
         let start = chunk_no * batch;
-        let asked: Vec<String> = chunk
+        // a model of sounds is corrected in the words it spells; the correction stays English, and a
+        // model or a negative network reads it as the sounds it makes
+        let shown: Vec<String> = chunk.iter().map(|t| reader_text(enc, t)).collect();
+        let asked: Vec<String> = shown
             .iter()
             .enumerate()
             .filter(|(_, t)| !t.trim().is_empty())
@@ -956,12 +1009,13 @@ pub fn correct_texts(
         }
         for (i, text) in chunk.iter().enumerate() {
             let index = start + i;
-            out.push(if text.trim().is_empty() {
-                CorrectionEntry::new(index, text, None, "", "empty output")
+            let shown = &shown[i];
+            out.push(if shown.trim().is_empty() {
+                CorrectionEntry::new(index, text, shown, None, "", "empty output")
             } else if let Some((correction, reason, note)) = parsed.get(&i) {
-                CorrectionEntry::new(index, text, Some(correction), reason, note)
+                CorrectionEntry::new(index, text, shown, Some(correction), reason, note)
             } else {
-                CorrectionEntry::new(index, text, None, "", "")
+                CorrectionEntry::new(index, text, shown, None, "", "")
             });
         }
     }
@@ -1028,6 +1082,10 @@ pub struct CorrectionOptions {
     pub seed: Option<i64>,
     /// Texts per call (0 = [`DEFAULT_BATCH`]).
     pub batch: usize,
+    /// How the texts are read: a model of sounds is corrected in the words it
+    /// spells.  The texts it samples are read in the model's own, given ones
+    /// as they are unless one is named here.
+    pub encoding: Option<Encoding>,
 }
 
 impl Default for CorrectionOptions {
@@ -1043,6 +1101,7 @@ impl Default for CorrectionOptions {
             model: String::new(),
             seed: None,
             batch: 0,
+            encoding: None,
         }
     }
 }
@@ -1054,16 +1113,18 @@ pub fn adversarial_correction(
     client: &dyn LlmClient,
     o: &CorrectionOptions,
 ) -> Result<CorrectionSummary, ReviewError> {
-    let (samples, source) = match (&o.texts, model) {
-        (Some(texts), _) => (texts.clone(), "given"),
+    let (samples, source, sampled) = match (&o.texts, model) {
+        (Some(texts), _) => (texts.clone(), "given", None),
         (None, Some(model)) => (
             sample_texts(model, o.count, &o.prefix, o.max_length, o.temperature, o.seed).map_err(invalid)?,
             "model",
+            Some(model.encoding()),
         ),
         (None, None) => return Err(invalid("either a model to sample from or texts to correct is required")),
     };
+    let enc = o.encoding.or(sampled).unwrap_or_default();
     let batch = if o.batch == 0 { DEFAULT_BATCH } else { o.batch };
-    let corrections = correct_texts(client, &samples, &o.context, &o.model, batch)?;
+    let corrections = correct_texts(client, &samples, &o.context, &o.model, batch, enc)?;
     let editor = if o.model.is_empty() {
         client.model()
     } else {
@@ -1231,13 +1292,21 @@ pub fn review_conversation(
     topic: &str,
     model: &str,
     threshold: f64,
+    enc: Encoding,
 ) -> Result<ReviewSummary, LlmError> {
     let replies: Vec<String> = exchanges.iter().map(|(_, reply)| reply.clone()).collect();
+    // the judge reads a model of sounds' replies in the words they spell
+    let shown: Vec<String> = replies.iter().map(|reply| reader_text(enc, reply)).collect();
     let blocks: Vec<String> = exchanges
         .iter()
         .enumerate()
-        .filter(|(_, (_, reply))| !reply.trim().is_empty())
-        .map(|(i, (said, reply))| format!("[{i}] {}: {said}\n    {}: {reply}", CHAT_SPEAKERS[0], CHAT_SPEAKERS[1]))
+        .filter(|(i, _)| !shown[*i].trim().is_empty())
+        .map(|(i, (said, _))| {
+            format!(
+                "[{i}] {}: {said}\n    {}: {}",
+                CHAT_SPEAKERS[0], CHAT_SPEAKERS[1], shown[i]
+            )
+        })
         .collect();
     let mut parsed = BTreeMap::new();
     let mut overall = None;
@@ -1263,7 +1332,7 @@ pub fn review_conversation(
         .iter()
         .enumerate()
         .map(|(i, (said, reply))| {
-            let mut review = if reply.trim().is_empty() {
+            let mut review = if shown[i].trim().is_empty() {
                 Review::unmarked(i, reply, Some(0.0), "fail", "it said nothing")
             } else if let Some((rating, critique)) = parsed.get(&i) {
                 Review::marked(i, reply, *rating, threshold, critique)
@@ -1271,6 +1340,7 @@ pub fn review_conversation(
                 Review::unmarked(i, reply, None, "unrated", "no review returned")
             };
             review.said = Some(said.clone());
+            review.spelled = (shown[i] != *reply).then(|| shown[i].clone());
             review
         })
         .collect();
@@ -1361,11 +1431,12 @@ pub fn faults_from_corrections(
             continue;
         };
         let verdict = entry.verdict.trim().to_lowercase();
-        if verdict == "unchanged" || (verdict.is_empty() && correction == &entry.text) {
+        let read = entry.spelled.as_ref().unwrap_or(&entry.text); // what the editor read: a model of sounds' words
+        if verdict == "unchanged" || (verdict.is_empty() && correction == read) {
             unchanged.push(entry.text.clone());
             continue;
         }
-        if correction == &entry.text {
+        if correction == read {
             continue;
         }
         let mut reason = entry.reason.trim().to_lowercase();
@@ -1641,6 +1712,7 @@ mod tests {
             "",
             6.0,
             DEFAULT_BATCH,
+            Encoding::default(),
         )
         .unwrap();
         let verdicts: Vec<&str> = reviews.iter().map(|r| r.verdict.as_str()).collect();
@@ -1657,7 +1729,16 @@ mod tests {
         assert!(o.json);
         assert!(o.system.contains("for a rating of 6 or more"));
         drop(asked);
-        let reviews = review_texts(&llm, &texts(&["a good sentence"]), " nursery rhymes ", "", 9.5, 20).unwrap();
+        let reviews = review_texts(
+            &llm,
+            &texts(&["a good sentence"]),
+            " nursery rhymes ",
+            "",
+            9.5,
+            20,
+            Encoding::default(),
+        )
+        .unwrap();
         assert_eq!(reviews[0].verdict, "fail", "9 < 9.5");
         let asked = llm.asked.lock().unwrap();
         assert!(asked[1]
@@ -1670,17 +1751,26 @@ mod tests {
     fn batches_number_from_zero_and_the_unreadable_is_unrated() {
         let llm = Scripted::reviewer();
         let many: Vec<String> = (0..45).map(|i| format!("good {i}")).collect();
-        let reviews = review_texts(&llm, &many, "", "", 6.0, 20).unwrap();
+        let reviews = review_texts(&llm, &many, "", "", 6.0, 20, Encoding::default()).unwrap();
         assert_eq!(reviews.len(), 45);
         assert_eq!(llm.asked.lock().unwrap().len(), 3);
         assert!(reviews.iter().all(|r| r.verdict == "pass"));
         assert_eq!(reviews[44].index, 44);
         assert!(llm.asked.lock().unwrap()[2].0.contains("[0] good 40"));
         let silent = Scripted::new(|_, _| "I cannot rate these.".to_string());
-        let reviews = review_texts(&silent, &texts(&["good one", "bad one"]), "", "", 6.0, 20).unwrap();
+        let reviews = review_texts(
+            &silent,
+            &texts(&["good one", "bad one"]),
+            "",
+            "",
+            6.0,
+            20,
+            Encoding::default(),
+        )
+        .unwrap();
         assert!(reviews.iter().all(|r| r.verdict == "unrated" && r.rating.is_none()));
         assert_eq!(reviews[0].critique, "no review returned");
-        assert!(review_texts(&silent, &[], "", "", 6.0, 0).is_err());
+        assert!(review_texts(&silent, &[], "", "", 6.0, 0, Encoding::default()).is_err());
     }
 
     #[test]
@@ -1775,6 +1865,7 @@ mod tests {
             " short greetings ",
             "",
             DEFAULT_BATCH,
+            Encoding::default(),
         )
         .unwrap();
         let verdicts: Vec<&str> = entries.iter().map(|c| c.verdict.as_str()).collect();
@@ -1823,9 +1914,14 @@ mod tests {
             .system
             .ends_with("with one entry per text, in the given order and with the given index."));
         drop(asked);
-        assert_eq!(correct_texts(&llm, &texts(&["   "]), "", "", 20).unwrap().len(), 1);
+        assert_eq!(
+            correct_texts(&llm, &texts(&["   "]), "", "", 20, Encoding::default())
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(llm.asked.lock().unwrap().len(), 1, "blank texts are not sent");
-        assert!(correct_texts(&llm, &[], "", "", 0).is_err());
+        assert!(correct_texts(&llm, &[], "", "", 0, Encoding::default()).is_err());
         // the record round-trips
         let back = CorrectionEntry::from_json(&first.to_json(), 9);
         assert_eq!(&back, first);
@@ -1881,6 +1977,7 @@ mod tests {
             "",
             "",
             20,
+            Encoding::default(),
         )
         .unwrap();
         let (faults, unchanged) = faults_from_corrections(&entries, -1.5, "correction");
@@ -1938,7 +2035,7 @@ mod tests {
             ("how are you".to_string(), " ".to_string()),
             ("and you".to_string(), "zzz".to_string()),
         ];
-        let result = review_conversation(&llm, &exchanges, "greetings", "", 6.0).unwrap();
+        let result = review_conversation(&llm, &exchanges, "greetings", "", 6.0, Encoding::default()).unwrap();
         assert_eq!(result.source, "chat");
         let verdicts: Vec<&str> = result.reviews.iter().map(|r| r.verdict.as_str()).collect();
         assert_eq!(verdicts, vec!["pass", "fail", "unrated"]);

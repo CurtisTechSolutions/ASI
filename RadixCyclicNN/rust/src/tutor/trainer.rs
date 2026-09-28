@@ -52,6 +52,7 @@ use crate::kinds;
 use crate::llm::{normalise_provider, LlmClient, DEFAULT_PROVIDER, PROVIDERS};
 use crate::model::{EpochRecord, Model, PredictOptions};
 use crate::ollama::think_value;
+use crate::phonetic::spelled_completion;
 use crate::plan::{count_of, mark_of, plan_lessons, LessonPlan, PlanRequest, DEFAULT_PLAN_LESSONS};
 use crate::radix::{Feedback, TrainConfig};
 use crate::review::ReviewError;
@@ -769,6 +770,15 @@ impl<'a> TutorTrainer<'a> {
             },
         )?;
         let mut lesson = Lesson::new(exercise.clone(), attempt, mode, &found.best.text);
+        let enc = model.encoding();
+        if enc.unit.phonetic() {
+            // a model of sounds: the teacher marks the words they spell, and the model learns from what it said
+            let (prefix, continuation) =
+                spelled_completion(enc, &exercise.cue(), &found.best.full_text, &found.best.text);
+            lesson.sentence = prefix + &continuation;
+            lesson.continuation = continuation;
+            lesson.said = found.best.full_text.clone();
+        }
         lesson.cost = found.best.cost;
         lesson.probability = found.best.probability();
         lesson.reached_end = found.best.reached_end;
@@ -916,7 +926,7 @@ impl<'a> TutorTrainer<'a> {
                 continue;
             }
             let pair = TutorCorrection {
-                wrong: lesson.sentence.trim().to_string(),
+                wrong: lesson.own().trim().to_string(),
                 right: grade.correction.trim().to_string(),
                 weight: self.weight_of(grade),
             };
@@ -943,7 +953,7 @@ impl<'a> TutorTrainer<'a> {
         let mut good: Vec<(String, f64)> = Vec::new();
         for lesson in lessons {
             let grade = &lesson.grade;
-            let sentence = lesson.sentence.trim();
+            let sentence = lesson.own().trim(); // what the network wrote, in its own units
             let answer = lesson.exercise.answer.trim();
             if grade.passed {
                 if !sentence.is_empty() {
@@ -1107,9 +1117,11 @@ impl<'a> TutorTrainer<'a> {
                     .zip(graded.good_weights.iter().copied())
                     .chain(drills.iter().map(|t| (t.clone(), TEACHER_WEIGHT))),
             );
+            // counted in the model's units, as its own correct counts them when it learns
+            let enc = nets.with_model(|m| m.encoding());
             let edits = corrections
                 .iter()
-                .map(|c| crate::diff::summary(&c.wrong, &c.right, 0, &crate::encoding::Encoding::default()).len())
+                .map(|c| crate::diff::summary(&c.wrong, &c.right, 0, &enc).len())
                 .sum();
             return Ok(Learned {
                 bad: graded.bad.len(),

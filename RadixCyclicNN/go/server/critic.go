@@ -484,9 +484,11 @@ func (s *Service) Review(client radixnet.LLMClient, o radixnet.AdversarialReview
 	// thinks without it (a network call that touches nothing of ours), and the
 	// blaming takes the lock again.
 	samples, source := o.Texts, "given"
+	var enc radixnet.Encoding // given texts are reviewed as they are
 	if samples == nil {
 		s.mu.Lock()
 		drawn, err := radixnet.SampleTexts(s.model, o.Count, o.Prefix, o.MaxLength, o.Temperature, o.Seed)
+		enc = s.model.Encoding() // the model's own: a model of sounds is reviewed on the words it spells
 		s.mu.Unlock()
 		if err != nil {
 			return nil, badRequest("%v", err)
@@ -497,7 +499,7 @@ func (s *Service) Review(client radixnet.LLMClient, o radixnet.AdversarialReview
 	if reviewer == "" {
 		reviewer = client.ModelName()
 	}
-	reviews, err := radixnet.ReviewTexts(client, samples, o.Context, o.Model, o.Threshold, radixnet.DefaultReviewBatch)
+	reviews, err := radixnet.ReviewTexts(client, samples, o.Context, o.Model, o.Threshold, radixnet.DefaultReviewBatch, enc)
 	if err != nil {
 		return nil, badGateway(err)
 	}
@@ -593,9 +595,11 @@ func (s *Service) Correct(client radixnet.LLMClient, o radixnet.AdversarialCorre
 	// thinks without it (a network call that touches nothing of ours), and the
 	// blaming takes the lock again.
 	samples, source := o.Texts, "given"
+	var enc radixnet.Encoding // given texts are corrected as they are
 	if samples == nil {
 		s.mu.Lock()
 		drawn, err := radixnet.SampleTexts(s.model, o.Count, o.Prefix, o.MaxLength, o.Temperature, o.Seed)
+		enc = s.model.Encoding() // the model's own: a model of sounds is corrected in the words it spells
 		s.mu.Unlock()
 		if err != nil {
 			return nil, badRequest("%v", err)
@@ -606,7 +610,7 @@ func (s *Service) Correct(client radixnet.LLMClient, o radixnet.AdversarialCorre
 	if editor == "" {
 		editor = client.ModelName()
 	}
-	corrections, err := radixnet.CorrectTexts(client, samples, o.Context, o.Model, radixnet.DefaultCorrectionBatch)
+	corrections, err := radixnet.CorrectTexts(client, samples, o.Context, o.Model, radixnet.DefaultCorrectionBatch, enc)
 	if err != nil {
 		return nil, badGateway(err)
 	}

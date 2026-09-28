@@ -456,7 +456,18 @@ pub fn turn(
         match ollama {
             None => ollama_error = Some("no Ollama to ask".to_string()),
             Some(client) => {
-                let mut transcript: Vec<(String, String)> = history.to_vec();
+                // Ollama reads the model's lines as words: a model of sounds is heard in the words it spells
+                let mut transcript: Vec<(String, String)> = history
+                    .iter()
+                    .map(|(who, text)| {
+                        let text = if who == SPEAKERS.1 {
+                            spelled(encoding, text)
+                        } else {
+                            text.clone()
+                        };
+                        (who.clone(), text)
+                    })
+                    .collect();
                 transcript.push((SPEAKERS.0.to_string(), heard.transcript.clone()));
                 match reply_line(
                     client,

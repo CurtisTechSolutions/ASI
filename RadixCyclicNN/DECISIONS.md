@@ -3810,7 +3810,8 @@ is its own spelling, and none of these fields appear.
 **Consequences** A spelling depends on the tokenizer's memory of what it read (*why* or *y* for `W AY1`), so a
 server's words can change as it reads more - the same rule as D-080's, and the three ports keep the same memory.
 The chat-format stream of a model of sounds delivers its text as one chunk, once the walk is spelled. The English
-the teaching loops show an LLM (tutor, chat, review) is not changed here: they still hand it the model's units.
+the teaching loops show an LLM (tutor, chat, review) is not changed here: they still hand it the model's units -
+D-091 does.
 `tests/test_phonetic.py`, `tests/test_api.py` (`TestAModelOfSoundsAnswersInWords`), `frontend/test/spelled.test.mjs`,
 `go/radixnet/phonetic_test.go`, `go/server/server_test.go`, the `phonetic` tests of `rust/src/phonetic.rs`, and
 `test_the_same_words_the_sounds_spell` in the Go and Rust parity suites.
@@ -3821,6 +3822,64 @@ the teaching loops show an LLM (tutor, chat, review) is not changed here: they s
 `go/radixnet/assistant.go`, `go/radixnet/mcp.go`, `go/server/http.go`, `go/cmd/radixnet-count/main.go`;
 `rust/src/encoding.rs`, `rust/src/phonetic.rs`, `rust/src/service.rs`, `rust/src/dialogue.rs`,
 `rust/src/thinking.rs`, `rust/src/assistant.rs`, `rust/src/mcp.rs`, `rust/src/bin/radixnet.rs`
+
+---
+
+### D-091 — The teaching loops show the LLM the words: a model of sounds is marked in English and taught in sounds
+
+**Status** Accepted · 2026-09-28 · **Layer** training · **Extends** D-046, D-090
+
+**Context** D-090 spelled every output of a model of sounds for a person, and left the teaching loops alone: the
+tutor's marker, the adversarial reviewer, the copy editor, the critic, the chat partner and judge and Ollama on the
+Voice tab were all handed `DH.AH0 # K.AE1.T # S.AE1.T` and asked whether it was good English. An LLM cannot mark
+ARPAbet - it rates it as nonsense, or "corrects" it into different ARPAbet - so a model of sounds could not be
+taught by any of them.
+
+**Decision** Every loop that shows an LLM what a model of sounds wrote shows it the English those sounds spell
+(`reader_text`, `spelled_completion` - `Encoding.spell` and `spell_tail` under D-090's rules), in all three ports:
+
+* **The tutor** marks the sentence in words - the teacher's prefix exactly as it wrote it, then the words the
+  continuation spells (or, where the continuation finished a word the prefix began, the words of the whole) - and
+  keeps what the model said as the lesson's `said`. The correction, the explanation and the variants are the
+  teacher's English; the lesson is corrected, blamed and cleared against `said`.
+* **The reviewer and the copy editor** read the words of what the model sampled; each review and each correction
+  keeps the sounds as `text` and the words as `spelled`, and the editor's changes are the diff of the words it read
+  against the words it wrote. Texts handed to them are read as written.
+* **The critic** runs the reviewer with the model's encoding, so the negative loop reads words too.
+* **The chat partner and the judge** read the model's replies as words; the transcript keeps each reply as `text`
+  and its words as `spelled`.
+* **Ollama on the Voice tab** hears the model's lines as the words they spell.
+
+What the LLM writes stays English, and the model reads it as sounds: `correct`, `teach_corrections` and blame diff
+in the encoding's units, so an English correction is read into sounds and aligned against the sounds the model
+said, and only the sounds that differ move. The model is rewarded, punished and blamed for its own text, never a
+respelling of it. The Ollama tab's reviews and corrections and the Chat tab's replies show the words the LLM read,
+the sounds beneath them - the editor's changes are marked on those words, which is where they fall. A model of
+letters, words or acoustic units reads as it writes, and none of the new fields appear.
+
+**Alternatives rejected**
+* **Teaching the LLM ARPAbet** - a system prompt explaining the symbols. The teacher's judgement is only as good
+  as its reading of the text, and no model reads English from phonemes as it reads English; the corrections would
+  be guesses in a notation it does not write.
+* **Training on the words.** A respelling read back through the tokenizer need not be the sounds the model said;
+  blame would land on paths it never walked, and a thumbs up would teach a text it never produced (D-090's reason).
+* **Blaming by the words' diff.** A change in the English moves no node - the nodes are sounds. The diff has to run
+  where the graph lives, and the correction read as sounds lines up with the sounds said.
+* **Spelling codegen and the agent too.** They trade in programs and tool calls: a model of sounds writing Python
+  is not a case either loop has, and neither shows an LLM English prose to mark.
+
+**Consequences** A mark is of the English the sounds spell, so the tokenizer's lexicon and memory decide part of
+it: sounds that spell a wrong word (*why* for *y*) are marked wrong though another reader might have heard them
+right. A correction the teacher writes in words that sound alike (*there* for *their*) reads as the same sounds and
+changes nothing, so it blames nothing - which is right, the model said nothing different. The records grow a field
+only for a model of sounds. `tests/test_teaching_in_words.py`, `go/radixnet/teaching_words_test.go`,
+`rust/src/teaching_in_words.rs` - each loop's prompts checked for a sound, which none may hold.
+
+**Lives in** `radixnet/encoding.py` (`reader_text`, `spelled_completion`), `radixnet/tutor.py`, `radixnet/blame.py`,
+`radixnet/ollama.py`, `radixnet/critic.py`, `radixnet/chat.py`, `radixnet/voicechat.py`, `radixnet/api.py`;
+`go/radixnet/phonetic.go`, `tutor.go`, `blame.go`, `review.go`, `critic.go`, `chat.go`, `voicechat.go`,
+`go/server/critic.go`; `rust/src/phonetic.rs`, `tutor.rs`, `tutor/trainer.rs`, `review.rs`, `critic.rs`,
+`chat.rs`, `voicechat.rs`, `ollama.rs`; `frontend/src/components/OllamaPanel.jsx`, `ChatPanel.jsx`
 
 ---
 

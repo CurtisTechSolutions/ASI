@@ -642,7 +642,7 @@ pub struct Lesson {
     pub attempt: usize,
     pub mode: String,
     pub continuation: String,
-    /// `cue(prefix) + continuation`: what is graded and, when it passes, learned.
+    /// The prefix + continuation, in words: what is graded and, when it passes, learned.
     pub sentence: String,
     pub cost: f64,
     pub probability: f64,
@@ -654,6 +654,10 @@ pub struct Lesson {
     /// More sentences that make the same mistake, each with its correct form -
     /// the negative network's lesson, and nothing else's.
     pub variants: Vec<TutorCorrection>,
+    /// The sentence in the model's own units when they are not the words the
+    /// teacher read: a model of sounds (`DH.AH0 # K.AE1.T`) is marked on the
+    /// English it spells (`sentence`) and learns from what it said.
+    pub said: String,
 }
 
 impl Lesson {
@@ -672,12 +676,33 @@ impl Lesson {
             grade: Grade::default(),
             why: String::new(),
             variants: Vec::new(),
+            said: String::new(),
         }
     }
 
     /// Whether the network wrote nothing at all.
     pub fn empty(&self) -> bool {
         self.continuation.trim().is_empty()
+    }
+
+    /// What the network wrote, in its own units: what it is rewarded or
+    /// punished for, and what is blamed.
+    pub fn own(&self) -> &str {
+        if self.said.is_empty() {
+            &self.sentence
+        } else {
+            &self.said
+        }
+    }
+
+    /// The part of `sentence` before the continuation - the exercise's cue,
+    /// unless the network finished a word the cue began (a model of sounds
+    /// can), in which case it is the words it kept.
+    pub fn prefix(&self) -> String {
+        match self.sentence.strip_suffix(self.continuation.as_str()) {
+            Some(head) if !self.continuation.is_empty() => head.to_string(),
+            _ => self.exercise.cue(),
+        }
     }
 
     /// What the teacher changed, span by span (empty when the sentence passed
@@ -694,9 +719,9 @@ impl Lesson {
         crate::diff::summary(self.sentence.trim(), grade.correction.trim(), 8, &Encoding::default())
     }
 
-    /// Python's `Lesson.to_dict`.
+    /// Python's `Lesson.to_dict` (`said` only when it is set).
     pub fn to_json(&self) -> Json {
-        Json::obj([
+        let doc = Json::obj([
             ("exercise", self.exercise.to_json()),
             ("attempt", Json::Int(self.attempt as i64)),
             ("mode", Json::str(self.mode.clone())),
@@ -713,7 +738,14 @@ impl Lesson {
                 "variants",
                 Json::Arr(self.variants.iter().map(TutorCorrection::to_json).collect()),
             ),
-        ])
+        ]);
+        match doc {
+            Json::Obj(mut pairs) if !self.said.is_empty() => {
+                pairs.push(("said".to_string(), Json::str(self.said.clone())));
+                Json::Obj(pairs)
+            }
+            doc => doc,
+        }
     }
 }
 
@@ -901,7 +933,7 @@ pub fn grade_completions(
                 continue;
             }
             asked.push(i);
-            let mut line = format!("[{i}] <<{}>>{}", lesson.exercise.cue(), lesson.continuation);
+            let mut line = format!("[{i}] <<{}>>{}", lesson.prefix(), lesson.continuation);
             if !lesson.exercise.focus.is_empty() {
                 line.push_str(&format!("   (drilling: {})", lesson.exercise.focus));
             }
@@ -1246,11 +1278,14 @@ pub fn faults_from_lessons(lessons: &[Lesson], threshold: f64, source: &str) -> 
     let mut passed: Vec<String> = Vec::new();
     for lesson in lessons {
         let sentence = squash(&lesson.sentence);
+        // what the network wrote in its own units - a model of sounds is marked on the words they spell,
+        // and blamed for the sounds it said (a correction in words is read as the sounds it makes)
+        let own = squash(lesson.own());
         let grade = &lesson.grade;
         let correction = squash(&grade.correction);
         let answer = squash(&lesson.exercise.answer);
         if !sentence.is_empty() && grade.passed {
-            passed.push(sentence.clone());
+            passed.push(own.clone());
         } else if !sentence.is_empty() {
             let error = grade.error.trim().to_lowercase();
             let reason = if !error.is_empty() && error != "none" {
@@ -1259,7 +1294,7 @@ pub fn faults_from_lessons(lessons: &[Lesson], threshold: f64, source: &str) -> 
                 classify(&grade.comment, &grade.graded_by, None, "")
             };
             let mut fault = Fault::new(
-                &sentence,
+                &own,
                 &reason,
                 severity_from_rating(grade.score, threshold),
                 &grade.comment,
