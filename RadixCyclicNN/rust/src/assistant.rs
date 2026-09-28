@@ -1259,6 +1259,7 @@ pub fn respond(
             thinking_units: 0,
         };
         let mut n = narrator.into_inner();
+        let mut raw = String::new(); // what the walk said, in the model's units
         match turn {
             None => {
                 if vetoed_any {
@@ -1285,8 +1286,8 @@ pub fn respond(
                 }
                 n.line(said);
                 let whole = turn.text.clone();
-                let pieces = deltas(&enc, &turn.labels, &turn.node_ids, &whole);
-                let start = if ask.prefill() && !turn.context.is_empty() {
+                let mut pieces = deltas(&enc, &turn.labels, &turn.node_ids, &whole);
+                let mut start = if ask.prefill() && !turn.context.is_empty() {
                     turn.context.len()
                 } else {
                     0
@@ -1346,7 +1347,18 @@ pub fn respond(
                         choice.stop_sequence = None;
                     }
                 }
-                choice.text = whole[start..end].to_string();
+                raw = whole[start..end].to_string();
+                choice.text = raw.clone();
+                if enc.unit.phonetic() {
+                    // a model of sounds answers in the words they spell; the turn keeps the sounds
+                    choice.text = enc.spell_tail(&whole[..end], &raw);
+                    pieces = if choice.text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![choice.text.clone()]
+                    };
+                    (start, end) = (0, choice.text.len());
+                }
                 for piece in windowed(&pieces, start, end) {
                     (n.emit)(&Json::obj([
                         ("type", Json::str("text")),
@@ -1369,7 +1381,7 @@ pub fn respond(
         }
         choice.thinking = n.lines.join("\n");
         choice.thinking_units = enc.len(&choice.thinking);
-        choice.output_units = enc.len(&choice.text) + choice.thinking_units;
+        choice.output_units = enc.len(&raw) + choice.thinking_units;
         let done = Json::obj([
             ("type", Json::str("done")),
             ("index", Json::Int(index as i64)),

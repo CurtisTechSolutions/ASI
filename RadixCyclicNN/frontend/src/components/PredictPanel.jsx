@@ -26,6 +26,7 @@ import TraversalFields from "./TraversalFields.jsx";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { problemText, searchProblemsFor } from "../settings.js";
 import { readingOrder, reverseUnits } from "../backwards.js";
+import { spelledParts } from "../spelled.js";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
@@ -50,9 +51,19 @@ function LikeButton({ text, liked, disabled, onLike, label, compact = false }) {
 /**
  * A prefix and its continuation, highlighted - or, for a query asked backwards
  * (`flip` = the model's units), in reading order: what the model says came
- * before, highlighted, then the query.
+ * before, highlighted, then the query. A model of sounds answers in the words
+ * they spell (`spelled`, from `spelledParts`), its continuation highlighted
+ * the same way.
  */
-function Continued({ prefix, continuation, flip }) {
+function Continued({ prefix, continuation, flip, spelled = null }) {
+  if (spelled && !flip) {
+    return (
+      <>
+        <span className="prefix">{spelled.head}</span>
+        <span className="continuation">{spelled.tail}</span>
+      </>
+    );
+  }
   if (flip) {
     const { before, gap, query } = readingOrder(prefix, continuation, flip);
     return (
@@ -71,8 +82,20 @@ function Continued({ prefix, continuation, flip }) {
   );
 }
 
+/**
+ * The sounds a model of sounds said, beneath the words they spell: the model's
+ * own text, which is what a like rewards and the voice speaks.
+ */
+function Sounds({ text, status }) {
+  return (
+    <span className="sounds" title="what the model said, in its own units">
+      in {unitName(status)}: {text}
+    </span>
+  );
+}
+
 /** One of the top-K / bottom-K continuations of the count / reward model. */
-function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, flip }) {
+function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, flip, status }) {
   return (
     <div className="paths">
       <h3>{title}</h3>
@@ -96,11 +119,14 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, fl
               {paths.map((p, i) => {
                 // the model's own text: what a like rewards, backwards or not
                 const text = String(p.full_text ?? `${prefix}${p.continuation ?? ""}`);
+                // a model of sounds: the words they spell (asked backwards, the sounds are read the other way)
+                const spelled = flip ? null : spelledParts(p);
                 return (
                   <tr key={i}>
                     <td>{i + 1}</td>
                     <td className="text">
-                      <Continued prefix={prefix} continuation={p.continuation} flip={flip} />
+                      <Continued prefix={prefix} continuation={p.continuation} flip={flip} spelled={spelled} />
+                      {spelled ? <Sounds text={text} status={status} /> : null}
                     </td>
                     <td>{fmtNum(p.probability, 4)}</td>
                     <td>{fmtNum(p.cost, 3)}</td>
@@ -242,6 +268,8 @@ export default function PredictPanel({ status }) {
   const shownPrefix = result ? String(result.prefix ?? (flip ? reverseUnits(prefix, flip) : prefix)) : prefix;
   // the model's own text, which is what a like rewards: backwards when it was asked backwards
   const fullText = result ? String(result.full_text ?? `${shownPrefix}${result.continuation ?? ""}`) : "";
+  // a model of sounds answers in the words they spell; asked backwards, its sounds read the other way round
+  const spelled = result && !flip ? spelledParts(result) : null;
 
   return (
     <>
@@ -361,8 +389,13 @@ export default function PredictPanel({ status }) {
         ) : (
           <>
             <p className="text-display">
-              <Continued prefix={shownPrefix} continuation={result.continuation} flip={flip} />
+              <Continued prefix={shownPrefix} continuation={result.continuation} flip={flip} spelled={spelled} />
             </p>
+            {spelled ? (
+              <p className="muted">
+                <Sounds text={fullText} status={status} />
+              </p>
+            ) : null}
             {flip ? (
               <p className="muted">
                 Asked backwards: the model was sent {JSON.stringify(shownPrefix)} and its answer is shown turned back
@@ -448,6 +481,7 @@ export default function PredictPanel({ status }) {
                   likeDisabled={likeDisabled}
                   onLike={like}
                   flip={flip}
+                  status={status}
                 />
                 <PathTable
                   title={`Bottom ${bottom.length} (least likely)`}
@@ -458,6 +492,7 @@ export default function PredictPanel({ status }) {
                   likeDisabled={likeDisabled}
                   onLike={like}
                   flip={flip}
+                  status={status}
                 />
               </>
             ) : null}

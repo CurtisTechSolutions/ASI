@@ -302,12 +302,46 @@ impl Encoding {
     }
 
     /// The words a phonetic text spells (`"DH AH0 # K AE1 T"` -> `"the cat"`); a
-    /// character or word encoding returns the text as it is.
+    /// text given in words is read as the sounds it makes first, so it spells
+    /// itself back.  A character or word encoding returns the text as it is.
     pub fn spell(&self, text: &str) -> String {
         if !self.unit.phonetic() {
             return text.to_string();
         }
         crate::phonetic::spell(self.unit, text)
+    }
+
+    /// What `tail` - the last units of `whole` - spells, as the part of
+    /// `spell(whole)` it wrote.  A continuation spelled on its own loses the
+    /// space before its first word, and cannot finish a word the text before
+    /// it began, so the whole text is spelled and what the text before the
+    /// tail spells is cut off its front: `spell_tail("DH AH0 # K AE1 T # S AE1
+    /// T", "# S AE1 T")` is `" sat"`, and the two pieces join back into
+    /// `spell(whole)`.  When the tail finished a word the head began, the cut
+    /// falls back to where that word starts.  A tail that does not end `whole`
+    /// is spelled on its own.  A character or word encoding returns the tail
+    /// as it is.  Python's `Encoding.spell_tail`, character for character.
+    pub fn spell_tail(&self, whole: &str, tail: &str) -> String {
+        if !self.unit.phonetic() {
+            return tail.to_string();
+        }
+        let Some(before) = whole.strip_suffix(tail) else {
+            return self.spell(tail);
+        };
+        let spelled = self.spell(whole);
+        let mut head = self.spell(before);
+        if !spelled.starts_with(&head) {
+            // the tail finished a word the head began: cut where that word starts
+            let common: usize = spelled
+                .chars()
+                .zip(head.chars())
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a.len_utf8())
+                .sum();
+            let cut = spelled[..common].rfind(' ').map_or(0, |i| i + 1);
+            head = spelled[..cut].to_string();
+        }
+        spelled[head.len()..].to_string()
     }
 
     /// The text read backwards, unit by unit: its last character first, or

@@ -2472,6 +2472,34 @@ class TestGoEncodingParity(unittest.TestCase):
         self.assertEqual([r["word"] for r in py("words", "--limit", 10, model=py_model)["words"]],
                          [r["word"] for r in go("words", "--limit", 10, model=go_model)["words"]])
 
+    def test_the_same_words_the_sounds_spell(self):
+        """A model of sounds answers in the English they spell: the same words on both sides, split the same
+        way where the continuation (or a turn's reply) begins - a prefix that ends inside a word included."""
+        for spec in ("phone:3:1", "syllable:2:1"):
+            with self.subTest(encoding=spec):
+                tag = spec.replace(":", "-")
+                py_model = os.path.join(TMP.name, f"spell-py-{tag}.json")
+                go_model = os.path.join(TMP.name, f"spell-go-{tag}.json")
+                py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+                   model=py_model)
+                go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=go_model)
+                keys = ("spelled", "spelled_continuation")
+                for prefix in ("the cat", "the ca", ""):
+                    a = py("predict", "--prefix", prefix, "--k", 3, "--length", 6, model=py_model)
+                    b = go("predict", "--prefix", prefix, "--k", 3, "--length", 6, model=go_model)
+                    self.assertEqual([a[k] for k in keys], [b[k] for k in keys], prefix)
+                    self.assertEqual([[r[k] for k in keys] for r in a["top"] + a["bottom"]],
+                                     [[r[k] for k in keys] for r in b["top"] + b["bottom"]], prefix)
+                    self.assertNotIn("#", a["spelled"])
+                    self.assertTrue(a["spelled"].endswith(a["spelled_continuation"]), a)
+                a = py("generate", "--mode", "beam", "--count", 3, "--prefix", "the", model=py_model)
+                b = go("generate", "--mode", "beam", "--count", 3, "--prefix", "the", model=go_model)
+                self.assertEqual([s["spelled"] for s in a["samples"]], [s["spelled"] for s in b["samples"]])
+                a = py("converse", "--opening", "the cat", "--turns", 3, "--no-learn", model=py_model)
+                b = go("converse", "--opening", "the cat", "--turns", 3, "--no-learn", model=go_model)
+                turn = ("text", "spelled", "spelled_reply")
+                self.assertEqual([[t[k] for k in turn] for t in a["turns"]], [[t[k] for k in turn] for t in b["turns"]])
+
 
     def test_the_same_speech(self):
         """Spoken as it walks: the same walk, the same words, and the same audio, sample for sample."""

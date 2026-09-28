@@ -89,15 +89,17 @@ def model_tools(
         with session() as model:
             return work(model)
 
+    # a model of sounds answers in the words they spell (``Encoding.spell``; every other encoding is its own spelling)
     def predict(prefix_text: str, length: int = 40, mode: str = "dijkstra", temperature: float = 1.0) -> str:
-        result = with_model(lambda m: m.predict(prefix_text, length=length, mode=mode, temperature=temperature,
-                                                max_length=max(length, 1)))
-        return result.full_text
+        return with_model(lambda m: m.encoding.spell(m.predict(
+            prefix_text, length=length, mode=mode, temperature=temperature, max_length=max(length, 1),
+        ).full_text))
 
     def generate(count: int = 3, max_length: int = 80, temperature: float = 1.0) -> str:
-        results = with_model(lambda m: m.generate(max_length=max_length, mode="sample",
-                                                  temperature=temperature, count=count))
-        return "\n".join(f"{i}. {r.text}" for i, r in enumerate(results, 1)) or "(the network generated nothing)"
+        texts = with_model(lambda m: [m.encoding.spell(r.text) for r in m.generate(
+            max_length=max_length, mode="sample", temperature=temperature, count=count,
+        )])
+        return "\n".join(f"{i}. {text}" for i, text in enumerate(texts, 1)) or "(the network generated nothing)"
 
     def score(text: str) -> str:
         data = with_model(lambda m: m.score(text))

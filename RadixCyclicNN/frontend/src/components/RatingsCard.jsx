@@ -44,7 +44,8 @@ export function clampMark(value) {
  * and Chat tabs punish the duplicates the model could not avoid that way).
  * A rating keeps the text the model wrote - that is what feedback trains on -
  * and may carry ``shown``, the text as the panel showed it: a sample asked
- * backwards is shown turned back round, and the card lists it that way too.
+ * backwards is shown turned back round, a sample of a model of sounds as the
+ * words it spells, and the card lists it that way too.
  */
 export function useRatings() {
   const [ratings, setRatings] = useState([]);
@@ -180,7 +181,7 @@ export default function RatingsCard({
             {ratings.map((r) => (
               <li key={r.text}>
                 <span className={`badge ${r.rating}`}>{r.rating === "up" ? "👍" : "👎"}</span>
-                <code title={r.shown !== undefined ? "sent to the model backwards, the way it reads" : undefined}>
+                <code title={r.shown !== undefined ? `the model's own text, which feedback trains on: ${r.text}` : undefined}>
                   {clipText(r.shown ?? r.text)}
                 </code>
                 {onMark ? (

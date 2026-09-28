@@ -1393,9 +1393,16 @@ func (s *Service) Think(o radixnet.ThinkOptions) (map[string]any, error) {
 	if err != nil {
 		return nil, badRequest("%v", err)
 	}
-	doc := thought.ToDict()
+	doc := radixnet.SpelledThought(s.model.Encoding(), thought) // a thought in sounds carries the words it spells
 	doc["kind"] = s.model.Kind()
 	return doc, nil
+}
+
+// unitEncoding is the active model's encoding, read under the lock: what its
+// answers are spelled through (radixnet.SpelledPrediction).
+func (s *Service) unitEncoding() radixnet.Encoding {
+	out, _ := s.read(func(m *radixnet.Model) (any, error) { return m.Encoding(), nil })
+	return out.(radixnet.Encoding)
 }
 
 // StartTrainThoughts starts a train job that teaches thoughts as thoughts

@@ -3773,6 +3773,57 @@ same, learned the same, the same reply found and spoken.
 
 ---
 
+### D-090 — A model of sounds answers in words: every output spelled back beside the sounds it said
+
+**Status** Accepted · 2026-09-28 · **Layer** output · **Extends** D-080, D-088
+
+**Context** D-080 made the prediction of a model of sounds spellable, and `predict` and `generate` printed a
+`spelled` line - but only on the Python command line. The API, the frontend, the Go and Rust command lines and
+servers, today's format, the MCP tools and a conversation's turns all answered in the model's units:
+`DH.AH0 # K.AE1.T # S.AE1.T` where a person expected *the cat sat*. A model of syllables was usable only by someone
+who read ARPAbet. And `spell` itself only decoded tokens, so a text given in words - a partner's line, an opening,
+a text that mixes the two - spelled to nothing.
+
+**Decision** Every output of a model of sounds carries the English it spells **beside** the sounds, in all three
+ports, keyed alike: `spelled` on a prediction (and on each `top` / `bottom` row), a sample, a turn and a thought
+(and its questions); `spelled_continuation` on a prediction and `spelled_reply` on a turn - the part of the words
+the model wrote, cut from the words of the whole with the space before it, so *the cat* + *␣sat on the mat*
+highlights the way a continuation of letters does, and a continuation that finishes a word the prefix began is
+highlighted from where that word starts (`Encoding.spell_tail`). The sounds stay the model's own text: what a
+thumbs up trains on, what the voice speaks, what `full_text` and `turn.text` hold. Where the answer *is* text for
+a reader - the reply of today's format, the MCP tools - the English replaces the sounds, and the turn record keeps
+them (`usage` still counts them, in the model's units). The frontend shows the English with the sounds beneath it.
+`spell` reads its text as sounds first, so words spell themselves back. A model of letters, words or acoustic units
+is its own spelling, and none of these fields appear.
+
+**Alternatives rejected**
+* **Replacing the sounds with the words everywhere.** The sounds are what the model said and what feedback trains
+  on; a thumbs up on a respelling would teach it a text it never produced, read back through the tokenizer into
+  sounds that need not be the same ones.
+* **Spelling the continuation on its own.** It loses the space before its first word, and a continuation that
+  finishes a word the prefix began spells as a fragment; cut from the whole, the two parts join back into it.
+* **Spelling in the frontend.** The lexicon and the tokenizer's memory live on the server, and three servers would
+  have to agree with a fourth copy of the tokenizer.
+* **Spelling the live window of a streamed conversation.** It is sliced character by character as a backtrack
+  rewrites it; the committed `turn` events are spelled, and the window stays in units.
+
+**Consequences** A spelling depends on the tokenizer's memory of what it read (*why* or *y* for `W AY1`), so a
+server's words can change as it reads more - the same rule as D-080's, and the three ports keep the same memory.
+The chat-format stream of a model of sounds delivers its text as one chunk, once the walk is spelled. The English
+the teaching loops show an LLM (tutor, chat, review) is not changed here: they still hand it the model's units.
+`tests/test_phonetic.py`, `tests/test_api.py` (`TestAModelOfSoundsAnswersInWords`), `frontend/test/spelled.test.mjs`,
+`go/radixnet/phonetic_test.go`, `go/server/server_test.go`, the `phonetic` tests of `rust/src/phonetic.rs`, and
+`test_the_same_words_the_sounds_spell` in the Go and Rust parity suites.
+
+**Lives in** `radixnet/encoding.py` (`spell`, `spell_tail`, `spelled_prediction`, `spelled_thought`,
+`spelled_turn`), `radixnet/api.py`, `radixnet/cli.py`, `radixnet/assistant.py`, `radixnet/mcp.py`,
+`frontend/src/spelled.js` and the Predict, Generate, Converse and Think panels; `go/radixnet/phonetic.go`,
+`go/radixnet/assistant.go`, `go/radixnet/mcp.go`, `go/server/http.go`, `go/cmd/radixnet-count/main.go`;
+`rust/src/encoding.rs`, `rust/src/phonetic.rs`, `rust/src/service.rs`, `rust/src/dialogue.rs`,
+`rust/src/thinking.rs`, `rust/src/assistant.rs`, `rust/src/mcp.rs`, `rust/src/bin/radixnet.rs`
+
+---
+
 # Part XXII — Structure
 
 ### D-087 — The dynamic window: nodes halved down a binary ladder, and grown back at the top

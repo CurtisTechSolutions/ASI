@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/CurtisTechSolutions/ASI/PhoneticTokenizer/go/phonetok"
 )
@@ -123,7 +124,9 @@ func phoneticText(unit UnitKind, text string) string {
 }
 
 // Spell is the words a phonetic text spells ("DH AH0 # K AE1 T" -> "the cat"):
-// a character or word encoding returns the text as it is.
+// a text given in words is read as the sounds it makes first, so it spells
+// itself back, and so does a text that mixes the two.  A character or word
+// encoding returns the text as it is.
 func (e Encoding) Spell(text string) string {
 	if !e.Unit.Phonetic() {
 		return text
@@ -134,5 +137,118 @@ func (e Encoding) Spell(text string) string {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.tok.Decode(strings.Fields(text))
+	return b.tok.Decode(strings.Fields(b.tok.Text(text)))
+}
+
+// SpellTail is what tail - the last units of whole - spells, as the part of
+// Spell(whole) it wrote.  A continuation spelled on its own loses the space
+// before its first word, and cannot finish a word the text before it began, so
+// the whole text is spelled and what the text before the tail spells is cut
+// off its front: SpellTail("DH AH0 # K AE1 T # S AE1 T", "# S AE1 T") is
+// " sat", and the two pieces join back into Spell(whole).  When the tail
+// finished a word the head began, the cut falls back to where that word
+// starts.  A tail that does not end whole is spelled on its own.  A character
+// or word encoding returns the tail as it is.  Python's Encoding.spell_tail,
+// character for character.
+func (e Encoding) SpellTail(whole, tail string) string {
+	if !e.Unit.Phonetic() {
+		return tail
+	}
+	if !strings.HasSuffix(whole, tail) {
+		return e.Spell(tail)
+	}
+	spelled := e.Spell(whole)
+	head := e.Spell(whole[:len(whole)-len(tail)])
+	if !strings.HasPrefix(spelled, head) { // the tail finished a word the head began: cut where that word starts
+		common := commonRunePrefix(spelled, head)
+		head = spelled[:strings.LastIndexByte(common, ' ')+1]
+	}
+	return spelled[len(head):]
+}
+
+// commonRunePrefix is the longest run of code points a and b start with.
+func commonRunePrefix(a, b string) string {
+	n := 0
+	for n < len(a) && n < len(b) {
+		ra, size := utf8.DecodeRuneInString(a[n:])
+		rb, _ := utf8.DecodeRuneInString(b[n:])
+		if ra != rb {
+			break
+		}
+		n += size
+	}
+	return a[:n]
+}
+
+// -- what a model of sounds said, in words ---------------------------------------------
+
+// SpelledPrediction is the words a prediction of a model of sounds spells:
+// {"spelled", "spelled_continuation"} - the whole text read back as English,
+// and the part of it the continuation wrote (SpellTail), so the prefix's words
+// are "spelled" without it.  Every other encoding is its own spelling and gets
+// an empty map: the fields are there only when they say something.  Python's
+// spelled_prediction.
+func SpelledPrediction(enc Encoding, fullText, continuation string) map[string]any {
+	if !enc.Unit.Phonetic() {
+		return map[string]any{}
+	}
+	return map[string]any{"spelled": enc.Spell(fullText), "spelled_continuation": enc.SpellTail(fullText, continuation)}
+}
+
+// SpelledThought is a thought's record (Thought.ToDict) with "spelled" beside
+// its text, and its questions' too; any other encoding, the record as it is.
+func SpelledThought(enc Encoding, t *Thought) map[string]any {
+	doc := t.ToDict()
+	if !enc.Unit.Phonetic() {
+		return doc
+	}
+	doc["spelled"] = enc.Spell(t.Text)
+	questions := make([]map[string]any, 0, len(t.Questions))
+	for _, q := range t.Questions {
+		questions = append(questions, SpelledThought(enc, q))
+	}
+	doc["questions"] = questions
+	return doc
+}
+
+// SpelledTurnRecord is a turn of a model of sounds as it is written out: the
+// turn, the words it spells ("spelled"), the part of them the search added
+// after the context it picked up ("spelled_reply"), and its rethink with the
+// thought spelled.
+type SpelledTurnRecord struct {
+	*Turn
+	Spelled      string          `json:"spelled"`
+	SpelledReply string          `json:"spelled_reply"`
+	Rethink      *spelledRethink `json:"rethink"` // shadows the turn's own
+}
+
+type spelledRethink struct {
+	*Rethink
+	Thought map[string]any `json:"thought"` // shadows the rethink's own
+}
+
+// SpelledTurn is a turn as it is written out: with the words it spells beside
+// its sounds for a model of sounds (SpelledTurnRecord), the turn itself for any
+// other encoding.  Python's spelled_turn.
+func SpelledTurn(enc Encoding, t *Turn) any {
+	if !enc.Unit.Phonetic() {
+		return t
+	}
+	out := &SpelledTurnRecord{Turn: t, Spelled: enc.Spell(t.Text), SpelledReply: enc.SpellTail(t.Text, t.Reply)}
+	if t.Rethink != nil {
+		out.Rethink = &spelledRethink{Rethink: t.Rethink}
+		if t.Rethink.Thought != nil {
+			out.Rethink.Thought = SpelledThought(enc, t.Rethink.Thought)
+		}
+	}
+	return out
+}
+
+// SpelledTurns is every turn as SpelledTurn writes it out.
+func SpelledTurns(enc Encoding, turns []*Turn) []any {
+	out := make([]any, 0, len(turns))
+	for _, t := range turns {
+		out = append(out, SpelledTurn(enc, t))
+	}
+	return out
 }
