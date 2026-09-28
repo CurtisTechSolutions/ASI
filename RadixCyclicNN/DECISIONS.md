@@ -3968,6 +3968,74 @@ epoch, in every kind's loop, feedback passes included. All three implementations
 
 ---
 
+### D-091 — A split and a merge keep what the count model hangs on its edges: the window, the verdicts, the reward
+
+**Status** Accepted · 2026-09-28 · **Layer** structure · **Extends** D-007, D-058, D-087; **amends** SPEC-LeastPunished §3.4
+
+**Context** The count model's weight function was sound and identical in the three ports, but the two
+structural operations under it were not lossless for what the model hangs on an edge. `split` gave the bridge
+`A -> B` the node's visit count and a window count of zero, so the moment a new branch left `A` the old
+continuation's recent share read as nothing: one traversal in fifty priced at 0.23 on a compressed graph and at
+0.029 on the same corpus uncompressed (identical under `window_scale = 0`). `split` also summed every moved edge's
+judged verdicts onto the bridge, so a clean path through a halved node inherited its siblings' blame and the
+least-punished ranking could flip on a halving alone. `merge_child` dropped the contexts of the absorbed node's
+out-edges instead of re-keying them - the verdicts on a real choice - so the prices changed across a compress
+(0.052 → 0.148 for a corrected text; the corrected-away alternative got *cheaper*), and it dropped the dying
+edge's reward, so a penalty placed on a window bridge vanished at the next step up. And under the least-punished
+traversal the bottom beam filtered like the top one, so it could never reach the most punished paths the spec
+promised: with `k = 1` it returned a path with no blame while one with blame 4.4 existed.
+
+**Decision** A split and a merge are inverses for everything the count model keeps on an edge, in all three
+ports:
+* **The bridge inherits the window.** Every windowed traversal of an edge that now leaves `B` went through the
+  node that was halved, and so through the bridge: the window is rewritten with a bridge event before each of
+  them and trimmed back to its size from the oldest end, the way `configure(window=)` trims it
+  (`_inherit_window` / `inheritWindow` / `inherit_window`). Afterwards the window reads as if the corpus had been
+  counted on the halved structure, and the compressed graph prices a new branch exactly as the chain does.
+* **The bridge carries no verdict.** A moved edge's context `(q, e)` becomes `(A, e)` and nothing is added to
+  the bridge: a forced step was never a choice, and a verdict about one of the siblings it stands before is not
+  a verdict about it.
+* **A merge re-keys the choice it absorbs.** The contexts of the absorbed node's out-edges, keyed by the merged
+  node, go to every node that calls it - exact with one caller, the split run backwards; with several, each
+  carries the pooled row, which is what the merged node's predecessor priced the step by. Contexts that arrived
+  through the absorbed node are re-keyed to it; the dying edge's own die with it.
+* **A merge carries what the forced step alone was taught.** The in-edges of the parent and the unary edge saw
+  the same walks, so a pass that rewards every edge of a path leaves the same amount on both and nothing moves;
+  what the in-edges do *not* explain - a reward or penalty put on the forced step alone - is added to each of
+  them, the step into the merged node, where the same feedback would land after the merge. Nothing moves when
+  the in-edges carry more than the unary edge, or the opposite sign: what they were taught on their own account
+  is theirs (`_fold_reward` / `foldReward` / `fold_reward`).
+* **The bottom beam walks what the top beam refuses.** Under `least-punished` the per-node filter applies to the
+  top beam and the sampled walk; the bottom beam takes every onward child and ranks its finds most punished
+  first, as SPEC-LeastPunished §3.4 always said it did.
+
+**Alternatives rejected**
+* **Refusing to merge an edge that carries a reward or a verdict**, as the negative network does for blame
+  (D-046). Its blame is sparse; here every feedback pass touches every edge of a path, so the window's ladder
+  (D-087) would never grow back after a tutoring session.
+* **Folding the dying edge's whole reward into its neighbours.** A pass that penalised every edge of a path
+  would then count twice on a merged node, and a walk through a re-merged region would look twice as punished
+  as the same text elsewhere; carrying only the unexplained part is exact for every pass and moves a correction's
+  own blame to where the correction would have put it.
+* **Seeding the bridge's window count without rewriting the window.** It would never age out, and the bridge
+  would stay recent forever; rewriting the events keeps every count derived from the window it is in.
+* **Splitting a pooled row among several callers.** Rounding a single verdict three ways loses it; pricing by
+  the pooled row is what happened before the merge.
+
+**Consequences** A split and a merge no longer change what the model predicts (the reward traversal to the bit,
+the least-punished ranking to the tie), and the dynamic window's cycle is transparent to feedback given during
+it. A rewritten window holds fewer walks than before when it had to be trimmed, and a split costs a pass over the
+window when the halved node had windowed traffic. `path_totals` can count a pooled row once per caller after a
+merge of a node with several callers. Tests: `tests/test_countnet.py::TestSplitsAndMergesKeepTheModel`,
+`go/radixnet/structure_test.go`, `rust/src/structure_tests.rs`.
+
+**Lives in** `radixnet/countnet.py::split / _inherit_window / merge_child / _fold_reward`, `radixnet/beam.py`,
+`go/radixnet/graph.go::Split / MergeChild`, `go/radixnet/paths.go`, `go/radixnet/weights.go`,
+`go/radixnet/beam.go`, `rust/src/graph.rs`, `rust/src/paths.rs`, `rust/src/weights.rs`, `rust/src/beam.rs`,
+`DESIGN.md` §19, §40.3, `SPEC-LeastPunished.md` §3.4
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.

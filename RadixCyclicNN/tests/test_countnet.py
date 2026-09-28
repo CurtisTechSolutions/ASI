@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from radixnet import diff  # noqa: E402
 from radixnet.beam import Prediction, beam_predict, default_beam, path_probability  # noqa: E402
 from radixnet.countnet import COUNT_MODEL_FORMAT, CountRewardGraph, CountRewardNet  # noqa: E402
-from radixnet.graph import BACK, END, START  # noqa: E402
+from radixnet.graph import BACK, END, FIRST, START  # noqa: E402
 from radixnet.search import (  # noqa: E402
     LEAST_PUNISHED,
     PUNISH_TOLERANCE,
@@ -1098,6 +1098,150 @@ class TestLeastPunishedTraversal(unittest.TestCase):
             for _ in range(5)
         ]
         self.assertEqual(set(walks), {"the cat sat on the log"}, walks)
+
+
+class TestSplitsAndMergesKeepTheModel(unittest.TestCase):
+    """A split or a merge must not change what the count model hangs on its edges: the recent shares, the
+    verdicts and the prices - and the bottom beam of the least-punished traversal finds the most punished paths."""
+
+    T1, T2 = "abcdefghij klm", "abcdefghij xyz"  # share "abcdefghij ", then part
+    T3R, T3W = "mnop tuv", "mnop tuw"  # share nothing with the other two
+
+    def fork(self, auto_compress, window=None):
+        """The node where two texts part, after one is trained fifty times and the other once: ``(graph, node,
+        {first three units of the child: (probability, traversals, windowed traversals)})``."""
+        model = CountRewardNet(seed=1) if window is None else CountRewardNet(seed=1, window=window)
+        model.train(["abcdefghij klmnop"], epochs=50, auto_compress=auto_compress)
+        model.train(["abcdefghij qrstuv"], epochs=1, auto_compress=auto_compress)
+        g = model.graph
+        forks = [p for p in g.alive_nodes() if p >= FIRST and len(g.children[p]) == 2]
+        self.assertEqual(len(forks), 1, forks)
+        probs = dict(g.child_probs(forks[0]))
+        ways = {
+            g.labels[c][:3]: (probs[c], g.edge_count[e], g.window_edge_count[e])
+            for c, e in g.children[forks[0]].items()
+        }
+        return model, forks[0], ways
+
+    def judged_pair(self):
+        model = CountRewardNet(seed=1)
+        model.train([self.T1] * 5 + [self.T3R], epochs=1)
+        for _ in range(3):
+            model.correct(self.T2, self.T1)  # the model wrote xyz, the teacher wrote klm: blame the xyz step
+        model.correct(self.T3W, self.T3R, strength=0.3)  # a light blame on the tuw step
+        return model
+
+    def halved(self, *texts):
+        """A model of ``texts`` whose shared prefix the dynamic window has halved and holds apart."""
+        model = CountRewardNet(seed=1)
+        model.train(list(texts), epochs=2)
+        model.configure_window(on=True, top=8, floor=8, size=8, auto=False)
+        step = model.window_step(1)
+        self.assertEqual(step["splits"], 1)
+        return model
+
+    @staticmethod
+    def ranking(model, traversal, k=4):
+        p = model.predict("", length=0, to_end=True, max_length=40, k=k, traversal=traversal)
+        rows = lambda results: [(r.text, round(r.punish, 6), round(r.cost, 9)) for r in results]  # noqa: E731
+        return rows(p.top), rows(p.bottom)
+
+    def test_a_split_hands_the_bridge_its_window_history(self):
+        _model, _p, compressed = self.fork(True)
+        _model, _p, plain = self.fork(False)
+        # the bridge carries the fifty windowed traversals of the node it came out of, as the chain's edge does,
+        # so the compressed graph and the chain price the new branch alike
+        for key in ("j k", "j q"):
+            with self.subTest(key=key):
+                self.assertEqual(compressed[key][1:], plain[key][1:])
+                self.assertAlmostEqual(compressed[key][0], plain[key][0], places=12)
+        self.assertEqual(compressed["j k"][1:], (50, 50))
+        self.assertLess(compressed["j q"][0], 0.05, "one traversal in fifty-one is not a fifth of the way on")
+
+    def test_the_rewritten_window_keeps_its_size_and_survives_the_file(self):
+        model, p, ways = self.fork(True, window=60)
+        g = model.graph
+        self.assertEqual(g.window_traversals, 60)
+        self.assertEqual(sum(g.window_edge_count), 60)  # every event in the window is counted once
+        self.assertGreater(ways["j k"][2], 0, "the bridge holds part of the window")
+        self.assertLess(ways["j q"][0], 0.06)
+        again = CountRewardNet.from_dict(model.to_dict())
+        self.assertEqual(again.graph.window_traversals, 60)
+        self.assertEqual(again.predict("abcdefghij ", length=4).text, model.predict("abcdefghij ", length=4).text)
+        g.check_invariants()
+
+    def test_a_split_hands_the_bridge_no_verdict(self):
+        model = self.judged_pair()
+        g = model.graph
+        before = {trav: self.ranking(model, trav) for trav in ("reward", "least-punished")}
+        self.assertEqual([r[0] for r in before["least-punished"][0]][:2], [self.T1, self.T3R])
+        totals = g.path_totals()
+        self.assertEqual(g.split_window(8), 1)  # halves the shared prefix "abcdefghij "
+        a = next(n for n in g.alive_nodes() if n >= FIRST and g.labels[n] == "abcdefg")
+        bridge = next(iter(g.children[a].values()))
+        self.assertEqual(g.edge_paths(bridge), (0, 0, 0), "a forced step carries no verdict")
+        self.assertEqual(g.path_totals(), totals, "the split moved the verdicts, it did not add any")
+        # the same walks, the same blame, the same prices - a split is invisible to both traversals
+        after = {trav: self.ranking(model, trav) for trav in ("reward", "least-punished")}
+        self.assertEqual(after, before)
+        g.check_invariants()
+
+    def test_a_merge_keeps_the_verdicts_and_the_prices(self):
+        model = self.halved(self.T1, self.T2)
+        g = model.graph
+        model.correct(self.T2, self.T1)  # verdicts on the fork, which the first half now calls
+        model.punish([self.T1], strength=0.5)
+        a = next(n for n in g.alive_nodes() if n >= FIRST and g.labels[n] == "abcdefg")
+        b = next(iter(g.children[a]))
+        kept = {e: list(row) for (prev, e), row in g.paths.items() if prev == a and g.edge_parent[e] == b}
+        self.assertEqual(len(kept), 2, "both ways out of the fork were judged")
+        before = {trav: self.ranking(model, trav) for trav in ("reward", "least-punished")}
+        model.configure_window(on=False)
+        self.assertEqual(model.compress(), 1)
+        # the fork's contexts are keyed by the merged node's caller now, counters intact
+        self.assertEqual(
+            {e: list(row) for (prev, e), row in g.paths.items() if prev == START and g.edge_parent[e] == a}, kept
+        )
+        after = {trav: self.ranking(model, trav) for trav in ("reward", "least-punished")}
+        self.assertEqual(after, before, "a merge changed what the model predicts")
+        g.check_invariants(compressed=True)
+
+    def test_a_merge_carries_what_the_forced_step_alone_was_taught(self):
+        model = self.halved(self.T1)
+        g = model.graph
+        a = next(iter(g.children[START]))  # the first half of the only text, held apart from the second
+        bridge = next(iter(g.children[a].values()))
+        into = g.children[START][a]
+        g.add_reward([bridge], -1.0)  # blame the forced step alone
+        self.assertEqual(self.ranking(model, "least-punished", k=1)[0][0][1], 1.0)
+        totals = g.total_reward()
+        model.configure_window(on=False)
+        self.assertEqual(model.compress(), 1)
+        self.assertEqual(g.edge_reward[into], -1.0, "the blame moved onto the step into the merged node")
+        self.assertEqual(g.total_reward(), totals)
+        self.assertEqual(self.ranking(model, "least-punished", k=1)[0][0][1], 1.0)
+        # a pass that penalised every edge of the path moves nothing: the step into the node explains it
+        model = self.halved(self.T1)
+        g = model.graph
+        model.punish([self.T1], strength=0.5)
+        a = next(iter(g.children[START]))
+        into = g.children[START][a]
+        prices = self.ranking(model, "reward", k=1)
+        model.configure_window(on=False)
+        self.assertEqual(model.compress(), 1)
+        self.assertEqual(g.edge_reward[into], -0.5)
+        self.assertEqual(self.ranking(model, "reward", k=1), prices)
+
+    def test_the_bottom_beam_finds_the_most_punished_paths(self):
+        model = self.judged_pair()
+        top, bottom = self.ranking(model, "least-punished", k=1)
+        self.assertEqual(top[0][0], self.T1)
+        self.assertEqual([r[0] for r in bottom], [self.T2], "the walk the corrections blamed three times over")
+        self.assertGreater(bottom[0][1], 4.0)
+        _top, by_cost = self.ranking(model, "reward", k=1)
+        self.assertEqual([r[0] for r in by_cost], [self.T2], "by cost it is the dearest walk too")
+        _top, two = self.ranking(model, "least-punished", k=2)
+        self.assertEqual([r[0] for r in two], [self.T2, self.T3W], "most punished first")
 
 
 if __name__ == "__main__":

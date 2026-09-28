@@ -71,7 +71,10 @@ func lessState(a, b beamState, traversal Traversal) bool {
 // traversal prices a step (penalty.go).  Under ByLeastPunished "cheapest"
 // instead reads as "least punished, and cheapest among those": a path is ranked
 // by its worst step first and by its summed cost only where two paths carry the
-// same worst step, and the blame is read off the graph itself.
+// same worst step, and the blame is read off the graph itself.  The top beam
+// then also refuses a blamed step at every node (LeastPunished); the bottom
+// beam does not, because the most punished paths lie behind those steps, and
+// it ranks its finds most punished first.
 func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepPenalty float64, toEnd bool, maxSteps, maxExpansions int, worst bool, costs CostFn, traversal Traversal, diversity float64) ([]finished, int) {
 	if traversal == ByLeastPunished {
 		costs = nil
@@ -176,7 +179,9 @@ func runBeam(g *Graph, startNode, startChars, minChars, cap, k, width int, stepP
 				prev = st.node
 			}
 			children := Onward(childCosts(st.node, prev))
-			if traversal == ByLeastPunished {
+			if traversal == ByLeastPunished && !worst {
+				// the top beam refuses a blamed step; the bottom one is looking for the most
+				// punished paths, and they lie behind exactly the steps the top beam refuses
 				children = LeastPunished(children)
 			}
 			for _, cc := range children {

@@ -641,8 +641,10 @@ func (g *Graph) Parents(c int) []int {
 // Split cuts a node between the gram starting at unit i and the one before
 // it: A keeps the id and the label up to the end of the earlier gram, B is a
 // new node with label[i:] that inherits A's out-edges (edge ids kept) and
-// count; A gets the single new edge A -> B.  i is a unit offset and must be
-// the start of one of the node's grams - a positive multiple of the stride.
+// count; A gets the single new edge A -> B, which carries the node's visit
+// count and the window history of the edges it now stands before
+// (inheritWindow), and no verdict (splitPaths).  i is a unit offset and must
+// be the start of one of the node's grams - a positive multiple of the stride.
 func (g *Graph) Split(node, i int) (int, int, error) {
 	if node < First {
 		return 0, 0, fmt.Errorf("cannot split a sentinel node")
@@ -673,24 +675,24 @@ func (g *Graph) Split(node, i int) (int, int, error) {
 		g.EdgeParent[e] = b
 	}
 	chA.clear()
-	g.newEdge(a, b, g.Count[a], aResets)
+	bridge := g.newEdge(a, b, g.Count[a], aResets)
+	g.inheritWindow(bridge, moved) // the bridge stood in every windowed traversal of the edges it now feeds
 	for j := i; j <= length-enc.N; j += stride {
 		g.index[label.Slice(j, j+enc.N)] = loc{b, j - i}
 	}
 	g.Labels[a] = label.Slice(0, i+overlap)
 	g.labelLen[a] = i + overlap
 	g.dirtyAll = true
-	bridge := -1
-	if e, ok := g.children[a].get(b); ok {
-		bridge = e
-	}
-	g.splitPaths(a, b, moved, bridge) // q -> P -> c is now q -> A -> B -> c
+	g.splitPaths(a, moved) // q -> P -> c is now q -> A -> B -> c; the bridge carries no verdict
 	g.pathParents = nil
 	return a, b, nil
 }
 
 // MergeChild merges p's single child c into p when the chain is unary
 // (p has exactly one child, c exactly one parent, no sentinels, p != c).
+// What the count model hangs on the edges follows the merge: the contexts of
+// the choice at c are keyed by the merged node's callers (mergePaths), and
+// what the dying edge alone was taught goes onto the steps into p (foldReward).
 func (g *Graph) MergeChild(p int) bool {
 	if p < First || p >= len(g.Labels) || !g.Alive[p] {
 		return false
@@ -720,6 +722,15 @@ func (g *Graph) MergeChild(p int) bool {
 	shift := lp.Len() - overlap
 	e := ch.edges[0]
 	movedOut := append([]int(nil), g.children[c].edges...)
+	// who calls p, read before the merge turns a cycle edge c -> p into the loop p -> p
+	callers := make([]int, 0, g.parents[p].size())
+	for _, q := range g.parents[p].order {
+		if q == c {
+			q = p
+		}
+		callers = append(callers, q)
+	}
+	g.foldReward(e, g.parents[p].edges) // what the forced step alone was taught goes onto the steps into p
 	ch.clear()
 	pc.clear()
 	g.EdgeAlive[e] = false
@@ -754,7 +765,7 @@ func (g *Graph) MergeChild(p int) bool {
 	g.Version.Add(1)
 	g.StructureVersion.Add(1)
 	g.dirtyAll = true
-	g.mergePaths(p, c, e, movedOut) // the chain was unary: what its contexts knew was never a choice
+	g.mergePaths(p, c, e, movedOut, callers) // the choice at c is the merged node's now
 	g.pathParents = nil
 	return true
 }

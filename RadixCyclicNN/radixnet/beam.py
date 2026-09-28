@@ -145,7 +145,10 @@ def _run_beam(
     punishment traversal prices a step (:mod:`radixnet.penalty`).  Under
     ``traversal="least-punished"`` "cheapest" instead reads as "least punished,
     and cheapest among those": a path is ranked by its *worst* step first and by
-    its summed cost only where two paths carry the same worst step.
+    its summed cost only where two paths carry the same worst step.  The top
+    beam then also refuses a blamed step at every node (:func:`least_punished`);
+    the bottom beam does not, because the most punished paths lie behind those
+    steps, and it ranks its finds most punished first.
     """
     labels = graph.labels
     blamed = traversal == LEAST_PUNISHED
@@ -195,7 +198,9 @@ def _run_beam(
             # where the walk came from: a model that counts paths prices the next step by it
             prev = entries[parent_entry][0] if parent_entry >= 0 else (node if node in ORIGINS else None)
             children = onward(child_costs(node, prev))
-            if blamed:
+            if blamed and not worst:
+                # the top beam refuses a blamed step; the bottom one is looking for the most punished
+                # paths, and they lie behind exactly the steps the top beam refuses
                 children = least_punished(children)
             for item in children:
                 c, ec = item[0], item[2]
@@ -286,8 +291,9 @@ def beam_predict(
     traversal's (:mod:`radixnet.penalty`) ``top`` is the ``k`` *least punished*
     continuations and ``bottom`` the ``k`` most punished ones.
     ``traversal="least-punished"`` does something else again: it ranks a path by
-    the blame on its worst step before its cost, and lets a node offer only the
-    children it has the least against (``../SPEC-LeastPunished.md``).
+    the blame on its worst step before its cost, and lets a node offer the top
+    beam only the children it has the least against; ``bottom`` is then the
+    ``k`` *most* punished complete paths (``../SPEC-LeastPunished.md``).
     ``diversity`` spreads the top beam out: a partial path pays that much per
     path already kept at the same step that ends in the same node, so the ``k``
     continuations differ in more than their last word; costs are not touched

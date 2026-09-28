@@ -1449,10 +1449,14 @@ edge)` - the step in the company it kept - and the row is `[seen, correct, incor
   off its entry table, the sampler remembers its last step, and the Python Dijkstra puts it in the state key *only*
   for the nodes where it makes a difference, so the search does not grow anywhere else. Go prices every judged
   context once in `Prepare` (`ensureContextCosts`), because the two beams run side by side and must only read.
-* **Through splits and merges.** A split re-keys a moved edge's contexts to the new node and hands the bridge edge
-  the caller's counts (`q -> P -> c` becomes `q -> A -> B -> c`); a merge drops the contexts of the dying edge and
-  of the steps that were never a choice (a unary chain has one way through) and re-keys the ones that arrived
-  through the absorbed node. `edge_parent` is maintained alongside, as Go has always had `EdgeParent`.
+* **Through splits and merges.** A split re-keys a moved edge's contexts to the new node (`q -> P -> c` becomes
+  `q -> A -> B -> c`, so `(q, e)` becomes `(A, e)`) and hands the bridge edge nothing: a forced step carries no
+  verdict, and a verdict about one of the siblings it stands before is not a verdict about it. A merge is the
+  inverse: the contexts of the absorbed node's out-edges, keyed by the merged node, are re-keyed to every node that
+  calls it (exact with one caller; with several, each carries the pooled row, which is what the merged node's
+  predecessor priced the step by), the ones that arrived through the absorbed node are re-keyed to it, and the
+  dying edge's own die with it - a unary chain has one way through (D-091). `edge_parent` is maintained alongside,
+  as Go has always had `EdgeParent`.
 * **What it reports.** `path_stats` adds `correct_ratio` (of the judged traffic) and `seen_ratio` (of the edge's
   traversals), `path_totals` the four counters that reach `stats()` as `path_contexts`, `path_judged`, `path_seen`,
   `path_correct`, `path_incorrect`; `radixnet paths` / `radixnet-count paths` and `GET /api/paths` list the
@@ -1624,7 +1628,9 @@ window is trimmed when shrunk) and `weight_config()` describes it. `to_dict` sto
 and the window's edge ids (remapped like the edges); `from_dict` rebuilds the window counts from them, and a file
 from before the dual function loads with `count_scale = 1, global_scale = window_scale = 0` so it behaves as it did. Every node is created with `a = 0, k = 1`, so the sine activation is the constant 1 and the
 base class's score `w * f_p * f_c` is the weight itself: `child_probs`, `child_costs`, Dijkstra, sampling, `split`
-(the new internal edge gets the node's count and reward 0) and `merge_child` (activation ratios are 1) work
+(the new internal edge gets the node's count, the window history of the edges it now stands before and reward 0,
+section 40.3 and D-091) and `merge_child` (activation ratios are 1; what the dying edge alone was taught goes onto
+the edges into the merged node, and the contexts of the choice it led to onto the nodes that call it) work
 unchanged. `add_reward(edge_ids, amount)` and `recompute_weights()` keep `edge_w` in sync and bump `version` so the
 cost cache refreshes; `invert()` negates the rewards; `to_dict` / `from_dict` carry `edges.reward` and the two scales
 (`weights`) and rebuild the weights on load.
@@ -4412,7 +4418,10 @@ it is still longer; a node of one gram is never cut. Under a grouping encoding t
 and `CD`); under a sliding one the halves share the overlap (`ABCD` is `ABC -> BCD` merged, and comes apart into
 those). Both halves carry the node's state, activation parameters, count and, in the count model, its judged
 contexts (`split`). The bridge `A -> B` is the **heavy connection**, in each kind's currency: `split` already gives
-it the node's whole visit count, which is what makes it heavy where weights are computed from counts; the sine
+it the node's whole visit count, which is what makes it heavy where weights are computed from counts, and the
+window history of the out-edges it now stands before - every windowed traversal of those went through the node,
+so the window is rewritten with a bridge event before each of them and trimmed back to its size from the oldest
+end, and the bridge's recent share is the node's rather than nothing (D-091); the sine
 model sets its weight to `W_HEAVY = 8` (negated while inverted, as every fresh weight is), a score of `8 · f²`
 between two copies of one activation; the phase model, which counts edges and not nodes, gives it what passed
 through the node - the traversals of the out-edges it stands before, read before the halving (`_heavy_bridge`);
