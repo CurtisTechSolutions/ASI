@@ -47,6 +47,7 @@ import urllib.request
 from collections.abc import Sequence
 from typing import Any
 
+from .encoding import Encoding, reader_text
 from .llm import LLMError, loads_lenient as _loads_lenient
 
 __all__ = [
@@ -496,11 +497,15 @@ def review_texts(
     model: str | None = None,
     threshold: float = 6.0,
     batch: int = 20,
+    encoding: Encoding | None = None,
 ) -> list[dict]:
     """Adversarial ratings for ``texts`` (input order): ``{index, text, rating, verdict, critique}`` each.
 
     ``rating`` is ``None`` with verdict ``"unrated"`` when the LLM answer could
     not be understood for that text.  Blank texts are failed without asking.
+    ``encoding`` is the model's that wrote them: a model of sounds is reviewed
+    on the English it spells (:func:`reader_text`), and an entry whose words
+    differ from its text carries them as ``spelled``.
     """
     if batch < 1:
         raise ValueError("batch must be >= 1")
@@ -508,7 +513,8 @@ def review_texts(
     system = _REVIEW_SYSTEM.format(threshold=threshold)
     for start in range(0, len(texts), batch):
         chunk = [str(t) for t in texts[start : start + batch]]
-        asked = [(i, t) for i, t in enumerate(chunk) if t.strip()]
+        shown = [reader_text(encoding, t) for t in chunk]
+        asked = [(i, t) for i, t in enumerate(shown) if t.strip()]
         parsed: dict[int, dict] = {}
         if asked:
             numbered = "\n".join(f"[{i}] {t}" for i, t in asked)
@@ -520,7 +526,9 @@ def review_texts(
             parsed = _parse_reviews(raw, len(chunk))
         for i, text in enumerate(chunk):
             entry = {"index": start + i, "text": text}
-            if not text.strip():
+            if shown[i] != text:
+                entry["spelled"] = shown[i]
+            if not shown[i].strip():
                 entry.update(rating=0.0, verdict="fail", critique="empty output")
             elif i in parsed:
                 rating = parsed[i]["rating"]
@@ -558,21 +566,29 @@ def adversarial_review(
     context: str | None = None,
     ollama_model: str | None = None,
     seed: int | None = None,
+    encoding: Encoding | None = None,
 ) -> dict:
     """Let the LLM judge the network's own output (or ``texts``) and split it into ``good`` / ``bad`` sets.
 
     Returns ``{"source", "model", "threshold", "texts", "reviews", "mean_rating",
     "pass_rate", "good", "bad"}``; ``bad`` holds failed and unrated texts.
+    ``encoding`` says how the texts are read - a model of sounds is reviewed
+    on the words it spells; the texts it samples are read in the model's own,
+    and given ones as they are unless an encoding is named.
     """
     if texts is None:
         if model is None:
             raise ValueError("either a model to sample from or texts to review is required")
         samples = sample_texts(model, count, prefix=prefix, max_length=max_length, temperature=temperature, seed=seed)
         source = "model"
+        if encoding is None:
+            encoding = getattr(model, "encoding", None)
     else:
         samples = [str(t) for t in texts]
         source = "given"
-    reviews = review_texts(client, samples, context=context, model=ollama_model, threshold=threshold)
+    reviews = review_texts(
+        client, samples, context=context, model=ollama_model, threshold=threshold, encoding=encoding,
+    )
     return summarise_reviews(source, ollama_model or client.model, threshold, samples, reviews)
 
 
@@ -655,12 +671,22 @@ def _parse_corrections(raw: str, count: int) -> dict[int, dict]:
     return parsed
 
 
-def _correction_entry(index: int, text: str, correction: str | None, reason: str, note: str) -> dict:
-    """One :func:`correct_texts` result: the diff against the correction, and what the editor said."""
+def _correction_entry(
+    index: int, text: str, correction: str | None, reason: str, note: str, shown: str | None = None,
+) -> dict:
+    """One :func:`correct_texts` result: the diff against the correction, and what the editor said.
+
+    ``shown`` is the text as the editor read it when that is not the text itself (the words a model of sounds
+    spells): the diff, the verdict and the counts are the editor's, over what it read, and the entry carries it
+    as ``spelled``.
+    """
     from . import blame as blame_module
     from . import diff
 
     entry: dict[str, Any] = {"index": index, "text": text}
+    read = text if shown is None else shown
+    if read != text:
+        entry["spelled"] = read
     if correction is None:
         entry.update(
             correction=None, verdict="uncorrected", reason="", note=note or "no correction returned",
@@ -669,9 +695,9 @@ def _correction_entry(index: int, text: str, correction: str | None, reason: str
         return entry
     changes = [
         {"op": e.op, "wrong": e.wrong, "right": e.right, "at": [e.a0, e.a1], "to": [e.b0, e.b1]}
-        for e in diff.edits(text, correction) if e.op != "equal"
+        for e in diff.edits(read, correction) if e.op != "equal"
     ]
-    changed = correction != text
+    changed = correction != read
     entry.update(
         correction=correction,
         verdict="corrected" if changed else "unchanged",
@@ -692,9 +718,15 @@ def correct_texts(
     context: str | None = None,
     model: str | None = None,
     batch: int = 20,
+    encoding: Encoding | None = None,
 ) -> list[dict]:
     """Letter-level corrections of ``texts`` (input order): ``{index, text, correction, verdict, reason, note,
     changes, edits, wrong_chars, right_chars}`` each.
+
+    ``encoding`` is the model's that wrote them: a model of sounds is corrected
+    in the English it spells (:func:`reader_text`), the entry carries those
+    words as ``spelled`` and its diff is over them; the correction stays
+    English, and a model or a negative network reads it as the sounds it makes.
 
     ``verdict`` is ``"corrected"`` when the editor changed something,
     ``"unchanged"`` when it handed the text back as it was (it is correct, so
@@ -715,7 +747,8 @@ def correct_texts(
     system = _CORRECT_SYSTEM.format(reasons=", ".join(r for r in CORRECTION_REASONS if r != "none"))
     for start in range(0, len(texts), batch):
         chunk = [str(t) for t in texts[start : start + batch]]
-        asked = [(i, t) for i, t in enumerate(chunk) if t.strip()]
+        shown = [reader_text(encoding, t) for t in chunk]
+        asked = [(i, t) for i, t in enumerate(shown) if t.strip()]
         parsed: dict[int, dict] = {}
         if asked:
             numbered = "\n".join(f"[{i}] {t}" for i, t in asked)
@@ -726,13 +759,15 @@ def correct_texts(
             raw = client.generate(user, system=system, model=model, json_mode=True, options={"temperature": 0.0})
             parsed = _parse_corrections(raw, len(chunk))
         for i, text in enumerate(chunk):
-            if not text.strip():
-                results.append(_correction_entry(start + i, text, None, "", "empty output"))
+            if not shown[i].strip():
+                results.append(_correction_entry(start + i, text, None, "", "empty output", shown[i]))
             elif i in parsed:
                 item = parsed[i]
-                results.append(_correction_entry(start + i, text, item["correction"], item["reason"], item["note"]))
+                results.append(
+                    _correction_entry(start + i, text, item["correction"], item["reason"], item["note"], shown[i])
+                )
             else:
-                results.append(_correction_entry(start + i, text, None, "", ""))
+                results.append(_correction_entry(start + i, text, None, "", "", shown[i]))
     return results
 
 
@@ -748,22 +783,28 @@ def adversarial_correction(
     context: str | None = None,
     ollama_model: str | None = None,
     seed: int | None = None,
+    encoding: Encoding | None = None,
 ) -> dict:
     """Let the LLM copy-edit the network's own output (or ``texts``), letter by letter.
 
     Returns the :func:`summarise_corrections` shape: ``{"source", "model",
     "texts", "corrections", "corrected", "unchanged", "uncorrected", "edits",
-    "wrong_chars", "right_chars", "change_rate"}``.
+    "wrong_chars", "right_chars", "change_rate"}``.  ``encoding`` says how the
+    texts are read - a model of sounds is corrected in the words it spells;
+    the texts it samples are read in the model's own, and given ones as they
+    are unless an encoding is named.
     """
     if texts is None:
         if model is None:
             raise ValueError("either a model to sample from or texts to correct is required")
         samples = sample_texts(model, count, prefix=prefix, max_length=max_length, temperature=temperature, seed=seed)
         source = "model"
+        if encoding is None:
+            encoding = getattr(model, "encoding", None)
     else:
         samples = [str(t) for t in texts]
         source = "given"
-    corrections = correct_texts(client, samples, context=context, model=ollama_model)
+    corrections = correct_texts(client, samples, context=context, model=ollama_model, encoding=encoding)
     return summarise_corrections(source, ollama_model or client.model, samples, corrections)
 
 
@@ -914,6 +955,7 @@ def review_conversation(
     model: str | None = None,
     threshold: float = 6.0,
     speakers: Sequence[str] = ("Partner", "Model"),
+    encoding: Encoding | None = None,
 ) -> dict:
     """Mark every reply the network gave in a conversation, and the conversation as a whole.
 
@@ -921,11 +963,14 @@ def review_conversation(
     order.  The result is the :func:`summarise_reviews` shape - so
     :func:`radixnet.blame.teach_reviews` takes it as it is - plus ``overall``,
     the judge's verdict on the conversation itself (``None`` when it did not
-    give one).
+    give one).  ``encoding`` is the network's: the judge reads the replies of
+    a model of sounds in the words they spell, and an entry carries them as
+    ``spelled``.
     """
     pairs = [(str(said), str(reply)) for said, reply in exchanges]
     replies = [reply for _said, reply in pairs]
-    asked = [(i, said, reply) for i, (said, reply) in enumerate(pairs) if reply.strip()]
+    shown = [reader_text(encoding, reply) for reply in replies]
+    asked = [(i, said, shown[i]) for i, (said, _reply) in enumerate(pairs) if shown[i].strip()]
     parsed: dict[int, dict] = {}
     overall: dict | None = None
     if asked:
@@ -945,7 +990,9 @@ def review_conversation(
     reviews: list[dict] = []
     for i, (said, reply) in enumerate(pairs):
         entry: dict[str, Any] = {"index": i, "text": reply, "said": said}
-        if not reply.strip():
+        if shown[i] != reply:
+            entry["spelled"] = shown[i]
+        if not shown[i].strip():
             entry.update(rating=0.0, verdict="fail", critique="it said nothing")
         elif i in parsed:
             rating = parsed[i]["rating"]

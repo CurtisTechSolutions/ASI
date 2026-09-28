@@ -286,13 +286,25 @@ type ChatHeld struct {
 	Vetoed  int    `json:"vetoed"`
 }
 
+// spelled is what the partner and the judge read of the model's line: the
+// words a model of sounds spells (ReaderText).
+func (c *Chat) spelled(text string) string { return ReaderText(c.Model.Encoding(), text) }
+
 // partnerLine is the LLM's next line; only the partner's thinking happens
-// outside the model lock.
+// outside the model lock.  The partner reads the model's lines as words;
+// what it writes is words, which the model reads as it reads any.
 func (c *Chat) partnerLine(transcript []Line) (string, error) {
 	cfg := c.Config
+	heard := make([]Line, 0, len(transcript))
+	for _, line := range transcript {
+		if line.Speaker == ChatSpeakers[1] {
+			line.Text = c.spelled(line.Text)
+		}
+		heard = append(heard, line)
+	}
 	line := ""
 	err := c.external(func() error {
-		out, err := ChatLine(c.Client, transcript, ChatLineOptions{
+		out, err := ChatLine(c.Client, heard, ChatLineOptions{
 			Topic: cfg.Topic, Persona: cfg.Persona, Model: cfg.PartnerModel,
 			Temperature: cfg.PartnerTemperature,
 		})
@@ -362,13 +374,17 @@ func (c *Chat) Converse(progress func(map[string]any)) (*ChatHeld, error) {
 		}
 		heard.Remember(turn.Text, reply)
 		if progress != nil {
-			progress(map[string]any{
+			event := map[string]any{
 				"kind": "exchange", "conversation": c.Number, "exchange": index + 1,
 				"said": line, "reply": turn.Text, "context": turn.Context, "fresh": turn.Fresh,
 				"repeat": turn.Repeat, "stutter": turn.Stutter, "rethink": turn.Rethink, "vetoed": turn.Vetoed,
 				"cost":        turn.Cost,
 				"probability": turn.Probability,
-			})
+			}
+			if spelled := c.spelled(turn.Text); spelled != turn.Text {
+				event["spelled"] = spelled
+			}
+			progress(event)
 		}
 		if index == cfg.Turns-1 {
 			break // the last word is the model's: no line after it to reply to
@@ -413,7 +429,8 @@ func (c *Chat) RunConversation(progress func(map[string]any)) (map[string]any, e
 	if len(held.Exchanges) > 0 {
 		// the judge's thinking, also outside the lock
 		if err := c.external(func() error {
-			out, err := ReviewConversation(c.judge(), held.Exchanges, cfg.Topic, judgeModel, cfg.Threshold)
+			out, err := ReviewConversation(c.judge(), held.Exchanges, cfg.Topic, judgeModel, cfg.Threshold,
+				c.Model.Encoding())
 			if err != nil {
 				return err
 			}
@@ -449,7 +466,13 @@ func (c *Chat) RunConversation(progress func(map[string]any)) (map[string]any, e
 	}
 	lines := make([]map[string]any, 0, len(held.Transcript))
 	for _, line := range held.Transcript {
-		lines = append(lines, map[string]any{"speaker": line.Speaker, "text": line.Text})
+		entry := map[string]any{"speaker": line.Speaker, "text": line.Text}
+		if line.Speaker == ChatSpeakers[1] { // a line of a model of sounds carries the words it spells
+			if spelled := c.spelled(line.Text); spelled != line.Text {
+				entry["spelled"] = spelled
+			}
+		}
+		lines = append(lines, entry)
 	}
 	record := map[string]any{
 		"kind":             "conversation",

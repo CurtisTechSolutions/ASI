@@ -215,8 +215,11 @@ export default function ChatPanel({ status }) {
                         </span>
                       ) : null}
                     </div>
+                    {/* a model of sounds is shown as the words the partner and the judge read, its sounds beneath */}
                     <p className="bubble">
-                      {r.context ? (
+                      {typeof r.spelled === "string" ? (
+                        r.spelled
+                      ) : r.context ? (
                         <>
                           <span className="context" title="picked up from the line before">{r.context}</span>
                           {String(r.reply ?? "").slice(String(r.context).length)}
@@ -225,6 +228,11 @@ export default function ChatPanel({ status }) {
                         r.reply
                       )}
                     </p>
+                    {typeof r.spelled === "string" ? (
+                      <span className="sounds" title="what the model said, in its own units">
+                        {r.reply}
+                      </span>
+                    ) : null}
                     <div className="meta">
                       cost {fmtNum(r.cost, 3)} · p {fmtNum(r.probability, 4)}
                       {r.context ? <> · picked up “{r.context}”</> : <> · a fresh line</>}

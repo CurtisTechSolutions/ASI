@@ -534,7 +534,7 @@ func TestChatReviewConversationMarksEveryReply(t *testing.T) {
 		{Said: "tell me about the cat", Reply: "the cat sat on the mat"},
 		{Said: "and the dog", Reply: "xxxx"},
 		{Said: "say more", Reply: "   "},
-	}, "animals", "", 6)
+	}, "animals", "", 6, Encoding{})
 	if err != nil {
 		t.Fatalf("ReviewConversation: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestChatReviewConversationMarksEveryReply(t *testing.T) {
 func TestChatReviewConversationWithoutAnOverall(t *testing.T) {
 	fake := newFakePartner()
 	fake.answerAs = `{"reviews": [{"index": 0, "rating": 8, "critique": "fine"}]}`
-	result, err := ReviewConversation(fake, []Exchange{{Said: "hello", Reply: "hello there"}}, "", "judge:1", 6)
+	result, err := ReviewConversation(fake, []Exchange{{Said: "hello", Reply: "hello there"}}, "", "judge:1", 6, Encoding{})
 	if err != nil {
 		t.Fatalf("ReviewConversation: %v", err)
 	}

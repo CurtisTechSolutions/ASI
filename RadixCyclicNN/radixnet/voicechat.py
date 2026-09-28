@@ -248,9 +248,11 @@ def turn(
         if ollama is None:
             ollama_error = "no Ollama to ask"
         else:
+            # Ollama reads the model's lines as words: a model of sounds is heard in the words it spells
+            words = [(who, spelled(encoding, text) if who == SPEAKERS[1] else text) for who, text in transcript]
             try:
                 text = reply_line(
-                    ollama, transcript + [(SPEAKERS[0], heard["transcript"])], persona=o.persona, topic=o.topic,
+                    ollama, words + [(SPEAKERS[0], heard["transcript"])], persona=o.persona, topic=o.topic,
                     speakers=SPEAKERS, temperature=o.ollama_temperature,
                 )
             except LLMError as exc:
