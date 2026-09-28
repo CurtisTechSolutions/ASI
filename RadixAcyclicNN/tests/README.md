@@ -5,7 +5,8 @@ make test                          # or: python3 -m unittest tests.test_radixtre
 python3 -m radixtree test          # the same, through the CLI
 ```
 
-Plain `unittest`, standard library, about half a minute, deterministic. The
+Plain `unittest`, standard library, about half a minute, deterministic (71
+tests; the phonetic ones need `../PhoneticTokenizer` and skip without it). The
 structural tests mirror `RadixCyclicNN/tests/test_graph.py` case for case, with
 the tree's answers where the graph's were cycles. Each test names the invariant
 it protects; the ones that hold the line on something the acyclic design is
@@ -31,3 +32,5 @@ specifically about:
 | `TestInversion.test_path_inversion_is_exact_on_a_tree` | flipping every other node of a path flips **every** edge of it, END leaf included — exact where the graph is best-effort |
 | `TestInversion.test_two_nrl` | 2NRL read at the branches where a garbage line leaves its twin: the inversion reverses every preference exactly, and the positive phase leaves the good one preferred |
 | `TestPersistence` | a saved model reloads to the same tree, the same predictions, and the same continued training (the RNG state travels) |
+| `TestSlide` | token by token: one query per token and one for END; a window of one gram is the first-order walk; a window cut from a history never begins a text; the caps, the clock, the seeded sample; `next_token_accuracy` |
+| `TestPhonetic` | the tree over sounds (skipped when the tokenizer is not importable): text read as sounds and spelled back, a tree over phones and one over syllables that recite in words, scoring in phones, token by token in sounds, save and load with the encoding, and the CLI's `--unit phone` |

@@ -34,13 +34,15 @@ Pure Python, standard library only, sized like `FilterBankRadix/`: a package
 | Scoring | The deepest context decides; a gram it was never followed by costs `UNKNOWN_PROB = 1e-6` — the cyclic model's convention, so the two read on one scale. `min_count` says how often a context must have been seen to be trusted. |
 | Inversion and 2NRL | `invert()` negates every weight and every activation. `invert_paths` flips every other node of a text's path — **exact** on a tree (it is bipartite and each END leaf is private), best-effort on the graph. `two_nrl`: train on the bad, invert, fine-tune on the good. |
 | Bounded windows | `depth=8` caps a root path at eight symbols. A walk that runs out of its window re-enters the tree at the deepest context of what it has said — a loop *outside* the tree, with `max_legs` as its clock. Unbounded, a walk never needs to. |
+| Token by token | `mode="slide"`: one query of the tree per token — the deepest usable context of the last `window` grams, or of everything said so far — one decision from that context's options (the most likely token at temperature 0, a sample above it), the token fed back, the next query from the new context. A window that forgets can go round; `MAX_SLIDE` is its clock. |
+| Sounds | `Encoding(unit=PHONES)` or `SYLLABLES`: the text is read through the sibling phonetic tokenizer (`PhoneticTokenizer/`), a gram is `n` sounds, the tree is built over sounds, and a prediction is spelled back into words (`spelled`, `full_spelled`). |
 | Persistence | JSON, gzipped on request, written atomically; the RNG state travels, so training after a load is the training that would have followed a save. |
 
 ## Quick start
 
 ```bash
 cd RadixAcyclicNN
-make test            # 61 tests, standard library, about half a minute
+make test            # 71 tests, standard library, about half a minute
 make check           # the rule against finite differences
 make demo            # train on the sample corpus and watch it recite
 make compare-quick   # both models on the sample corpus, seconds
@@ -242,20 +244,75 @@ So: the cycle is what makes the structure finite and general; the tree is what
 makes it certain and exact. The tree is the control that makes the paper's
 claims measurable. It is not the better model of text, and the numbers say so.
 
+## Token by token
+
+`predict(prefix, mode="slide", window=k)` is the loop you would write by hand:
+query the tree once with the last `k` grams of the context (everything said so
+far when `k` is `None`), take the token it gives, append it, query again.
+Inside a compressed run the token is fixed; at a branch it is the most likely
+option at temperature 0, or a sample above it. With the whole history as
+context the walk follows the deepest path the tree has and recites, as the
+cheapest path does; with a window it decides afresh at every token and can
+forget its way into a loop (`…sets in the east and sets in the east…`), which
+is the cycle coming back outside the tree — `MAX_SLIDE` is its clock.
+
+How deep the window should be is a measurement, and the unbounded tree holds
+every depth at once. Next-gram prediction on the held-out prose, by counts
+(the most frequent continuation, so the depth is isolated from the learning
+rule), the cyclic graph's own walk as the reference:
+
+| window | train accuracy | held-out accuracy | held-out: actual gram is an option |
+|---|---:|---:|---:|
+| cyclic graph | 0.591 | 0.514 | 0.88 |
+| tree, k = 1 | 0.591 | 0.514 | 0.88 |
+| tree, k = 2 | 0.707 | 0.568 | 0.81 |
+| tree, k = 3 | 0.781 | 0.579 | 0.76 |
+| tree, k = 4 | 0.832 | 0.581 | 0.73 |
+| tree, k = 8 | 0.942 | 0.578 | 0.69 |
+| tree, unbounded | 0.978 | 0.579 | 0.68 |
+
+A window of one gram is the graph, to the digit. Held-out accuracy plateaus
+at three to four grams; deeper windows only add recitation. And depth narrows
+the options: the deepest window's top guess is as good as a shallow one's,
+but the actual next gram is among its options far less often — which is where
+the tree's held-out miss rate in the comparison came from. `python3 -m
+radixtree accuracy` measures the same thing with the learned rule on any
+saved model.
+
+## Sounds
+
+```bash
+python3 -m radixtree predict --unit phone "the quick" --to-end
+# the quick brown fox jumps over the lazy dog
+#   sounds DH AH0 # K W IH1 K # B R AW1 N # F AA1 K S # JH AH1 M P S # OW1 V ER0 # DH AH0 # L EY1 Z IY0 # D AO1 G
+python3 -m radixtree predict --unit syllable --n 2 "the cat" --to-end --slide --window 4
+```
+
+With `--unit phone` or `--unit syllable` the corpus is read through the
+phonetic tokenizer in `../PhoneticTokenizer` (found beside this checkout, or
+`pip install -e ../PhoneticTokenizer`): every word becomes its sounds, the gap
+between two words a `#`, punctuation a pause. The tree is then a tree over
+sounds — labels, grams, lengths and scores are all in phones or syllables —
+and every prediction carries its words too (`spelled`, `full_spelled`), spelled
+back through the same tokenizer's lexicon and its memory of what it read. On
+the sample corpus a tree over phones holds 1 767 nodes against the character
+tree's 2 224, recites the same lines, and a prefix the tree has never heard
+is kept as the sounds it makes.
+
 ## The pieces
 
 | module | what it is |
 |---|---|
-| `radixtree/encoding.py` | the sliding window of `n` characters, the gram overlap, the path decoder |
+| `radixtree/encoding.py` | the sliding window of `n` units — characters, or phones and syllables through the phonetic tokenizer — the gram overlap, the path decoder, and the spelling of sounds back into words |
 | `radixtree/activation.py` | the parametric sine and its partials — the reference implementation, repeated |
 | `radixtree/tree.py` | `RadixTree`: the nodes, every-suffix insertion, `split` / `merge_child` / `compress`, `walk` / `trace` / `locate`, scores and costs, `invert` / `flip_nodes`, the invariants, JSON |
 | `radixtree/search.py` | `cheapest_path` and `sample_walk` over the tree; `PathResult` |
-| `radixtree/model.py` | `RadixTreeNet`: the one-hop rule, `train`, `predict` / `generate` (with re-entry), `score` / `bits_per_char`, `invert_paths`, `two_nrl`, `save` / `load` |
+| `radixtree/model.py` | `RadixTreeNet`: the one-hop rule, `train`, `predict` / `generate` (cheapest path, sampled, or token by token), `score` / `bits_per_char`, `next_token_accuracy`, `invert_paths`, `two_nrl`, `save` / `load` |
 | `radixtree/check.py` | the finite-difference checks |
 | `radixtree/corpus.py` | the prose corpus from the pinned papers, the snapshot and its digest, the split |
 | `radixtree/compare.py` | the comparison against `radixnet`, and the tables above |
 | `radixtree/cli.py` | `python3 -m radixtree <command>` |
-| `tests/test_radixtree.py` | 61 tests; `tests/README.md` names what each holds the line on |
+| `tests/test_radixtree.py` | 71 tests; `tests/README.md` names what each holds the line on |
 | `DESIGN.md` | the specification, module by module, and the decisions |
 | `data/`, `results/` | the texts, and the numbers with their digests |
 
@@ -266,6 +323,9 @@ python3 -m radixtree train   --data data/sample_corpus.txt --epochs 10 --save mo
 python3 -m radixtree predict --load model.json.gz "the quick" --to-end
 python3 -m radixtree predict --load model.json.gz "the" --sample --temperature 0.8 --sample-seed 3
 python3 -m radixtree predict --load model.json.gz "the" --costs signal --step-penalty -0.2
+python3 -m radixtree predict --load model.json.gz "the cat" --slide --window 4 --to-end
+python3 -m radixtree accuracy --load model.json.gz --texts data/corpus.txt --windows 1,2,4,all
+python3 -m radixtree train --unit phone --data data/sample_corpus.txt --save sounds.json.gz
 python3 -m radixtree generate --load model.json.gz --count 3
 python3 -m radixtree score   --load model.json.gz "the cat sat on the mat" "the cat sat on the sky"
 python3 -m radixtree stats   --load model.json.gz
@@ -280,7 +340,8 @@ python3 -m radixtree demo
 Every command that needs a model takes `--load`; without it the model is
 trained from `--data` first (the sample corpus by default), so everything runs
 straight out of a checkout. `--depth N` bounds a root path, `--min-count K`
-sets the trust, `--n` the window; `make help` lists the Makefile's targets.
+sets the trust, `--n` the gram, `--unit` what a unit is; `make help` lists the
+Makefile's targets.
 
 ## Limits
 
@@ -293,9 +354,9 @@ sets the trust, `--n` the window; `make help` lists the Makefile's targets.
   cheaper an epoch than batch 32 on the prose corpus (the root is visited once
   per batch); the tests and the comparison use 32 because it learns visibly in
   ten epochs.
-- Characters only — no word, phonetic or acoustic units; no dynamic window; no
-  `BACK` / `THINK` sentinels; no server, frontend or Go and Rust ports. This is
-  the acyclic core, not the cyclic product.
+- Characters, phones and syllables — no word or acoustic units; no dynamic
+  window; no `BACK` / `THINK` sentinels; no server, frontend or Go and Rust
+  ports. This is the acyclic core, not the cyclic product.
 
 ## Where it sits
 

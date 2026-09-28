@@ -48,7 +48,7 @@ import random
 from collections.abc import Iterable, Sequence
 
 from .activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K
-from .encoding import END_LABEL, START_LABEL, Encoding
+from .encoding import END_LABEL, START_LABEL, Encoding, _piece
 
 __all__ = [
     "FIRST", "KIND_END", "KIND_REAL", "KIND_ROOT", "KIND_START", "ROOT", "START",
@@ -114,6 +114,8 @@ class RadixTree:
         self._act_version = -1
         self._n = self.encoding.n
         self._ov = self.encoding.overlap
+        self._view = self.encoding.view
+        self._last = self.encoding.last_unit
         self._new_node("", KIND_ROOT, -1, w=0.0)
         self._new_node(START_LABEL, KIND_START, ROOT)
 
@@ -166,7 +168,7 @@ class RadixTree:
     def _new_real(self, label: str, parent: int) -> int:
         """A real node holding ``label``, linked under ``parent`` by its first gram."""
         nid = self._new_node(label, KIND_REAL, parent)
-        self.children[parent][label[: self._n]] = nid
+        self.children[parent][self.encoding.first_gram(label)] = nid
         return nid
 
     def _new_end(self, parent: int) -> int:
@@ -187,15 +189,15 @@ class RadixTree:
 
     def held(self, i: int) -> int:
         """How many grams node ``i`` holds (0 for the root, START and END leaves)."""
-        return len(self.labels[i]) - self._ov if self.kind[i] == KIND_REAL else 0
+        return len(self._view(self.labels[i])) - self._ov if self.kind[i] == KIND_REAL else 0
 
     def label_len(self, i: int) -> int:
-        """The length of a real node's label in characters (0 for sentinels)."""
-        return len(self.labels[i]) if self.kind[i] == KIND_REAL else 0
+        """The length of a real node's label in the encoding's units (0 for sentinels)."""
+        return len(self._view(self.labels[i])) if self.kind[i] == KIND_REAL else 0
 
     def first_gram(self, i: int) -> str:
         """The gram a real node is keyed by under its parent."""
-        return self.labels[i][: self._n]
+        return self.encoding.first_gram(self.labels[i])
 
     def num_nodes(self) -> int:
         """Alive real nodes - the ones holding grams; the sentinels are not counted."""
@@ -218,8 +220,8 @@ class RadixTree:
         return len(self.grams) / max(1, self._n_real)
 
     def label_chars(self) -> int:
-        """Characters held in real labels: the tree's real size."""
-        return sum(len(lab) for i, lab in enumerate(self.labels) if self.alive[i] and self.kind[i] == KIND_REAL)
+        """Units held in real labels (characters, or sounds): the tree's real size."""
+        return sum(self.label_len(i) for i in range(len(self.labels)) if self.alive[i] and self.kind[i] == KIND_REAL)
 
     def alive_nodes(self) -> list[int]:
         """Ids of alive nodes in increasing order (the root and START first)."""
@@ -351,10 +353,10 @@ class RadixTree:
         held = self.held(node)
         if i < 1 or i >= held:
             raise ValueError(f"split index {i} out of range 1..{held - 1} for label {self.labels[node]!r}")
-        label = self.labels[node]
+        view = self._view(self.labels[node])
         n, ov = self._n, self._ov
         b = self._new_node(
-            label[i:], KIND_REAL, node,
+            _piece(view, i), KIND_REAL, node,
             z=self.z[node], a=self.a[node], b=self.b[node], h=self.h[node], k=self.k[node], count=self.count[node],
         )
         self.children[b] = self.children[node]
@@ -364,9 +366,9 @@ class RadixTree:
         self.end_leaf[b] = e
         if e >= 0:
             self.parent[e] = b
-        self.children[node] = {label[i : i + n]: b}
+        self.children[node] = {_piece(view, i, i + n): b}
         self.end_leaf[node] = -1
-        self.labels[node] = label[: i + ov]
+        self.labels[node] = _piece(view, 0, i + ov)
         self.version += 1
         self.structure_version += 1
         return node, b
@@ -403,7 +405,7 @@ class RadixTree:
         else:
             w[p] *= fp / fc
             self.z[p], self.a[p], self.b[p], self.h[p], self.k[p] = self.z[c], self.a[c], self.b[c], self.h[c], self.k[c]
-        self.labels[p] = self.labels[p] + self.labels[c][self._ov :]
+        self.labels[p] = self.encoding.join_units(self.labels[p], _piece(self._view(self.labels[c]), self._ov))
         self.children[p] = self.children[c]
         for g in self.children[p].values():
             self.parent[g] = p
@@ -494,7 +496,9 @@ class RadixTree:
         counts = self.count
         labels = self.labels
         children = self.children
-        n, ov = self._n, self._ov
+        view = self._view
+        ov = self._ov
+        tails = [self._last(g) for g in symbols]
         trans: list[tuple[int, int]] = []
         if count:
             counts[node] += 1
@@ -523,12 +527,12 @@ class RadixTree:
                         counts[e] += 1
                     trans.append((leaf, e))
                 return trans
-            label = labels[nxt]
-            held = len(label) - ov
+            lv = view(labels[nxt])
+            held = len(lv) - ov
             remaining = total - pos
             limit = held if held < remaining else remaining
             i = 1
-            while i < limit and label[i + ov] == symbols[pos + i][-1]:
+            while i < limit and lv[i + ov] == tails[pos + i]:
                 i += 1
             if i < held:
                 if i == remaining:
@@ -564,17 +568,19 @@ class RadixTree:
         total = len(grams)
         labels = self.labels
         children = self.children
+        view = self._view
         ov = self._ov
+        tails = [self._last(g) for g in grams]
         while pos < total:
             nxt = children[node].get(grams[pos])
             if nxt is None:
                 return None
-            label = labels[nxt]
-            held = len(label) - ov
+            lv = view(labels[nxt])
+            held = len(lv) - ov
             remaining = total - pos
             limit = held if held < remaining else remaining
             i = 1
-            while i < limit and label[i + ov] == grams[pos + i][-1]:
+            while i < limit and lv[i + ov] == tails[pos + i]:
                 i += 1
             if i < limit:
                 return None
@@ -601,19 +607,21 @@ class RadixTree:
         total = len(grams)
         labels = self.labels
         children = self.children
+        view = self._view
         ov = self._ov
+        tails = [self._last(g) for g in grams]
         transitions: list[tuple[int, int]] = []
         path = [origin]
         while pos < total:
             nxt = children[node].get(grams[pos])
             if nxt is None:
                 return None
-            label = labels[nxt]
-            held = len(label) - ov
+            lv = view(labels[nxt])
+            held = len(lv) - ov
             if held > total - pos:
                 return None
             i = 1
-            while i < held and label[i + ov] == grams[pos + i][-1]:
+            while i < held and lv[i + ov] == tails[pos + i]:
                 i += 1
             if i < held:
                 return None
@@ -653,7 +661,9 @@ class RadixTree:
             return True
         return bool(self.children[node]) or self.end_leaf[node] >= 0
 
-    def locate(self, grams: Sequence[str], min_count: int = 1, ending: bool = False) -> tuple[int, int, int] | None:
+    def locate(
+        self, grams: Sequence[str], min_count: int = 1, ending: bool = False, anchored: bool = True
+    ) -> tuple[int, int, int] | None:
         """The deepest usable context of a history: ``(node, offset, symbols)``, or ``None``.
 
         Tries the history from START first (the whole of it, when it fits under
@@ -661,6 +671,9 @@ class RadixTree:
         a suffix tree answers for a prefix it has never seen whole: drop the
         oldest gram and ask again.  ``symbols`` is how many symbols the context
         holds, START included.  ``None`` when not even the last gram is known.
+        ``anchored=False`` skips the walk from START: for a window cut out of
+        a longer history, which does not begin a text however many texts begin
+        with those grams.
 
         With a bound, a context of exactly ``depth`` symbols stands at the end
         of its window: it can never have seen a next gram, only whether texts
@@ -671,7 +684,7 @@ class RadixTree:
         total = len(grams)
         depth = self.depth
         room = None if depth is None else (depth if ending else depth - 1)
-        if room is None or total + 1 <= room:
+        if anchored and (room is None or total + 1 <= room):
             loc = self.walk(START, grams)
             if loc is not None and self.usable(loc[0], loc[1], min_count):
                 return (loc[0], loc[1], total + 1)
@@ -744,6 +757,7 @@ class RadixTree:
             self.labels, self.kind, self.parent, self.children, self.end_leaf, self.alive,
         )
         n, ov = self._n, self._ov
+        view = self._view
         total = len(labels)
         assert alive[ROOT] and kind[ROOT] == KIND_ROOT and parent[ROOT] == -1 and labels[ROOT] == ""
         assert alive[START] and kind[START] == KIND_START and parent[START] == ROOT and labels[START] == START_LABEL
@@ -755,7 +769,7 @@ class RadixTree:
                 continue
             if kind[i] == KIND_REAL:
                 real += 1
-                assert len(labels[i]) >= n, (i, labels[i])
+                assert len(view(labels[i])) >= n, (i, labels[i])
             elif kind[i] == KIND_END:
                 ends += 1
                 assert labels[i] == END_LABEL and not children[i] and end_leaf[i] < 0, i
@@ -765,9 +779,10 @@ class RadixTree:
             p = parent[i]
             assert 0 <= p < total and alive[p], (i, p)
             if kind[i] == KIND_REAL:
-                assert children[p].get(labels[i][:n]) == i, (i, p)
-                if kind[p] == KIND_REAL:
-                    assert labels[p][-ov:] == labels[i][:ov] if ov else True, (p, i)
+                assert children[p].get(self.encoding.first_gram(labels[i])) == i, (i, p)
+                if kind[p] == KIND_REAL and ov:
+                    vp, vi = view(labels[p]), view(labels[i])
+                    assert vp[len(vp) - ov :] == vi[:ov], (p, i)
             elif kind[i] == KIND_END:
                 assert end_leaf[p] == i, (i, p)
             else:
@@ -798,8 +813,9 @@ class RadixTree:
         assert visited == set(self.alive_nodes()), "the parents and the children disagree"
         for i in range(FIRST, total):
             if alive[i] and kind[i] == KIND_REAL:
-                for j in range(len(labels[i]) - ov):
-                    assert labels[i][j : j + n] in self.grams, (i, labels[i][j : j + n])
+                v = view(labels[i])
+                for j in range(len(v) - ov):
+                    assert _piece(v, j, j + n) in self.grams, (i, _piece(v, j, j + n))
         if compressed:
             for i in range(FIRST, total):
                 if alive[i] and kind[i] == KIND_REAL:
@@ -883,12 +899,12 @@ class RadixTree:
         tree.alive = [True] * total
         tree.children = [{} for _ in range(total)]
         tree.end_leaf = [-1] * total
-        n = tree._n
+        first_gram = tree.encoding.first_gram
         real = ends = 0
         for i in range(FIRST, total):
             p = parents[i]
             if kinds[i] == KIND_REAL:
-                tree.children[p][labels[i][:n]] = i
+                tree.children[p][first_gram(labels[i])] = i
                 real += 1
             elif kinds[i] == KIND_END:
                 tree.end_leaf[p] = i

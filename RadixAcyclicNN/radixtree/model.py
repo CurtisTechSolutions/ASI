@@ -57,6 +57,13 @@ UNKNOWN_PROB = 1e-6
 MAX_LEGS = 64
 """How many times a walk may re-enter a bounded tree before it stops - the clock a bounded window needs."""
 
+MODES = ("dijkstra", "sample", "slide")
+"""How a prediction walks: the cheapest path, a sampled path, or one token per query of the tree."""
+
+MAX_SLIDE = 2000
+"""Characters a token-by-token walk to END may emit before it is stopped: a window that forgets can go round -
+the cycle is back, outside the tree - and this is its clock."""
+
 _LOG_UNKNOWN = math.log(UNKNOWN_PROB)
 _MAX_LOG_PPL = 700.0
 
@@ -188,13 +195,14 @@ class RadixTreeNet:
     def _clean_texts(self, texts: Iterable[str] | str) -> tuple[list[str], int]:
         """Strings only, the ones too short for a single gram dropped (and counted)."""
         items = [texts] if isinstance(texts, str) else list(texts)
-        n = self.encoding.n
+        enc = self.encoding
+        n = enc.n
         kept: list[str] = []
         skipped = 0
         for t in items:
             if not isinstance(t, str):
                 raise TypeError("texts must be strings")
-            if len(t) >= n:
+            if enc.length(t) >= n:
                 kept.append(t)
             else:
                 skipped += 1
@@ -405,7 +413,7 @@ class RadixTreeNet:
         records: list[dict] = []
         transitions, observed = self._observe(texts, count=True)
         meta["trained_texts"] += len(texts)
-        meta["trained_chars"] += sum(len(t) for t in texts)
+        meta["trained_chars"] += sum(self.encoding.length(t) for t in texts)
         pending_merges = tree.compress() if cfg.auto_compress else 0
         if tree.structure_version != observed:
             transitions, observed = self._observe(texts, count=False)  # a merge moved nodes
@@ -481,26 +489,155 @@ class RadixTreeNet:
                 return loc[0], loc[1], False, 0
             return START, -1, True, 0
         if prefix:
+            enc = self.encoding
             best = -1
             for c in tree.children[START].values():
-                if tree.labels[c].startswith(prefix) and (best < 0 or tree.count[c] > tree.count[best]):
+                if enc.has_unit_prefix(tree.labels[c], prefix) and (best < 0 or tree.count[c] > tree.count[best]):
                     best = c
             if best >= 0:
-                return best, 0, True, len(prefix)
+                return best, 0, True, enc.length(prefix)
         return START, -1, True, 0
 
     @staticmethod
-    def _check_predict_args(prefix: str, length: int, max_length: int | None, mode: str, max_legs: int) -> None:
+    def _check_predict_args(
+        prefix: str, length: int, max_length: int | None, mode: str, max_legs: int, window: int | None
+    ) -> None:
         if not isinstance(prefix, str):
             raise TypeError("prefix must be a string")
         if length < 0:
             raise ValueError(f"length must be >= 0, got {length}")
         if max_length is not None and max_length < 0:
             raise ValueError(f"max_length must be >= 0, got {max_length}")
-        if mode not in ("dijkstra", "sample"):
-            raise ValueError(f"mode must be 'dijkstra' or 'sample', got {mode!r}")
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {', '.join(MODES)}, got {mode!r}")
         if max_legs < 1:
             raise ValueError(f"max_legs must be >= 1, got {max_legs}")
+        if window is not None and window < 1:
+            raise ValueError(f"window must be >= 1 grams or None, got {window}")
+
+    def context(self, grams: list[str], window: int | None = None) -> tuple[int, int] | None:
+        """One query of the tree: the deepest usable context of the last ``window`` grams (all of them: ``None``).
+
+        A window cut out of a longer history is never matched from START - it
+        does not begin a text - while a history the window still holds whole is.
+        """
+        tree = self.tree
+        if window is not None and len(grams) > window:
+            loc = tree.locate(grams[len(grams) - window :], self.min_count, anchored=False)
+        else:
+            loc = tree.locate(grams, self.min_count)
+        return None if loc is None else (loc[0], loc[1])
+
+    def next_token(
+        self, node: int, offset: int, temperature: float = 0.0, rng: random.Random | None = None, costs: str = "logprob"
+    ) -> tuple[int, str | None, float]:
+        """The token that follows a located context: ``(node, gram, cost)``, with ``gram`` ``None`` for END.
+
+        Inside a compressed run the next gram is the run's, at cost 0; at a
+        node's end it is drawn from the options - the cheapest at temperature
+        0, a sample from ``softmax(-cost / temperature)`` otherwise.
+        """
+        tree = self.tree
+        if offset < tree.held(node) - 1:
+            return node, self.encoding.gram_at(tree.labels[node], offset + 1), 0.0
+        options = tree.child_costs(node, costs)
+        if not options:
+            return node, None, 0.0
+        if temperature == 0 or len(options) == 1:
+            child, cost = min(options, key=lambda item: item[1])
+        else:
+            if rng is None:
+                rng = tree.rng
+            inv_t = 1.0 / temperature
+            lowest = min(cst for _, cst in options)
+            weights = [math.exp(-(cst - lowest) * inv_t) for _, cst in options]
+            r = rng.random() * math.fsum(weights)
+            child, cost = options[-1]
+            acc = 0.0
+            for item, wgt in zip(options, weights):
+                acc += wgt
+                if r < acc:
+                    child, cost = item
+                    break
+        if tree.is_end(child):
+            return child, None, cost
+        return child, tree.first_gram(child), cost
+
+    def _slide(
+        self,
+        prefix: str,
+        length: int,
+        window: int | None,
+        temperature: float,
+        rng: random.Random | None,
+        to_end: bool,
+        max_length: int | None,
+        costs: str,
+    ) -> PathResult:
+        """Token by token: query the tree once, take the token it gives, feed it back, query again.
+
+        Every step is one :meth:`context` of what has been said so far and one
+        :meth:`next_token` from it.  With ``window=None`` the query is the
+        whole history and the walk follows the deepest path the tree has, as
+        the cheapest path does inside a run; with a window of ``k`` grams the
+        tree is asked about the last ``k`` alone and decides afresh at every
+        token, whatever it said before them.  Stops at END, at ``length``
+        characters (unless ``to_end``), at ``max_length``, or when the tree
+        knows nothing about the context.
+        """
+        tree = self.tree
+        enc = self.encoding
+        n = enc.n
+        emitted = ""
+        n_emitted = 0
+        labels: list[str] = []
+        node_ids: list[int] = []
+        step_costs: list[float] = []
+        queries = 0
+        reached_end = False
+        grams = enc.encode(prefix)
+        if grams:
+            loc = self.context(grams, window)
+            cut = n - 1 if loc is not None else 0  # the next gram overlaps the located one; its new unit is emitted
+            if loc is None:
+                loc = (START, -1)  # nothing known: a new text begins, and the prefix is not its context
+                grams = []
+        else:
+            node, offset, _include, cut = self._start(prefix)
+            loc = (node, offset)
+            grams = []
+        if to_end and max_length is None:
+            max_length = max(length, MAX_SLIDE)
+        while True:
+            if max_length is not None and n_emitted >= max_length:
+                break
+            if not to_end and n_emitted >= length:
+                break
+            node, offset = loc
+            queries += 1
+            child, gram, cost = self.next_token(node, offset, temperature, rng, costs)
+            labels.append(tree.labels[child])
+            node_ids.append(child)
+            step_costs.append(cost)
+            if gram is None:
+                reached_end = tree.is_end(child)
+                break
+            piece = enc.piece_of(gram, cut) if cut else gram
+            cut = n - 1
+            units = len(enc.view(piece))
+            if max_length is not None and n_emitted + units > max_length:
+                piece = enc.truncate(piece, max_length - n_emitted)
+                units = max_length - n_emitted
+            emitted = enc.join_units(emitted, piece)
+            n_emitted += units
+            grams.append(gram)
+            loc = self.context(grams, window)
+            if loc is None:
+                break
+        return self._spelled(PathResult(
+            text=emitted, labels=labels, node_ids=node_ids, cost=math.fsum(step_costs), step_costs=step_costs,
+            expanded=queries, reached_end=reached_end, full_text=enc.join(prefix, emitted), legs=1,
+        ))
 
     def predict(
         self,
@@ -514,14 +651,19 @@ class RadixTreeNet:
         costs: str = "logprob",
         seed: int | None = None,
         max_legs: int = MAX_LEGS,
+        window: int | None = None,
     ) -> PathResult:
         """Continue ``prefix``.
 
         ``mode="dijkstra"`` returns the cheapest continuation of at least
         ``length`` characters (or to an END leaf with ``to_end``);
         ``mode="sample"`` walks stochastically at ``temperature`` (0 is
-        greedy), stopping after ``length`` characters or at END.  ``max_length``
-        caps the text.  ``costs`` is ``"logprob"`` (the cyclic graph's
+        greedy), stopping after ``length`` characters or at END;
+        ``mode="slide"`` goes token by token - one query of the tree per
+        token, from the last ``window`` grams of everything said so far (all
+        of it: ``None``), the token it gives fed back for the next query, the
+        most likely token at temperature 0 and a sample above it
+        (:meth:`_slide`).  ``max_length`` caps the text.  ``costs`` is ``"logprob"`` (the cyclic graph's
         non-negative cost) or ``"signal"`` (the signed edge signal, legal only
         because there are no cycles); ``step_penalty`` may be negative for the
         same reason.  ``seed`` makes a sampled walk reproducible on its own.
@@ -533,12 +675,18 @@ class RadixTreeNet:
         times.  The tree has no cycles; the re-entry is a loop *outside* it,
         and ``max_legs`` is its clock.
         """
-        self._check_predict_args(prefix, length, max_length, mode, max_legs)
+        self._check_predict_args(prefix, length, max_length, mode, max_legs, window)
         check_costs(costs)
         tree = self.tree
         rng = random.Random(seed) if seed is not None else tree.rng
+        if temperature < 0:
+            raise ValueError("temperature must be >= 0")
+        if mode == "slide":
+            return self._slide(prefix, length, window, temperature, rng, to_end, max_length, costs)
+        enc = self.encoding
         node, offset, include_context, cut = self._start(prefix)
         emitted = ""
+        n_emitted = 0
         labels: list[str] = []
         node_ids: list[int] = []
         step_costs: list[float] = []
@@ -546,10 +694,10 @@ class RadixTreeNet:
         legs = 0
         reached_end = False
         while True:
-            need = length - len(emitted)
+            need = length - n_emitted
             if need < 0:
                 need = 0
-            cap = None if max_length is None else max(0, max_length - len(emitted))
+            cap = None if max_length is None else max(0, max_length - n_emitted)
             if mode == "dijkstra":
                 leg = cheapest_path(
                     tree, node, offset, min_chars=need, max_chars=cap, step_penalty=step_penalty,
@@ -561,10 +709,11 @@ class RadixTreeNet:
                     tree, node, offset, max_chars=limit, temperature=temperature, rng=rng,
                     stop_at_end=True, include_context=include_context, costs=costs,
                 )
-            text = leg.text[cut:] if cut else leg.text
+            text = enc.piece_of(leg.text, cut) if cut else leg.text
             cut = 0
             legs += 1
-            emitted += text
+            emitted = enc.join_units(emitted, text)
+            n_emitted += len(enc.view(text))
             labels.extend(leg.labels)
             node_ids.extend(leg.node_ids)
             step_costs.extend(leg.step_costs)
@@ -572,22 +721,29 @@ class RadixTreeNet:
             if leg.reached_end:
                 reached_end = True
                 break
-            if not to_end and len(emitted) >= length:
+            if not to_end and n_emitted >= length:
                 break
-            if cap is not None and len(emitted) >= max_length:
+            if cap is not None and n_emitted >= max_length:
                 break
             if not text or legs >= max_legs:
                 break
-            loc = tree.locate(self.encoding.encode(prefix + emitted), self.min_count)
+            loc = tree.locate(enc.encode(enc.join(prefix, emitted)), self.min_count)
             if loc is None:
                 break
             node, offset, include_context = loc[0], loc[1], False
         if max_length is not None:
-            emitted = emitted[:max_length]
-        return PathResult(
+            emitted = enc.truncate(emitted, max_length)
+        return self._spelled(PathResult(
             text=emitted, labels=labels, node_ids=node_ids, cost=math.fsum(step_costs), step_costs=step_costs,
-            expanded=expanded, reached_end=reached_end, full_text=prefix + emitted, legs=legs,
-        )
+            expanded=expanded, reached_end=reached_end, full_text=enc.join(prefix, emitted), legs=legs,
+        ))
+
+    def _spelled(self, result: PathResult) -> PathResult:
+        """A result with its words: the continuation and the whole text spelled back when the units are sounds."""
+        enc = self.encoding
+        result.full_spelled = enc.spell(result.full_text)
+        result.spelled = enc.spell_tail(result.full_text, result.text)
+        return result
 
     def generate(
         self,
@@ -599,19 +755,62 @@ class RadixTreeNet:
         step_penalty: float = 0.0,
         to_end: bool = False,
         costs: str = "logprob",
+        window: int | None = None,
     ) -> list[PathResult]:
-        """``count`` texts from START: sampled walks by default, or the one cheapest path with ``mode="dijkstra"``."""
+        """``count`` texts from START: sampled walks by default, the one cheapest path with ``mode="dijkstra"``,
+        or token-by-token walks with ``mode="slide"`` (one text at temperature 0, which is deterministic)."""
         if count < 0:
             raise ValueError(f"count must be >= 0, got {count}")
-        if mode == "dijkstra":
+        if mode == "dijkstra" or (mode == "slide" and temperature == 0):
             count = min(count, 1)
         out: list[PathResult] = []
         for i in range(count):
             out.append(self.predict(
                 "", length=max_length, mode=mode, step_penalty=step_penalty, temperature=temperature,
                 to_end=to_end, max_length=max_length, costs=costs, seed=None if seed is None else seed + i,
+                window=window,
             ))
         return out
+
+    def next_token_accuracy(self, texts: Iterable[str] | str, window: int | None = None) -> dict:
+        """How often the token-by-token walk's most likely token is the text's next one, over texts.
+
+        Every position of every text is one query (:meth:`context` of the
+        text so far, over the last ``window`` grams) and one decision at
+        temperature 0; END counts as a token.  ``known`` is how often the
+        actual token was among the context's options at all - the tail the
+        deepest window may not hold even when its top choice is right.
+        """
+        items = [texts] if isinstance(texts, str) else list(texts)
+        enc = self.encoding
+        tree = self.tree
+        correct = known = total = 0
+        for text in items:
+            grams = enc.encode(text)
+            if not grams:
+                continue
+            history: list[str] = []
+            for actual in grams + [None]:
+                loc = self.context(history, window) if history else (START, -1)
+                if loc is not None and tree.count[loc[0]] < self.min_count:
+                    loc = None
+                total += 1
+                if loc is not None:
+                    node, offset = loc
+                    _child, gram, _cost = self.next_token(node, offset)
+                    correct += gram == actual
+                    if offset < tree.held(node) - 1:
+                        known += enc.gram_at(tree.labels[node], offset + 1) == actual
+                    elif actual is None:
+                        known += tree.end_leaf[node] >= 0
+                    else:
+                        known += actual in tree.children[node]
+                if actual is not None:
+                    history.append(actual)
+        return {
+            "window": window, "tokens": total,
+            "accuracy": correct / total if total else 0.0, "known": known / total if total else 0.0,
+        }
 
     # -- scoring -------------------------------------------------------------
 
@@ -646,14 +845,17 @@ class RadixTreeNet:
         tree = self.tree
         enc = self.encoding
         grams = enc.encode(text)
-        chars = len(text)
+        chars = enc.length(text)
+        units = enc.units_name
         if not grams:
-            return {"log_prob": 0.0, "per_char": 0.0, "chars": chars, "transitions": 0, "unknown_transitions": 0}
+            return {"log_prob": 0.0, "per_char": 0.0, "chars": chars, "transitions": 0, "unknown_transitions": 0, "units": units}
         labels = tree.labels
         children = tree.children
         count = tree.count
         held = tree.held
-        n, ov = enc.n, enc.overlap
+        view = enc.view
+        last = enc.last_unit
+        ov = enc.overlap
         min_count = self.min_count
         end_leaf = tree.end_leaf
         log_prob = 0.0
@@ -681,7 +883,7 @@ class RadixTreeNet:
             node, offset = settle(node, offset)
             ok = False
             if offset < held(node) - 1:
-                if labels[node][offset + 1 + ov] == g[-1]:
+                if view(labels[node])[offset + 1 + ov] == last(g):
                     offset += 1
                     ok = True
             else:
@@ -713,6 +915,7 @@ class RadixTreeNet:
             "chars": chars,
             "transitions": transitions,
             "unknown_transitions": unknown,
+            "units": units,
         }
 
     def bits_per_char(self, texts: Iterable[str] | str) -> dict:
@@ -732,6 +935,7 @@ class RadixTreeNet:
             "transitions": transitions,
             "unknown_transitions": unknown,
             "miss_rate": unknown / transitions if transitions else 0.0,
+            "units": self.encoding.units_name,
         }
 
     # -- inversion and 2NRL --------------------------------------------------
@@ -853,6 +1057,8 @@ class RadixTreeNet:
             "max_depth": t.max_depth(),
             "compression_ratio": t.compression_ratio(),
             "encoding": str(self.encoding),
+            "unit": self.encoding.unit,
+            "units": self.encoding.units_name,
             "ngram": self.encoding.n,
             "depth": self.depth,
             "min_count": self.min_count,

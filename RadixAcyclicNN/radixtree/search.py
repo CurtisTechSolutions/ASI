@@ -56,6 +56,10 @@ class PathResult:
     reached_end: bool = False
     full_text: str = ""
     legs: int = 1
+    spelled: str = ""
+    """``text`` spelled back into words when the units are sounds; ``text`` itself otherwise."""
+    full_spelled: str = ""
+    """``full_text`` spelled back into words when the units are sounds; ``full_text`` itself otherwise."""
 
     def to_dict(self) -> dict:
         """JSON-serialisable representation."""
@@ -69,6 +73,8 @@ class PathResult:
             "reached_end": self.reached_end,
             "full_text": self.full_text,
             "legs": self.legs,
+            "spelled": self.spelled,
+            "full_spelled": self.full_spelled,
         }
 
 
@@ -107,7 +113,7 @@ def _build_result(
     real = [tree.labels[i] for i in node_ids if tree.is_real(i)]
     text = tree.encoding.decode_path(real, offset, include_context)
     if max_chars is not None and max_chars >= 0:
-        text = text[:max_chars]
+        text = tree.encoding.truncate(text, max_chars)
     return PathResult(
         text=text,
         labels=labels,

@@ -44,24 +44,47 @@ and it trains every context a position passes through.
 
 ## 2. `encoding.py`
 
-A sliding window of `n` characters at stride 1 (`Encoding(n=3)` by default).
-`encode("hello") -> ["hel", "ell", "llo"]`; consecutive grams overlap by
-`n - 1` characters, which is what lets a run of them merge back into text.
-`Encoding(n=1)` is the plain character trie. Characters only: the word,
-phonetic and acoustic units of the cyclic model are out of scope here (§17).
+Two dials, fixed for a tree's life: what a **unit** is, and how many units a
+gram holds. The window slides at stride 1, so consecutive grams overlap by
+`n - 1` units, which is what lets a run of them merge back into text.
+
+* `Encoding()` — character trigrams, `encode("hello") -> ["hel", "ell", "llo"]`;
+  `Encoding(n=1)` is the plain character trie.
+* `Encoding(unit=PHONES)` / `Encoding(unit=SYLLABLES)` — the text is read
+  through the phonetic tokenizer (`../PhoneticTokenizer`'s `phonetok`, found
+  beside the checkout or installed; refused at construction when it is not
+  importable). `units("the cat") -> ["DH", "AH0", "#", "K", "AE1", "T"]`, a
+  gram is `n` units joined by spaces, and a label is unit text — which the
+  tokenizer reads back unchanged, so a label splits into the units it was made
+  of without the tokenizer (`view`). Word and acoustic units are out of scope
+  (§17).
 
 ```python
 class Encoding:            # frozen
+    unit: str = "char"     # "char" | "phone" | "syllable"
     n: int = 3
-    overlap -> n - 1
-    encode(text) -> list[str]            # [] when len(text) < n
+    overlap -> n - 1;  phonetic -> bool;  units_name -> "chars" | "phones" | "syllables"
+    units(text) -> str | list[str]       # user text as something that slices by unit (the tokenizer, for sounds)
+    view(label) -> str | list[str]       # a label the same way, without the tokenizer
+    length(text), normalize(text)        # units held; the unit text of a user text
+    piece(text, lo, hi) / piece_of(label, lo, hi)   # units [lo:hi) of user text / of unit text
+    join(*parts) / join_units(*parts)    # nothing between characters, a space between sounds
+    encode(text) -> list[str]            # [] when the text holds fewer than n units
     check_grams(grams)                   # ValueError: wrong length, or no overlap
-    decode_grams(grams) -> str           # first gram whole, then each one's new character
-    grams_held(label) -> int             # len(label) - n + 1
-    gram_at(label, i) -> str
+    decode_grams(grams) -> str           # first gram whole, then each one's new unit
+    grams_held(label), gram_at(label, i), first_gram(label), last_unit(gram)
     decode_path(labels, start_offset=0, include_context=True) -> str
+    truncate(text, k), has_unit_prefix(label, prefix)
+    spell(text) -> str                   # "DH AH0 # K AE1 T" -> "the cat"; other text as it is
+    spell_tail(whole, tail) -> str       # what the last units of a text spell, as the part of spell(whole) they wrote
     to_dict() / from_dict(d)
 ```
+
+Every operation of the tree, the search and the model that reads a label goes
+through `view` / `piece_of` / `join_units`, so the character path is the
+plain string operation it always was and a phonetic label costs one split.
+A prediction's `text` is unit text; `PathResult.spelled` and `full_spelled`
+carry its words.
 
 `decode_path` is the cyclic model's: every label after the first contributes
 its part past the overlap; the first contributes `label[start_offset:]` with
@@ -234,7 +257,10 @@ START first (the whole of it, when the window can hold it), then its suffixes
 from the root, longest first — drop the oldest gram and ask again. A context is
 *usable* when it has been seen `min_count` times and has something to continue
 with: a run to finish, a child, or an END leaf. `symbols` counts START.
-`None` when not even the last gram is known.
+`None` when not even the last gram is known. `anchored=False` skips the walk
+from START: for a window cut out of a longer history, which does not begin a
+text however many texts begin with those grams (the token-by-token walk,
+§11.4, cuts such windows).
 
 A context of exactly `depth` symbols stands at the end of its window: it can
 never have seen a next gram, only whether texts ended there. So it is consulted
@@ -420,8 +446,38 @@ bounded and the request is longer than the window.
 reached_end, full_text, legs`.
 
 `generate(max_length=40, count=1, mode="sample", temperature=1.0, seed=None,
-step_penalty=0.0, to_end=False, costs="logprob")` runs `predict("")`
-`count` times (one, for the cheapest path).
+step_penalty=0.0, to_end=False, costs="logprob", window=None)` runs
+`predict("")` `count` times (one, for the cheapest path and for the
+token-by-token walk at temperature 0).
+
+### 11.4 The token-by-token walk (`mode="slide"`)
+
+`predict(prefix, mode="slide", window=k, temperature=t)` is one loop:
+
+1. **query**: `context(grams, window)` — the deepest usable context of the last
+   `k` grams of everything said so far (all of it when `k` is `None`); a window
+   cut from a longer history is looked for from the root only;
+2. **decide**: `next_token(node, offset, temperature)` — inside a compressed
+   run the run's next gram at cost 0; at a node's end the cheapest option at
+   temperature 0 or a sample from `softmax(-cost / t)`, END included;
+3. **feed back**: the gram is appended to the history and its new unit to the
+   text; then 1 again.
+
+It stops at END, at `length` units (unless `to_end`), at `max_length`, or
+when the tree knows nothing about the context. `expanded` counts the queries:
+one per token, and one for END. With `k = None` the walk follows the deepest
+path the tree has, as the cheapest path does inside a run, and recites; with a
+window it decides afresh at every token and can forget its way into a loop
+(`…sets in the east and sets in the east…`). The tree has no cycle; the window
+has, and `MAX_SLIDE` (2 000 units) is the clock a walk to END gets when no
+`max_length` is given. A prefix the tree knows nothing about starts a new text
+from START, and is not the context of what follows.
+
+`next_token_accuracy(texts, window)` runs the same query and decision at
+every position of every text at temperature 0 and reports how often the
+token was the text's next one (`accuracy`), and how often the actual token was
+among the context's options at all (`known`) — the number that separates a
+deep window's top guess from its tail.
 
 ---
 
@@ -618,3 +674,18 @@ cannot.
 label reads the same way in both models and the decoder is shared in spirit.
 *Cost:* §16; the offset representation is the obvious next step if this
 structure is ever asked to hold a large corpus.
+
+**T-11 — Token by token is a mode of prediction, not a different search.** One
+query per token, the token fed back, the window a parameter of the query and
+not of the structure; the same `locate`, the same options, the same softmax.
+A window cut from a longer history is never matched from START. *Cost:* a
+walk that forgets can loop, so it carries a clock the cheapest path never
+needed.
+
+**T-12 — A sound is a unit, read through the sibling tokenizer.** The encoding
+gains a unit dial rather than the tree a second implementation: labels stay
+text, the tokenizer is idempotent on its own output so a label splits without
+it, and every prediction is spelled back through the same lexicon. The
+character path is untouched. *Cost:* a prefix the tree has never heard is kept
+as the sounds it makes, and the tokenizer's lexicon decides what a sound
+spells.

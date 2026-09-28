@@ -1,9 +1,10 @@
 """``python3 -m radixtree <command>`` - every command this model has.
 
     train      build the tree from a corpus, train it, save it
-    predict    the cheapest (or a sampled) continuation of a prefix
+    predict    the cheapest, a sampled, or a token-by-token continuation of a prefix
     generate   texts from START
-    score      log-probability and bits per character of texts
+    score      log-probability and bits per unit of texts
+    accuracy   next-token accuracy of the token-by-token walk, over windows
     stats      the size and shape of a saved model
     invert     flip a saved model (2NRL's negation) and save it
     2nrl       train on the bad texts, invert, fine-tune on the good ones
@@ -27,7 +28,7 @@ import sys
 
 from . import corpus
 from .check import check_all
-from .encoding import Encoding
+from .encoding import UNIT_KINDS, Encoding
 from .model import RadixTreeNet, load_model
 from .search import COSTS
 
@@ -43,7 +44,9 @@ def _add_train_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--act-lr", type=float, default=0.05)
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument("--depth", type=int, default=None, help="symbols a root path may hold (default: every whole suffix)")
-    p.add_argument("--n", type=int, default=3, help="characters per gram")
+    p.add_argument("--n", type=int, default=3, help="units per gram")
+    p.add_argument("--unit", choices=UNIT_KINDS, default="char",
+                   help="what a unit is: a character, or a phone or syllable read through the phonetic tokenizer")
     p.add_argument("--min-count", type=int, default=1, help="how often a context must have been seen to be trusted")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--no-compress", action="store_true", help="do not merge unary chains")
@@ -54,9 +57,13 @@ def _add_load(p: argparse.ArgumentParser) -> None:
     p.add_argument("--load", help="a model file written by train")
 
 
+def _encoding(args) -> Encoding:
+    return Encoding(unit=args.unit, n=args.n)
+
+
 def _train(args) -> RadixTreeNet:
     texts = corpus.read_texts(args.data)
-    model = RadixTreeNet(seed=args.seed, depth=args.depth, encoding=Encoding(n=args.n), min_count=args.min_count)
+    model = RadixTreeNet(seed=args.seed, depth=args.depth, encoding=_encoding(args), min_count=args.min_count)
     model.train(
         texts, epochs=args.epochs, lr=args.lr, act_lr=args.act_lr, batch_size=args.batch_size,
         auto_compress=not args.no_compress, verbose=args.verbose,
@@ -85,17 +92,26 @@ def cmd_train(args) -> int:
     return 0
 
 
+def _mode(args) -> str:
+    if args.slide:
+        return "slide"
+    return "sample" if args.sample else "dijkstra"
+
+
 def cmd_predict(args) -> int:
     model = _model(args)
     result = model.predict(
-        args.prefix, length=args.length, mode="sample" if args.sample else "dijkstra", step_penalty=args.step_penalty,
-        temperature=args.temperature, to_end=args.to_end, max_length=args.max_length, costs=args.costs, seed=args.sample_seed,
+        args.prefix, length=args.length, mode=_mode(args), step_penalty=args.step_penalty,
+        temperature=args.temperature, to_end=args.to_end, max_length=args.max_length, costs=args.costs,
+        seed=args.sample_seed, window=args.window,
     )
     if args.json:
         print(json.dumps(result.to_dict(), indent=1))
     else:
-        print(result.full_text)
-        print(f"  continuation {result.text!r}  cost {result.cost:.3f}  expanded {result.expanded}  "
+        print(result.full_spelled)
+        if model.encoding.phonetic:
+            print(f"  sounds {result.full_text}", file=sys.stderr)
+        print(f"  continuation {result.spelled!r}  cost {result.cost:.3f}  expanded {result.expanded}  "
               f"legs {result.legs}  reached END {result.reached_end}", file=sys.stderr)
     return 0
 
@@ -103,12 +119,12 @@ def cmd_predict(args) -> int:
 def cmd_generate(args) -> int:
     model = _model(args)
     results = model.generate(
-        max_length=args.max_length, count=args.count, mode="dijkstra" if args.dijkstra else "sample",
+        max_length=args.max_length, count=args.count, mode="slide" if args.slide else ("dijkstra" if args.dijkstra else "sample"),
         temperature=args.temperature, seed=args.sample_seed, step_penalty=args.step_penalty, to_end=args.to_end,
-        costs=args.costs,
+        costs=args.costs, window=args.window,
     )
     for r in results:
-        print(r.text)
+        print(r.full_spelled)
     return 0
 
 
@@ -127,6 +143,23 @@ def cmd_score(args) -> int:
     return 0
 
 
+def cmd_accuracy(args) -> int:
+    """Next-token accuracy of the token-by-token walk, over windows."""
+    model = _model(args)
+    texts = corpus.read_texts(args.texts) if args.texts else corpus.read_texts(args.data)
+    windows = [None if w in ("all", "none", "0") else int(w) for w in args.windows.split(",")]
+    rows = [model.next_token_accuracy(texts, window=w) for w in windows]
+    print(f"{'window':>8} {'tokens':>8} {'accuracy':>9} {'known':>7}")
+    for r in rows:
+        print(f"{('all' if r['window'] is None else r['window']):>8} {r['tokens']:8d} {r['accuracy']:9.3f} {r['known']:7.3f}")
+    if args.out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as fh:
+            json.dump({"texts": args.texts or args.data, "rows": rows}, fh, indent=1)
+        print(f"wrote {args.out}")
+    return 0
+
+
 def cmd_stats(args) -> int:
     model = _model(args)
     print(json.dumps(model.stats(), indent=1))
@@ -142,7 +175,7 @@ def cmd_invert(args) -> int:
 
 
 def cmd_2nrl(args) -> int:
-    model = _model(args) if args.load else RadixTreeNet(seed=args.seed, depth=args.depth, encoding=Encoding(n=args.n), min_count=args.min_count)
+    model = _model(args) if args.load else RadixTreeNet(seed=args.seed, depth=args.depth, encoding=_encoding(args), min_count=args.min_count)
     bad = corpus.read_texts(args.bad)
     good = corpus.read_texts(args.good)
     out = model.two_nrl(
@@ -195,7 +228,7 @@ def cmd_demo(args) -> int:
     texts = corpus.read_texts(args.data)
     print(f"{len(texts)} texts, {sum(len(t) for t in texts)} characters")
     check_all()
-    model = RadixTreeNet(seed=args.seed, depth=args.depth, encoding=Encoding(n=args.n), min_count=args.min_count)
+    model = RadixTreeNet(seed=args.seed, depth=args.depth, encoding=_encoding(args), min_count=args.min_count)
     for r in model.train(texts, epochs=args.epochs, lr=args.lr, act_lr=args.act_lr, batch_size=args.batch_size):
         print(f"  epoch {r['epoch']:2d}  loss {r['loss']:.4f}  nodes {r['nodes']}  ends {r['ends']}  "
               f"transitions {r['transitions']}  ({r['seconds']:.2f}s)")
@@ -205,10 +238,14 @@ def cmd_demo(args) -> int:
     print(f"  train bits/char {model.bits_per_char(texts)['bits_per_char']:.3f}\n")
     for prefix in ("the quick", "the cat", "knowledge", "th", "zzzq"):
         r = model.predict(prefix, length=30, to_end=True)
-        print(f"  {prefix!r:14} -> {r.text!r}  (cost {r.cost:.3f}, {r.expanded} nodes visited, END {r.reached_end})")
+        print(f"  {prefix!r:14} -> {r.spelled!r}  (cost {r.cost:.3f}, {r.expanded} nodes visited, END {r.reached_end})")
+    print("\n  token by token, a window of four grams:")
+    for prefix in ("the quick", "the cat"):
+        r = model.predict(prefix, length=40, to_end=True, mode="slide", window=4)
+        print(f"  {prefix!r:14} -> {r.spelled!r}  ({r.expanded} queries)")
     print("\n  three sampled texts:")
     for r in model.generate(max_length=50, count=3, seed=7):
-        print(f"    {r.text}")
+        print(f"    {r.full_spelled}")
     print("\n  what the tree cannot do: shown 'aaaa', it does not represent 'aaaaaaa'")
     small = RadixTreeNet(seed=args.seed)
     small.train(["aaaa"], epochs=1)
@@ -248,6 +285,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-seed", type=int, default=None)
     p.add_argument("--step-penalty", type=float, default=0.0, help="added to every step; may be negative here")
     p.add_argument("--costs", choices=COSTS, default="logprob")
+    p.add_argument("--slide", action="store_true", help="token by token: one query of the tree per token, fed back")
+    p.add_argument("--window", type=int, default=None, help="grams of context per query in --slide (default: all)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_predict)
 
@@ -257,6 +296,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--count", type=int, default=3)
     p.add_argument("--max-length", type=int, default=60)
     p.add_argument("--dijkstra", action="store_true", help="the one cheapest text instead of samples")
+    p.add_argument("--slide", action="store_true", help="token by token, one query per token")
+    p.add_argument("--window", type=int, default=None, help="grams of context per query in --slide")
     p.add_argument("--to-end", action="store_true")
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--sample-seed", type=int, default=None)
@@ -270,6 +311,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("text", nargs="*")
     p.add_argument("--texts", help="a file of texts to score, one per line")
     p.set_defaults(func=cmd_score)
+
+    p = sub.add_parser("accuracy", help="next-token accuracy of the token-by-token walk, over windows")
+    _add_train_options(p)
+    _add_load(p)
+    p.add_argument("--texts", help="texts to measure on, one per line (default: the training data)")
+    p.add_argument("--windows", default="1,2,3,4,6,8,all", help="comma-separated grams of context; 'all' is the whole history")
+    p.add_argument("--out")
+    p.set_defaults(func=cmd_accuracy)
 
     p = sub.add_parser("stats", help="size and shape")
     _add_train_options(p)

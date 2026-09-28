@@ -18,16 +18,22 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "PhoneticTokenizer"))
 
 from radixtree import corpus  # noqa: E402
 from radixtree.activation import DEFAULT_A, DEFAULT_B, DEFAULT_H, DEFAULT_K, MIN_B, SineActivation, sine_partials  # noqa: E402
 from radixtree.check import check_gradients, check_step  # noqa: E402
 from radixtree.cli import main as cli_main  # noqa: E402
 from radixtree.compare import compare, load_radixnet, markdown  # noqa: E402
-from radixtree.encoding import START_LABEL, Encoding  # noqa: E402
-from radixtree.model import MAX_LEGS, UNKNOWN_PROB, RadixTreeNet, TrainConfig, load_model  # noqa: E402
+from radixtree.encoding import PHONES, START_LABEL, SYLLABLES, Encoding  # noqa: E402
+from radixtree.model import MAX_LEGS, MAX_SLIDE, UNKNOWN_PROB, RadixTreeNet, TrainConfig, load_model  # noqa: E402
 from radixtree.search import cheapest_path, sample_walk  # noqa: E402
 from radixtree.tree import FIRST, ROOT, START, RadixTree  # noqa: E402
+
+try:
+    import phonetok  # noqa: E402,F401
+except ImportError:  # pragma: no cover
+    phonetok = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(os.path.dirname(HERE), "data")
@@ -113,7 +119,9 @@ class TestEncoding(unittest.TestCase):
         self.assertEqual(Encoding.from_dict(five.to_dict()), five)
         self.assertEqual(Encoding.from_dict(None), ENC)
         with self.assertRaises(ValueError):
-            Encoding.from_dict({"unit": "word", "n": 2})
+            Encoding.from_dict({"unit": "word", "n": 2}).validate()
+        with self.assertRaises(ValueError):
+            Encoding.from_dict({"unit": "char", "n": 3, "stride": 3})
 
 
 class TestActivation(unittest.TestCase):
@@ -728,6 +736,134 @@ class TestPrediction(unittest.TestCase):
         self.assertIsInstance(r.to_dict(), dict)
 
 
+class TestSlide(unittest.TestCase):
+    """Token by token: one query of the tree per token, the token fed back, the next query from the new context."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.model = corpus_model(seed=1, epochs=6)
+
+    def test_one_query_per_token(self):
+        r = self.model.predict("the quick", length=40, mode="slide", to_end=True)
+        self.assertEqual(r.text, " brown fox jumps over the lazy dog")
+        self.assertEqual(r.expanded, len(r.text) + 1)  # every character one query, and one for END
+        self.assertTrue(r.reached_end)
+        self.assertEqual(r.cost, 0.0)
+        self.assertEqual(len(r.node_ids), r.expanded)
+
+    def test_a_window_forgets(self):
+        model = self.model
+        whole = model.predict("the cat", length=60, mode="slide", to_end=True)
+        narrow = model.predict("the cat", length=60, mode="slide", to_end=True, window=1)
+        self.assertNotEqual(whole.text, narrow.text)
+        # a window of one gram is the first-order walk: every token is the choice at the last gram's context
+        grams = ENC.encode("the cat")
+        for step in range(min(8, len(narrow.text))):
+            node, offset = model.context(grams, 1)
+            _child, expected, _cost = model.next_token(node, offset)
+            self.assertEqual(narrow.text[step], expected[-1])
+            grams.append(expected)
+
+    def test_a_window_cut_from_a_history_never_begins_a_text(self):
+        model = self.model
+        t = model.tree
+        grams = ENC.encode("zz the quick brown")
+        node, _offset = model.context(grams, 3)
+        path = []
+        while node != ROOT:
+            path.append(node)
+            node = t.parent[node]
+        self.assertNotIn(START, path)
+        node, _offset = model.context(ENC.encode("the quick"), None)
+        self.assertEqual(t.symbols_of(node, _offset), len(ENC.encode("the quick")) + 1)  # the whole history, from START
+
+    def test_stops_and_the_clock(self):
+        model = self.model
+        self.assertLessEqual(len(model.predict("the", length=5, mode="slide").text), 6)
+        whole_walk = model.predict("the cat", length=30, mode="slide").text
+        capped = model.predict("the cat", length=30, mode="slide", max_length=4).text
+        self.assertEqual((len(capped), whole_walk.startswith(capped)), (4, True))
+        r = model.predict("the", length=10, mode="slide", to_end=True, window=2)
+        self.assertLessEqual(len(r.text), MAX_SLIDE)  # a window that forgets can go round; this is its clock
+        a = model.predict("the", length=30, mode="slide", temperature=0.8, seed=3, window=4)
+        b = model.predict("the", length=30, mode="slide", temperature=0.8, seed=3, window=4)
+        self.assertEqual(a.text, b.text)
+        self.assertEqual(len(model.generate(mode="slide", count=3)), 1)  # temperature 0 is deterministic: one text
+        self.assertEqual(len(model.generate(mode="slide", count=3, temperature=0.8, seed=1, window=4)), 3)
+        self.assertTrue(model.predict("", length=10, mode="slide").text)
+        self.assertTrue(model.predict("zzzq", length=10, mode="slide").text)  # nothing known: a new text
+        self.assertTrue(("th" + model.predict("th", length=10, mode="slide").text).startswith("the"))
+        with self.assertRaises(ValueError):
+            model.predict("the", mode="slide", window=0)
+
+    def test_accuracy(self):
+        model = self.model
+        whole = model.next_token_accuracy(CORPUS)
+        narrow = model.next_token_accuracy(CORPUS, window=1)
+        self.assertEqual(set(whole), {"window", "tokens", "accuracy", "known"})
+        self.assertEqual(whole["known"], 1.0)  # a training text is always among the options
+        self.assertGreater(whole["accuracy"], narrow["accuracy"])
+        self.assertEqual(whole["tokens"], sum(len(ENC.encode(t)) + 1 for t in CORPUS))
+
+
+@unittest.skipUnless(phonetok, "the phonetic tokenizer is not importable")
+class TestPhonetic(unittest.TestCase):
+    """The tree over sounds: text read through the phonetic tokenizer, predictions spelled back into words."""
+
+    def test_text_becomes_sounds(self):
+        enc = Encoding(unit=PHONES)
+        enc.validate()
+        self.assertEqual(enc.units("The cat sat."), ["DH", "AH0", "#", "K", "AE1", "T", "#", "S", "AE1", "T", "."])
+        self.assertEqual(enc.encode("the cat"), ["DH AH0 #", "AH0 # K", "# K AE1", "K AE1 T"])
+        self.assertEqual(enc.decode_grams(enc.encode("the cat")), "DH AH0 # K AE1 T")
+        self.assertEqual(enc.spell("DH AH0 # K AE1 T"), "the cat")
+        self.assertEqual(enc.spell_tail("DH AH0 # K AE1 T # S AE1 T", "# S AE1 T"), " sat")
+        self.assertEqual(enc.first_gram("DH AH0 # K AE1 T"), "DH AH0 #")
+        self.assertEqual(enc.last_unit("K AE1 T"), "T")
+        self.assertEqual(enc.grams_held("DH AH0 # K AE1 T"), 4)
+        self.assertTrue(enc.has_unit_prefix("DH AH0 # K AE1 T # S AE1 T", "the cat"))
+        self.assertEqual(str(enc), "phone:3:1")
+        self.assertEqual(Encoding.from_dict(enc.to_dict()), enc)
+        self.assertEqual(Encoding(unit=SYLLABLES, n=2).encode("butter cup"), ["B.AH1.T ER0", "ER0 #", "# K.AH1.P"])
+
+    def test_a_tree_over_sounds_recites_in_words(self):
+        model = RadixTreeNet(seed=1, encoding=Encoding(unit=PHONES))
+        model.train(CORPUS, epochs=3, **FAST)
+        model.tree.check_invariants(texts=CORPUS, compressed=True)
+        self.assertEqual(model.stats()["units"], "phones")
+        r = model.predict("the quick", length=20, to_end=True)
+        self.assertEqual(r.spelled, " brown fox jumps over the lazy dog")
+        self.assertTrue(r.text.startswith("# B R AW1 N"))
+        self.assertEqual(r.full_spelled, "the quick brown fox jumps over the lazy dog")
+        s = model.score("the cat sat on the mat")
+        self.assertEqual((s["unknown_transitions"], s["units"]), (0, "phones"))
+        self.assertEqual(model.bits_per_char(CORPUS)["unknown_transitions"], 0)
+        slide = model.predict("the cat", length=12, to_end=True, mode="slide", window=4)
+        self.assertEqual(slide.expanded, len(slide.text.split()) + 1)  # one query per sound, one for END
+        self.assertTrue(slide.spelled.startswith(" "))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.json.gz")
+            model.save(path)
+            loaded = load_model(path)
+            self.assertEqual(loaded.encoding, model.encoding)
+            self.assertEqual(loaded.predict("the quick", to_end=True).spelled, r.spelled)
+
+    def test_syllables(self):
+        model = RadixTreeNet(seed=1, encoding=Encoding(unit=SYLLABLES, n=2))
+        model.train(CORPUS, epochs=3, **FAST)
+        model.tree.check_invariants(texts=CORPUS, compressed=True)
+        self.assertEqual(model.predict("the cat", length=10, to_end=True).spelled, " sat on the mat")
+        self.assertEqual(model.stats()["units"], "syllables")
+
+    def test_cli_speaks_in_sounds(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli_main(["predict", "--unit", "phone", "--epochs", "2", "the quick", "--to-end"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue().strip(), "the quick brown fox jumps over the lazy dog")
+        self.assertIn("sounds DH AH0 # K W IH1 K", err.getvalue())
+
+
 # ---------------------------------------------------------------------------
 # scoring
 # ---------------------------------------------------------------------------
@@ -778,13 +914,16 @@ class TestScoring(unittest.TestCase):
         bad = model.score("the quick brown cat")
         self.assertGreater(bad["unknown_transitions"], 0)
         self.assertLess(bad["log_prob"], s["log_prob"])
-        self.assertEqual(model.score("ab"), {"log_prob": 0.0, "per_char": 0.0, "chars": 2, "transitions": 0, "unknown_transitions": 0})
+        self.assertEqual(
+            model.score("ab"),
+            {"log_prob": 0.0, "per_char": 0.0, "chars": 2, "transitions": 0, "unknown_transitions": 0, "units": "chars"},
+        )
         with self.assertRaises(TypeError):
             model.score(None)
         bits = model.bits_per_char(CORPUS)
         self.assertEqual(bits["unknown_transitions"], 0)
         self.assertGreater(bits["bits_per_char"], 0.0)
-        self.assertEqual(set(bits), {"bits_per_char", "chars", "transitions", "unknown_transitions", "miss_rate"})
+        self.assertEqual(set(bits), {"bits_per_char", "chars", "transitions", "unknown_transitions", "miss_rate", "units"})
 
     def test_the_repetition_the_graph_generalises_the_tree_does_not(self):
         model = RadixTreeNet(seed=1)
