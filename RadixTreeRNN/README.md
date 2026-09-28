@@ -18,5 +18,6 @@ this directory is the RNN variant of it.
 ## Status
 
 **A stub.** See `RadixTrieLLM_RNN/main.py` for the working version of the same
-shape (transformer-per-node), and `RadixCyclicNN/` for the full architecture
-this line of thinking became.
+shape (transformer-per-node), `RadixCyclicNN/` for the full architecture
+this line of thinking became, and `RadixAcyclicNN/` for that architecture kept
+as a tree — the radix tree with no cycles, measured against the cyclic graph.

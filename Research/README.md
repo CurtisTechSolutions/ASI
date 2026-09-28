@@ -37,6 +37,7 @@ it. Read any one first; each says where it depends on the others.
 | Idea | Code |
 |---|---|
 | the cyclic graph, split / merge, the invariants | `RadixCyclicNN/radixnet/graph.py` |
+| the same network with no cycles — a node is a context, not a gram — and what that measures against the graph | `RadixAcyclicNN/radixtree/tree.py`, `RadixAcyclicNN/README.md` |
 | the dynamic window: nodes halved down a binary ladder and grown back at the top | `RadixCyclicNN/radixnet/window.py`, `graph.py` (`split_window`) |
 | shortest-path prediction over the unrolled graph | `RadixCyclicNN/radixnet/search.py` |
 | the sine activation and its partial derivatives | `RadixCyclicNN/radixnet/activation.py` |

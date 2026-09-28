@@ -7,7 +7,9 @@ compressing and each node's model only has to explain the bytes on its own edge.
 
 This is one variation of many. `RadixCyclicNN/` is where the idea is built out
 properly — with cycles, a self-compressing graph and a sine activation instead
-of a trie of transformers.
+of a trie of transformers. `RadixAcyclicNN/` is that same network with the
+cycles left out: a node is a context rather than a gram, so the structure stays
+a tree, and its README measures what the cycles buy.
 
 ## Contents
 
