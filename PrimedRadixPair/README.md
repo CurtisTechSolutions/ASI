@@ -12,9 +12,10 @@ structure again: training is a counter going up at an address that is
 not — and never by a text merely read. The two are connected wherever they hold
 an equal sequence, at every level, and the connection is where a step's two
 numbers — how often it was read, what it earned — are read together into one
-answer. Text goes in and comes out through an **encoder/decoder** behind a
-tokenizer of your choosing: characters, bytes, the byte-pair encoding LLMs
-use, or the repository's phonetic tokenizer.
+answer. Text goes in and comes out through an **encoder/decoder** behind a tokenizer of your choosing:
+characters, bytes, GPT-2's own tokenizer or a byte-pair encoding of your own
+size, or the repository's phonetic tokenizer at the phoneme or the syllable
+level.
 
 ## Contents
 
