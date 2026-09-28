@@ -198,6 +198,7 @@ the window (`depth 8`).
 | cyclic graph | 3 516 | 11 260 | 9 | 1.924 | 4.057 | 12 % | 0 / 640 |
 | tree, unbounded, `min_count 1` | 61 213 | 1 510 919 | 871 | 0.145 | 6.514 | 54 % | 572 / 640 |
 | tree, unbounded, `min_count 2` | 61 213 | 1 510 919 | 879 | 1.288 | 5.629 | 32 % | 198 / 640 |
+| tree, `depth 2` | 12 006 | 38 338 | 248 | 1.843 | 3.832 | 11 % | 0 / 640 |
 
 **What the tree has that the graph cannot.** No clock and no budget in the
 search — "keep going until there is nowhere to go" is a complete algorithm. A

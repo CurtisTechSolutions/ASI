@@ -1,1 +1,54 @@
 tree: training on 640 texts, 10 epochs
+cyclic: training on 640 texts, 10 epochs
+repetition and generalisation
+corpus: data/corpus.txt - 640 texts / 44335 chars to train, 160 texts / 10897 chars held out (sha256 31ea49d2800c)
+settings: seed 1, 10 epochs, lr 0.5, act_lr 0.05, batch 32, depth 2, min_count 1
+
+| | cyclic graph | tree |
+|---|---:|---:|
+| real nodes | 3516 | 12006 |
+| END leaves | 1 | 731 |
+| edges | 9699 | 12737 |
+| distinct grams | 4228 | 4228 |
+| label characters | 11260 | 38338 |
+| grams per node | 1.203 | 0.352 |
+| transitions per epoch | 42310 | 81374 |
+| training seconds | 8.19 | 248.14 |
+| final epoch loss (nats) | 1.405 | 4.614 |
+| train bits/char | 1.924 | 1.843 |
+| train miss rate | 0.000 | 0.000 |
+| held-out bits/char | 4.057 | 3.832 |
+| held-out miss rate | 0.122 | 0.109 |
+| texts recited whole | 0/640 | 0/640 |
+
+| prefix | cyclic graph says | tree says |
+|---|---|---|
+| `the quick` | 'ets,' | 'ed' |
+| `the cat` | 'e.' | 'ion' |
+| `knowledge` | 't' | ' monit' |
+| `two plus` | ' up:' | ' an' |
+| `the moon` | '.' | '.' |
+| `th` | 'e' | 'er' |
+| `zzzq` | 'uest' | 'free' |
+
+| text | chars | cyclic nodes | tree nodes | cyclic label chars | tree label chars |
+|---|---:|---:|---:|---:|---:|
+| `a` × 4 | 4 | 1 | 3 | 3 | 9 |
+| `a` × 10 | 10 | 1 | 3 | 3 | 9 |
+| `a` × 100 | 100 | 1 | 3 | 3 | 9 |
+| `a` × 1000 | 1000 | 1 | 3 | 3 | 9 |
+| `abc` × 2 | 6 | 2 | 5 | 7 | 17 |
+| `abc` × 5 | 15 | 2 | 5 | 7 | 17 |
+| `abc` × 50 | 150 | 2 | 5 | 7 | 17 |
+| `abc` × 500 | 1500 | 2 | 5 | 7 | 17 |
+
+shown `aaaa` once, scoring `aaaaaaa`:
+- cyclic graph: representable True, 0 unknown of 6 transitions, log-prob -3.59
+- tree: representable False, 0 unknown of 6 transitions, log-prob -2.52
+
+wrote results/prose_depth2_results.json
+
+real	4m16.853s
+user	4m14.337s
+sys	0m0.063s
+exit 0
