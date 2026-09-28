@@ -4,6 +4,8 @@ frontend/node_modules/
 checkpoints/
 /model.json
 /model.phone.json
+/model.token.json
+/merges.txt
 /speech.wav
 /model.json.gz
 /*.json.gz

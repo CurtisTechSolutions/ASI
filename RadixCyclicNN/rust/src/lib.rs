@@ -60,6 +60,7 @@ pub mod attention;
 pub mod beam;
 pub mod bench;
 pub mod blame;
+pub mod bpe;
 pub mod calc;
 pub mod chat;
 pub mod chatgpt;

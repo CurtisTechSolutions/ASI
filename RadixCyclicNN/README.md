@@ -235,6 +235,7 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 | `attention` | the attention band - where inside a gram a correction lands: without options it is shown; `--on` (at the blur it had, else 0.5), `--blur X` (0..1: the band is 1 at a gram's centre and 1 - X at its ends; switches it on), `--off` (each changed unit charged to the step that wrote it) change it and save the model (`--dry-run`: in memory only, `--out PATH`); `--wrong TEXT --right TEXT` prints where that correction would land, gram by gram, under the band and without it. The count model and the negative network take a band (point `--model` at the negative file for its own); the sine and phase models refuse one |
 | `window` | the dynamic window - a ladder of node sizes halving from 32 to 4 and back up: without options it is shown; `--on` (at the ladder it had, else 32 down to 4, standing at the top, stepping every epoch), `--top N`, `--floor N` (powers of two), `--size N` (where it stands), `--auto` / `--manual`, `--off` change it and save the model (`--dry-run`: in memory only, `--out PATH`); `--step [N]` takes N steps - each merges what fits the window, halves every node that is longer (both halves keep the node's state, activation and count, joined by a heavy connection) and moves the window - and saves. Every kind takes a window |
 | `paths` | count model: the judged paths - `--limit 20`, `--node LABEL` (only the paths leaving one node). Each line is `prev -> parent -> child`, its correct / incorrect counter, how often it has been walked since (`seen`) and what that says about the edge (`seen ratio`, `correct ratio`) |
+| `tokenizer <action>` | the traditional LLM tokenizer the token unit reads through (byte-level BPE): `info` (which merges are in use), `encode TEXT... [--special]` (tokens, ids and the text form), `decode ID...` / `decode --text TEXT` (ids, or a text of tokens, back into text), `learn --data FILE... --vocab 4096 --min-frequency 2 --out PATH [--whole-file] [--note]` (learn merges from a corpus); each takes `--merges FILE` to read another merges file than `$RADIXNET_TOKENIZER` or the bundled one |
 | `words` | word model: its alphabet - `--limit 20` (0 = all). Every word it has read, with how many of the graph's three-word windows hold it; a word graph is addressed in words everywhere else too (`nodes --node "sat on the mat"`) |
 | `nodes` | count model: each node against the nodes around it - `--limit 10`, `--node LABEL`. A row per previous node and a row per next node, each with its share of that side's traffic (`seen %`) and of that side's reward (`reward %`, signed), how much of the edge a judged context has been watching, and what those contexts made of it |
 | `chatgpt [--url] [--chatgpt-model] [--timeout] <action>` | `models` (what the key may use); `ask --prompt TEXT [--system TEXT] [--temperature 0.7] [--json]`. Needs `$OPENAI_API_KEY` (or `$OPENAI_API_KEY_FILE`); `$OPENAI_BASE_URL` points at any OpenAI-compatible server |
@@ -2334,7 +2335,7 @@ build the same graph and read each other's files):
 
 | flag | what it sets | default |
 |---|---|---|
-| `--units char\|word\|phone\|syllable` | what one unit of text is: a character, a whitespace-delimited word, a *sound* or a syllable (the text read through the phonetic tokenizer, `../PhoneticTokenizer`) | `char` |
+| `--units char\|word\|phone\|syllable\|acoustic\|token` | what one unit of text is: a character, a whitespace-delimited word, a *sound* or a syllable (the text read through the phonetic tokenizer, `../PhoneticTokenizer`), an acoustic unit, or a *token* of the traditional LLM tokenizer (byte-level BPE, [below](#the-tokens-the-traditional-llm-tokenizer)) | `char` |
 | `--ngram N` | how many units one gram holds - the *n* of the n-gram, any number | 3 |
 | `--stride N` | how far apart two consecutive grams start: **1** slides them (they overlap by n-1), **n** cuts the text into non-overlapping groups | 1 |
 
@@ -2356,6 +2357,9 @@ go/bin/radixnet-count --model m.json predict --prefix "the cat sat" --k 5       
 python -m radixnet --model s.json --encoding phone:3:1 train --data book.txt   # trigrams of sounds
 python -m radixnet --model s.json predict --prefix "the cat sat" --k 5         # ... spelled back into words
 python -m radixnet --model s.json --encoding syllable:2:1 train --data book.txt   # syllable bigrams
+
+python -m radixnet --model t.json --encoding token:3:1 train --data book.txt   # trigrams of BPE tokens
+python -m radixnet --model t.json predict --prefix "the cat sat" --k 5         # ... decoded back into text
 ```
 
 ### The phonetic units: the same model over an alphabet of sounds
@@ -2503,6 +2507,71 @@ the codebook that made them: the bundled codebook was learned from the
 synthesizer's own speech, and `PHONETOK_CODEBOOK=mine.tsv` points every command
 at one learned from real recordings (`phonetok learn recordings/*.wav --out
 mine.tsv`), which is what real speech needs.
+
+### The tokens: the traditional LLM tokenizer
+
+`--encoding token:3:1` (or `bpe:3:1`) reads every text the way GPT-2 and the models after it do:
+**byte-level byte-pair encoding**. The text is cut into pre-tokens by GPT-2's pattern - a word, a run
+of digits or a run of punctuation with the space before it, whitespace, an English contraction -
+each pre-token's UTF-8 bytes are written in GPT-2's byte alphabet (`Ġ` is the space, `Ċ` the
+newline), and a ranked list of **merges** joins them pairwise until none applies. Every byte is a
+token, so any text at all is read, exactly: there is no unknown token, and decoding gives the text
+back byte for byte. A space is put before every text, as SentencePiece models do, so the first word
+is the same token as the same word anywhere else. `radixnet/bpe.py` is the tokenizer; the Go and Rust
+ports carry the same one (`go/radixnet/bpe.go`, `rust/src/bpe.rs`), token for token.
+
+The graph is built over the tokens, so a label has to be text that reads back as the tokens it was
+made of. A token that is a space and a word is written as the word, bare; every other token is
+glued on with `⁀`:
+
+```
+$ python -m radixnet tokenizer encode "The walking cat."
+text       "The walking cat."
+tokens     5
+text form  "The walk ⁀ing cat ⁀."
+#    id  token    bytes
+-  ----  -------  -------
+0   367  "ĠThe"   " The"
+1   929  "Ġwalk"  " walk"
+2   283  "ing"    "ing"
+3  1060  "Ġcat"   " cat"
+4    46  "."      "."
+```
+
+A text of plain words is its own text form (`the cat sat on the mat` is six tokens, written as
+itself), a text that is the text form is read piece by piece, anything else is read as text - and
+where both readings apply they agree - so a label cuts into the tokens it was made of and a prefix
+typed as text is looked for as its tokens. `predict` and `generate` print what the tokens spell:
+
+```
+$ python -m radixnet --model t.json predict --prefix "the cat sat" --length 8 --mode beam
+prefix        "the cat sat"
+continuation  "on the mat"
+full text     "the cat sat on the mat"
+spelled       "the cat sat on the mat"
+```
+
+**The merges** ship with the package (`radixnet/data/merges.txt`, 4096 ids: the 256 bytes, 3839
+merged tokens and `<|endoftext|>`), learned from this repository's own prose; they read English of
+that kind at about three characters a token. Learn your own from your corpus and point every port at
+them with `RADIXNET_TOKENIZER` - and keep the two together: a model's tokens mean nothing without the
+merges that made them, so train and predict with the same file (the rule the phonetic lexicon and the
+acoustic codebook have too).
+
+```bash
+python -m radixnet tokenizer learn --data book.txt --vocab 8000 --out book.merges.txt   # GPT-2's merges.txt format
+RADIXNET_TOKENIZER=book.merges.txt python -m radixnet --model b.json --encoding token:3:1 train --data book.txt
+python -m radixnet tokenizer encode "Hello, world!" --special     # tokens, ids, the text form
+python -m radixnet tokenizer decode 1021 557 426                  # ids back into text, exactly: "Hello"
+python -m radixnet tokenizer decode --text "The walk ⁀ing cat ⁀."  # a text of tokens back into text
+python -m radixnet tokenizer info                                 # which merges are in use
+go/bin/radixnet-count --model t.json predict --prefix "the cat sat"   # the same model in Go
+make token-demo                                                   # train, predict, generate, list the tokens
+```
+
+A model over tokens is spoken by `speak` and `say` as the text its tokens spell, and `words` lists
+the tokens it has read. `SPEC-Tokens.md` is the specification and `DECISIONS.md` D-090 the reasoning;
+`make token-parity` holds the three ports to the same graph, the same predictions and the same audio.
 
 ## The attention band: where inside a gram a correction lands
 
@@ -2976,7 +3045,7 @@ make frontend-test  # cd frontend && npm test (node --test over the settings sto
 
 ```
 RadixCyclicNN/
-  radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, phasesearch, penalty, model,
+  radixnet/           activation, counter, encoding, bpe (the traditional LLM tokenizer; data/merges.txt), graph, backend(+torch), search, beam, phasesearch, penalty, model,
                       countnet, negative, resonance, metacog, blame, duo, diff, schedule, gan, checkpoint, bench,
                       cli, api, llm, ollama, chatgpt, tutor, recall, critic, codegen, tools, agent, browser, mcp,
                       vision, speech, dialogue, chat, assistant (today's format: messages in, thinking and a
@@ -2997,6 +3066,7 @@ RadixCyclicNN/
   SPEC-LeastPunished.md   the traversal that follows the blame (built)
   SPEC-AttentionBand.md   where inside a gram a correction lands (built)
   SPEC-DynamicWindow.md   the ladder of node sizes, halving from 32 to 4 and back up (built)
+  SPEC-Tokens.md      the token unit: byte-level BPE as an encoder and decoder layer, and its text form (built)
   SPEC-EdgeDecay.md   a node's edges fading on the graph's own clock (proposed)
 ```
 

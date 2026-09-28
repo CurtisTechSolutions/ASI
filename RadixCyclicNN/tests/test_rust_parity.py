@@ -529,7 +529,8 @@ class TestRustWordParity(unittest.TestCase):
 
     def test_the_other_dials_agree_too(self):
         """Any n, any stride: the two sides build the same graph from the same grams."""
-        for spec in ("char:5:1", "char:4:4", "word:2:1", "phone:3:1", "phone:2:2", "syllable:2:1"):
+        for spec in ("char:5:1", "char:4:4", "word:2:1", "phone:3:1", "phone:2:2", "syllable:2:1", "token:3:1",
+                     "token:2:2"):
             with self.subTest(encoding=spec):
                 pym = os.path.join(TMP.name, f"py.{spec.replace(':', '-')}.json")
                 rsm = os.path.join(TMP.name, f"rs.{spec.replace(':', '-')}.json")
@@ -574,6 +575,25 @@ class TestRustWordParity(unittest.TestCase):
                 self.assertGreater(len(x), 16000)
                 self.assertLessEqual(max(abs(p - q) for p, q in zip(x, y)), 64)
 
+    def test_the_same_prediction_in_tokens(self):
+        """A model over BPE tokens: the same walk, the same tokens, and the same text they spell."""
+        spec = "token:3:1"
+        pym = os.path.join(TMP.name, "py.token.json")
+        rsm = os.path.join(TMP.name, "rs.token.json")
+        py("--kind", "count", "--encoding", spec, "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=pym)
+        rust("--encoding", spec, "--seed", 1, "train", "--data", CORPUS, "--epochs", 2, model=rsm)
+        for prefix in ("the cat sat", "the dog chased.", ""):
+            with self.subTest(prefix=prefix):
+                a = py("predict", "--prefix", prefix, "--length", 6, "--k", 3, model=pym)
+                b = rust("predict", "--prefix", prefix, "--length", 6, "--k", 3, model=rsm)
+                self.assertEqual(a["continuation"], b["continuation"])
+                self.assertEqual(a["full_text"], b["full_text"])
+                self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+        for reader, path in ((rust, pym), (py, rsm)):  # each reads the other's file as the model of tokens it is
+            info = reader("info", model=path)
+            self.assertEqual(info["stats"]["encoding"], spec)
+            self.assertEqual(info["stats"]["units"], "tokens")
+
     def test_the_same_say(self):
         """The output decoder: the same text said in the same units is the same audio, sample for sample, with no model file."""
 
@@ -587,6 +607,7 @@ class TestRustWordParity(unittest.TestCase):
             ("syllable:2:1", ["the cat sat on the mat"], []),
             ("char:3:1", ["the cat sat on the mat.", "hello, world"], []),
             ("word:2:1", ["the cat sat on the mat"], []),
+            ("token:3:1", ["the cat sat on the mat ⁀.", "The walking cats, 3 of them!"], []),
             ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1", "q3 q7"], []),
             ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1"], ["--polish", "8"]),
         )

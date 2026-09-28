@@ -74,15 +74,30 @@ const (
 	// the graph is built over; as text the units are tokens taken as they come,
 	// like words, and what the model says is spoken through the vocoder.
 	Acoustic UnitKind = "acoustic"
+	// BPETokens: one unit is one *token* of the traditional LLM tokenizer -
+	// byte-level byte-pair encoding, GPT-2's way (bpe.go).  The text is read
+	// through the tokenizer, and a label is the tokens' text form: a token that
+	// is a space and a word is written as the word, any other glued on with ⁀,
+	// so "The walking cat." is the units The walk ⁀ing cat ⁀.
+	BPETokens UnitKind = "token"
 )
 
 // Valid reports whether k is a unit kind this package knows.
 func (k UnitKind) Valid() bool {
-	return k == Chars || k == Words || k == Phones || k == Syllables || k == Acoustic
+	return k == Chars || k == Words || k == Phones || k == Syllables || k == Acoustic || k == BPETokens
 }
 
 // Phonetic reports whether the units are sounds rather than letters or words.
 func (k UnitKind) Phonetic() bool { return k == Phones || k == Syllables }
+
+// Reads reports whether a text is *read* into these units through a tokenizer
+// whose text form is idempotent (sounds, syllables, BPE tokens): a text that
+// already is units passes through, anything else is read.
+func (k UnitKind) Reads() bool { return k.Phonetic() || k == BPETokens }
+
+// Spells reports whether a text of these units spells something else - sounds
+// their words, tokens their text - which Encoding.Spell gives.
+func (k UnitKind) Spells() bool { return k.Reads() }
 
 // Tokens reports whether the units are whitespace-separated tokens taken as
 // they come (words, acoustic units).
@@ -99,6 +114,8 @@ func (k UnitKind) Word() string {
 		return "syllable"
 	case Acoustic:
 		return "unit"
+	case BPETokens:
+		return "token"
 	}
 	return "character"
 }
@@ -152,7 +169,8 @@ func (e Encoding) WithDefaults() Encoding {
 // Validate reports what is wrong with an encoding, if anything.
 func (e Encoding) Validate() error {
 	if !e.Unit.Valid() {
-		return fmt.Errorf("unit must be %q, %q, %q, %q or %q, got %q", Chars, Words, Phones, Syllables, Acoustic, e.Unit)
+		return fmt.Errorf("unit must be %q, %q, %q, %q, %q or %q, got %q", Chars, Words, Phones, Syllables, Acoustic,
+			BPETokens, e.Unit)
 	}
 	if e.Unit.Phonetic() {
 		if _, err := phoneticTokenizer(e.Unit); err != nil {
@@ -162,6 +180,11 @@ func (e Encoding) Validate() error {
 	if e.Unit == Acoustic {
 		if _, err := acousticTokenizer(); err != nil {
 			return err // and the acoustic unit its codebook, to hear recordings and be heard
+		}
+	}
+	if e.Unit == BPETokens {
+		if _, err := DefaultTokenizer(); err != nil {
+			return err // and the token unit its merges
 		}
 	}
 	if e.N < 1 {
@@ -238,8 +261,10 @@ func ParseEncoding(spec string) (Encoding, error) {
 		e.Unit = Syllables
 	case "acoustic", "acoustics", "audio", "unit", "units":
 		e.Unit = Acoustic
+	case "token", "tokens", "bpe", "subword", "subwords":
+		e.Unit = BPETokens
 	default:
-		return Encoding{}, fmt.Errorf("encoding %q: unit must be char, word, phone, syllable or acoustic, got %q", spec, parts[0])
+		return Encoding{}, fmt.Errorf("encoding %q: unit must be char, word, phone, syllable, acoustic or token, got %q", spec, parts[0])
 	}
 	if len(parts) > 1 && parts[1] != "" {
 		n, err := strconv.Atoi(parts[1])
@@ -323,6 +348,11 @@ func (e Encoding) Units(text string) Units {
 		// through unchanged, so a label cuts into the units it was made of.
 		return wordUnits(phoneticText(e.Unit, text))
 	}
+	if e.Unit == BPETokens {
+		// the text read through the BPE tokenizer; text that already is tokens passes
+		// through unchanged, so a label cuts into the units it was made of
+		return wordUnits(tokenText(text))
+	}
 	return charUnits(text)
 }
 
@@ -366,6 +396,9 @@ func (e Encoding) Len(text string) int {
 	if e.Unit.Phonetic() {
 		return len(strings.Fields(phoneticText(e.Unit, text)))
 	}
+	if e.Unit == BPETokens {
+		return len(tokenUnits(text))
+	}
 	return utf8.RuneCountInString(text)
 }
 
@@ -388,6 +421,8 @@ func (e Encoding) Join(parts ...string) string {
 	for _, p := range parts {
 		if e.Unit.Phonetic() { // a piece given as text joins as the sounds it makes, so a joined text is all sounds
 			p = phoneticText(e.Unit, p)
+		} else if e.Unit == BPETokens { // and as the tokens it reads as
+			p = tokenText(p)
 		}
 		if p != "" {
 			kept = append(kept, p)
@@ -417,8 +452,12 @@ func (e Encoding) HasUnitPrefix(text, prefix string) bool {
 	if e.Unit == Chars {
 		return strings.HasPrefix(text, prefix)
 	}
-	if e.Unit.Phonetic() { // a prefix given as text is looked for as the sounds it makes
-		prefix = phoneticText(e.Unit, prefix)
+	if e.Unit.Reads() { // a prefix given as text is looked for as the units it reads as
+		if e.Unit == BPETokens {
+			prefix = tokenText(prefix)
+		} else {
+			prefix = phoneticText(e.Unit, prefix)
+		}
 		if prefix == "" {
 			return true
 		}

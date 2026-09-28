@@ -964,7 +964,7 @@ func Deltas(enc Encoding, labels []string, nodeIDs []int, text string) []string 
 	if tail == "" {
 		return []string{text}
 	}
-	words := enc.Unit == Words
+	words := enc.Unit != Chars // every unit but the character is written with a space between two
 	var head string
 	if words {
 		switch {

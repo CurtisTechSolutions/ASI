@@ -43,6 +43,8 @@ pub struct Speaker {
     pub rate: u32,
     letters: String,
     spoken_words: usize,
+    /// A token model's bytes that do not finish a character yet.
+    pending: Vec<u8>,
     /// Every token that reached the voice, for the record.
     pub tokens: Vec<String>,
 }
@@ -67,6 +69,7 @@ impl Speaker {
                 rate: tok.book.analysis.rate,
                 letters: String::new(),
                 spoken_words: 0,
+                pending: Vec::new(),
                 tokens: Vec::new(),
             });
         }
@@ -78,6 +81,7 @@ impl Speaker {
             rate,
             letters: String::new(),
             spoken_words: 0,
+            pending: Vec::new(),
             tokens: Vec::new(),
         })
     }
@@ -107,7 +111,22 @@ impl Speaker {
             let words: Vec<String> = piece.split_whitespace().map(String::from).collect();
             return self.feed_words(&words);
         }
-        // letters: a word ends at whitespace; punctuation ends it too and becomes a pause
+        if self.enc.unit == Unit::BpeTokens {
+            // tokens: the text their bytes spell, spoken as a letter model's letters
+            let Ok(tok) = crate::bpe::default_tokenizer() else {
+                return Vec::new();
+            };
+            let mut data = std::mem::take(&mut self.pending);
+            data.extend(tok.bytes_of(piece));
+            let (text, rest) = crate::bpe::decode_utf8(&data, false);
+            self.pending = rest;
+            return self.feed_letters(&text);
+        }
+        self.feed_letters(piece)
+    }
+
+    /// Letters: a word ends at whitespace; punctuation ends it too and becomes a pause.
+    fn feed_letters(&mut self, piece: &str) -> Vec<u8> {
         let mut out = Vec::new();
         for c in piece.chars() {
             if c.is_whitespace() {
@@ -167,8 +186,15 @@ impl Speaker {
             self.tokens.push("</s>".to_string());
             return voc.end();
         }
+        let mut out = Vec::new();
+        if !self.pending.is_empty() {
+            // a character the walk left unfinished is read as what it is
+            let data = std::mem::take(&mut self.pending);
+            let (text, _) = crate::bpe::decode_utf8(&data, true);
+            out.extend(self.feed_letters(&text));
+        }
         // a letter model's last word, so the sentinel is recorded after it
-        let mut out = self.flush_letters();
+        out.extend(self.flush_letters());
         self.tokens.push("</s>".to_string());
         out.extend(self.synth.end());
         self.spoken_words = 0;
@@ -376,9 +402,12 @@ pub fn decoder_name(enc: Encoding) -> &'static str {
 }
 
 /// The words a text spells: through the tokenizer for a model of sounds (so
-/// `"the cat"` given to a phone model spells `"the cat"` too), the text itself
-/// for every other unit.
+/// `"the cat"` given to a phone model spells `"the cat"` too) or of tokens,
+/// the text itself for every other unit.
 pub fn spelled(enc: Encoding, text: &str) -> String {
+    if enc.unit == Unit::BpeTokens {
+        return enc.spell(text);
+    }
     if !enc.unit.phonetic() {
         return text.to_string();
     }

@@ -38,7 +38,7 @@ export function unitStyle(weight) {
   };
 }
 
-/** The units of a gram: its characters, or its space-separated tokens under a word, phone, syllable or acoustic encoding. */
+/** The units of a gram: its characters, or its space-separated tokens under a word, phone, syllable, acoustic or token encoding. */
 export function gramUnits(gram, unit) {
   const text = String(gram ?? "");
   return unit && unit !== "char" ? text.split(" ") : Array.from(text);

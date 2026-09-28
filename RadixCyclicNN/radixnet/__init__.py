@@ -30,9 +30,10 @@ from .backend import (
     torch_available,
 )
 from .checkpoint import CheckpointManager
+from .bpe import BPETokenizer
 from .encoding import (
-    ACOUSTIC, BACK_LABEL, CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, THINK_LABEL, WINDOW, WORDS, Decoder, Encoder,
-    Encoding, parse_encoding,
+    ACOUSTIC, BACK_LABEL, CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, THINK_LABEL, TOKENS, WINDOW, WORDS, Decoder,
+    Encoder, Encoding, parse_encoding,
 )
 from .gan import EvolveConfig, Evolver
 from .graph import BACK, END, FIRST, START, THINK, RadixCyclicGraph
@@ -82,7 +83,8 @@ __all__ = [
     "DEFAULT_A", "DEFAULT_B", "DEFAULT_H", "DEFAULT_K",
     "edge_signal", "sine_activation", "sine_derivative", "sine_partials",
     "CSR", "Backend", "NodeParams", "PythonBackend",
-    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "Encoding", "parse_encoding",
+    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "TOKENS", "Encoding", "parse_encoding",
+    "BPETokenizer",
     "SPEECH_TOKEN", "SPEECH_CODECS", "SPEECH_RATE", "ASR_BACKENDS", "Audio", "SpeechError",
     "encode_audio", "speech_texts", "teach_by_speech", "transcribe", "utterance_token",
     "END", "START", "RadixCyclicGraph",

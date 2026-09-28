@@ -189,6 +189,12 @@ func TestAssistantDeltasAndTools(t *testing.T) {
 	if strings.Join(got, "|") != "the cat| sat| on" {
 		t.Fatalf("word deltas: %v", got)
 	}
+	// every unit written with a space between two streams like words: the pieces rejoin the text
+	tokens := Encoding{Unit: BPETokens, N: 3, Stride: 1}
+	got = Deltas(tokens, []string{"the cat sat", "cat sat on", "sat on the"}, []int{4, 5, 6}, "the cat sat on the")
+	if strings.Join(got, "|") != "the cat sat| on| the" {
+		t.Fatalf("token deltas: %v", got)
+	}
 	// the offered tools read a call's arguments the way the agent does
 	box := OfferedToolBox([]OfferedTool{{Name: "calc", Parameters: map[string]any{
 		"properties": map[string]any{"expression": map[string]any{"type": "string"}}, "required": []any{"expression"}}}})

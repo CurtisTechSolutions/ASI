@@ -122,9 +122,29 @@ func phoneticText(unit UnitKind, text string) string {
 	return b.tok.Text(text)
 }
 
-// Spell is the words a phonetic text spells ("DH AH0 # K AE1 T" -> "the cat"):
-// a character or word encoding returns the text as it is.
+// tokenUnits is a text as the units of the BPE tokenizer's text form.
+func tokenUnits(text string) []string {
+	tok, err := DefaultTokenizer()
+	if err != nil {
+		panic(err) // Validate refused the encoding before any text could reach here
+	}
+	return tok.Units(text)
+}
+
+// tokenText is the BPE text form of a text: its units joined by single spaces.
+func tokenText(text string) string { return strings.Join(tokenUnits(text), " ") }
+
+// Spell is the words a phonetic text spells ("DH AH0 # K AE1 T" -> "the cat"),
+// or the text a text of tokens is ("The walk ⁀ing cat ⁀." -> "The walking
+// cat."): a character or word encoding returns the text as it is.
 func (e Encoding) Spell(text string) string {
+	if e.Unit == BPETokens {
+		tok, err := DefaultTokenizer()
+		if err != nil {
+			return text
+		}
+		return tok.Spell(text)
+	}
 	if !e.Unit.Phonetic() {
 		return text
 	}

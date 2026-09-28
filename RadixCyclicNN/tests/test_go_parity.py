@@ -2389,7 +2389,7 @@ class TestGoEncodingParity(unittest.TestCase):
 
     ENCODINGS = ["char:3:1", "char:5:1", "char:4:4", "char:5:5", "char:6:3",
                  "word:1:1", "word:2:1", "word:3:1", "word:2:2",
-                 "phone:3:1", "phone:2:2", "syllable:2:1"]
+                 "phone:3:1", "phone:2:2", "syllable:2:1", "token:3:1", "token:2:2"]
 
     def test_the_same_graph_from_the_same_corpus(self):
         for spec in self.ENCODINGS:
@@ -2473,6 +2473,30 @@ class TestGoEncodingParity(unittest.TestCase):
                          [r["word"] for r in go("words", "--limit", 10, model=go_model)["words"]])
 
 
+    def test_the_same_prediction_in_tokens(self):
+        """A model over BPE tokens: the same walk, the same tokens, and the same text they spell."""
+        spec = "token:3:1"
+        py_model = os.path.join(TMP.name, "enc-token-py.json")
+        go_model = os.path.join(TMP.name, "enc-token-go.json")
+        py("--kind", "count", "--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2,
+           model=py_model)
+        go("--seed", 1, "--encoding", spec, "train", "--data", CORPUS, "--epochs", 2, model=go_model)
+        for prefix in ("the cat sat", "the dog chased."):
+            with self.subTest(prefix=prefix):
+                a = py("predict", "--prefix", prefix, "--k", 3, "--length", 6, model=py_model)
+                b = go("predict", "--prefix", prefix, "--k", 3, "--length", 6, model=go_model)
+                self.assertEqual(a["continuation"], b["continuation"])
+                self.assertEqual(a["full_text"], b["full_text"])
+                self.assertEqual([r["full_text"] for r in a["top"]], [r["full_text"] for r in b["top"]])
+        self.assertTrue(a["spelled"].startswith("the dog chased"), a)
+        # each side reads the other's file as the model of tokens it is, and lists the same tokens
+        for reader, path in ((go, py_model), (py, go_model)):
+            info = reader("info", model=path)
+            self.assertEqual(info["stats"]["encoding"], spec)
+            self.assertEqual(info["stats"]["units"], "tokens")
+        self.assertEqual([r["word"] for r in py("words", "--limit", 10, model=py_model)["words"]],
+                         [r["word"] for r in go("words", "--limit", 10, model=go_model)["words"]])
+
     def test_the_same_speech(self):
         """Spoken as it walks: the same walk, the same words, and the same audio, sample for sample."""
         spec = "phone:3:1"
@@ -2520,6 +2544,7 @@ class TestGoEncodingParity(unittest.TestCase):
             ("syllable:2:1", ["the cat sat on the mat"], []),
             ("char:3:1", ["the cat sat on the mat.", "hello, world"], []),
             ("word:2:1", ["the cat sat on the mat"], []),
+            ("token:3:1", ["the cat sat on the mat ⁀.", "The walking cats, 3 of them!"], []),
             ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1", "q3 q7"], []),
             ("acoustic:3:1", ["q2 q28 q55 q5 q60 q1"], ["--polish", "8"]),
         )

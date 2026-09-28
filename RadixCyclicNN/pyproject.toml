@@ -25,3 +25,7 @@ radixnet = "radixnet.cli:main"
 
 [tool.setuptools]
 packages = ["radixnet"]
+
+[tool.setuptools.package-data]
+# the bundled merges of the token unit (radixnet/bpe.py)
+radixnet = ["data/*.txt"]

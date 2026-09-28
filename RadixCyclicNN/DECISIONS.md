@@ -100,6 +100,9 @@ D-083 the veto can keep its provenance to itself
 
 **Part XXII — Structure** · D-087 the dynamic window: nodes halved down a binary ladder, and grown back at the top
 
+**Part XXIII — Tokens** · D-090 the traditional LLM tokenizer is a unit of the encoding dial: byte-level BPE, and a
+text form that reads back
+
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
 ---
@@ -3858,6 +3861,84 @@ epoch, in every kind's loop, feedback passes included. All three implementations
 
 ---
 
+# Part XXIII — Tokens
+
+### D-090 — The traditional LLM tokenizer is a unit of the encoding dial: byte-level BPE, and a text form that reads back
+
+**Status** Accepted · 2026-09-28 · **Layer** representation · **Extends** D-071, D-080 · **Revisits** D-006's
+rejection of a learned sub-word tokenizer · **Specified in** `SPEC-Tokens.md`
+
+**Context — my reason** *"Implement a new encoder and decoder layer that follows the traditional LLM tokenizer."*
+D-006 rejected a learned sub-word tokenizer for two reasons - it needs a corpus before training can start, and it
+freezes what the model can read - and D-071 and D-080 kept the rejection. Both reasons are answered by the
+tokenizer the large models actually use. It is *byte-level*: every byte is a token, so a frozen vocabulary still
+reads every text there is, exactly, with no `<unk>`; what the merges add is only which runs of bytes travel
+together. And the corpus it needs can be one the repository already has, learned once and shipped, the way the
+phonetic lexicon and the acoustic codebook ship. So the question stops being *whether* and becomes *where*: the
+encoding dial already says what one unit of a text is (D-071), and a unit that is read through a tokenizer already
+exists (D-080). A token is a unit.
+
+**Decision** A sixth unit, `token` (`--encoding token:3:1`, or `bpe:3:1`), in all three ports. The encoder is
+GPT-2's, piece for piece: its byte alphabet (`Ġ` for the space), its pre-tokenizer pattern (contractions, a word or
+a run of digits or punctuation with the space before it, whitespace leaving its last space to what follows), its
+ranked merges applied the pair with the best rank first, everywhere, left to right, its `merges.txt` file, ids
+with the bytes first and `<|endoftext|>` last; plus the one thing SentencePiece models add, a space before every
+text, so the first word is the same token as the same word anywhere else. The decoder is its inverse, exactly. The
+merges ship learned from the repository's own prose (4096 ids, `tests/make_merges.py`, pinned to a commit), and
+`RADIXNET_TOKENIZER` points every port at another file, which `radixnet tokenizer learn` makes from a corpus.
+
+The graph needed one thing more than a tokenizer: a **text form**. A label is its units joined by single spaces
+and is cut into units again all day, so the tokens had to be written in a way the tokenizer reads back as the same
+tokens - any run of them, since a label starts and ends wherever a gram does. A token that is a space and printable
+ASCII is written as that ASCII, bare (`Ġcat` is `cat`); every other token is glued on with `⁀`, a mark outside the
+byte alphabet (`ing` is `⁀ing`, `.` is `⁀.`). `"The walking cat."` is `The walk ⁀ing cat ⁀.`, and a text of plain
+words is its own text form. A text whose every single-spaced piece reads as a token is read piece by piece;
+anything else is read as text; and where both readings apply they give the same tokens (`SPEC-Tokens.md` §5.3
+proves both halves). So a label cuts into the tokens it was made of, a prefix typed as text is looked for as its
+tokens, and nothing in the graph, the search, the weights or the file changed.
+
+**Alternatives rejected**
+* **GPT-2's form as the label** (`the Ġcat Ġsat .`). It marks the space and leaves the glue unmarked - backwards
+  for text: a word typed after a space would read as a glued token, and no prefix a person types could match a
+  label. The bare-and-glued form is the same information with the mark moved to where text needs it.
+* **A label as the tokens' bytes run together**, cut by encoding it again. Encoding a stretch of text is not always
+  the stretch of the encoding (a contraction, the last space of a run cut it differently), so a label could come
+  back as other tokens.
+* **A tokenizer package beside this one**, as the phonetic tokenizer is (D-080). That one is wanted by other
+  projects and carries a lexicon and a voice; this one is a module per port and a data file, and the encoding layer
+  is its only reader.
+* **The vocabulary in the model file**, learned from a model's first corpus: the most self-contained, and the
+  traditional workflow, but it would turn the encoding - a value compared and copied everywhere - into a registry of
+  tokenizers, one per loaded model. The file and the environment variable are the rule the lexicon and the codebook
+  already follow.
+* **GPT-2's own vocabulary.** Not in the repository, not fetchable from a checkout, and not this project's; its
+  `merges.txt` is in the format the loader reads, for anyone who brings it.
+* **The Unicode categories for the pre-tokenizer's classes.** The Rust standard library has none to ask; a fixed
+  table is the same in three ports.
+
+**Consequences**
+* **D-006's first reason is answered, its second priced.** A token model can read any text exactly - bytes are the
+  floor - but what it reads *well* is what the merges were learned from; English prose of the kind this repository
+  is written in reads at about three characters a token, 1.7 tokens a word. Text unlike it falls back towards
+  bytes, which is readable and exact but long.
+* **A model is only as portable as its merges.** Train and predict with the same file, in every port - the rule
+  D-080 wrote for the lexicon. Relearning the bundled merges is a new vocabulary, not an update.
+* **Compression means phrases of subwords.** Under `token:3:1` a merged node is a run of tokens - `the cat sat on
+  the mat` is one node of six tokens on the sample corpus - and a branch point falls at a token, not a character
+  and not only at a word: `walk` can go on to `⁀ing` or `⁀ed`.
+* **What the model says is decoded, not respelled.** Unlike the phonetic units, spelling a text of tokens back is
+  exact: `spelled` is the text, and the voice speaks it as letters, a character held until its last byte arrives.
+* **Learning is Python's.** The Go and Rust ports read the merges file and carry the encoder, the decoder and the
+  text form; `radixnet tokenizer learn` writes the file for all three.
+* **Nothing is graded.** Whether a graph over tokens predicts better than one over characters or words - fewer,
+  larger units, more shared prefixes - is the research question (Q-21).
+
+**Lives in** `radixnet/bpe.py`, `radixnet/data/merges.txt`, `radixnet/encoding.py` (`TOKENS`), `radixnet/cli.py`
+(`tokenizer`), `radixnet/voice.py`, `go/radixnet/bpe.go`, `go/radixnet/data/merges.txt`, `rust/src/bpe.rs`,
+`tests/test_tokens.py`, `tests/tokens_fixture.json`, `tests/make_merges.py`, `SPEC-Tokens.md`, `DESIGN.md` §41
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.
@@ -4024,3 +4105,11 @@ measured: a model cycled 32 → 16 → 8 → 4 → 32 over the same corpus as on
 alone, compared on its loss, on the branch points its halves grew and on what
 it predicts, is the experiment - and it decides whether the top should merge
 back at all, or whether the halves that learned to differ should be kept.
+
+**Q-21 — What do tokens buy the graph (D-090)?** A token model walks fewer, larger
+units than a character model and branches inside words, which a word model cannot;
+whether that predicts better, compresses better or only differently is not measured.
+The same corpus trained under `char:3:1`, `word:3:1` and `token:3:1`, compared on
+held-out loss per character, on node and edge counts, and on what each continues
+a prefix with, is the experiment - and the vocabulary size is a fourth dial it
+should sweep.

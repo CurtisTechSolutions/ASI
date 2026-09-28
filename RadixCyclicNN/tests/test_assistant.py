@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from radixnet import assistant as A  # noqa: E402
 from radixnet.dialogue import Turn, reply as dialogue_reply  # noqa: E402
 from radixnet.duo import NegativeFilter  # noqa: E402
-from radixnet.encoding import WORDS, Encoding  # noqa: E402
+from radixnet.encoding import TOKENS, WORDS, Encoding  # noqa: E402
 from radixnet.model import new_model  # noqa: E402
 from radixnet.negative import NegativeNet  # noqa: E402
 
@@ -257,6 +257,22 @@ class TestRespond(unittest.TestCase):
         words = Encoding(unit=WORDS, n=2, stride=1)
         self.assertEqual(A.deltas(words, ["<s>", "the cat", "cat sat", "sat on"], [0, 4, 5, 6], "the cat sat on"), ["the cat", " sat", " on"])
         self.assertEqual(A.deltas(words, ["the cat", "cat sat"], [4, 5], "sat"), ["sat"])
+        # every unit written with a space between two streams like words: tokens, sounds - the pieces rejoin the text
+        tokens = Encoding(unit=TOKENS)
+        self.assertEqual(A.deltas(tokens, ["the cat sat", "cat sat on", "sat on the"], [4, 5, 6], "the cat sat on the"),
+                         ["the cat sat", " on", " the"])
+        self.assertEqual(A.deltas(tokens, ["walk ⁀ing cat", "⁀ing cat ⁀."], [4, 5], "walk ⁀ing cat ⁀."),
+                         ["walk ⁀ing cat", " ⁀."])
+
+    def test_a_token_model_streams_tokens(self):
+        model = new_model("count", seed=1, encoding=Encoding(unit=TOKENS))
+        model.train(CORPUS, epochs=2)
+        reply, seen = events_of(model, A.parse_openai(user("the cat sat on the", learn=False, max_tokens=8)))
+        choice = reply.choices[0]
+        self.assertEqual(reply.units, "tokens")
+        pieces = [e["text"] for e in seen if e["type"] == "text"]
+        self.assertEqual("".join(pieces), choice.text)
+        self.assertTrue(choice.text, choice)
 
     def test_a_word_model_streams_words(self):
         model = trained(words=True)
