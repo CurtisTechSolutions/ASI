@@ -16,7 +16,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from phonetok import PhoneticTokenizer, Lexicon, Phonotactics, LEVELS, letter_to_sound, respell  # noqa: E402
-from phonetok.acoustic import AcousticTokenizer, default_codebook, frames_of, learn, pcm_samples, synthesize  # noqa: E402
+from phonetok.acoustic import (  # noqa: E402
+    PITCH, AcousticTokenizer, default_codebook, frames_of, learn, pcm_samples, synthesize,
+)
 from phonetok.synth import Synthesizer, Voice  # noqa: E402
 from phonetok.g2p import Transcriber  # noqa: E402
 from phonetok.phones import SYMBOLS, features, to_ipa  # noqa: E402
@@ -166,6 +168,8 @@ def acoustic_block(tok: PhoneticTokenizer) -> dict:
                   "runs": small.runs, "mean": small.mean, "inertia": small.inertia},
         "replay": {"units": replay_units, "polish": 0, **slice_of(synthesize(replay_units, book))},
         "polished": {"units": replay_units, "polish": 2, **slice_of(synthesize(replay_units, book, polish=2))},
+        # the bundled neural vocoder (phonetok/data/acoustic.vocoder.json) over the same units, at the default pitch
+        "neural": {"units": replay_units, "pitch": PITCH, **slice_of(AcousticTokenizer(book).synthesize(replay_units, neural=True))},
     }
 
 

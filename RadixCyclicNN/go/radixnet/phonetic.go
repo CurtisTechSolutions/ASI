@@ -30,14 +30,14 @@ var (
 // mean nothing without the codebook that made them, so the two travel together.
 func acousticTokenizer() (*phonetok.AcousticTokenizer, error) {
 	acousticOnce.Do(func() {
-		var book *phonetok.Codebook
+		// the codebook's file is remembered so its neural vocoder is looked for beside it
 		if path := os.Getenv("PHONETOK_CODEBOOK"); path != "" {
-			if book, acousticErr = phonetok.LoadCodebook(path); acousticErr != nil {
+			if acousticTok, acousticErr = phonetok.LoadAcousticTokenizer(path, true); acousticErr != nil {
 				acousticErr = fmt.Errorf("the acoustic unit's codebook (PHONETOK_CODEBOOK): %w", acousticErr)
-				return
 			}
+			return
 		}
-		acousticTok, acousticErr = phonetok.NewAcousticTokenizer(book, true)
+		acousticTok, acousticErr = phonetok.NewAcousticTokenizer(nil, true)
 		if acousticErr != nil {
 			acousticErr = fmt.Errorf("the acoustic unit needs its codebook: %w", acousticErr)
 		}

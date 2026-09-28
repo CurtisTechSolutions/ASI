@@ -32,7 +32,7 @@ func init() {
 	route("POST", "/api/say", rSay)
 	doc("POST", "/api/say", "the output decoder: texts in the model's units - predictions, samples, turns; sounds, "+
 		"syllables, acoustic units, words or letters - spoken through the model's voice, one utterance each, closed "+
-		"by the END sentinel: {texts | text (one per line), rate, pitch, tempo, gain, polish (acoustic units: "+
+		"by the END sentinel: {texts | text (one per line), rate, pitch, tempo, gain, vocoder (acoustic units: auto | neural | centroid), polish (acoustic units: "+
 		"Griffin-Lim iterations over each whole utterance)} -> {wav_base64, rate, samples, seconds, encoding, "+
 		"decoder: voice | vocoder, count, utterances: [{text, spelled, tokens, samples, seconds}]}")
 	route("POST", "/api/speech/decode", rSpeechDecode)
@@ -229,6 +229,13 @@ func voiceOptions(f fields) (radixnet.SayOptions, error) {
 	if o.Polish, _, err = f.integer("polish", 0, intp(0)); err != nil {
 		return o, err
 	}
+	auto := "auto"
+	if o.Vocoder, err = f.text("vocoder", &auto); err != nil {
+		return o, err
+	}
+	if _, err := radixnet.VocoderChoice(o.Vocoder); err != nil {
+		return o, badRequest("%v", err)
+	}
 	if o.Pitch <= 0 {
 		return o, badRequest("'pitch' must be above 0 Hz")
 	}
@@ -256,7 +263,7 @@ func sayTexts(rq *request, texts []string, o radixnet.SayOptions) (int, any, err
 	return 200, doc, nil
 }
 
-// rSay is POST /api/say: {texts | text, rate, pitch, tempo, gain, polish}.
+// rSay is POST /api/say: {texts | text, rate, pitch, tempo, gain, polish, vocoder}.
 func rSay(rq *request) (int, any, error) {
 	texts, err := rq.f.textsOptional("texts", "text")
 	if err != nil {

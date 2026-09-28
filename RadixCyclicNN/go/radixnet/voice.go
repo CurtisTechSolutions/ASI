@@ -235,6 +235,9 @@ type SayOptions struct {
 	Tempo  float64
 	Gain   float64
 	Polish int
+	// Vocoder is how acoustic units are spoken (Vocoders): the codebook's neural vocoder when it has one
+	// ("auto", the default when empty), that or nothing ("neural"), or the codebook's own ("centroid").
+	Vocoder string
 }
 
 // DefaultSayOptions is the default voice.
@@ -268,6 +271,7 @@ type Spoken struct {
 	Rate       int
 	Encoding   string // the encoding the texts were read in
 	Decoder    string // "voice": the formant synthesizer; "vocoder": the acoustic codebook's vocoder
+	Vocoder    string // acoustic units: "neural" (the codebook's learned vocoder) or "centroid" (its own); else ""
 	Utterances []Utterance
 }
 
@@ -294,7 +298,7 @@ func (s *Spoken) Dict() map[string]any {
 	}
 	return map[string]any{
 		"rate": s.Rate, "samples": s.Samples(), "seconds": s.Seconds(), "encoding": s.Encoding,
-		"decoder": s.Decoder, "count": len(s.Utterances), "utterances": utterances,
+		"decoder": s.Decoder, "vocoder": VocoderNameOrNil(s.Vocoder), "count": len(s.Utterances), "utterances": utterances,
 	}
 }
 
@@ -305,6 +309,44 @@ func DecoderName(enc Encoding) string {
 		return "vocoder"
 	}
 	return "voice"
+}
+
+// Vocoders is how acoustic units are spoken by Say: through the codebook's neural vocoder when it has one
+// (auto), through it or not at all (neural), or through the codebook's own centroid vocoder (centroid).
+var Vocoders = []string{"auto", "neural", "centroid"}
+
+// VocoderNameOrNil is a vocoder name for a JSON document: nil when there is none.
+func VocoderNameOrNil(name string) any {
+	if name == "" {
+		return nil
+	}
+	return name
+}
+
+// VocoderChoice is a Vocoders name as the acoustic tokenizer's SynthesizeWith takes it (nil: auto).
+func VocoderChoice(vocoder string) (*bool, error) {
+	switch vocoder {
+	case "", "auto":
+		return nil, nil
+	case "neural", "centroid":
+		choice := vocoder == "neural"
+		return &choice, nil
+	}
+	return nil, fmt.Errorf("'vocoder' must be one of %s, not %q", strings.Join(Vocoders, ", "), vocoder)
+}
+
+// VocoderName is which vocoder Say speaks an encoding's texts with: "neural" or "centroid" for acoustic units
+// (an error when neural is insisted on and the codebook has none), "" otherwise.
+func VocoderName(enc Encoding, vocoder string) (string, error) {
+	choice, err := VocoderChoice(vocoder)
+	if err != nil || enc.Unit != Acoustic {
+		return "", err
+	}
+	tok, err := acousticTokenizer()
+	if err != nil {
+		return "", err
+	}
+	return tok.VocoderName(choice)
 }
 
 // Spelled is the words a text spells: through the tokenizer for a model of
@@ -380,20 +422,26 @@ func Say(enc Encoding, texts []string, o SayOptions) (*Spoken, error) {
 	if err != nil {
 		return nil, err
 	}
-	spoken := &Spoken{Rate: rate, Encoding: enc.String(), Decoder: DecoderName(enc), Utterances: []Utterance{}}
-	if spoken.Decoder == "vocoder" && o.Polish > 0 {
-		// the whole utterance is known, so it can be polished: the vocoder's gain convention
-		// is the Speaker's (the voice's half scale is the codebook's own level)
+	vocoder, err := VocoderName(enc, o.Vocoder)
+	if err != nil {
+		return nil, err
+	}
+	spoken := &Spoken{Rate: rate, Encoding: enc.String(), Decoder: DecoderName(enc), Vocoder: vocoder, Utterances: []Utterance{}}
+	if vocoder == "neural" || (spoken.Decoder == "vocoder" && o.Polish > 0) {
+		// the whole utterance is known, so it can be rendered whole - through the learned vocoder, or
+		// polished: the vocoder's gain convention is the Speaker's (the voice's half scale is the
+		// codebook's own level)
 		tok, err := acousticTokenizer()
 		if err != nil {
 			return nil, err
 		}
+		neural := vocoder == "neural"
 		for _, text := range texts {
 			if err := checkUnits(enc, text); err != nil {
 				return nil, err
 			}
 			units := strings.Fields(text)
-			pcm, err := phonetok.Synthesize(units, tok.Book, o.Polish, o.Gain*2.0, o.Pitch)
+			pcm, err := tok.SynthesizeWith(units, o.Polish, o.Gain*2.0, o.Pitch, &neural)
 			if err != nil {
 				return nil, err
 			}

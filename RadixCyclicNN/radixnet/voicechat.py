@@ -37,7 +37,7 @@ from .dialogue import EXPLORE, Heard, Turn
 from .encoding import ACOUSTIC, Encoding, hear_audio
 from .llm import LLMError
 from .speech import DEFAULT_RATE, teach
-from .voice import RATE, say, spelled
+from .voice import RATE, VOCODERS, say, spelled
 
 SPEAKERS = ("You", "Model")
 """Who speaks: the person, and the model (or Ollama on its behalf)."""
@@ -106,6 +106,9 @@ class VoiceOptions:
     tempo: float = 1.0
     gain: float = 0.5
     polish: int = 0
+    vocoder: str = "auto"
+    """How acoustic units are spoken (:data:`radixnet.voice.VOCODERS`): the codebook's neural vocoder when it has
+    one, that or nothing, or its own centroid vocoder."""
     chunk: int = CHUNK_SAMPLES
 
     def validate(self) -> None:
@@ -119,6 +122,8 @@ class VoiceOptions:
             raise ValueError("'pitch' and 'tempo' must be above 0, 'gain' at least 0 and 'voice_rate' at least 1")
         if self.chunk < 1 or self.polish < 0 or self.max_length < 0 or self.context < 0 or self.k < 1:
             raise ValueError("'chunk' and 'k' must be at least 1; 'polish', 'max_length' and 'context' at least 0")
+        if self.vocoder not in VOCODERS:
+            raise ValueError(f"'vocoder' must be one of {', '.join(VOCODERS)}")
 
 
 @dataclass
@@ -268,7 +273,8 @@ def turn(
     pcm = b""
     rate = o.voice_rate
     if o.speak and reply_text:
-        spoken = say(voice, [reply_text], rate=o.voice_rate, pitch=o.pitch, tempo=o.tempo, gain=o.gain, polish=o.polish)
+        spoken = say(voice, [reply_text], rate=o.voice_rate, pitch=o.pitch, tempo=o.tempo, gain=o.gain, polish=o.polish,
+                     vocoder=o.vocoder)
         pcm, rate = spoken.pcm, spoken.rate
         for event in audio_events(pcm, rate, o.chunk):
             emit(event)
@@ -309,14 +315,22 @@ def turn(
 def describe(encoding: Encoding, ollama: Any = None) -> dict:
     """What the Voice tab has to work with: the speakers, the answer modes, the voice and the transcription."""
     from .speech import describe as describe_speech
-    from .voice import decoder_name
+    from .voice import decoder_name, vocoder_name
 
     speech = describe_speech()
+    vocoder = None
+    if encoding.unit == ACOUSTIC:
+        try:
+            vocoder = vocoder_name(encoding)
+        except ValueError as exc:  # a vocoder file that is not the codebook's: the tab says so, the turn raises
+            vocoder = f"error: {exc}"
     return {
         "speakers": list(SPEAKERS),
         "answers": list(ANSWERS),
+        "vocoders": list(VOCODERS),
         "encoding": str(encoding),
         "decoder": decoder_name(encoding),
+        "vocoder": vocoder,
         "acoustic": encoding.unit == ACOUSTIC,
         "default_rate": DEFAULT_RATE,
         "chunk": CHUNK_SAMPLES,

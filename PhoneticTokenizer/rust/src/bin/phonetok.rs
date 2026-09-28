@@ -10,6 +10,7 @@ use phonetok::acoustic::{learn, load_wav, resample, AcousticTokenizer, Analysis,
 use phonetok::json::Json;
 use phonetok::lexicon::{read_entries, Lexicon, ENV_LEXICON};
 use phonetok::mt::{Mt, Rng};
+use phonetok::neural::{vocoder_path_for, UnitVocoder};
 use phonetok::phones::{strip_stress, to_ipa};
 use phonetok::rules::letter_to_sound;
 use phonetok::syllables::{rhymes, syllabify};
@@ -35,13 +36,17 @@ commands:
   hear WAV...             the acoustic units of recordings: sounds learned, nothing written down (--frames)
   learn WAV...            learn a codebook of acoustic units from recordings (--units, --seed, --iterations,
                           --note, --out FILE)
-  replay UNIT...          units spoken back through the vocoder (--out, --play, --raw, --polish, --pitch, --gain);
-                          units on stdin when none are given
+  replay UNIT...          units spoken back through the vocoder (--out, --play, --raw, --polish, --pitch, --gain,
+                          --use auto|neural|centroid); units on stdin when none are given
   codebook [FILE]         what a codebook holds (the bundled one when no file is named)
+  vocoder info [FILE]     what a neural vocoder file holds (the codebook's when no file is named); training one
+                          is the Python package's (phonetok vocoder train, with numpy)
 
 options (after the command):
   --level L  --no-stress  --no-boundaries  --no-pauses  --core  --lexicon FILE  --json
-  --codebook FILE         the codebook of acoustic units (hear, replay; the bundled one otherwise)";
+  --codebook FILE         the codebook of acoustic units (hear, replay; the bundled one otherwise)
+  --vocoder FILE          the neural vocoder (replay, vocoder; else $PHONETOK_VOCODER, else the .vocoder.json
+                          beside the codebook, else none)";
 
 struct Options {
     level: Level,
@@ -64,6 +69,10 @@ struct Options {
     tempo: f64,
     gain: f64,
     codebook: Option<String>,
+    vocoder: Option<String>,
+    /// Which vocoder `replay` uses: `None` the neural one when there is one, `Some(true)` it or nothing,
+    /// `Some(false)` the centroid vocoder.
+    neural: Option<bool>,
     frames: bool,
     units: usize,
     iterations: usize,
@@ -96,6 +105,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         tempo: 1.0,
         gain: 0.5,
         codebook: None,
+        vocoder: None,
+        neural: None,
         frames: false,
         units: 64,
         iterations: 50,
@@ -159,6 +170,19 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 o.out_set = true;
             }
             "--codebook" => o.codebook = Some(value(&mut i)?),
+            "--vocoder" => o.vocoder = Some(value(&mut i)?),
+            "--use" => {
+                o.neural = match value(&mut i)?.as_str() {
+                    "auto" => None,
+                    "neural" => Some(true),
+                    "centroid" => Some(false),
+                    other => {
+                        return Err(format!(
+                            "--use takes auto, neural or centroid, not {other:?}"
+                        ))
+                    }
+                }
+            }
             "--frames" => o.frames = true,
             "--units" => {
                 o.units = value(&mut i)?
@@ -745,7 +769,7 @@ fn run(args: &[String]) -> Result<i32, String> {
             );
         }
         "replay" => {
-            let tok = AcousticTokenizer::new(load_book(&o)?, true)?;
+            let tok = load_tokenizer(&o)?;
             let units: Vec<String> = if o.positional.is_empty() {
                 std::io::stdin()
                     .lock()
@@ -806,7 +830,8 @@ fn run(args: &[String]) -> Result<i32, String> {
                 out.write_all(&voc.end()).map_err(|e| e.to_string())?;
                 out.flush().ok();
             } else {
-                let pcm = tok.synthesize(&units, o.polish, gain, o.pitch)?;
+                let vocoder = tok.vocoder_name(o.neural)?;
+                let pcm = tok.synthesize_with(&units, o.polish, gain, o.pitch, o.neural)?;
                 let out = if o.out_set {
                     o.out.clone()
                 } else {
@@ -822,12 +847,75 @@ fn run(args: &[String]) -> Result<i32, String> {
                         ("rate", Json::Num(rate as f64)),
                         ("bytes", Json::Num((pcm.len() + 44) as f64)),
                         ("polish", Json::Num(o.polish as f64)),
+                        ("vocoder", Json::str(vocoder)),
                     ]),
                     vec![format!(
-                        "{seconds:.2} s of speech written to {out} ({rate} Hz)"
+                        "{seconds:.2} s of speech written to {out} ({rate} Hz, the {vocoder} vocoder)"
                     )],
                 );
             }
+        }
+        "vocoder" => {
+            let action = o.positional.first().cloned().unwrap_or_default();
+            if action != "info" {
+                eprintln!(
+                    "phonetok: `vocoder {action}` is not this port's; `vocoder info [FILE]` is, and training is the \
+                     Python package's (phonetok vocoder train, with numpy)"
+                );
+                return Ok(2);
+            }
+            let tok = load_tokenizer(&o)?;
+            let (vocoder, path) = match o.positional.get(1) {
+                Some(p) => (UnitVocoder::load(p)?, p.clone()),
+                None => match tok.neural()? {
+                    Some(v) => (
+                        v.clone(),
+                        o.vocoder
+                            .clone()
+                            .or_else(|| {
+                                std::env::var("PHONETOK_VOCODER")
+                                    .ok()
+                                    .filter(|p| !p.is_empty())
+                            })
+                            .or_else(|| tok.source.as_deref().map(vocoder_path_for))
+                            .unwrap_or_else(|| "(bundled)".to_string()),
+                    ),
+                    None => {
+                        eprintln!("phonetok: no vocoder for this codebook");
+                        return Ok(1);
+                    }
+                },
+            };
+            let d = vocoder.describe();
+            let matches = vocoder.matches(&tok.book);
+            let dilations: Vec<String> = vocoder
+                .spec
+                .dilations
+                .iter()
+                .map(|d| d.to_string())
+                .collect();
+            let mut lines = vec![
+                format!(
+                    "a vocoder of {} parameters over {} units: {} channels, kernel {}, dilations {} ({:.0} ms of \
+                     context either side): {path}",
+                    vocoder.spec.parameters(),
+                    vocoder.spec.units,
+                    vocoder.spec.channels,
+                    vocoder.spec.kernel,
+                    dilations.join(" "),
+                    d.get("context_seconds").as_f64().unwrap_or(0.0) * 1000.0
+                ),
+                format!("{} this codebook", if matches { "for" } else { "NOT for" }),
+            ];
+            if !vocoder.note.is_empty() {
+                lines.push(vocoder.note.clone());
+            }
+            if !vocoder.trained.is_null() {
+                lines.push(format!("trained: {}", vocoder.trained));
+            }
+            let mut doc = vec![("path", Json::str(&path)), ("matches", Json::Bool(matches))];
+            doc.extend(d.as_obj().iter().map(|(k, v)| (k.as_str(), v.clone())));
+            emit(&o, Json::obj(doc), lines);
         }
         "codebook" => {
             let (book, path) = match o.positional.first() {
@@ -970,6 +1058,15 @@ fn load_book(o: &Options) -> Result<Codebook, String> {
         Some(path) => Codebook::load(path),
         None => Codebook::bundled(),
     }
+}
+
+/// The acoustic tokenizer over `--codebook` (or the bundled codebook), its neural vocoder `--vocoder`'s.
+fn load_tokenizer(o: &Options) -> Result<AcousticTokenizer, String> {
+    let tok = match &o.codebook {
+        Some(path) => AcousticTokenizer::from_file(path, true)?,
+        None => AcousticTokenizer::bundled()?,
+    };
+    Ok(tok.with_vocoder(o.vocoder.clone()))
 }
 
 fn main() -> ExitCode {

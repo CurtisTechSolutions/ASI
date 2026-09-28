@@ -269,8 +269,9 @@ impl Model {
 // -- the output decoder --------------------------------------------------------------
 
 /// How the output decoder speaks: the voice `speak_walks` walks with, and for
-/// acoustic units how many Griffin-Lim iterations polish each whole utterance
-/// (0: the streaming vocoder's output as it is).
+/// acoustic units which vocoder (`vocoder`, one of [`VOCODERS`]) and how many
+/// Griffin-Lim iterations polish each whole utterance through the centroid
+/// vocoder (0: the streaming vocoder's output as it is).
 #[derive(Clone, Debug)]
 pub struct SayOptions {
     pub rate: u32,
@@ -278,6 +279,7 @@ pub struct SayOptions {
     pub tempo: f64,
     pub gain: f64,
     pub polish: usize,
+    pub vocoder: String,
 }
 
 impl Default for SayOptions {
@@ -288,8 +290,39 @@ impl Default for SayOptions {
             tempo: 1.0,
             gain: 0.5,
             polish: 0,
+            vocoder: "auto".to_string(),
         }
     }
+}
+
+/// How acoustic units are spoken by [`say`]: through the codebook's neural
+/// vocoder when it has one (`auto`), through it or not at all (`neural`), or
+/// through the codebook's own centroid vocoder (`centroid`).
+pub const VOCODERS: [&str; 3] = ["auto", "neural", "centroid"];
+
+/// A [`VOCODERS`] name as the acoustic tokenizer's `synthesize_with` takes it.
+pub fn vocoder_choice(vocoder: &str) -> Result<Option<bool>, String> {
+    match vocoder {
+        "auto" => Ok(None),
+        "neural" => Ok(Some(true)),
+        "centroid" => Ok(Some(false)),
+        other => Err(format!(
+            "'vocoder' must be one of {}, not {other:?}",
+            VOCODERS.join(", ")
+        )),
+    }
+}
+
+/// Which vocoder [`say`] speaks an encoding's texts with: `"neural"` or
+/// `"centroid"` for acoustic units (an error when `neural` is insisted on and
+/// the codebook has none), `None` otherwise.
+pub fn vocoder_name(enc: Encoding, vocoder: &str) -> Result<Option<&'static str>, String> {
+    let choice = vocoder_choice(vocoder)?;
+    if enc.unit != Unit::Acoustic {
+        return Ok(None);
+    }
+    let tok = crate::phonetic::acoustic_tokenizer()?;
+    Ok(Some(tok.vocoder_name(choice)?))
 }
 
 /// One text of a model spoken: what it said, what that spells, and how much
@@ -327,6 +360,9 @@ pub struct Spoken {
     pub encoding: String,
     /// `"voice"`: the formant synthesizer; `"vocoder"`: the acoustic codebook's vocoder.
     pub decoder: &'static str,
+    /// Which vocoder spoke acoustic units: `"neural"` (the codebook's learned vocoder) or `"centroid"` (its
+    /// own, streamed or Griffin-Lim polished); `None` for the voice.
+    pub vocoder: Option<&'static str>,
     pub utterances: Vec<Utterance>,
 }
 
@@ -356,6 +392,13 @@ impl Spoken {
             ("seconds", Json::Num(self.seconds())),
             ("encoding", Json::str(&self.encoding)),
             ("decoder", Json::str(self.decoder)),
+            (
+                "vocoder",
+                match self.vocoder {
+                    Some(v) => Json::str(v),
+                    None => Json::Null,
+                },
+            ),
             ("count", Json::Int(self.utterances.len() as i64)),
             (
                 "utterances",
@@ -439,26 +482,32 @@ pub fn speak_texts(
 
 /// The output decoder: texts in a model's units become speech, one utterance
 /// each, through the same voice [`Model::speak_walks`] walks with and closed by
-/// the same rule, the END sentinel.  `o.polish` applies to acoustic units only:
-/// that many Griffin-Lim iterations over each whole utterance once it is
-/// known, which the streaming vocoder cannot do.
+/// the same rule, the END sentinel.  Acoustic units are spoken through the
+/// codebook's neural vocoder when it has one (`o.vocoder`), each utterance
+/// rendered whole once it is known; else through the codebook's own centroid
+/// vocoder, `o.polish` Griffin-Lim iterations over each whole utterance, or
+/// streamed exactly as a walk is when `o.polish` is 0.
 pub fn say(enc: Encoding, texts: &[String], o: &SayOptions) -> Result<Spoken, String> {
     let rate = crate::phonetic::output_rate(enc, o.rate)?;
+    let vocoder = vocoder_name(enc, &o.vocoder)?;
     let mut spoken = Spoken {
         pcm: Vec::new(),
         rate,
         encoding: enc.to_string(),
         decoder: decoder_name(enc),
+        vocoder,
         utterances: Vec::new(),
     };
-    if spoken.decoder == "vocoder" && o.polish > 0 {
-        // the whole utterance is known, so it can be polished: the vocoder's gain
-        // convention is the Speaker's (the voice's half scale is the codebook's own level)
+    if vocoder == Some("neural") || (spoken.decoder == "vocoder" && o.polish > 0) {
+        // the whole utterance is known, so it can be rendered whole - through the learned
+        // vocoder, or polished: the vocoder's gain convention is the Speaker's (the voice's
+        // half scale is the codebook's own level)
         let tok = crate::phonetic::acoustic_tokenizer()?;
+        let neural = Some(vocoder == Some("neural"));
         for text in texts {
             check_units(enc, text)?;
             let units: Vec<String> = text.split_whitespace().map(String::from).collect();
-            let pcm = phonetok::acoustic::synthesize(&units, &tok.book, o.polish, o.gain * 2.0, o.pitch)?;
+            let pcm = tok.synthesize_with(&units, o.polish, o.gain * 2.0, o.pitch, neural)?;
             let mut tokens = units;
             tokens.push("</s>".to_string());
             spoken.utterances.push(Utterance {
@@ -678,26 +727,48 @@ mod tests {
         // acoustic units: the codebook's vocoder, at its rate
         let acoustic = parse_encoding("acoustic:3:1").unwrap();
         let units = vec!["q2 q28 q55 q5".to_string(), "q1 q2".to_string()];
+        // the bundled codebook has its neural vocoder, so that is what speaks unless the centroid
+        // vocoder is asked for
         let spoken = say(acoustic, &units, &SayOptions::default()).unwrap();
         assert_eq!(
-            (spoken.decoder, spoken.rate, spoken.utterances.len()),
-            ("vocoder", 16000, 2)
+            (spoken.decoder, spoken.vocoder, spoken.rate, spoken.utterances.len()),
+            ("vocoder", Some("neural"), 16000, 2)
         );
+        assert_eq!(spoken.to_json().at("vocoder").as_str(), Some("neural"));
         assert!(spoken.samples() > 0);
         assert_eq!(spoken.utterances[1].tokens, vec!["q1", "q2", "</s>"]);
         assert_eq!(spoken.utterances[1].spelled, "q1 q2");
+        let centroid = SayOptions {
+            vocoder: "centroid".to_string(),
+            ..SayOptions::default()
+        };
+        let streamed = say(acoustic, &units, &centroid).unwrap();
+        assert_eq!(streamed.vocoder, Some("centroid"));
+        assert_eq!(streamed.samples(), spoken.samples());
+        assert_ne!(streamed.pcm, spoken.pcm);
         let polish = SayOptions {
             polish: 4,
+            vocoder: "centroid".to_string(),
             ..SayOptions::default()
         };
         let polished = say(acoustic, &units, &polish).unwrap();
+        assert_eq!(polished.vocoder, Some("centroid"));
         assert_eq!(polished.samples(), spoken.samples());
-        assert_ne!(polished.pcm, spoken.pcm);
+        assert_ne!(polished.pcm, streamed.pcm);
         let nope = vec!["q2 nope".to_string()];
-        for opts in [SayOptions::default(), polish] {
+        for opts in [SayOptions::default(), centroid, polish] {
             let err = say(acoustic, &nope, &opts).expect_err("a token that is not a unit was spoken");
             assert!(err.contains("not a unit"), "{err}");
         }
+        let bad = SayOptions {
+            vocoder: "nope".to_string(),
+            ..SayOptions::default()
+        };
+        let err = say(acoustic, &units, &bad).expect_err("a vocoder that is not one");
+        assert!(err.contains("'vocoder'"), "{err}");
+        let voice = say(phones, &["K AE1 T".to_string()], &SayOptions::default()).unwrap();
+        assert_eq!(voice.vocoder, None);
+        assert!(voice.to_json().at("vocoder").is_null());
     }
 
     /// What is spoken is what the walk says: from START (the first node whole)

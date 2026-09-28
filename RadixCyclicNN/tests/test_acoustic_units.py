@@ -163,34 +163,47 @@ class TestTheAcousticUnit(unittest.TestCase):
         enc = Encoding(unit=ACOUSTIC)
         book = default_codebook()
         spoken = say(enc, ["q2 q28 q55 q5", "q1 q2"])
-        self.assertEqual((spoken.decoder, spoken.rate, spoken.encoding), ("vocoder", book.analysis.rate, "acoustic:3:1"))
+        # the bundled codebook has its neural vocoder, so that is what speaks unless the centroid vocoder is asked for
+        self.assertEqual((spoken.decoder, spoken.vocoder, spoken.rate, spoken.encoding),
+                         ("vocoder", "neural", book.analysis.rate, "acoustic:3:1"))
         self.assertEqual([u.tokens for u in spoken.utterances], [["q2", "q28", "q55", "q5", "</s>"], ["q1", "q2", "</s>"]])
         self.assertEqual([u.spelled for u in spoken.utterances], ["q2 q28 q55 q5", "q1 q2"])  # nothing to spell
         self.assertGreater(spoken.samples, 0)
         self.assertEqual(spoken.samples, sum(u.samples for u in spoken.utterances))
-        # the vocoder's stream is the Speaker's, exactly
+        self.assertEqual(say(enc, ["q2 q28 q55 q5", "q1 q2"], vocoder="neural").pcm, spoken.pcm)
+        self.assertEqual(spoken.to_dict()["vocoder"], "neural")
+        # the centroid vocoder's stream is the Speaker's, exactly
         speaker = Speaker(enc)
-        self.assertEqual(say(enc, "q2 q28 q55 q5").pcm, speaker.feed("q2 q28 q55 q5") + speaker.end())
+        streamed = say(enc, "q2 q28 q55 q5", vocoder="centroid")
+        self.assertEqual(streamed.pcm, speaker.feed("q2 q28 q55 q5") + speaker.end())
+        self.assertEqual(streamed.vocoder, "centroid")
+        self.assertEqual(streamed.utterances[0].samples, spoken.utterances[0].samples)  # the same frames either way
+        self.assertNotEqual(streamed.pcm, spoken.pcm[:len(streamed.pcm)])
         # polished: Griffin-Lim over each whole utterance - the same length, other samples
-        polished = say(enc, ["q2 q28 q55 q5", "q1 q2"], polish=4)
+        polished = say(enc, ["q2 q28 q55 q5", "q1 q2"], polish=4, vocoder="centroid")
         self.assertEqual([u.samples for u in polished.utterances], [u.samples for u in spoken.utterances])
         self.assertNotEqual(polished.pcm, spoken.pcm)
         self.assertEqual([u.tokens for u in polished.utterances], [u.tokens for u in spoken.utterances])
+        self.assertEqual(polished.vocoder, "centroid")
         with self.assertRaises(ValueError):
             say(enc, ["q2 nope"])
         with self.assertRaises(ValueError):
             say(enc, ["q2 nope"], polish=2)
+        with self.assertRaises(ValueError):
+            say(enc, ["q2"], vocoder="nope")
+        self.assertIsNone(say(Encoding(unit="phone"), ["K AE1 T"]).vocoder)
         with tempfile.TemporaryDirectory() as tmp:
             wav = os.path.join(tmp, "units.wav")
             none = os.path.join(tmp, "none.json")  # no model file: the encoding says how a text is read
-            for extra in ([], ["--polish", "2"]):
+            for extra in ([], ["--polish", "2"], ["--vocoder", "centroid"], ["--vocoder", "centroid", "--polish", "2"]):
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
                     code = main(["--model", none, "--encoding", "acoustic:3:1", "--json", "say", "q2 q28 q55", "--out", wav, *extra])
                 self.assertEqual(code, 0, out.getvalue())
                 doc = json.loads(out.getvalue())
-                self.assertEqual((doc["decoder"], doc["rate"], doc["count"], doc["polish"]),
-                                 ("vocoder", book.analysis.rate, 1, 2 if extra else 0))
+                self.assertEqual((doc["decoder"], doc["vocoder"], doc["rate"], doc["count"], doc["polish"]),
+                                 ("vocoder", "centroid" if "--vocoder" in extra else "neural", book.analysis.rate, 1,
+                                  2 if "--polish" in extra else 0))
                 with wave.open(wav) as w:
                     self.assertEqual((w.getframerate(), w.getnframes()), (book.analysis.rate, doc["utterances"][0]["samples"]))
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

@@ -1466,6 +1466,13 @@ func (h Heard) Text() string { return strings.Join(h.Units, " ") }
 type AcousticTokenizer struct {
 	Book     *Codebook
 	Collapse bool
+	// Source is the codebook's file, when it came from one: where its neural vocoder is looked for.
+	Source string
+	// VocoderPath names a neural vocoder file outright (else $PHONETOK_VOCODER, else the file beside the codebook).
+	VocoderPath string
+	neuralOnce  sync.Once
+	neural      *UnitVocoder
+	neuralErr   error
 }
 
 // NewAcousticTokenizer is a tokenizer over book (nil: the bundled codebook); collapse folds runs into one token.
@@ -1480,6 +1487,64 @@ func NewAcousticTokenizer(book *Codebook, collapse bool) (*AcousticTokenizer, er
 		return nil, err
 	}
 	return &AcousticTokenizer{Book: book, Collapse: collapse}, nil
+}
+
+// LoadAcousticTokenizer is a tokenizer over the codebook in a file, whose neural vocoder is looked for beside it.
+func LoadAcousticTokenizer(path string, collapse bool) (*AcousticTokenizer, error) {
+	book, err := LoadCodebook(path)
+	if err != nil {
+		return nil, err
+	}
+	tok, err := NewAcousticTokenizer(book, collapse)
+	if err != nil {
+		return nil, err
+	}
+	tok.Source = path
+	return tok, nil
+}
+
+// Neural is the codebook's neural vocoder, found once (see FindVocoder), or nil.
+func (t *AcousticTokenizer) Neural() (*UnitVocoder, error) {
+	t.neuralOnce.Do(func() { t.neural, t.neuralErr = FindVocoder(t.Book, t.Source, t.VocoderPath) })
+	return t.neural, t.neuralErr
+}
+
+// VocoderName is which vocoder SynthesizeWith uses: "neural" or "centroid" (the codebook's own).  neural nil
+// is the neural one when there is one; true insists and fails without one; false the centroid vocoder.
+func (t *AcousticTokenizer) VocoderName(neural *bool) (string, error) {
+	found, err := t.Neural()
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case neural == nil:
+		if found != nil {
+			return "neural", nil
+		}
+		return "centroid", nil
+	case *neural && found == nil:
+		return "", fmt.Errorf("no neural vocoder for this codebook (phonetok vocoder train, or PHONETOK_VOCODER)")
+	case *neural:
+		return "neural", nil
+	}
+	return "centroid", nil
+}
+
+// SynthesizeWith is the units spoken back through the vocoder of choice (see VocoderName): the neural one, or
+// the centroid vocoder with polish Griffin-Lim iterations over the whole utterance.
+func (t *AcousticTokenizer) SynthesizeWith(units []string, polish int, gain, pitch float64, neural *bool) ([]byte, error) {
+	name, err := t.VocoderName(neural)
+	if err != nil {
+		return nil, err
+	}
+	if name == "neural" {
+		codes, err := CodesOf(units, t.Book)
+		if err != nil {
+			return nil, err
+		}
+		return t.neural.Synthesize(codes, gain, pitch)
+	}
+	return Synthesize(units, t.Book, polish, gain, pitch)
 }
 
 // Samples is a WAV file's bytes as samples at the codebook's rate.
@@ -1561,7 +1626,7 @@ func (t *AcousticTokenizer) Text(text string) (string, error) {
 
 // Synthesize is the units spoken back, as 16-bit PCM at the codebook's rate.
 func (t *AcousticTokenizer) Synthesize(units []string, polish int, gain, pitch float64) ([]byte, error) {
-	return Synthesize(units, t.Book, polish, gain, pitch)
+	return t.SynthesizeWith(units, polish, gain, pitch, nil)
 }
 
 // Vocoder is a streaming vocoder over the codebook.

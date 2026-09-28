@@ -1070,15 +1070,23 @@ class AcousticTokenizer:
     off, every frame is a token.
     """
 
-    def __init__(self, codebook: Codebook | str | None = None, collapse: bool = True) -> None:
+    def __init__(self, codebook: Codebook | str | None = None, collapse: bool = True,
+                 vocoder: str | None = None) -> None:
+        self.source: str | None = None
+        """The codebook's file, when it came from one: where its neural vocoder is looked for."""
         if codebook is None:
             self.codebook = default_codebook()
+            self.source = DEFAULT_CODEBOOK
         elif isinstance(codebook, str):
             self.codebook = Codebook.load(codebook)
+            self.source = codebook
         else:
             self.codebook = codebook
         self.codebook.validate()
         self.collapse = collapse
+        self.vocoder_path = vocoder
+        """A neural vocoder file named outright (else ``$PHONETOK_VOCODER``, else the file beside the codebook)."""
+        self._neural: list = []
 
     @property
     def analysis(self) -> Analysis:
@@ -1135,11 +1143,44 @@ class AcousticTokenizer:
             return " ".join(self.units_of(units_or_text))
         return " ".join(self.units_of(" ".join(units_or_text)))
 
-    def synthesize(self, units: str | Iterable[str], polish: int = 0, gain: float = 1.0, pitch: float = PITCH) -> bytes:
-        """16-bit PCM at the codebook's rate: the units spoken back."""
-        return synthesize(
-            self.units_of(units) if isinstance(units, str) else list(units), self.codebook, polish, gain, pitch,
-        )
+    @property
+    def neural(self):
+        """The codebook's neural vocoder (:class:`phonetok.neural.UnitVocoder`), found once, or ``None``.
+
+        Looked for where :func:`phonetok.neural.find_vocoder` looks: the file
+        named to the constructor, ``$PHONETOK_VOCODER``, or the ``.vocoder.json``
+        beside the codebook's own file (the bundled vocoder for the bundled
+        codebook).  A file that was not trained for this codebook raises.
+        """
+        if not self._neural:
+            from .neural import find_vocoder
+
+            self._neural.append(find_vocoder(self.codebook, self.source, self.vocoder_path))
+        return self._neural[0]
+
+    def vocoder_name(self, neural: bool | None = None) -> str:
+        """Which vocoder :meth:`synthesize` would use: ``"neural"`` or ``"centroid"`` (the codebook's own)."""
+        if neural is None:
+            return "neural" if self.neural is not None else "centroid"
+        if neural and self.neural is None:
+            raise ValueError("no neural vocoder for this codebook (phonetok vocoder train, or PHONETOK_VOCODER)")
+        return "neural" if neural else "centroid"
+
+    def synthesize(self, units: str | Iterable[str], polish: int = 0, gain: float = 1.0, pitch: float = PITCH,
+                   neural: bool | None = None) -> bytes:
+        """16-bit PCM at the codebook's rate: the units spoken back.
+
+        Through the neural vocoder when the codebook has one (``neural=None``,
+        the default; ``True`` insists and raises without one), else through the
+        codebook's own centroid vocoder, ``polish`` Griffin-Lim iterations over
+        the whole utterance (``neural=False`` chooses it outright).
+        """
+        units = self.units_of(units) if isinstance(units, str) else list(units)
+        if self.vocoder_name(neural) == "neural":
+            from .neural import codes_of
+
+            return self.neural.synthesize(codes_of(units, self.codebook), gain=gain, pitch=pitch)
+        return synthesize(units, self.codebook, polish, gain, pitch)
 
     def vocoder(self, gain: float = 1.0, pitch: float = PITCH) -> Vocoder:
         return Vocoder(self.codebook, gain, pitch)

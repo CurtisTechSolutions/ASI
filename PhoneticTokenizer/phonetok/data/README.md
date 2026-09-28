@@ -6,6 +6,7 @@
 | `LICENSE-cmudict` | the dictionary's BSD licence, which the redistribution of these entries requires. |
 | `voice.tsv` | the voice: per phoneme, the formant targets and bandwidths, the duration, the voicing and the noise the synthesizer speaks it with (`synth.py`). |
 | `acoustic.tsv` | the bundled codebook of acoustic units: 64 centroids over 40 log-mel bands, each unit's count and typical run, the analysis settings that made the frames and the mean log-mel of the training audio (`acoustic.py`). Learned from the synthesizer's speech of 28 sentences in two voices by `../../tests/make_codebook.py`; a codebook learned from real recordings (`phonetok learn`) suits real speech better. |
+| `acoustic.vocoder.json` | the bundled codebook's neural vocoder (`neural.py`): the small network that turns a run of its units into a waveform - the architecture, the codebook's fingerprint, the training report and the weights as base64 float32. Trained on the synthesizer's speech of 27 sentences in four voices by `../../tests/make_vocoder.py` (the last sentence of each voice held out); a vocoder trained on real recordings (`phonetok vocoder train`) suits a real voice better. Looked for beside a codebook as `<stem>.vocoder.json`, or named by `PHONETOK_VOCODER`. |
 
 The full dictionary (135 000 words) is not bundled: `pip install cmudict` or
 `PHONETOK_LEXICON=/path/to/cmudict.dict` gives the tokenizer the whole of it

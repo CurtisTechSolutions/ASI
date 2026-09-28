@@ -1047,14 +1047,14 @@ pub fn voicing_of(logmel: &[f64], bands: &(Vec<usize>, Vec<usize>)) -> f64 {
 }
 
 /// A deterministic noise source (xorshift32), the same numbers in every port.
-struct Noise(u32);
+pub(crate) struct Noise(u32);
 
 impl Noise {
-    fn new() -> Noise {
+    pub(crate) fn new() -> Noise {
         Noise(0x9E37_79B9)
     }
 
-    fn next(&mut self) -> f64 {
+    pub(crate) fn next(&mut self) -> f64 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 17;
@@ -1158,7 +1158,7 @@ fn spectrum(mags: &[f64], cos: &[f64], sin: &[f64], n: usize) -> (Vec<f64>, Vec<
     (re, im)
 }
 
-fn pack_pcm(samples: &[f64], gain: f64) -> Vec<u8> {
+pub(crate) fn pack_pcm(samples: &[f64], gain: f64) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 * samples.len());
     let scale = gain * 32767.0;
     for &x in samples {
@@ -1277,9 +1277,9 @@ impl Vocoder {
     }
 }
 
-type Spectra = Vec<(Vec<f64>, Vec<f64>)>;
+pub(crate) type Spectra = Vec<(Vec<f64>, Vec<f64>)>;
 
-fn stft(samples: &[f64], a: &Analysis, count: usize) -> Spectra {
+pub(crate) fn stft(samples: &[f64], a: &Analysis, count: usize) -> Spectra {
     let window = hann(a.frame);
     let mut out = Vec::with_capacity(count);
     for t in 0..count {
@@ -1300,7 +1300,7 @@ fn stft(samples: &[f64], a: &Analysis, count: usize) -> Spectra {
     out
 }
 
-fn istft(spectra: &Spectra, a: &Analysis) -> Vec<f64> {
+pub(crate) fn istft(spectra: &Spectra, a: &Analysis) -> Vec<f64> {
     let window = hann(a.frame);
     let length = if spectra.is_empty() {
         0
@@ -1445,17 +1445,92 @@ pub struct AcousticTokenizer {
     pub book: Codebook,
     /// Folds a run of one unit into one token; off, every frame is a token.
     pub collapse: bool,
+    /// The codebook's file, when it came from one: where its neural vocoder is looked for.
+    pub source: Option<String>,
+    /// A neural vocoder file named outright (else `$PHONETOK_VOCODER`, else the file beside the codebook).
+    pub vocoder_path: Option<String>,
+    neural: std::sync::OnceLock<Result<Option<crate::neural::UnitVocoder>, String>>,
 }
 
 impl AcousticTokenizer {
     pub fn new(book: Codebook, collapse: bool) -> Result<AcousticTokenizer, String> {
         book.validate()?;
-        Ok(AcousticTokenizer { book, collapse })
+        Ok(AcousticTokenizer {
+            book,
+            collapse,
+            source: None,
+            vocoder_path: None,
+            neural: std::sync::OnceLock::new(),
+        })
     }
 
     /// Over the bundled codebook.
     pub fn bundled() -> Result<AcousticTokenizer, String> {
         AcousticTokenizer::new(Codebook::bundled()?, true)
+    }
+
+    /// Over the codebook in a file, whose neural vocoder is looked for beside it.
+    pub fn from_file(path: &str, collapse: bool) -> Result<AcousticTokenizer, String> {
+        let mut tok = AcousticTokenizer::new(Codebook::load(path)?, collapse)?;
+        tok.source = Some(path.to_string());
+        Ok(tok)
+    }
+
+    /// Names the neural vocoder file outright.
+    pub fn with_vocoder(mut self, path: Option<String>) -> AcousticTokenizer {
+        self.vocoder_path = path;
+        self.neural = std::sync::OnceLock::new();
+        self
+    }
+
+    /// The codebook's neural vocoder, found once (see [`crate::neural::find_vocoder`]), or `None`.
+    pub fn neural(&self) -> Result<Option<&crate::neural::UnitVocoder>, String> {
+        self.neural
+            .get_or_init(|| {
+                crate::neural::find_vocoder(
+                    &self.book,
+                    self.source.as_deref(),
+                    self.vocoder_path.as_deref(),
+                )
+            })
+            .as_ref()
+            .map(|found| found.as_ref())
+            .map_err(|e| e.clone())
+    }
+
+    /// Which vocoder [`AcousticTokenizer::synthesize_with`] uses: `"neural"` or `"centroid"` (the codebook's
+    /// own).  `None` is the neural one when there is one; `Some(true)` insists and fails without one.
+    pub fn vocoder_name(&self, neural: Option<bool>) -> Result<&'static str, String> {
+        match neural {
+            None => Ok(if self.neural()?.is_some() {
+                "neural"
+            } else {
+                "centroid"
+            }),
+            Some(true) if self.neural()?.is_none() => Err(
+                "no neural vocoder for this codebook (phonetok vocoder train, or PHONETOK_VOCODER)"
+                    .to_string(),
+            ),
+            Some(true) => Ok("neural"),
+            Some(false) => Ok("centroid"),
+        }
+    }
+
+    /// The units spoken back through the vocoder of choice (see [`AcousticTokenizer::vocoder_name`]): the neural
+    /// one, or the centroid vocoder with `polish` Griffin-Lim iterations over the whole utterance.
+    pub fn synthesize_with(
+        &self,
+        units: &[String],
+        polish: usize,
+        gain: f64,
+        pitch: f64,
+        neural: Option<bool>,
+    ) -> Result<Vec<u8>, String> {
+        if self.vocoder_name(neural)? == "neural" {
+            let vocoder = self.neural()?.ok_or("no neural vocoder")?;
+            return vocoder.synthesize(&crate::neural::codes_of(units, &self.book)?, gain, pitch);
+        }
+        synthesize(units, &self.book, polish, gain, pitch)
     }
 
     /// A WAV file's bytes as samples at the codebook's rate.
@@ -1522,7 +1597,8 @@ impl AcousticTokenizer {
         Ok(self.units_of(text)?.join(" "))
     }
 
-    /// The units spoken back, as 16-bit PCM at the codebook's rate.
+    /// The units spoken back, as 16-bit PCM at the codebook's rate: through the neural vocoder when the
+    /// codebook has one, else the centroid vocoder polished `polish` times.
     pub fn synthesize(
         &self,
         units: &[String],
@@ -1530,7 +1606,7 @@ impl AcousticTokenizer {
         gain: f64,
         pitch: f64,
     ) -> Result<Vec<u8>, String> {
-        synthesize(units, &self.book, polish, gain, pitch)
+        self.synthesize_with(units, polish, gain, pitch, None)
     }
 
     /// A streaming vocoder over the codebook.

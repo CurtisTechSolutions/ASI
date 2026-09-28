@@ -107,7 +107,8 @@ func cmdSpeechTalk(args []string) {
 	pitch := fs.Float64("pitch", 120, "the voice's base pitch in Hz")
 	tempo := fs.Float64("tempo", 1, "the voice's pace")
 	gain := fs.Float64("gain", 0.5, "peak level as a share of full scale")
-	polish := fs.Int("polish", 0, "acoustic units: Griffin-Lim iterations over the whole reply")
+	polish := fs.Int("polish", 0, "acoustic units through the centroid vocoder: Griffin-Lim iterations over the whole reply")
+	vocoderFlag := fs.String("vocoder", "auto", "acoustic units: the codebook's neural vocoder when it has one (auto), that or nothing (neural), or the codebook's own (centroid)")
 	_ = fs.Parse(permute(fs, args))
 
 	path := *file
@@ -145,6 +146,7 @@ func cmdSpeechTalk(args []string) {
 	options.Temperature, options.Explore, options.Learn = *temperature, *explore, !*noLearn
 	options.Speak, options.VoiceRate = !*noSpeak, *voiceRate
 	options.Pitch, options.Tempo, options.Gain, options.Polish = *pitch, *tempo, *gain, *polish
+	options.Vocoder = *vocoderFlag
 	if *seeded {
 		seed := seedFlag
 		options.Seed = &seed

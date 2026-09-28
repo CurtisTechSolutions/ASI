@@ -150,7 +150,8 @@ class TestTheOutputDecoder(unittest.TestCase):
                 speaker = Speaker(enc)
                 self.assertEqual(say(enc, "the cat sat").pcm, speaker.feed("the cat sat") + speaker.end())
                 doc = spoken.to_dict()
-                self.assertEqual(set(doc), {"rate", "samples", "seconds", "encoding", "decoder", "count", "utterances"})
+                self.assertEqual(set(doc), {"rate", "samples", "seconds", "encoding", "decoder", "vocoder", "count",
+                                            "utterances"})
                 self.assertEqual((doc["count"], doc["seconds"]), (2, spoken.samples / 16000))
                 self.assertEqual(set(doc["utterances"][0]), {"text", "spelled", "tokens", "samples", "seconds"})
         # what a text spells: a text of sounds through the tokenizer, anything else as it is

@@ -907,7 +907,8 @@ func cmdSay(args []string) {
 	pitch := fs.Float64("pitch", 120, "the voice's base pitch in Hz")
 	tempo := fs.Float64("tempo", 1, "the voice's pace")
 	gain := fs.Float64("gain", 0.5, "peak level as a share of full scale")
-	polish := fs.Int("polish", 0, "acoustic units: Griffin-Lim iterations over each whole utterance (0: the streaming vocoder as it is)")
+	polish := fs.Int("polish", 0, "acoustic units through the centroid vocoder: Griffin-Lim iterations over each whole utterance (0: the streaming vocoder as it is)")
+	vocoderFlag := fs.String("vocoder", "auto", "acoustic units: the codebook's neural vocoder when it has one (auto), that or nothing (neural), or the codebook's own (centroid)")
 	_ = fs.Parse(permute(fs, args))
 	if outPath == "" {
 		outPath = "speech.wav"
@@ -944,11 +945,15 @@ func cmdSay(args []string) {
 	if err != nil {
 		fail("%v", err)
 	}
-	opts := radixnet.SayOptions{Rate: *rate, Pitch: *pitch, Tempo: *tempo, Gain: *gain, Polish: *polish}
+	opts := radixnet.SayOptions{Rate: *rate, Pitch: *pitch, Tempo: *tempo, Gain: *gain, Polish: *polish, Vocoder: *vocoderFlag}
+	vocoder, err := radixnet.VocoderName(enc, opts.Vocoder)
+	if err != nil {
+		fail("%v", err)
+	}
 	said := []map[string]any{}
 	record := func(_ int, u radixnet.Utterance) { said = append(said, u.Dict()) }
-	// polishing needs the whole utterance, so it is not streamed
-	polished := *polish > 0 && radixnet.DecoderName(enc) == "vocoder"
+	// the learned vocoder and the polish need the whole utterance, so it is not streamed
+	polished := vocoder == "neural" || (*polish > 0 && radixnet.DecoderName(enc) == "vocoder")
 	run := func(emitPCM func([]byte)) error {
 		if polished {
 			spoken, err := radixnet.Say(enc, texts, opts)
@@ -1003,7 +1008,8 @@ func cmdSay(args []string) {
 	}
 	if !*raw {
 		emit(map[string]any{"texts": texts, "utterances": said, "count": len(said), "seconds": float64(total) / 2 / float64(outRate),
-			"rate": outRate, "sink": sink, "encoding": enc.String(), "decoder": radixnet.DecoderName(enc), "polish": *polish})
+			"rate": outRate, "sink": sink, "encoding": enc.String(), "decoder": radixnet.DecoderName(enc),
+			"vocoder": radixnet.VocoderNameOrNil(vocoder), "polish": *polish})
 	}
 }
 

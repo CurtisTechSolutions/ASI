@@ -399,8 +399,9 @@ export const api = {
   /**
    * The output decoder: texts in the model's units (predictions, samples, turns - sounds, syllables, acoustic
    * units, words or letters) spoken through the model's voice, one utterance each. Options: rate, pitch, tempo,
-   * gain, polish (acoustic units: Griffin-Lim iterations). Answers `{wav_base64, rate, samples, seconds, encoding,
-   * decoder, count, utterances}`.
+   * gain, polish (acoustic units: Griffin-Lim iterations through the centroid vocoder), vocoder (acoustic units:
+   * auto | neural | centroid). Answers `{wav_base64, rate, samples, seconds, encoding, decoder, vocoder, count,
+   * utterances}`.
    */
   say: (texts, options = {}) => post("/api/say", { texts: Array.isArray(texts) ? texts : [texts], ...options }),
   /** Talking with the model by voice (VoicePanel): what the tab has to work with. */

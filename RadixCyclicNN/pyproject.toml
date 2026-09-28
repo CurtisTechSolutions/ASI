@@ -18,6 +18,9 @@ diffusion = ["pillow", "torch", "diffusers"]
 # Speech to text; the waveform encoder itself needs nothing, and the browser's
 # Web Speech API (or --text) supplies the words without any of these.
 speech = ["faster-whisper"]
+# The acoustic units' neural vocoder (D-090) runs on the standard library; numpy makes a reply's
+# audio take milliseconds instead of seconds, and is what training one needs.
+vocoder = ["numpy"]
 whisper = ["openai-whisper"]
 
 [project.scripts]

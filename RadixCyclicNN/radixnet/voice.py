@@ -249,6 +249,9 @@ class Spoken:
     decoder: str
     """``"voice"``: the formant synthesizer; ``"vocoder"``: the acoustic codebook's vocoder."""
     utterances: list[Utterance] = field(default_factory=list)
+    vocoder: str | None = None
+    """Which vocoder spoke acoustic units: ``"neural"`` (the codebook's learned vocoder) or ``"centroid"`` (its
+    own, streamed or Griffin-Lim polished); ``None`` for the voice."""
 
     @property
     def samples(self) -> int:
@@ -266,7 +269,7 @@ class Spoken:
         """The record without the audio: what the CLI prints and the API returns beside ``wav_base64``."""
         return {
             "rate": self.rate, "samples": self.samples, "seconds": self.seconds,
-            "encoding": self.encoding, "decoder": self.decoder, "count": len(self.utterances),
+            "encoding": self.encoding, "decoder": self.decoder, "vocoder": self.vocoder, "count": len(self.utterances),
             "utterances": [u.to_dict() for u in self.utterances],
         }
 
@@ -282,6 +285,27 @@ def spelled(encoding: Encoding, text: str) -> str:
 def decoder_name(encoding: Encoding) -> str:
     """What speaks a model's texts: the codebook's vocoder for acoustic units, the formant voice for the rest."""
     return "vocoder" if encoding.unit == ACOUSTIC else "voice"
+
+
+VOCODERS = ("auto", "neural", "centroid")
+"""How acoustic units are spoken by :func:`say`: through the codebook's neural vocoder when it has one (``auto``),
+through it or not at all (``neural``), or through the codebook's own centroid vocoder (``centroid``)."""
+
+
+def vocoder_choice(vocoder: str) -> bool | None:
+    """A :data:`VOCODERS` name as :meth:`phonetok.acoustic.AcousticTokenizer.synthesize` takes it."""
+    if vocoder not in VOCODERS:
+        raise ValueError(f"'vocoder' must be one of {', '.join(VOCODERS)}, not {vocoder!r}")
+    return None if vocoder == "auto" else vocoder == "neural"
+
+
+def vocoder_name(encoding: Encoding, vocoder: str = "auto") -> str | None:
+    """Which vocoder :func:`say` speaks an encoding's texts with: ``"neural"`` or ``"centroid"`` for acoustic
+    units (a :class:`ValueError` when ``neural`` is insisted on and the codebook has none), ``None`` otherwise."""
+    if encoding.unit != ACOUSTIC:
+        vocoder_choice(vocoder)
+        return None
+    return acoustic_tokenizer().vocoder_name(vocoder_choice(vocoder))
 
 
 def speak_texts(
@@ -326,29 +350,32 @@ def say(
     tempo: float = 1.0,
     gain: float = 0.5,
     polish: int = 0,
+    vocoder: str = "auto",
 ) -> Spoken:
     """The output decoder: texts in a model's units become speech, one utterance each.
 
     The same voice as :func:`speak_walks` reads them (``rate``, ``pitch``,
     ``tempo``, ``gain``), and the same rule closes each: the END sentinel.
-    ``polish`` applies to acoustic units only - that many Griffin-Lim
-    iterations over each whole utterance once it is known, which the streaming
-    vocoder cannot do; ``0`` is exactly what the vocoder makes.
+    Acoustic units are spoken through the codebook's neural vocoder when it
+    has one (``vocoder``, one of :data:`VOCODERS`: ``auto``; ``neural`` insists,
+    ``centroid`` declines), each utterance rendered whole once it is known;
+    else through the codebook's own centroid vocoder, ``polish`` Griffin-Lim
+    iterations over each whole utterance, or streamed exactly as
+    :func:`speak_walks` makes it when ``polish`` is ``0``.
     """
     if isinstance(texts, str):
         texts = [texts]
     texts = list(texts)
     out_rate = output_rate(encoding, rate)
-    spoken = Spoken(b"", out_rate, str(encoding), decoder_name(encoding))
+    spoken = Spoken(b"", out_rate, str(encoding), decoder_name(encoding), vocoder=vocoder_name(encoding, vocoder))
     chunks: list[bytes] = []
-    if spoken.decoder == "vocoder" and polish > 0:
-        # the whole utterance is known, so it can be polished: the vocoder's gain convention
-        # is the Speaker's (the voice's half scale is the codebook's own level)
-        acoustic = phonetok_module("acoustic", "speaking")
-        book = acoustic_tokenizer().codebook
+    if spoken.vocoder == "neural" or (spoken.decoder == "vocoder" and polish > 0):
+        # the whole utterance is known, so it can be rendered whole - through the learned vocoder, or polished:
+        # the vocoder's gain convention is the Speaker's (the voice's half scale is the codebook's own level)
+        tok = acoustic_tokenizer()
         for text in texts:
             units = encoding.units(text)
-            pcm = acoustic.synthesize(units, book, polish=polish, gain=gain * 2.0, pitch=pitch)
+            pcm = tok.synthesize(units, polish=polish, gain=gain * 2.0, pitch=pitch, neural=spoken.vocoder == "neural")
             chunks.append(pcm)
             spoken.utterances.append(Utterance(text, spelled(encoding, text), [*units, "</s>"], len(pcm) // 2,
                                                len(pcm) / 2.0 / out_rate))

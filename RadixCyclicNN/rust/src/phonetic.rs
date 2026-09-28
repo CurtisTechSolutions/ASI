@@ -10,7 +10,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use phonetok::acoustic::{AcousticTokenizer, Codebook};
+use phonetok::acoustic::AcousticTokenizer;
 use phonetok::lexicon::Lexicon;
 use phonetok::tokenizer::{Level, Tokenizer};
 
@@ -26,12 +26,12 @@ static ACOUSTIC: OnceLock<Result<AcousticTokenizer, String>> = OnceLock::new();
 pub fn acoustic_tokenizer() -> Result<&'static AcousticTokenizer, String> {
     ACOUSTIC
         .get_or_init(|| {
-            let book = match std::env::var("PHONETOK_CODEBOOK") {
-                Ok(path) if !path.is_empty() => Codebook::load(&path)
-                    .map_err(|e| format!("the acoustic unit's codebook (PHONETOK_CODEBOOK): {e}"))?,
-                _ => Codebook::bundled().map_err(|e| format!("the acoustic unit needs its codebook: {e}"))?,
-            };
-            AcousticTokenizer::new(book, true)
+            // the codebook's file is remembered so its neural vocoder is looked for beside it
+            match std::env::var("PHONETOK_CODEBOOK") {
+                Ok(path) if !path.is_empty() => AcousticTokenizer::from_file(&path, true)
+                    .map_err(|e| format!("the acoustic unit's codebook (PHONETOK_CODEBOOK): {e}")),
+                _ => AcousticTokenizer::bundled().map_err(|e| format!("the acoustic unit needs its codebook: {e}")),
+            }
         })
         .as_ref()
         .map_err(|e| e.clone())

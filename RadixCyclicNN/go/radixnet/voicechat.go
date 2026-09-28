@@ -90,6 +90,7 @@ type VoiceOptions struct {
 	Tempo             float64
 	Gain              float64
 	Polish            int
+	Vocoder           string
 	Chunk             int
 }
 
@@ -120,12 +121,15 @@ func (o VoiceOptions) Validate() error {
 	if o.Chunk < 1 || o.Polish < 0 || o.MaxLength < 0 || o.Context < 0 || o.K < 1 {
 		return fmt.Errorf("'chunk' and 'k' must be at least 1; 'polish', 'max_length' and 'context' at least 0")
 	}
+	if _, err := VocoderChoice(o.Vocoder); err != nil {
+		return err
+	}
 	return nil
 }
 
 // sayOptions is the voice the reply is spoken with.
 func (o VoiceOptions) sayOptions() SayOptions {
-	return SayOptions{Rate: o.VoiceRate, Pitch: o.Pitch, Tempo: o.Tempo, Gain: o.Gain, Polish: o.Polish}
+	return SayOptions{Rate: o.VoiceRate, Pitch: o.Pitch, Tempo: o.Tempo, Gain: o.Gain, Polish: o.Polish, Vocoder: o.Vocoder}
 }
 
 // VoiceOutcome is what one turn came to: the document the API answers with,
@@ -490,10 +494,19 @@ func DescribeVoice(enc Encoding, ollama *OllamaClient) map[string]any {
 	if ollama != nil {
 		client = map[string]any{"url": ollama.URL, "model": ollama.Model}
 	}
+	var vocoder any
+	if enc.Unit == Acoustic {
+		// a vocoder file that is not the codebook's: the tab says so, the turn fails
+		if name, err := VocoderName(enc, "auto"); err != nil {
+			vocoder = "error: " + err.Error()
+		} else {
+			vocoder = VocoderNameOrNil(name)
+		}
+	}
 	return map[string]any{
-		"speakers": VoiceSpeakers[:], "answers": VoiceAnswers, "encoding": enc.String(),
-		"decoder": DecoderName(enc), "acoustic": enc.Unit == Acoustic, "default_rate": DefaultSpeechRate,
-		"chunk": VoiceChunkSamples,
+		"speakers": VoiceSpeakers[:], "answers": VoiceAnswers, "vocoders": Vocoders, "encoding": enc.String(),
+		"decoder": DecoderName(enc), "vocoder": vocoder, "acoustic": enc.Unit == Acoustic,
+		"default_rate": DefaultSpeechRate, "chunk": VoiceChunkSamples,
 		"transcription": map[string]any{
 			"backends": speech["backends"], "auto": speech["auto"], "faster_whisper": speech["faster_whisper"],
 			"whisper": speech["whisper"],
