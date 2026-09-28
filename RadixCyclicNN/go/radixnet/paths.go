@@ -296,32 +296,35 @@ func (g *Graph) NodesWithPaths() map[int]bool {
 }
 
 // splitPaths follows the contexts through a split: q -> P -> c becomes q -> A
-// -> B -> c, so a context (q, e) of a moved edge becomes (A, e) and the new
-// edge A -> B inherits (q, A->B), the step q now calls.
-func (g *Graph) splitPaths(a, b int, moved []int, bridge int) {
+// -> B -> c, so a context (q, e) of a moved edge becomes (A, e) - the node
+// before B is A now.  The bridge A -> B carries no verdict: it is a forced
+// step, and a verdict about one of the siblings it stands before is not a
+// verdict about it.
+func (g *Graph) splitPaths(a int, moved []int) {
 	if len(g.paths) == 0 || len(moved) == 0 {
 		return
 	}
 	for _, edge := range moved {
 		for prev := range copyKeys(g.pathsByEdge[edge]) {
-			row := g.dropPath(prev, edge)
-			if row == nil {
-				continue
-			}
-			g.addPath(a, edge, row)
-			if bridge >= 0 {
-				g.addPath(prev, bridge, row)
+			if row := g.dropPath(prev, edge); row != nil {
+				g.addPath(a, edge, row)
 			}
 		}
 	}
 	g.ctxVersion = invalidStamp
 }
 
-// mergePaths follows the contexts through a merge: the chain was unary, so
-// what it knew about was never a choice.  The edge p -> c dies with its
-// contexts, and so do the contexts of c's out-edges ("having come to c from
-// p"); contexts that arrive through c are re-keyed to p.
-func (g *Graph) mergePaths(p, child, dying int, moved []int) {
+// mergePaths follows the contexts through a merge: q -> p -> c -> c' becomes
+// q -> p -> c'.  The contexts of c's out-edges, keyed (p, e) - having come to
+// c from p - are re-keyed to (q, e) for every node q that called p (callers):
+// that is the node before the merged node now, and for a node with one caller
+// it is exactly what splitPaths did in reverse.  With several callers each of
+// them carries the pooled row: the merge cannot tell which of them a judged
+// walk came through, and pricing the step by the pooled verdicts is what the
+// merged node's predecessor did before.  Contexts that arrived through c are
+// re-keyed to p; the dying edge's own die with it - a forced step was never a
+// choice.
+func (g *Graph) mergePaths(p, child, dying int, moved, callers []int) {
 	if len(g.paths) == 0 {
 		return
 	}
@@ -329,7 +332,11 @@ func (g *Graph) mergePaths(p, child, dying int, moved []int) {
 		g.dropPath(prev, dying)
 	}
 	for _, edge := range moved {
-		g.dropPath(p, edge)
+		if row := g.dropPath(p, edge); row != nil {
+			for _, q := range callers {
+				g.addPath(q, edge, row)
+			}
+		}
 	}
 	for edge := range copyKeys(g.pathsByPrev[child]) {
 		if row := g.dropPath(child, edge); row != nil {

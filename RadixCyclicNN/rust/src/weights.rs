@@ -86,6 +86,80 @@ impl Graph {
         edges.len()
     }
 
+    /// Gives a new bridge the window history of the edges it now stands
+    /// before; returns the events added.  The sliding window is the last
+    /// `window_size` edge traversals, and every one of a moved edge's
+    /// traversals inside it went through the node that was just halved, and so
+    /// through the bridge: the window is rewritten with a bridge event before
+    /// each of them, then trimmed to its size from the oldest end, the way
+    /// `configure(window)` trims it.  Afterwards the window reads as if the
+    /// corpus had been counted on the halved structure.  The caller
+    /// ([`Graph::split`]) marks every row for recomputation.
+    pub(crate) fn inherit_window(&mut self, bridge: usize, moved: &[usize]) -> usize {
+        let mut moved_set = crate::hash::set();
+        for &e in moved {
+            if self.window_edge_count[e] > 0 {
+                moved_set.insert(e);
+            }
+        }
+        if moved_set.is_empty() {
+            return 0;
+        }
+        let live = &self.window[self.window_head..];
+        let mut rebuilt = Vec::with_capacity(2 * live.len());
+        let mut added = 0usize;
+        for &e in live {
+            if moved_set.contains(&e) {
+                rebuilt.push(bridge);
+                added += 1;
+            }
+            rebuilt.push(e);
+        }
+        self.window_edge_count[bridge] += added as i64;
+        let drop = rebuilt.len().saturating_sub(self.window_size);
+        for &old in &rebuilt[..drop] {
+            if old < self.window_edge_count.len() && self.window_edge_count[old] > 0 {
+                self.window_edge_count[old] -= 1;
+            }
+        }
+        if drop > 0 {
+            rebuilt.drain(..drop);
+        }
+        self.window = rebuilt;
+        self.window_head = 0;
+        added
+    }
+
+    /// Carries what a unary edge was taught, beyond what the edges entering
+    /// its parent (`in_edges`) already carry, onto them; returns the amount
+    /// carried.  The in-edges and the unary edge saw the same walks, so a pass
+    /// that rewards every edge of a path leaves the same amount on both and
+    /// there is nothing to carry: what the in-edges do *not* explain is what
+    /// was taught to the forced step alone, and it is added to each of them -
+    /// the step into the merged node, where the same feedback would land after
+    /// the merge.  Nothing moves when the in-edges carry more than the unary
+    /// edge, or the opposite sign: what they were taught on their own account
+    /// is theirs.
+    pub(crate) fn fold_reward(&mut self, dying: usize, in_edges: &[usize]) -> f64 {
+        let reward = self.edge_reward[dying];
+        if reward == 0.0 || in_edges.is_empty() {
+            return 0.0;
+        }
+        let mut explained = 0.0;
+        for &e in in_edges {
+            explained += self.edge_reward[e];
+        }
+        let unexplained = reward - explained;
+        if unexplained == 0.0 || (unexplained > 0.0) != (reward > 0.0) || unexplained.abs() > reward.abs() {
+            return 0.0;
+        }
+        for &e in in_edges {
+            self.edge_reward[e] += unexplained;
+            self.dirty.insert(self.edge_parent[e]);
+        }
+        unexplained
+    }
+
     /// Writes the weight function to every edge leaving `p`.
     ///
     /// # Safety

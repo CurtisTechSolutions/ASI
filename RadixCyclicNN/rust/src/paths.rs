@@ -23,7 +23,7 @@ pub struct PathKey {
 }
 
 /// What a context did.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct PathRow {
     pub seen: i64,
     pub correct: i64,
@@ -39,7 +39,7 @@ pub enum PathOutcome {
 }
 
 /// How much of the graph has been judged as paths rather than as edges.
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
 pub struct PathTotals {
     pub contexts: usize,
     pub judged: usize,
@@ -232,10 +232,10 @@ impl Graph {
 
     /// Follows the contexts through a split: `q -> P -> c` becomes
     /// `q -> A -> B -> c`, so a context `(q, e)` of a moved edge becomes
-    /// `(A, e)` and the new edge `A -> B` inherits `(q, A->B)`, the step `q`
-    /// now calls.
-    pub(crate) fn split_paths(&mut self, a: usize, b: usize, moved: &[usize], bridge: Option<usize>) {
-        let _ = b;
+    /// `(A, e)` - the node before `B` is `A` now.  The bridge `A -> B` carries
+    /// no verdict: it is a forced step, and a verdict about one of the
+    /// siblings it stands before is not a verdict about it.
+    pub(crate) fn split_paths(&mut self, a: usize, moved: &[usize]) {
         if self.paths.is_empty() || moved.is_empty() {
             return;
         }
@@ -245,36 +245,43 @@ impl Graph {
                 None => continue,
             };
             for prev in callers {
-                let Some(row) = self.drop_path(prev, edge) else {
-                    continue;
-                };
-                self.add_path(a, edge, row);
-                if let Some(bridge) = bridge {
-                    self.add_path(prev, bridge, row);
+                if let Some(row) = self.drop_path(prev, edge) {
+                    self.add_path(a, edge, row);
                 }
             }
         }
         self.ctx_version = crate::counter::INVALID_STAMP;
     }
 
-    /// Follows the contexts through a merge: the chain was unary, so what it
-    /// knew about was never a choice.  The edge `p -> c` dies with its
-    /// contexts, and so do the contexts of `c`'s out-edges; contexts that
-    /// arrive through `c` are re-keyed to `p`.
-    pub(crate) fn merge_paths(&mut self, p: usize, child: usize, dying: usize, moved: &[usize]) {
+    /// Follows the contexts through a merge: `q -> p -> c -> c'` becomes
+    /// `q -> p -> c'`.  The contexts of `c`'s out-edges, keyed `(p, e)` -
+    /// having come to `c` from `p` - are re-keyed to `(q, e)` for every node
+    /// `q` that called `p` (`callers`): that is the node before the merged
+    /// node now, and for a node with one caller it is exactly what
+    /// [`Graph::split_paths`] did in reverse.  With several callers each of
+    /// them carries the pooled row: the merge cannot tell which of them a
+    /// judged walk came through, and pricing the step by the pooled verdicts
+    /// is what the merged node's predecessor did before.  Contexts that
+    /// arrived through `c` are re-keyed to `p`; the dying edge's own die with
+    /// it - a forced step was never a choice.
+    pub(crate) fn merge_paths(&mut self, p: usize, child: usize, dying: usize, moved: &[usize], callers: &[usize]) {
         if self.paths.is_empty() {
             return;
         }
-        let callers: Vec<usize> = self
+        let blamed: Vec<usize> = self
             .paths_by_edge
             .get(&dying)
             .map(|s| s.iter().copied().collect())
             .unwrap_or_default();
-        for prev in callers {
+        for prev in blamed {
             self.drop_path(prev, dying);
         }
         for &edge in moved {
-            self.drop_path(p, edge);
+            if let Some(row) = self.drop_path(p, edge) {
+                for &q in callers {
+                    self.add_path(q, edge, row);
+                }
+            }
         }
         let called: Vec<usize> = self
             .paths_by_prev

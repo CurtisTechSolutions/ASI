@@ -103,6 +103,8 @@ pub mod search;
 pub mod service;
 pub mod source;
 pub mod speech;
+#[cfg(test)]
+mod structure_tests;
 pub mod thinking;
 pub mod toolbox;
 pub mod tools;

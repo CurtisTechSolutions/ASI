@@ -4,9 +4,10 @@
 //! cheapest path, the way the model has always searched; under
 //! [`Traversal::LeastPunished`] it is the path whose *worst* step carries the
 //! least blame, with the cost deciding only between paths that carry the same
-//! worst step.  The bottom beam is the same order upside down, so the k worst
-//! come back as the dearest paths - or, following the blame, the most punished
-//! ones.
+//! worst step, and the top beam refuses a blamed step at every node.  The
+//! bottom beam is the same order upside down, so the k worst come back as the
+//! dearest paths - or, following the blame, the most punished ones, which is
+//! why it walks the steps the top beam refuses.
 
 use crate::graph::{Graph, END};
 use crate::penalty::PenaltyCosts;
@@ -223,7 +224,10 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
             };
             g.step_costs_into(st.node, prev, o.costs, &mut children);
             onward(&mut children);
-            if o.traversal == Traversal::LeastPunished {
+            if o.traversal == Traversal::LeastPunished && !o.worst {
+                // the top beam refuses a blamed step; the bottom one is looking for the
+                // most punished paths, and they lie behind exactly the steps the top
+                // beam refuses
                 least_punished(&mut children);
             }
             for &cc in children.iter() {

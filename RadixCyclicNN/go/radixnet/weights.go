@@ -60,6 +60,48 @@ func (g *Graph) RecordTraversals(edges []int) int {
 	return len(edges)
 }
 
+// inheritWindow gives a new bridge the window history of the edges it now
+// stands before; returns the events added.  The sliding window is the last
+// WindowSize edge traversals, and every one of a moved edge's traversals
+// inside it went through the node that was just halved, and so through the
+// bridge: the window is rewritten with a bridge event before each of them,
+// then trimmed to its size from the oldest end, the way Configure trims it.
+// Afterwards the window reads as if the corpus had been counted on the halved
+// structure.  The caller (Split) marks every row for recomputation.
+func (g *Graph) inheritWindow(bridge int, moved []int) int {
+	movedSet := make(map[int]struct{}, len(moved))
+	for _, e := range moved {
+		if g.WindowEdgeCount[e] > 0 {
+			movedSet[e] = struct{}{}
+		}
+	}
+	if len(movedSet) == 0 {
+		return 0
+	}
+	live := g.window[g.windowHead:]
+	rebuilt := make([]int, 0, 2*len(live))
+	added := 0
+	for _, e := range live {
+		if _, ok := movedSet[e]; ok {
+			rebuilt = append(rebuilt, bridge)
+			added++
+		}
+		rebuilt = append(rebuilt, e)
+	}
+	g.WindowEdgeCount[bridge] += int64(added)
+	drop := len(rebuilt) - g.WindowSize
+	for i := 0; i < drop; i++ {
+		if old := rebuilt[i]; old < len(g.WindowEdgeCount) && g.WindowEdgeCount[old] > 0 {
+			g.WindowEdgeCount[old]--
+		}
+	}
+	if drop > 0 {
+		rebuilt = rebuilt[drop:]
+	}
+	g.window, g.windowHead = rebuilt, 0
+	return added
+}
+
 // Configure changes the scales / window size and recomputes every weight (on a
 // negative graph: the blame function's scales).
 func (g *Graph) Configure(opts map[string]float64) error {
@@ -253,6 +295,35 @@ func (g *Graph) AddReward(edges []int, amount float64) int {
 		}
 	}
 	return touched
+}
+
+// foldReward carries what a unary edge was taught, beyond what the edges
+// entering its parent (inEdges) already carry, onto them; returns the amount
+// carried.  The in-edges and the unary edge saw the same walks, so a pass that
+// rewards every edge of a path leaves the same amount on both and there is
+// nothing to carry: what the in-edges do *not* explain is what was taught to
+// the forced step alone, and it is added to each of them - the step into the
+// merged node, where the same feedback would land after the merge.  Nothing
+// moves when the in-edges carry more than the unary edge, or the opposite
+// sign: what they were taught on their own account is theirs.
+func (g *Graph) foldReward(dying int, inEdges []int) float64 {
+	reward := g.EdgeReward[dying]
+	if reward == 0 || len(inEdges) == 0 {
+		return 0
+	}
+	explained := 0.0
+	for _, e := range inEdges {
+		explained += g.EdgeReward[e]
+	}
+	unexplained := reward - explained
+	if unexplained == 0 || (unexplained > 0) != (reward > 0) || math.Abs(unexplained) > math.Abs(reward) {
+		return 0
+	}
+	for _, e := range inEdges {
+		g.EdgeReward[e] += unexplained
+		g.dirty[g.EdgeParent[e]] = struct{}{}
+	}
+	return unexplained
 }
 
 // TotalReward is (sum of positive rewards, sum of negative rewards) over alive edges.

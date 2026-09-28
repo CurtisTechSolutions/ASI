@@ -542,31 +542,72 @@ class CountRewardGraph(RadixCyclicGraph):
     # -- keeping the contexts honest through splits and merges ----------------
 
     def split(self, node_id: int, i: int) -> tuple[int, int]:
-        """Split, then follow the contexts: ``q -> P -> c`` becomes ``q -> A -> B -> c``.
+        """Split, then keep what this model hangs on its edges consistent: ``q -> P -> c`` becomes
+        ``q -> A -> B -> c``.
 
-        Every out-edge of the old node now leaves ``B``, whose only way in is
-        ``A``, so a context ``(q, e)`` of a moved edge becomes ``(A, e)``; the
-        new edge ``A -> B`` inherits ``(q, A->B)``, the step ``q`` now calls.
+        * The bridge ``A -> B`` is born with the node's visit count (the base
+          class) *and with its window history*: every windowed traversal of an
+          edge that now leaves ``B`` went through the node that was halved, and
+          so through the bridge, so the window is rewritten with a bridge event
+          before each of them (:meth:`_inherit_window`).  Left at zero, the
+          bridge's recent share would say the node had not been walked lately,
+          and the first new branch out of ``A`` would be priced far above its
+          share of the traffic.
+        * A context ``(q, e)`` of a moved edge becomes ``(A, e)``: the node
+          before ``B`` is ``A`` now.  The bridge itself carries no verdict - it
+          is a forced step, and a verdict about one of the siblings it stands
+          before is not a verdict about it.
         """
         moving = list(self.children[node_id].values()) if self.alive[node_id] else []
         a_id, b_id = super().split(node_id, i)
         for edge in moving:
             self.edge_parent[edge] = b_id
+        bridge = self.children[a_id].get(b_id)
+        if bridge is not None and moving:
+            self._inherit_window(bridge, moving)
         if not self.paths or not moving:
             self._path_parents = None
             return a_id, b_id
-        bridge = self.children[a_id].get(b_id)
         for edge in moving:
             for prev in list(self._by_edge.get(edge, ())):
                 row = self._drop_path(prev, edge)
-                if row is None:
-                    continue
-                self._add_path(a_id, edge, row, b_id)
-                if bridge is not None:
-                    self._add_path(prev, bridge, row, a_id)
+                if row is not None:
+                    self._add_path(a_id, edge, row, b_id)
         self._path_parents = None
         self._ctx_cache.clear()
         return a_id, b_id
+
+    def _inherit_window(self, bridge: int, moved: Sequence[int]) -> int:
+        """Give a new bridge the window history of the edges it now stands before; returns the events added.
+
+        The sliding window is the last ``window`` edge traversals.  Every one
+        of a moved edge's traversals inside it went through the node that was
+        just halved, and so through the bridge: the window is rewritten with a
+        bridge event before each of them, then trimmed to its size from the
+        oldest end, the way ``configure(window=)`` trims it.  Afterwards the
+        window reads as if the corpus had been counted on the halved structure.
+        The weights are not recomputed here: every caller of :meth:`split`
+        recomputes them once the structure has settled.
+        """
+        wcount = self.window_edge_count
+        moved_set = {e for e in moved if wcount[e] > 0}
+        if not moved_set:
+            return 0
+        rebuilt: deque[int] = deque()
+        added = 0
+        for e in self._window:
+            if e in moved_set:
+                rebuilt.append(bridge)
+                added += 1
+            rebuilt.append(e)
+        wcount[bridge] += added
+        limit = self.window
+        while len(rebuilt) > limit:
+            old = rebuilt.popleft()
+            if old < len(wcount) and wcount[old] > 0:
+                wcount[old] -= 1
+        self._window = rebuilt
+        return added
 
     def split_window(self, size: int) -> int:
         """Halve what is longer than the window, then give every bridge its weight: the node's whole count."""
@@ -576,12 +617,26 @@ class CountRewardGraph(RadixCyclicGraph):
         return splits
 
     def merge_child(self, p: int) -> bool:
-        """Merge, then follow the contexts: the chain was unary, so what it knew was never a choice.
+        """Merge, then keep what this model hangs on its edges consistent: ``q -> p -> c -> c'`` becomes
+        ``q -> p -> c'``.
 
-        The edge ``p -> c`` dies with its contexts, and so do the contexts of
-        ``c``'s out-edges, which said "having come to ``c`` from ``p``" - a
-        step nobody could avoid.  Contexts that arrive *through* ``c`` are
-        re-keyed to ``p``, which is what the merged node is called from now on.
+        * The contexts of ``c``'s out-edges, keyed ``(p, e)`` - having come to
+          ``c`` from ``p`` - are re-keyed to ``(q, e)`` for every node ``q``
+          that called ``p``: that is the node before the merged node now, and
+          for a node with one caller it is exactly what :meth:`split` did in
+          reverse.  With several callers each of them carries the pooled row:
+          the merge cannot tell which of them a judged walk came through, and
+          pricing the step by the pooled verdicts is what the merged node's
+          predecessor did before.  Contexts that arrived *through* ``c`` are
+          re-keyed to ``p``; the dying edge's own die with it - a forced step
+          was never a choice.
+        * What the dying edge was taught beyond what the edges entering ``p``
+          already carry is folded into them (:meth:`_fold_reward`): a pass
+          that rewards every edge of a path leaves the same amount on the step
+          into ``p`` and on ``p -> c``, and nothing moves; a reward or penalty
+          placed on the forced step alone is carried onto the step into the
+          merged node, where the same feedback would have landed had it come
+          after the merge.
         """
         child = dying = None
         moved: list[int] = []
@@ -593,11 +648,20 @@ class CountRewardGraph(RadixCyclicGraph):
             return False
         for edge in moved:
             self.edge_parent[edge] = p
+        # who calls the merged node: a cycle edge c -> p is the loop p -> p by now, under the same edge id
+        callers = list(self.parents[p])
+        if self._fold_reward(dying, list(self.parents[p].values())):
+            for q in callers:
+                self._recompute_row(q)
+            self.version += 1
         if self.paths:
             for prev in list(self._by_edge.get(dying, ())):
-                self._drop_path(prev, dying)  # the edge is gone
+                self._drop_path(prev, dying)  # the edge is gone, and the step it was could not be avoided
             for edge in moved:
-                self._drop_path(p, edge)  # "arrived from p" was the only way to arrive
+                row = self._drop_path(p, edge)
+                if row is not None:
+                    for q in callers:
+                        self._add_path(q, edge, row)
             for edge in list(self._by_prev.get(child, ())):
                 row = self._drop_path(child, edge)
                 if row is not None:
@@ -605,6 +669,31 @@ class CountRewardGraph(RadixCyclicGraph):
             self._ctx_cache.clear()
         self._path_parents = None
         return True
+
+    def _fold_reward(self, dying: int, in_edges: Sequence[int]) -> float:
+        """Carry what a unary edge was taught, beyond what the edges entering its parent carry, onto them.
+
+        The in-edges of the parent and the unary edge saw the same walks, so a
+        pass that rewards every edge of a path leaves the same amount on both
+        and there is nothing to carry: what the in-edges do *not* explain is
+        what was taught to the forced step alone, and it is added to each of
+        them - the step into the merged node, where the same feedback would
+        land after the merge.  Nothing moves when the in-edges carry more than
+        the unary edge, or the opposite sign: what they were taught on their
+        own account is theirs.  Returns the amount carried.
+        """
+        reward = self.edge_reward[dying]
+        if reward == 0.0 or not in_edges:
+            return 0.0
+        explained = 0.0
+        for e in in_edges:
+            explained += self.edge_reward[e]
+        unexplained = reward - explained
+        if unexplained == 0.0 or (unexplained > 0.0) != (reward > 0.0) or abs(unexplained) > abs(reward):
+            return 0.0
+        for e in in_edges:
+            self.edge_reward[e] += unexplained
+        return unexplained
 
     def observe_sequence(self, trigrams, count: bool = True, origin: int = START) -> list[tuple[int, int]]:
         transitions = super().observe_sequence(trigrams, count, origin)
@@ -712,8 +801,26 @@ class CountRewardGraph(RadixCyclicGraph):
             for c, e in edges
         ]
 
+    def _recompute_row(self, p: int) -> None:
+        """Write the dual frequency weight to every edge leaving ``p`` (:meth:`recompute_weights`, one node)."""
+        ch = self.children[p]
+        if not ch or not self.alive[p]:
+            return
+        ew, er, wc = self.edge_w, self.edge_reward, self.window_edge_count
+        edges = list(ch.values())
+        degree = len(edges)
+        counts = [self._edge_traversals_f(e) for e in edges]
+        total = 0.0
+        for count in counts:  # an explicit left-to-right sum, as in the Go port
+            total += count
+        recent = sum(wc[e] for e in edges)
+        for e, count in zip(edges, counts):
+            ew[e] = self.edge_weight(count, er[e], total, degree, wc[e], recent)
+
     def recompute_weights(self) -> None:
-        """Write the dual frequency weight to every alive edge (after counts, rewards or scales changed)."""
+        """Write the dual frequency weight to every alive edge (after counts, rewards or scales changed).
+
+        The loop is :meth:`_recompute_row` unrolled: it runs once per counted text, so it stays flat."""
         ew, er, wc = self.edge_w, self.edge_reward, self.window_edge_count
         weight = self.edge_weight
         traversals = self._edge_traversals_f

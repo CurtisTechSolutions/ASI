@@ -587,7 +587,9 @@ impl Graph {
     /// Cuts a node between its trigrams `i - 1` and `i`: `a` keeps the id with
     /// `label[..i + 2]`, `b` is a new node with `label[i..]` that inherits
     /// `a`'s out-edges (edge ids kept) and its count; `a` gets the single new
-    /// edge `a -> b`.
+    /// edge `a -> b`, which carries the node's visit count and the window
+    /// history of the edges it now stands before ([`Graph::inherit_window`]),
+    /// and no verdict ([`Graph::split_paths`]).
     pub fn split(&mut self, node: usize, i: usize) -> Result<(usize, usize), String> {
         if node < FIRST {
             return Err("cannot split a sentinel node".to_string());
@@ -626,7 +628,8 @@ impl Graph {
             self.edge_parent[e] = b;
         }
         self.children[a].clear();
-        self.new_edge(a, b, a_count, a_resets);
+        let bridge = self.new_edge(a, b, a_count, a_resets);
+        self.inherit_window(bridge, &moved); // the bridge stood in every windowed traversal of the edges it now feeds
         let mut j = i;
         while j + enc.n <= length {
             self.index
@@ -636,8 +639,7 @@ impl Graph {
         self.labels[a] = label.slice(0, i + enc.overlap());
         self.label_len[a] = i + enc.overlap();
         self.dirty_all = true;
-        let bridge = self.children[a].get(b);
-        self.split_paths(a, b, &moved, bridge); // q -> P -> c is now q -> A -> B -> c
+        self.split_paths(a, &moved); // q -> P -> c is now q -> A -> B -> c; the bridge carries no verdict
         self.resonant_refresh(a);
         self.resonant_refresh(b);
         Ok((a, b))
@@ -645,7 +647,11 @@ impl Graph {
 
     /// Merges `p`'s single child into it when the chain is unary (`p` has
     /// exactly one child, that child exactly one parent, no sentinels, and the
-    /// two are not the same node).
+    /// two are not the same node).  What the count model hangs on the edges
+    /// follows the merge: the contexts of the choice at the child are keyed by
+    /// the merged node's callers ([`Graph::merge_paths`]), and what the dying
+    /// edge alone was taught goes onto the steps into `p`
+    /// ([`Graph::fold_reward`]).
     pub fn merge_child(&mut self, p: usize) -> bool {
         if p < FIRST || p >= self.labels.len() || !self.alive[p] {
             return false;
@@ -672,6 +678,14 @@ impl Graph {
         let shift = lp.len() - enc.overlap();
         let e = self.children[p].edges[0];
         let moved_out: Vec<usize> = self.children[c].edges.clone();
+        // who calls p, read before the merge turns a cycle edge c -> p into the loop p -> p
+        let callers: Vec<usize> = self.parents[p]
+            .order
+            .iter()
+            .map(|&q| if q == c { p } else { q })
+            .collect();
+        let in_edges: Vec<usize> = self.parents[p].edges.clone();
+        self.fold_reward(e, &in_edges); // what the forced step alone was taught goes onto the steps into p
         self.children[p].clear();
         self.parents[c].clear();
         self.edge_alive[e] = false;
@@ -730,7 +744,7 @@ impl Graph {
         self.version.add(1);
         self.structure_version.add(1);
         self.dirty_all = true;
-        self.merge_paths(p, c, e, &moved_out); // the chain was unary: what its contexts knew was never a choice
+        self.merge_paths(p, c, e, &moved_out, &callers); // the choice at c is the merged node's now
         self.resonant_refresh(p);
         true
     }

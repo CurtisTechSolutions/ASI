@@ -143,16 +143,18 @@ not "more punished" for that.
 
 | | under `reward` | under `least-punished` |
 |---|---|---|
-| the children a node offers | `onward(costs)` — everything but a hand-over to `BACK` | `onward`, then **only the least punished of what is left** |
+| the children a node offers | `onward(costs)` — everything but a hand-over to `BACK` | `onward`, then **only the least punished of what is left** — in the top beam and the sampled walk; the bottom beam takes `onward` alone |
 | a partial path in the beam | ordered by `(cost, chars, node, entry)` | `(punish, cost, chars, node, entry)` |
 | a finished path | kept if cheaper than the k-th kept | kept if less punished, or as punished and cheaper |
-| the bottom beam | the k **dearest** paths | the k **most punished** paths |
+| the bottom beam | the k **dearest** paths | the k **most punished** paths — found by walking the steps the top beam refuses, and ranked most punished first |
 | the early exit | stop when the best partial is no cheaper than the k-th finished | same, on the lexicographic order |
 | a sampled walk | softmax over `-cost / temperature` | the same softmax, over the least punished children alone |
 
 The local filter and the global order do different work and both are needed. The
 filter is what makes a walk *refuse* a blamed step while standing at the node; the
-order is what makes the beam prefer a branch that never had to take one.
+order is what makes the beam prefer a branch that never had to take one. The bottom
+beam is asked the opposite question, which is why it does not filter: the most
+punished path lies behind exactly the steps the top beam will not take.
 
 ## 4. API
 
