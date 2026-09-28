@@ -11,8 +11,9 @@ model's own outputs earned when a judge said the output was right or wrong. The
 two are connected wherever they hold an equal sequence, at every level, and the
 connection is where a step's two numbers are read together. Text goes in and
 comes out through a **codec** — an encoder/decoder behind a tokenizer. This
-document is the contract the code is written against. Read it fully before
-writing code. `PRD.md` says what it is for and what will count as success; this
+document is the contract the code is written against - phases P1 and P2 of it
+are built; `README.md` has what they measured. Read it fully before changing
+code. `PRD.md` says what it is for and what will count as success; this
 says what exactly the code must do.
 
 Directory: `PrimedRadixPair/`. Python package: `radixpair`. Python 3.11+,
@@ -468,9 +469,11 @@ question is which way the least has gone wrong on (`SPEC-LeastPunished.md`
 ### 8.2 Crediting a judged text — at every level; a punishment is a negative reward
 
 ```python
-def credit(self, ids: Sequence[int], amount: float, rungs: str = "all") -> int
+def credit(self, ids: Sequence[int], amount: float, rungs: str = "all", skip: int = 0) -> int
     # a padded text and a SIGNED amount: +strength·weight for a reward, −strength·weight for a punishment —
     # a punishment is a negative reward, and the same call writes both.
+    # skip: positions at the start that are context only - their substrings roll the codes but are not
+    #       credited. What the model was GIVEN is not what it PRODUCED: PairModel passes the prefix's length.
     # rungs="all":   every substring of length 1..L ending at every position — the same ids observe() counts —
     #                gets plus += amount (amount > 0) or minus += −amount (amount < 0).
     # rungs="final": only the substrings of length L (the final nodes): the step is credited at the deepest
@@ -486,6 +489,13 @@ and generalise; deep nodes hold the credit of one context and specialise. That
 is the whole of what "connected at every level, not just the final nodes" does
 on the writing side, and `rungs = final` is the pair the idea started from,
 kept so the difference is measured (S-7).
+
+An outcome credits **what the model produced, not what it was given**: `reward`
+and `punish` take the `prefix` the model continued, whose units are context
+for the credited steps and earn nothing themselves (`skip`). Rewarding a whole
+sentence instead credits the prefix's steps too — at four characters, `he ` is
+followed by `c` in `the cat` as well as by `m` in `the mat`, and both would
+earn the reward.
 
 `credit` **is the only thing that writes `plus` and `minus`** (invariant 4),
 and it never touches `cnt`. `PairModel.reward` / `punish` / `two_nrl` /
@@ -671,6 +681,14 @@ time.
 
 ## 10. `search.py` — walks over the pair
 
+**The greedy walk of the exact fold is the default** (`mode = greedy`), and the
+cheapest path (`mode = dijkstra`) is the option, the other way round from the
+family. Measured while building: on a primed tree the cheapest single path can
+pay for a rare unit at the deepest level — an `<unk>` — because the unread
+context it lands in then falls to the root for nothing (`own = 0`), where
+frequent units are cheap; the fold sums over every fall and is not fooled. On a
+grown graph the rare edge does not exist and the problem does not arise.
+
 State: `(node, level, emitted)`. Moves from `(i, ℓ, e)`, under the traversal
 the call names:
 
@@ -750,22 +768,27 @@ class PairModel:
         # count kind: observe_text per text; returns {"texts", "units", "unk", "unk_share", "increments", "seconds"}
 
     # -- outcomes: the family's primitives (D-026), marks as weights (D-050) --
-    def reward(self, texts, *, strength: float | None = None, weights: Sequence[float] | None = None, read: bool = False) -> dict
-        # credit(+strength·weight) per text at the model's `rungs`; a weight of 0 is skipped; read=True also observes the
-        # text into the count tree (the family's count model's behaviour; off by default — PRD.md section 9.7)
-    def punish(self, texts, *, strength=None, weights=None) -> dict          # reward with the sign reversed: credit(−strength·weight); never reads
-    def two_nrl(self, bad, good, *, strength=None, bad_weights=None, good_weights=None) -> dict   # punish(bad) then reward(good); no inversion
-    def feedback(self, good=(), bad=(), *, good_weights=None, bad_weights=None, strength=None) -> dict
+    def reward(self, texts, *, strength: float | None = None, weights: Sequence[float] | None = None, read: bool = False,
+               prefix: str | None = None) -> dict
+        # credit(+strength·weight) per text at the model's `rungs`; a weight of 0 is skipped; prefix: what the model was
+        # given - context for the texts, not credited (section 8.2); read=True also observes the text into the count
+        # tree (the family's count model's behaviour; off by default — PRD.md section 9.7)
+    def punish(self, texts, *, strength=None, weights=None, prefix=None) -> dict   # reward with the sign reversed; never reads
+    def two_nrl(self, bad, good, *, strength=None, bad_weights=None, good_weights=None, prefix=None) -> dict   # punish(bad) then reward(good); no inversion
+    def feedback(self, good=(), bad=(), *, good_weights=None, bad_weights=None, strength=None, prefix=None) -> dict
         # both -> two_nrl; only good -> reward; only bad -> punish — D-026's dispatch, so a tutor's marks, a sandbox's
         # verdict and a person's thumb all end here
     def invert(self) -> None                                                  # the reward tree's swap (§8.4)
 
     # -- prediction and scoring --
-    def predict(self, prefix: str, length: int, mode: str = "dijkstra", traversal: str = "reward", start: bool = True,
-                temperature: float = 1.0, to_end: bool = False) -> PathResult
+    def predict(self, prefix: str, length: int, mode: str = "greedy", traversal: str = "reward", start: bool = True,
+                temperature: float = 1.0, to_end: bool = False, backoff: str | None = None) -> PathResult
         # start=True: the prefix begins a text (padded with START); False: a fragment. The context is the last ≤ D
-        # units. mode: "dijkstra" | "greedy" | "sample". full_text = prefix + text.
-    def generate(self, prefix: str = "", length: int = 60, **options) -> PathResult     # from START alone when prefix == ""
+        # units. mode: "greedy" (the exact fold, the default - section 10) | "dijkstra" | "sample".
+        # full_text = codec.decode(prefix units + emitted units).
+    def generate(self, prefix: str = "", length: int = 60, mode: str = "greedy", **options) -> PathResult
+        # the walk runs to END, capped at `length`; from START alone when prefix == "". The cheapest complete text
+        # (mode="dijkstra") is one step long whenever END is likelier than any continuation, as the family's is.
     def score(self, text: str, traversal: str = "reward") -> Score
     def distribution(self, context: Sequence[int], traversal: str = "reward") -> list[float]   # the fold; for tests and the API
     def weights(self, **scales) -> dict      # change smoothing / the four scales / backoff at run time and report them,
@@ -877,10 +900,11 @@ python3 -m radixpair prime    --model m.json --codec chars|bytes|bpe|phones|syll
 python3 -m radixpair train    --model m.json --data corpus.txt [--data more.txt ...] [--checkpoint-dir DIR]
                               [sine kind: --epochs 5 --lr 0.05 --act-lr 0.005 --batch 256 --clip 5]
 python3 -m radixpair reward   --model m.json (--text "..." | --data file) [--strength 1] [--ratings 9 7 10] [--read]
-python3 -m radixpair punish   --model m.json (--text "..." | --data file) [--strength 1] [--ratings ...]
-python3 -m radixpair 2nrl     --model m.json --bad bad.txt --good good.txt [--strength 1]
-python3 -m radixpair feedback --model m.json [--good ...] [--bad ...] [--good-ratings ...] [--bad-ratings ...]
-python3 -m radixpair predict  --model m.json --prefix "the quick brown" --length 20 [--mode dijkstra|greedy|sample]
+                              [--prefix "what the model was given"]
+python3 -m radixpair punish   --model m.json (--text "..." | --data file) [--strength 1] [--ratings ...] [--prefix ...]
+python3 -m radixpair 2nrl     --model m.json --bad bad.txt --good good.txt [--strength 1] [--prefix ...]
+python3 -m radixpair feedback --model m.json [--good ...] [--bad ...] [--good-ratings ...] [--bad-ratings ...] [--prefix ...]
+python3 -m radixpair predict  --model m.json --prefix "the quick brown" --length 20 [--mode greedy|dijkstra|sample]
                               [--traversal reward|punishment] [--merit-scale 1] [--penalty-scale 1]
                               [--temperature 1.0] [--fragment] [--to-end] [--hops]
 python3 -m radixpair generate --model m.json [--prefix ""] [--length 60] [the predict options]
@@ -891,7 +915,7 @@ python3 -m radixpair info     --model m.json
 python3 -m radixpair check    [--R 3 --L 4]                                   the brute-force oracle (§6.4)
 python3 -m radixpair bench    [--codec chars --L 4 --units 200000]            throughput: counting and crediting (§16)
 python3 -m radixpair bench compare  --data corpus.txt [--holdout 0.1] [--L 4] [--smoothing 0]   bits per unit: all / deepest / none, and the references (PRD S-4, S-5)
-python3 -m radixpair bench feedback [--data corpus.txt]                        the mat / log case under both traversals (PRD S-6)
+python3 -m radixpair bench feedback [--smoothing 0]                            the mat / log case under both traversals, at smoothing 0 (PRD S-6)
 python3 -m radixpair bench rungs    --data corpus.txt                          rewards at every level against the final nodes (PRD S-7)
 python3 -m radixpair invert   --model m.json
 ```
