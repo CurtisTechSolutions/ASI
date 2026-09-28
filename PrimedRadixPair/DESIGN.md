@@ -30,9 +30,9 @@ one codec, imported lazily and never required. Deterministic given its inputs.
 | **brute-force insertion of every option** | A complete `R`-ary tree needs no pointers: the path to a node, read as a number in base `R` — the *radix* — is its address (§6). The literal brute-force insertion — every sequence, one at a time, with the standard radix insertion of `RadixTrieLLM_RNN/main.py` — is kept in `check.py` as the oracle the arithmetic is tested against (§6.4, §15). |
 | **connect the 2nd Radix Tree to the first where the nodes are equal** | Two nodes are equal when they spell the same sequence. Every sequence has exactly one id, the same in both trees, so the connection — the **rung** — is the same id read twice: once for its count, once for its reward (§9.1). |
 | **at every single level/node, not just the final nodes** | A prediction visits every context length from the deepest down to the root (§9.3), and at each one the rung combines the count tree's share with the reward tree's reward into one answer (§9.2). A judged step is credited at every context length (§8.2). `rungs = final` keeps only the deepest level's rungs, so what the rest buy is measured (§9.6). |
-| **the second tree is reward-focused, rewarded based on correct outcomes** | The reward tree is written only by `reward` / `punish` — the family's primitives (D-026), marks as weights (D-050) — and never by `train`. A step carries its **reward** and its **penalty** as two numbers kept apart, because their net loses what the punishment traversal needs (`SPEC-LeastPunished.md` §1). |
+| **the second tree is reward-focused, rewarded based on correct outcomes — and can be punished, a negative reward** | The reward tree is written only by `reward` / `punish` — the family's primitives (D-026), marks as weights (D-050) — and never by `train`. A punishment is `reward` with a negative amount: the same loop, the same nodes, the opposite sign (§8.2), and what a step is worth is its net. Underneath, a step keeps its **reward** and its **penalty** as two sums kept apart, because their net loses what the punishment traversal needs (`SPEC-LeastPunished.md` §1). |
 | **use an encoder/decoder** | `Codec` (§5): `encode(text) → ids`, `decode(ids) → text`, the two halves of one tokenizer, chosen at priming and saved with the model — as `RadixCyclicNN`'s `Encoding` has its `Encoder` and `Decoder` halves. |
-| **a tokenizer commonly used in LLMs, and my phonetic tokenizer** | `bpe` — the repository's byte-level byte-pair encoding, trained at priming to a chosen vocabulary size (§5.3); `phones` — `../PhoneticTokenizer` at the phoneme level, its fixed alphabet of 92 ids as the vocabulary (§5.4); `external` — a published LLM tokenizer through `tiktoken` or `tokenizers`, optional (§5.5). And `chars` and `bytes` for the small alphabets. |
+| **a tokenizer commonly used in LLMs, and my phonetic tokenizer** | `gpt2` — GPT-2's own tokenizer from its two vocabulary files, in the standard library, whole or capped to a corpus's most frequent tokens (§5.5); `bpe` — the repository's byte-level byte-pair encoding, trained at priming to a chosen vocabulary size (§5.3); `phones` and `syllables` — `../PhoneticTokenizer` at the phoneme level, its fixed alphabet of 92 ids as the vocabulary, and at the syllable level, its vocabulary closed at priming from the lexicon or a corpus (§5.4); `external` — any other published tokenizer through `tiktoken` or `tokenizers`, optional (§5.6). And `chars` and `bytes` for the small alphabets. |
 | A model of the family | `train / predict / generate / score` and `reward / punish / two_nrl / feedback`; shortest-path prediction (Dijkstra, as `RadixCyclicNN/DESIGN.md` §7); the reward and punishment traversals (`RadixCyclicNN/DESIGN.md` §31); JSON model files; a CLI; `unittest` with no dependencies. |
 | The score is the family's dual function | At a node, `P(x) ∝ share^share_scale · e^(reward_scale · reward)`: the edge's share of its node's traversals times `e` to the reward (D-022, without the recency window). Here the share comes from one tree and the reward from the other, and the rung is where they meet (§9.2). |
 | No back-propagation | The count kind has no gradient at all. The sine kind's rule (§12) is the one-hop rule of `FilterBankRadix/DESIGN.md` §5.4 on the count tree's edges; the reward tree is a ledger, never a gradient's target. |
@@ -79,7 +79,7 @@ gradient's target.
 | symbol | meaning |
 |---|---|
 | `Σ`, `R` | the codec's vocabulary and its size, marks included |
-| `START`, `END`, `UNK` | the codec's ids for the start of a text, its end and a unit outside the vocabulary. `0, 1, 2` for `chars`, `bytes` and `bpe`; `V, V+1, V+2` for `external`; the phonetic tokenizer's own `2, 3, 1` for `phones`, whose `<pad>` (`0`) is a *dead* id |
+| `START`, `END`, `UNK` | the codec's ids for the start of a text, its end and a unit outside the vocabulary. `0, 1, 2` for `chars`, `bytes`, `bpe` and a capped `gpt2`; `V, V+1, V+2` for a whole `gpt2` and for `external`; the phonetic tokenizer's own `2, 3, 1` for `phones` and `syllables`, whose `<pad>` (`0`) is a *dead* id |
 | `Σ_out`, `R'` | what a walk may emit: `Σ` without `START` and without the dead ids; its size |
 | `L`, `D` | the longest sequence held, and `D = L − 1` the longest context |
 | `s`, `\|s\|`, `ε` | a sequence of ids, its length, and the empty sequence (the root, id `0`) |
@@ -109,7 +109,8 @@ PrimedRadixPair/
   radixpair/
     __init__.py          the public surface: Codec and the presets, PairModel, prime, load_model, Score, PathResult
     __main__.py          python3 -m radixpair -> cli.main()
-    codec.py             the encoder/decoder: Codec, chars, bytes_, phones, external; the marks
+    codec.py             the encoder/decoder: Codec, chars, bytes_, phones, syllables, gpt2, external; the marks
+    gpt2.py              GPT-2's byte-level BPE from encoder.json + vocab.bpe: the byte table, the pre-tokenizer, the merges
     bpe.py               the byte-level byte-pair encoding: train, encode, decode
     address.py           the arithmetic of a primed tree: base, code, id, append, drop_oldest, drop_newest, level
     count.py             CountTree: the counts, observe(), ctx / share / own
@@ -141,7 +142,7 @@ changed afterwards: the tree's addresses are measured in its units.
 
 ```python
 class Codec:
-    name: str                       # "chars" | "bytes" | "bpe" | "phones" | "external"
+    name: str                       # "chars" | "bytes" | "bpe" | "phones" | "syllables" | "gpt2" | "external"
     R: int                          # the vocabulary size, marks included
     start: int ; end: int           # the ids of the marks
     unk: int | None                 # the id of "a unit outside the vocabulary"; None where every input is a unit (bytes)
@@ -167,7 +168,9 @@ family's do; both are views of the one codec.
 | `bytes_()` | 3 marks, then the 256 byte values | **259** | UTF-8 bytes; `unk` is never produced (`unk = None`); decode with replacement for a walk that is not valid UTF-8 |
 | `bpe(vocab_size=1024)` | 3 marks, then `vocab_size` tokens: the 256 bytes and `vocab_size − 256` merges (§5.3) | `vocab_size + 3` | byte-level BPE; `unk` is never produced |
 | `phones(stress=True)` | the phonetic tokenizer's fixed alphabet at the phoneme level: `<pad> <unk> <s> </s> # , . ?` then the 84 ARPAbet symbols of `cmudict.symbols` (§5.4) | **92** | `PhoneticTokenizer.encode` / `.decode`; `stress=False` keeps the same 92 ids and uses fewer of them |
-| `external(spec)` | a published tokenizer's vocabulary, then the 3 marks appended (§5.5) | `V + 3` | the library's own; optional |
+| `syllables(stress=True, vocabulary="lexicon", top=None)` | the same 8 specials, then every distinct syllable token of the source — the tokenizer's lexicon (**1,502** with stress in the bundled core lexicon, 1,389 without; measured) or the tokenizer-data corpus — sorted, frozen (§5.4) | `syllables + 8` | the tokenizer at `level="syllable"` with a frozen `Vocab`: `encode(text, grow=False)`, so a syllable outside the vocabulary is `<unk>`; `decode` spells the sounds back |
+| `gpt2(files=(encoder.json, vocab.bpe), top=None)` | GPT-2's 50,257 tokens, then the 3 marks appended; or, capped, the `top` most frequent tokens of the tokenizer-data corpus renumbered `3..top+2` after the marks, with `<unk>` for the rest (§5.5) | `50,260`, or `top + 3` | GPT-2's byte-level BPE in the standard library from the two files of the original release; verified against `tiktoken` when it is installed |
+| `external(spec)` | any other published tokenizer's vocabulary, then the 3 marks appended (§5.6) | `V + 3` | the library's own; optional |
 
 Every preset is deterministic and normalises before it maps, so
 `decode(encode(text))` is the normalised text (`test_codec.py`, S-9).
@@ -200,22 +203,68 @@ sized to what priming can afford.
 Its merges are trained here; it is byte-identical to no published tokenizer,
 and does not claim to be — `external` is for that.
 
-### 5.4 `phones` — the phonetic tokenizer
+### 5.4 `phones` and `syllables` — the phonetic tokenizer
 
-`PhoneticTokenizer(level="phoneme", stress=stress)` from `../PhoneticTokenizer`
-(`phonetok`), imported lazily; `test_codec.py` skips it when the package is not
-importable. Its phoneme-level vocabulary is **frozen** — 92 ids, the same on
-every machine — which is what makes it primeable, and its ids are used as they
-are: `<pad> = 0` is dead, `<unk> = 1`, `<s> = 2`, `</s> = 3`, `# = 4` (the gap
-between words), `, . ? = 5..7` (the pauses), then the 84 ARPAbet symbols.
-`encode` is `tok.encode(text, grow=False)`; `decode` is `tok.decode(ids)`,
-which spells the sounds back into words. The other levels — constituent,
-syllable, word — give a token its id the first time it is read, so "every
-option" over them is open-ended; `phones(level=…)` refuses them with the reason.
-The tokenizer's settings (`level`, `stress`, `boundaries`, `pauses`) are saved
-in the codec block (§13) so a model reads exactly as it was primed.
+`PhoneticTokenizer(level, stress=stress)` from `../PhoneticTokenizer`
+(`phonetok`), imported lazily; `test_codec.py` skips both codecs when the
+package is not importable. The tokenizer's settings (`level`, `stress`,
+`boundaries`, `pauses`) are saved in the codec block (§13) so a model reads
+exactly as it was primed, and its own specials are used as they are: `<pad> = 0`
+is dead, `<unk> = 1`, `<s> = 2`, `</s> = 3`, `# = 4` (the gap between words),
+`, . ? = 5..7` (the pauses).
 
-### 5.5 `external` — a published LLM tokenizer
+**`phones`** is the phoneme level. Its vocabulary is **frozen** by the
+tokenizer itself — 92 ids, the specials then the 84 ARPAbet symbols, the same
+on every machine — which is what makes it primeable as it stands. `encode` is
+`tok.encode(text, grow=False)`; `decode` is `tok.decode(ids)`, which spells the
+sounds back into words.
+
+**`syllables`** is the syllable level, where the tokenizer gives a syllable
+(`K.AE1.T`) its id the first time it reads one. "Every option" over an open
+vocabulary is not a thing, so the codec **closes the vocabulary at priming**
+and freezes it: the 8 specials, then every distinct syllable token of a source,
+in sorted order so that priming is deterministic, as `Vocab(tokens,
+frozen=True)`. Two sources: `vocabulary="lexicon"` — every syllable of every
+word the tokenizer's lexicon knows, which is "every potential option" for the
+language as the tokenizer knows it — and `vocabulary="corpus"` — every
+syllable the tokenizer-data texts contain. `top=K` keeps the `K` most frequent
+syllables of the corpus and reads the rest as `<unk>`. A syllable outside the
+vocabulary is `<unk>` (`encode(text, grow=False)`), and `decode` drops it.
+Measured with the package while writing this: the bundled core lexicon (2,057
+entries) holds **1,502** distinct syllable tokens with stress and 1,389
+without, so `L = 2` — one syllable of context — is 2,281,611 nodes; the
+sample corpus holds 244. The full CMU dictionary (`pip install cmudict`, some
+135,000 words) holds tens of thousands and would prime no deeper than `L = 1`
+uncapped, and the 113,530,725 syllables the tokenizer's own onset and coda
+rules would allow (77 legal onsets × 45 stressed vowels × 32,765 legal codas)
+are not a vocabulary anything primes over. The word level is not taken.
+
+### 5.5 `gpt2` — GPT-2's tokenizer, in the standard library
+
+GPT-2's byte-level byte-pair encoding, run from the two files of the original
+release — `encoder.json` (token → id) and `vocab.bpe` (the merges in rank
+order), the same content as Hugging Face's `vocab.json` and `merges.txt` —
+given by path at priming and copied into the codec block whole (about a
+megabyte, gzip takes it to a quarter). `gpt2.py` carries the three parts of the
+algorithm: the reversible byte-to-unicode table, the pre-tokenizer regex
+(`'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`,
+with `\p{L}` written `[^\W\d_]` and `\p{N}` written `\d` for Python's `re`),
+and the rank-ordered merging of §5.3. `test_codec.py` holds it to `tiktoken`'s
+`gpt2` encoding id for id on every text of the test corpus when `tiktoken` is
+installed and skips that one test when it is not; exact parity on every unicode
+category is not promised, and the test corpus says how far it holds.
+
+Whole, the vocabulary is 50,257 tokens and the three marks are **appended** at
+`50257..50259`, the tokenizer's ids unchanged: that primes to `L = 1` under
+the ceiling (§16.1) — **no context at all, a unigram over tokens** — and one
+token of context is 2.5 billion nodes. Capped, `top=K` keeps the `K` most
+frequent GPT-2 tokens of the tokenizer-data corpus, renumbered `3..K+2` after
+the marks in frequency order (the kept GPT-2 ids are saved in the codec block
+so the renumbering is reproducible), and reads every other token as `<unk>`;
+at `K = 2000` that is 4,018,021 nodes at `L = 2` — one GPT-2 token of
+context — under the ceiling. What `<unk>` swallows is reported by `info`.
+
+### 5.6 `external` — any other published tokenizer
 
 `external("tiktoken:cl100k_base")` or `external("hf:/path/to/tokenizer.json")`:
 the tokenizer's own ids, unchanged, with the three marks **appended** at
@@ -225,10 +274,10 @@ spec, `V` and a digest of the vocabulary (the sorted `(id, bytes)` pairs
 hashed with `hashlib.sha256`), and `from_dict` refuses a library whose
 vocabulary digests differently — a model must read with the exact tokenizer it
 was primed with. `V` is tens of thousands, so this codec primes to `L = 1`
-under the default ceiling (§16.1): one token of context, a bigram over tokens.
-That is stated, not hidden.
+under the default ceiling (§16.1) — a unigram — and takes the same `top=K` cap
+as `gpt2` for one token of context. That is stated, not hidden.
 
-### 5.6 The marks, and the sequences that cannot occur
+### 5.7 The marks, and the sequences that cannot occur
 
 The marks are units of the vocabulary on purpose (`PRD.md` §9.6): the first unit
 of a text is predicted from a context that says it is first, and the end of a
@@ -416,11 +465,12 @@ once must not read like one rewarded four times and never punished when the
 question is which way the least has gone wrong on (`SPEC-LeastPunished.md`
 §1). Both arrays are monotone non-decreasing except through `invert` (§8.4).
 
-### 8.2 Crediting a judged text — at every level
+### 8.2 Crediting a judged text — at every level; a punishment is a negative reward
 
 ```python
 def credit(self, ids: Sequence[int], amount: float, rungs: str = "all") -> int
-    # a padded text and a signed amount: +strength·weight for a reward, −strength·weight for a penalty.
+    # a padded text and a SIGNED amount: +strength·weight for a reward, −strength·weight for a punishment —
+    # a punishment is a negative reward, and the same call writes both.
     # rungs="all":   every substring of length 1..L ending at every position — the same ids observe() counts —
     #                gets plus += amount (amount > 0) or minus += −amount (amount < 0).
     # rungs="final": only the substrings of length L (the final nodes): the step is credited at the deepest
@@ -703,7 +753,7 @@ class PairModel:
     def reward(self, texts, *, strength: float | None = None, weights: Sequence[float] | None = None, read: bool = False) -> dict
         # credit(+strength·weight) per text at the model's `rungs`; a weight of 0 is skipped; read=True also observes the
         # text into the count tree (the family's count model's behaviour; off by default — PRD.md section 9.7)
-    def punish(self, texts, *, strength=None, weights=None) -> dict          # credit(−strength·weight); never reads
+    def punish(self, texts, *, strength=None, weights=None) -> dict          # reward with the sign reversed: credit(−strength·weight); never reads
     def two_nrl(self, bad, good, *, strength=None, bad_weights=None, good_weights=None) -> dict   # punish(bad) then reward(good); no inversion
     def feedback(self, good=(), bad=(), *, good_weights=None, bad_weights=None, strength=None) -> dict
         # both -> two_nrl; only good -> reward; only bad -> punish — D-026's dispatch, so a tutor's marks, a sandbox's
@@ -801,8 +851,8 @@ temporary file and `os.replace`, as `RadixCyclicNN`'s `write_bytes_atomic`.
 * The **codec block** holds the whole tokenizer: `chars` its symbols; `bytes`
   nothing but its name; `bpe` its merge list in rank order; `phones` the
   tokenizer's settings (`level`, `stress`, `boundaries`, `pauses`); `external`
-  its spec, `V` and the vocabulary digest (§5.5). `R` and `N` are recomputed,
-  never read.
+  its spec, `V` and the vocabulary digest (§5.6); `gpt2` its two files whole and,
+  capped, the kept ids (§5.5). `R` and `N` are recomputed, never read.
 * `counts.ids` are sorted and hold **only the non-zero counts**; `rewards.ids`
   only the nodes with a non-zero `plus` or `minus`; `sine.ids` only the nodes
   whose parameters differ from §12's initial values (the block is absent in
@@ -820,8 +870,9 @@ temporary file and `os.replace`, as `RadixCyclicNN`'s `write_bytes_atomic`.
 ## 14. `cli.py` and the `Makefile`
 
 ```
-python3 -m radixpair prime    --model m.json --codec chars|bytes|bpe|phones|external --L 4 [--vocab-size 1024]
-                              [--tokenizer-data corpus.txt] [--external tiktoken:cl100k_base] [--no-stress]
+python3 -m radixpair prime    --model m.json --codec chars|bytes|bpe|phones|syllables|gpt2|external --L 2
+                              [--vocab-size 1024] [--tokenizer-data corpus.txt] [--vocabulary lexicon|corpus] [--top 2000]
+                              [--gpt2-files encoder.json vocab.bpe] [--external tiktoken:cl100k_base] [--no-stress]
                               [--kind count|sine] [--seed 0] [--rungs all|final] [--ceiling N]
 python3 -m radixpair train    --model m.json --data corpus.txt [--data more.txt ...] [--checkpoint-dir DIR]
                               [sine kind: --epochs 5 --lr 0.05 --act-lr 0.005 --batch 256 --clip 5]
@@ -856,7 +907,7 @@ on the command line (`make train DATA=… L=4`), plus `test`
 
 ## 15. Tests (`unittest`, no dependencies, seconds)
 
-* `test_codec.py` — every preset: `R`, the marks, the dead ids, `emits`; normalisation; `unk`; `padded`; the round trip; `to_dict` / `from_dict`; `phones` agrees with `phonetok` token for token and refuses the growing levels, skipped when the package is not importable; `external` agrees with its library id for id and refuses a vocabulary that digests differently, skipped when neither library is installed.
+* `test_codec.py` — every preset: `R`, the marks, the dead ids, `emits`; normalisation; `unk`; `padded`; the round trip; `to_dict` / `from_dict`; `phones` and `syllables` agree with `phonetok` token for token, the syllable vocabulary is closed, sorted and frozen from either source, a syllable outside it is `<unk>` and `top` keeps the most frequent, skipped when the package is not importable; `gpt2` from the two files: the byte table is a bijection, the pre-tokenizer cuts the documented cases, the merges reproduce the release's own examples, the cap renumbers reproducibly, and id-for-id agreement with `tiktoken` on the test corpus when it is installed; `external` agrees with its library id for id and refuses a vocabulary that digests differently, skipped when neither library is installed.
 * `test_bpe.py` — pieces never crossed by a merge; training reaches the vocabulary size and is deterministic (ties); `decode(encode(b)) == b` for random bytes and for unicode text; the merge list round-trips through the file; a repeated word is one cache hit.
 * `test_address.py` — **the brute-force oracle** at `(2,5), (3,4), (5,3), (7,2)` (§6.4); the worked example of §6.1; `level` by bisection at every id; the children block contiguous; `append` undone by `drop_newest`; `substrings` against a naive enumeration; the refusals.
 * `test_count.py` — the invariants of §7.4; the rolling code against a naive recount; the ceiling refused with the numbers in the message.
@@ -878,20 +929,25 @@ on the command line (`make train DATA=… L=4`), plus `test`
 `N` nodes per model, at 24 bytes each — a count and two reward numbers; the
 sine kind adds 56. `L` is the longest sequence; the longest context is `L − 1`.
 
-| codec | `R` | `L = 1` | `L = 2` | `L = 3` | `L = 4` |
+| codec | `R` | `L = 1` (no context) | `L = 2` | `L = 3` | `L = 4` |
 |---|---|---|---|---|---|
 | `chars` | 33 | 34 | 1,123 | 37,060 · 0.8 MiB | **1,222,981 · 28 MiB** |
 | `phones` | 92 | 93 | 8,557 · 0.2 MiB | **787,245 · 18 MiB** | 72,426,541 · 1.6 GiB — a port's job |
+| `syllables`, the core lexicon, stress kept (measured) | 1,510 | 1,511 | **2,281,611 · 52 MiB** | 3,445,232,611 — no | — |
+| `syllables`, stress dropped (measured) | 1,397 | 1,398 | 1,953,007 · 45 MiB | 2,728,350,780 — no | — |
+| `syllables` of `sample_corpus.txt` (measured) | 252 | 253 | 63,757 · 1.5 MiB | 16,066,765 · 368 MiB — a port's job | — |
 | `bytes` | 259 | 260 | 67,341 · 1.5 MiB | 17,441,320 · 399 MiB — a port's job | — |
 | `bpe` 1,024 | 1,027 | 1,028 | **1,055,757 · 24 MiB** | 1,084,262,440 — no | — |
 | `bpe` 2,048 | 2,051 | 2,052 | 4,208,653 · 96 MiB — just over the ceiling | — | — |
-| `external` GPT-2 | 50,260 | **50,261 · 1.2 MiB** | 2,526,117,861 · 56 GiB — no | — | — |
-| `external` cl100k | 100,280 | **100,281 · 2.3 MiB** | 10,056,178,681 — no | — | — |
+| `gpt2` capped to 2,000 | 2,004 | 2,005 | **4,018,021 · 92 MiB** | 8,052,114,085 — no | — |
+| `gpt2` whole | 50,260 | **50,261 · 1.2 MiB — a unigram** | 2,526,117,861 · 56 GiB — no | — | — |
+| `external` cl100k | 100,280 | 100,281 · 2.3 MiB — a unigram | 10,056,178,681 — no | — | — |
 
 The default ceiling (`4,194,304` nodes, §7.1) admits a vocabulary of at most
 45 at `L = 4`, 160 at `L = 3`, 2,047 at `L = 2` and anything at `L = 1`, and
 refuses the rest until there is a port or a torch backend to run them. **The
-tokenizer decides the depth.**
+tokenizer decides the depth** — and `L = 1` holds no context at all: it is a
+unigram, and one unit of context is `L = 2`.
 
 ### 16.2 What was measured while writing this
 
@@ -942,7 +998,7 @@ Asserted in the suite, true at every point in a model's life:
 Named so that adding one is a decision rather than a drift.
 
 * **No growth.** No split, no merge, no dynamic window, no node after priming. The moment a node is created because a text needed it, this is `RadixCyclicNN`.
-* **No open vocabularies.** Every codec is closed at priming; the phonetic tokenizer's growing levels are refused.
+* **No open vocabularies.** Every codec is closed at priming and frozen; the syllable level is closed from the lexicon or a corpus first, the word level is not taken, and the phonotactic enumeration of every possible syllable (§5.4) is measured and not taken.
 * **No recency window.** D-022's second share — an edge's share inside the last 10,000 traversals — is not carried; a primed tree could keep one, and does not yet (§19, question 8).
 * **No `BACK`, no `THINK`.** The sentinels of `RadixCyclicNN` §5.1.1–§5.1.2 are learned from conversation; this model has no conversation yet.
 * **No back-propagation.** Not through depth, not into the reward tree, not "just for the fall".
@@ -964,6 +1020,7 @@ Honest gaps, to be resolved by measurement rather than by guessing now.
 6. **Should the sine kind learn the fall?** §12 keeps `own` on the counts. A learned fall — a weight per node competing with the children, trained by "the deepest level that knows best answers, everything deeper defers" — was the first draft's rule and is a guess; it is not taken without a measurement.
 7. **Should the floor be a rung?** The floor is the one term of the answer that is not a path. A fall from the root to "nothing" with a weight of its own would make it one, and make every path's cost the fold's, which §10 currently only bounds.
 8. **The recency window.** D-022's `R_recent` is what lets the family's count model move on from what it saw early. A primed tree could keep a per-node window count in one more array; whether recency matters on corpora that are read once is not known.
-9. **Is a BPE of two thousand tokens at two tokens of context a language model worth having?** It is the deepest an LLM-style tokenizer primes to under the ceiling, and the alternative — an LLM's own tokenizer at one token — is a bigram. The first `bench compare` on `bpe 1024, L = 2` against `chars, L = 4` on the same text decides where this model's home is.
+9. **Is one syllable, or one capped GPT-2 token, of context a language model worth having?** `L = 2` is the deepest either of the two decided codecs primes to under the ceiling, and the alternative — GPT-2's whole vocabulary at `L = 1` — is a unigram. The first `bench compare` on `syllables, L = 2` and `gpt2 top 2000, L = 2` against `chars, L = 4` and `phones, L = 3` on the same text decides where this model's home is.
+12. **How is the full dictionary's syllables to be primed?** The core lexicon's 1,502 syllables prime to `L = 2`; the full CMU dictionary's would not. The `top` cap, a port that raises the ceiling, or a two-level vocabulary — the frequent syllables whole, the rare ones as their phonemes — are the three ways, and the last is the one the tokenizer's own idempotent text form makes possible.
 10. **When to port.** `phones, L = 4` is 1.6 GiB and 72 million slots — Go or Rust, or torch over the arrays. The number that decides it is S-4's gap between `L = 3` and what a grown model reaches at the same memory.
 11. **`<unk>`'s share.** A closed vocabulary on real text may route too much through `<unk>`; `info` reports it. Where the line is — at what share `<unk>` starts to carry the model — is not known, and `bytes` and `bpe` are the codecs that never produce one.

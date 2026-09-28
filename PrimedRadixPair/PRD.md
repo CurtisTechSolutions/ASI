@@ -1,6 +1,6 @@
 # PrimedRadixPair — Product Requirements
 
-**Status** Proposed, revised 2026-09-28 (v0.2). No code yet. This document says
+**Status** Proposed, revised 2026-09-28 (v0.3). No code yet. This document says
 *what* is being built and *why*, and what will count as success. `DESIGN.md` is
 the contract that says *how*; every requirement below names the section that
 realises it.
@@ -12,6 +12,13 @@ model reads and writes text through an **encoder/decoder** behind a tokenizer �
 the byte-pair kind LLMs use, or the repository's phonetic tokenizer. The mirror
 reading, the backward scoring and the meeting walk are gone from this document;
 §9.3 records why.
+
+**What changed in v0.3.** Two decisions made and one correction. The first
+codecs to try are **GPT-2's tokenizer** and the **syllable level of the phonetic
+tokenizer** (§9.5, with the measured sizes); a **punishment is a negative
+reward** (§1, §9.7). The correction: a tree of depth `L = 1` holds no context
+at all — it is a unigram — so one token of context is `L = 2`, and the budget
+table and the text now say so.
 
 ---
 
@@ -41,12 +48,13 @@ would change the design, and what it would change.
 | **brute-force insertion** | the requirement is that every option is *present*. A complete tree needs no pointers — the path to a node is its address in base `R` — so the design realises the insertion by arithmetic and keeps a literal brute-force insertion as the oracle the arithmetic is tested against (`DESIGN.md` §6, §15). |
 | **the 2nd Radix Tree** | **the reward tree**: the same sequences, primed alike, holding not how often a step was read but what it earned — the rewards and the penalties from the outcomes the model's outputs were judged by. |
 | **rewarded based on correct outcomes** | an output the model produced is judged — a tutor's mark, a sandbox, a person's thumb, 2NRL's good and bad texts — and every step of it is rewarded or punished in the reward tree, at every context length; nothing else there ever moves. The count tree is never written by an outcome, the reward tree never by a text merely read. |
+| **the reward tree can also be punished — a negative reward** | `punish` is `reward` with a negative strength: the same primitive, the same nodes, the opposite sign. What a step is worth is its net — rewards minus penalties — and that net is what the model reads by default. The tree keeps the two sums apart underneath so the punishment traversal can ask which way the least has gone wrong on without the rewards buying it back (§9.4). |
 | **nodes are equal** | two nodes spell the same sequence. Path equality, not label equality (§9.2). |
 | **connected at every level** | every node of the count tree has a connection — a *rung* — to its equal in the reward tree, at every depth. The rung is where a step's two numbers — how often it was read, what it earned — are read together into one answer, at every context length the prediction visits; and a reward is written at every context length of the step it judges. |
 | **connected at the final nodes** | the special case the idea started from, kept as a setting: `rungs = final` writes and reads rewards only at the deepest sequences. What the connections at every level buy over it is measured, not assumed (S-7). |
 | **encoder/decoder** | the **codec**: the encoder turns text into unit ids, the decoder turns ids back into text — the two halves of one tokenizer, as `RadixCyclicNN`'s `Encoding` has its encoder and decoder halves. Which tokenizer is chosen at priming and written into the model file, because a tree's addresses are measured in its units. |
 | **a tokenizer commonly used in LLMs** | byte-pair encoding: the repository's own byte-level BPE, trained on the corpus to a chosen vocabulary size and saved with the model; and, as optional extras, a published LLM tokenizer through `tiktoken` or `tokenizers` when either is installed. |
-| **my phonetic tokenizer in this repo** | `../PhoneticTokenizer`'s `PhoneticTokenizer` at the phoneme level, whose fixed alphabet of 92 ids — its own marks included — is the vocabulary. |
+| **my phonetic tokenizer in this repo** | `../PhoneticTokenizer`'s `PhoneticTokenizer` at two levels. `phones`: the phoneme level, whose fixed alphabet of 92 ids — its own marks included — is the vocabulary. `syllables`: the syllable level, whose vocabulary is closed at priming — every syllable of every word the tokenizer's lexicon knows (1,502 with stress in the bundled core lexicon, measured), or every syllable a corpus contains — and frozen, so a syllable outside it reads as `<unk>`. |
 
 If "encoder/decoder" meant instead an input tree and an output tree — one that
 reads, one that writes — the design already has that shape: the count tree
@@ -97,10 +105,11 @@ follow, and each is a requirement in §6.
    specialises at the deep.
 
 The cost is stated as plainly, and it has a new edge. A primed tree is `R^L`
-big whatever the data, and **the tokenizer sets `R`**: letters and sounds prime
-to three or four units of context, a byte-pair vocabulary of about a thousand
-tokens to two, an LLM's own tokenizer to one (§6.2). The choice of tokenizer is
-the choice of depth.
+big whatever the data, and **the tokenizer sets `R`**: letters and phonemes
+prime to three or four units of context; the core lexicon's syllables, or a
+byte-pair vocabulary of about a thousand tokens, to one; and GPT-2's full
+vocabulary to none — a unigram — unless it is capped to its two thousand most
+frequent tokens (§6.2). The choice of tokenizer is the choice of depth.
 
 ---
 
@@ -110,7 +119,7 @@ the choice of depth.
 |---|---|---|
 | G-1 | A model that is **primed, not grown**: its node set is a function of `(vocabulary, L)` alone, fixed at creation. | `DESIGN.md` §6, §7 |
 | G-2 | **Two trees** over those nodes — the count tree and the reward tree — **connected at every equal node**, each written by its own kind of event and read together at the rung. | §8, §9 |
-| G-3 | An **encoder/decoder** over a chosen tokenizer: characters, bytes, the repository's byte-pair encoding, the phonetic tokenizer, and a published LLM tokenizer as an optional extra. | §5 |
+| G-3 | An **encoder/decoder** over a chosen tokenizer: characters, bytes, GPT-2's tokenizer, the repository's own byte-pair encoding, and the phonetic tokenizer at the phoneme and the syllable level. | §5 |
 | G-4 | The **four verbs** — `train / predict / generate / score` — and the family's **feedback primitives** — `reward / punish / two_nrl / feedback`, marks as weights (D-026, D-050) — on the same CLI shape as `RadixCyclicNN` and `GTMNN`. | §11, §14 |
 | G-5 | A **measurement against the nearest existing models** on the same corpus: bits per unit against `FilterBankRadix`'s single tree and `RadixCyclicNN`'s count model. | §7 of this document |
 | G-6 | The **rungs' contribution measured, not assumed**: rewards written and read at every level against the final nodes only, and the fold against no fold, on the same numbers. | §7, S-5, S-7 |
@@ -118,7 +127,7 @@ the choice of depth.
 ## 4. Non-goals — this version
 
 * **Growth of any kind.** No split, no merge, no dynamic window, no node created after priming. A tree that grows is `RadixCyclicNN`.
-* **Open vocabularies.** Every codec's vocabulary is closed at priming. The phonetic tokenizer's syllable and word levels give a token its id the first time it is read, so they cannot be primed and are refused; words as units are `RadixCyclicNN`'s `WordNGramNet`.
+* **Open vocabularies.** Every codec's vocabulary is closed at priming and frozen. The phonetic tokenizer gives a syllable its id the first time it is read, so the syllable codec closes its vocabulary from the lexicon or a corpus first (§9.5); the word level is not taken, and words as units are `RadixCyclicNN`'s `WordNGramNet`. The 113 million syllables English phonotactics would allow are measured and not taken either (`DESIGN.md` §5.4).
 * **Back-propagation.** Nothing in this family multiplies a chain of derivatives, and nothing here starts to.
 * **The least-punished ranking and the two beams** of the count model (worst step first; the `K` best and `K` worst continuations). Phase 3, once the two traversals exist.
 * **Teachers wired from this side.** The model exposes `reward` and `punish`; the tutor, the critic, the sandbox and the chat loop of `RadixCyclicNN` call them (phase 3). Nothing here calls an LLM.
@@ -152,10 +161,10 @@ The author, in three ways, in this order:
 | | Requirement | Realised in |
 |---|---|---|
 | FR-1 | **Priming.** `prime(codec, L)` produces a model holding every sequence of length `0..L` over the codec's vocabulary (`0` is the root). The node count is `(R^(L+1) − 1) / (R − 1)`, a pure function of `(R, L)`; no operation ever adds or removes a node. | `DESIGN.md` §6, §7.1 |
-| FR-2 | **The encoder/decoder.** A `Codec` with `encode(text) → ids`, `decode(ids) → text`, a closed vocabulary of `R` ids with its start, end and unknown marks, and `to_dict / from_dict` so the whole tokenizer travels in the model file. Presets: `chars`, `bytes`, `bpe(vocab_size)` — the repository's byte-level BPE trained at priming —, `phones` — the phonetic tokenizer at the phoneme level —, and `external` — a published LLM tokenizer through `tiktoken` or `tokenizers`, optional. | §5 |
+| FR-2 | **The encoder/decoder.** A `Codec` with `encode(text) → ids`, `decode(ids) → text`, a closed vocabulary of `R` ids with its start, end and unknown marks, and `to_dict / from_dict` so the whole tokenizer travels in the model file. Presets: `chars`; `bytes`; `bpe(vocab_size)` — the repository's byte-level BPE trained at priming; `phones` — the phonetic tokenizer at the phoneme level; `syllables` — the same tokenizer at the syllable level, its vocabulary closed at priming from the lexicon or a corpus; `gpt2` — GPT-2's tokenizer from its two vocabulary files, in the standard library, whole or capped to the `top` most frequent tokens of a corpus; and `external` — any other published tokenizer through `tiktoken` or `tokenizers`, optional. | §5 |
 | FR-3 | **Two trees, one address space.** The count tree holds a count per sequence; the reward tree holds a reward and a penalty per sequence, kept apart. Every sequence has one id, the same in both trees, so the rung between equal nodes is the same id read twice. | §7.1, §8.1, §9.1 |
 | FR-4 | **Training is counting.** `train(texts)` counts every substring of length `1..L` of every padded text, once per occurrence, into the count tree and nowhere else. Deterministic; training a text twice doubles its counts. | §7.2 |
-| FR-5 | **Rewarding is the same loop.** `reward(texts, strength, weights)` adds `strength × weight` to the reward of every step of every text **at every context length** (`rungs = all`) or at the deepest only (`rungs = final`); `punish` adds to the penalty; `two_nrl(bad, good)` is punish then reward; `feedback(good, bad, good_weights, bad_weights)` dispatches as D-026. Weights are marks (D-050): a `0.9` text earns nine tenths, a `0` is skipped. Nothing in the count tree moves. | §8.2, §9.6 |
+| FR-5 | **Rewarding is the same loop, and a punishment is a negative reward.** `reward(texts, strength, weights)` adds `strength × weight` to every step of every text **at every context length** (`rungs = all`) or at the deepest only (`rungs = final`); `punish` is the same call with the sign reversed; `two_nrl(bad, good)` is punish then reward; `feedback(good, bad, good_weights, bad_weights)` dispatches as D-026. Weights are marks (D-050): a `0.9` text earns nine tenths, a `0` is skipped. Nothing in the count tree moves. | §8.2, §9.6 |
 | FR-6 | **Prediction.** From a context of up to `L − 1` units: the next-unit distribution by the exact fold over every depth the walk can fall to (`mode = greedy`), the cheapest single path (`mode = dijkstra`, the family's default) and a sampled walk with a temperature (`mode = sample`); under either **traversal** — `reward` (follow the rewards) or `punishment` (the rewards leave the score and only the penalties price a step), with `merit_scale` and `penalty_scale` as in `RadixCyclicNN/DESIGN.md` §31. | §9.2, §9.3, §10 |
 | FR-7 | **Scoring.** `score(text)` returns bits per unit under the model's belief, and the reward tree's own readings of the same text: the mean net reward per step and the worst penalty on any step. | §9.5 |
 | FR-8 | **Fallback as a setting.** `backoff = all` (the fold; the default), `deepest` (one fall from the given context straight to the uniform) or `none` (the deepest context and the floor), so G-6 can be measured on the same numbers. | §9.6 |
@@ -175,21 +184,25 @@ The author, in three ways, in this order:
 | NFR-5 | **The file is the data, not the tree.** A model trained on ten sentences and judged on three is a file of a few kilobytes at any `L`. | §13 |
 
 The budget (`N` = nodes per model, at 24 bytes each). `L` is the longest
-sequence held; the longest *context* is `L − 1`:
+sequence held; the longest *context* is `L − 1`, so **`L = 1` is a unigram**
+and one unit of context is `L = 2`:
 
-| codec | `R` | `L = 1` | `L = 2` | `L = 3` | `L = 4` |
+| codec | `R` | `L = 1` (no context) | `L = 2` | `L = 3` | `L = 4` |
 |---|---|---|---|---|---|
 | `chars`: space, a–z, `'` `.` `,` + 3 marks | 33 | 34 | 1,123 | 37,060 · 0.8 MiB | **1,222,981 · 28 MiB** |
 | `phones`: the tokenizer's 92 ids | 92 | 93 | 8,557 · 0.2 MiB | **787,245 · 18 MiB** | 72,426,541 · 1.6 GiB — a port's job |
+| `syllables` of the core lexicon, stress kept (measured) | 1,510 | 1,511 | **2,281,611 · 52 MiB** | 3,445,232,611 — no | — |
+| `syllables` of `sample_corpus.txt` (measured) | 252 | 253 | 63,757 · 1.5 MiB | 16,066,765 · 368 MiB — a port's job | — |
 | `bytes` + 3 marks | 259 | 260 | 67,341 · 1.5 MiB | 17,441,320 · 399 MiB — a port's job | — |
 | `bpe` of 1,024 tokens + 3 marks | 1,027 | 1,028 | **1,055,757 · 24 MiB** | 1,084,262,440 — no | — |
 | `bpe` of 2,048 tokens + 3 marks | 2,051 | 2,052 | 4,208,653 · 96 MiB — just over the ceiling | — | — |
-| GPT-2's tokenizer (50,257) + 3 | 50,260 | **50,261 · 1.2 MiB** | 2,526,117,861 · 56 GiB — no | — | — |
-| `cl100k_base` (100,277) + 3 | 100,280 | **100,281 · 2.3 MiB** | 10,056,178,681 — no | — | — |
+| `gpt2` capped to 2,000 tokens + `<unk>` + 3 marks | 2,004 | 2,005 | **4,018,021 · 92 MiB** | 8,052,114,085 — no | — |
+| `gpt2`, the whole vocabulary (50,257) + 3 | 50,260 | **50,261 · 1.2 MiB — a unigram** | 2,526,117,861 · 56 GiB — no | — | — |
+| `external` `cl100k_base` (100,277) + 3 | 100,280 | 100,281 · 2.3 MiB — a unigram | 10,056,178,681 — no | — | — |
 
 The largest vocabulary the default ceiling admits: 45 at `L = 4`, 160 at
 `L = 3`, 2,047 at `L = 2`, anything at `L = 1`. The rows in bold are the
-regimes this version is for.
+regimes this version is for, and the two decided in §9.5 come first.
 
 ---
 
@@ -208,7 +221,7 @@ having failed, in `README.md`, the way `Experiments/` does it.
 | S-6 | **Rewards move the walk, and the two trees can be read apart.** The author's own case (`SPEC-LeastPunished.md` §1): `the cat sat on the mat` rewarded once at strength 5 and punished once at strength 1, `the cat sat on the log` never judged. The `reward` traversal continues `mat`; the `punishment` traversal continues `log`; and rewarding `mat` fifty times more changes neither answer. | `test_search.py`, `bench feedback`. |
 | S-7 | **Rewards at every level generalise.** A step rewarded under one context becomes likelier under a *different* context that shares its last unit with `rungs = all`, and not with `rungs = final`; the size of the effect, and its cost on contexts sharing nothing, are reported. This is the experiment the connections at every level exist to run. | `test_pair.py`, `bench rungs`. |
 | S-8 | **Round trip.** Save, load, identical predictions and scores; the file holds no zero count, reward or penalty; its size grows with what was read and judged and not with `L`. | `test_model.py`. |
-| S-9 | **The codecs are faithful.** Every codec decodes what it encodes (normalisation aside); the BPE reaches its vocabulary size and round-trips arbitrary bytes exactly; `phones` agrees with `phonetok` token for token; `external` agrees with its library id for id. | `test_codec.py`. |
+| S-9 | **The codecs are faithful.** Every codec decodes what it encodes (normalisation aside); the BPE reaches its vocabulary size and round-trips arbitrary bytes exactly; `phones` and `syllables` agree with `phonetok` token for token, and a syllable outside the frozen vocabulary reads as `<unk>`; `gpt2` agrees with `tiktoken`'s `gpt2` encoding id for id on every text in the test corpus when `tiktoken` is installed; `external` agrees with its library id for id. | `test_codec.py`. |
 
 ---
 
@@ -217,8 +230,8 @@ having failed, in `README.md`, the way `Experiments/` does it.
 | Phase | Delivers | Done when |
 |---|---|---|
 | **P0** | this document and `DESIGN.md` | reviewed; the decisions in §9 made |
-| **P1 — the core** | `codec.py` with `chars`, `bytes`, `phones`; `address.py`; `count.py`; `reward.py`; `pair.py` — the rung, the fold, the shift, scoring; `check.py`; the tests of §15 for these | S-1, S-3, S-7 (the test half), S-9 (three codecs) green |
-| **P2 — the verbs** | `search.py` under both traversals, `model.py`, `checkpoint.py`, `cli.py`, `bench.py`, the `Makefile`; `bpe.py` and the `external` codec; the measurements S-2, S-4, S-5, S-6, S-7, S-8 committed in `README.md` | every criterion of §7 has a number |
+| **P1 — the core** | `codec.py` with `chars`, `syllables`, `phones` and `gpt2` — the two codecs to try first, plus the two the tests are cheapest on; `address.py`; `count.py`; `reward.py`; `pair.py` — the rung, the fold, the shift, scoring; `check.py`; the tests of §15 for these | S-1, S-3, S-7 (the test half), S-9 (four codecs) green |
+| **P2 — the verbs** | `search.py` under both traversals, `model.py`, `checkpoint.py`, `cli.py`, `bench.py`, the `Makefile`; `bytes`, `bpe.py` and the `external` codec; the measurements S-2, S-4, S-5, S-6, S-7, S-8 committed in `README.md`, on `syllables, L = 2` and `gpt2 top 2000, L = 2` first | every criterion of §7 has a number |
 | **P3 — the judged loops** | `feedback` wired as a reward source from `RadixCyclicNN`'s tutor, critic, sandbox and chat (they call `reward` / `punish`, D-026); the least-punished ranking; the two beams | the tutor's marks reach the reward tree and `bench feedback` reports what they did |
 | **P4 — the sine kind** | `activation.py`, `sine.py`: learnable weights and activations on the count tree's edges, the one-hop rule, the reward tree unchanged; the same measurements as P2 | the count kind's numbers are matched or the gap is explained |
 | **P5 — ports and surfaces** | Go and Rust with bit-identical files, the HTTP API, the frontend — only if P2–P4's numbers justify them | parity tests as in `RadixCyclicNN/tests/` |
@@ -264,13 +277,24 @@ punishment traversal needs (`SPEC-LeastPunished.md` §1: a step rewarded five
 times and punished once must not read like one rewarded four times and never
 punished). Separate node sets would store the same addresses twice.
 
-**9.5 Which codec, at what depth, first?** *Recommended: `phones` at `L = 3`
-and `chars` at `L = 4` for the measurements; `bpe` of 1,024 tokens at `L = 2`
-as the LLM-style regime; a published LLM tokenizer at `L = 1`, supported and
-flagged.* The table in §6.2 is the argument: the tokenizer sets `R`, and `R`
-sets the depth the budget allows. An LLM-sized vocabulary primes to one token
-of context — a bigram over tokens — and no port changes that by more than one
-level.
+**9.5 Which codec, at what depth, first? — decided: GPT-2's tokenizer and
+the syllable phonetic tokenizer.** The table in §6.2 says what each allows,
+and the numbers were measured with the repository's own tokenizer:
+
+| regime | vocabulary | `R` | `L` | nodes | what it is |
+|---|---|---|---|---|---|
+| `syllables`, the core lexicon, stress kept | 1,502 syllables + the tokenizer's 8 specials | 1,510 | **2** | 2,281,611 · 52 MiB | one syllable of context: the language-model regime to measure first |
+| `syllables`, stress dropped | 1,389 + 8 | 1,397 | 2 | 1,953,007 · 45 MiB | the same, a little smaller |
+| `syllables`, the corpus's own | e.g. 244 + 8 for `sample_corpus.txt` | 252 | 2 (3 is 16 million) | 63,757 · 1.5 MiB | a small corpus's syllables; `L = 3` only under 160 syllables |
+| `gpt2`, capped to the corpus's 2,000 most frequent tokens | 2,000 + `<unk>` + 3 marks | 2,004 | **2** | 4,018,021 · 92 MiB | one GPT-2 token of context: the LLM-tokenizer regime |
+| `gpt2`, the whole vocabulary | 50,257 + 3 | 50,260 | 1 | 50,261 · 1.2 MiB | **no context — a unigram over tokens.** Useless as a language model; the cheapest bed for the reward tree over an LLM's tokens |
+| `gpt2`, one token of context, uncapped | | 50,260 | 2 | 2,526,117,861 · 56 GiB | not this version, and not Python |
+
+The full CMU dictionary's syllables (tens of thousands) and the 113,530,725
+syllables English phonotactics would allow prime no deeper than `L = 1` and are
+not taken (`DESIGN.md` §5.4). *Recommended first runs: `syllables` from the
+core lexicon at `L = 2`, and `gpt2` capped at 2,000 at `L = 2`; the whole GPT-2
+vocabulary at `L = 1` only to exercise the reward tree.*
 
 **9.6 The start and end of a text.** *Recommended: symbols of the vocabulary.*
 `<s>` and `</s>` are units, so the first unit of a text is predicted from a
@@ -278,11 +302,15 @@ context that says it is first, as `RadixCyclicNN`'s `START → …` does. The
 phonetic tokenizer has its own `<s>`, `</s>` and `<unk>`, and they are used as
 they are; the other codecs put the three marks first.
 
-**9.7 Does a reward also count a reading?** *Recommended: no.* The family's
-count model traverses *and* rewards on a thumbs up. Here the two trees are the
-point: `reward` writes the reward tree only, so what was read and what was
-judged never mix before the rung. `reward(..., read=True)` counts the text as
-well, and reproduces the family's behaviour for a comparison.
+**9.7 Does a reward also count a reading? — and a punishment is a negative
+reward.** *Recommended: no reading on a reward.* The family's count model
+traverses *and* rewards on a thumbs up. Here the two trees are the point:
+`reward` writes the reward tree only, so what was read and what was judged
+never mix before the rung. `reward(..., read=True)` counts the text as well,
+and reproduces the family's behaviour for a comparison. A punishment is
+`reward` with a negative strength — one primitive, one sign — and the net is
+what a step is worth; the two sums are kept apart underneath for the reason in
+§9.4, and dropping the second sum would drop the punishment traversal with it.
 
 **9.8 What decides how much a context is trusted?** *Recommended: the count
 tree alone.* `own(c)` — the share of the answer a context keeps for itself
@@ -297,7 +325,7 @@ often it was *judged* could add to it; that is an open question, not a default.
 
 | Risk | Where it bites | What is done about it |
 |---|---|---|
-| **The tokenizer decides the depth.** An LLM-sized vocabulary primes to one token of context; two is 56 GiB. | §6.2, S-4 | the table, a hard refusal above the ceiling at `prime` time, the BPE sized to what priming can afford, and the ports for one level more |
+| **The tokenizer decides the depth.** GPT-2's full vocabulary primes to a unigram; one token of context over it is 56 GiB. The full CMU dictionary's syllables would be tens of thousands and prime no deeper. | §6.2, S-4 | the table, a hard refusal above the ceiling at `prime` time, the `top` cap that keeps a corpus's most frequent tokens and reads the rest as `<unk>`, the core lexicon's syllables measured at 1,502, and the ports for one level more |
 | **Rewards are sparse.** A few hundred judgements over a million nodes leave the reward tree mostly zero. | S-6, S-7 | the rungs at every level are the answer — shallow nodes accumulate what deep ones cannot — and S-7 measures whether they are |
 | **Smoothing changes the numbers.** The Jeffreys smoothing that lets a reward lift an unread step (`DESIGN.md` §9.2) makes the fold differ from `FilterBankRadix`'s. | S-3, S-4 | the identity and the comparison are measured at `smoothing = 0` and the default reported beside them |
 | **The repository's BPE is not a published one.** Its merges are trained here; no byte-identity with any LLM's tokenizer is promised. | FR-2 | the `external` codec is for byte-identity, at `L = 1` |
@@ -312,6 +340,7 @@ one questions. The ones a reader of this document should know exist: whether
 priming beats growing on *little* data (the hypothesis in §2, and the cheapest
 thing to measure once P2 runs); whether judged evidence should count toward how
 much a context is trusted (§9.8); whether the reward and the count should share
-one smoothing or the reward tree needs its own; and whether a BPE of two
-thousand tokens at two tokens of context is a language model worth having, or
-whether the model's home is sounds at `L = 3`.
+one smoothing or the reward tree needs its own; whether one syllable, or one
+capped GPT-2 token, of context is a language model worth having, or whether
+the model's home is phonemes at `L = 3`; and how the full dictionary's
+syllables are to be primed at all.

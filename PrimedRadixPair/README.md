@@ -46,17 +46,20 @@ shallow levels and specialises at the deep; connected only at the final nodes
 it would do neither, and that difference is measured, not assumed (§9.6).
 
 **The tokenizer decides the depth.** A primed tree is `R^L` big, and the codec
-sets `R`: letters and sounds prime to three or four units of context, a
-byte-pair vocabulary of about a thousand tokens to two, an LLM's own tokenizer
-to one. The budget is a table, not a surprise (`DESIGN.md` §16).
+sets `R`: letters and phonemes prime to three or four units of context; the
+syllables of the core lexicon, or a byte-pair vocabulary of about a thousand
+tokens, to one; and GPT-2's full vocabulary to none — a unigram — unless it is
+capped to its two thousand most frequent tokens. The budget is a table, not a
+surprise (`DESIGN.md` §16).
 
 ## Planned shape
 
-Python package `radixpair`, Python 3.11+, **standard library only**; `tiktoken`
-and `tokenizers` are optional extras for reading with a published LLM tokenizer,
-imported lazily and never required. The familiar four verbs — `train / predict
+Python package `radixpair`, Python 3.11+, **standard library only** — GPT-2's
+tokenizer runs from its two vocabulary files; `tiktoken` and `tokenizers` are
+optional extras for a parity check and for other published tokenizers, imported
+lazily and never required. The familiar four verbs — `train / predict
 / generate / score` — and the family's feedback primitives — `reward / punish /
-two_nrl / feedback` — on the same CLI shape as `RadixCyclicNN/` and `GTMNN/`.
+two_nrl / feedback`, a punishment being a negative reward — on the same CLI shape as `RadixCyclicNN/` and `GTMNN/`.
 The `count` kind first (deterministic, no learning rate, the measurements are
 made on it), the `sine` kind second.
 
@@ -67,4 +70,4 @@ made on it), the `sine` kind second.
 * `FilterBankRadix/DESIGN.md` §5 — the context tree whose every-context-length prediction the fold reproduces, and the smoothing constants shared so bits per unit are comparable.
 * `RadixCyclicNN/DESIGN.md` §4, §7 — the encoder / decoder halves this codec is modelled on, and the shortest-path search reused here.
 * `RadixTrieLLM_RNN/main.py` — the smallest radix insertion in the repository; its splitting logic is what a primed tree never needs.
-* `PhoneticTokenizer/` — the tokenizer of sounds this reads with, at the phoneme level.
+* `PhoneticTokenizer/` — the tokenizer of sounds this reads with, at the phoneme level and at the syllable level.
