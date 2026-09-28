@@ -60,6 +60,7 @@ package are present. **The phonetic codecs** read the sibling
 |---|---|
 | `PRD.md` | the requirement in the author's own words, the hypothesis, goals and non-goals, the requirements, the success criteria, the phases, the decisions |
 | `DESIGN.md` | the specification — the contract every module is implemented against, in 19 sections |
+| `SPEC-DynamicTokenization.md` | **the growing window**: a proposal, measured — the tree deepens one letter of context at a time by appending a level, grows when its deepest contexts are trusted, and its tokens grow with it; not built |
 | `radixpair/codec.py` | the encoder/decoder: `chars`, `bytes`, `bpe`, `phones`, `syllables`, `gpt2`, `external`; the marks; the closed, frozen syllable vocabulary; the `top` cap |
 | `radixpair/gpt2.py`, `bpe.py` | GPT-2's byte-level BPE from its two files; the repository's own BPE, trained on a corpus |
 | `radixpair/address.py` | the arithmetic of a primed tree: `base`, `code`, `id`, `append`, `drop_oldest`, `drop_newest`, `level`, the rolling code |
