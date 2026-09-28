@@ -13,9 +13,10 @@ not (a punishment is a negative reward) — and never by a text merely read. The
 two are connected wherever they hold an equal sequence, at every level, and the
 connection is where a step's two numbers — how often it was read, what it
 earned — are read together into one answer. Text goes in and comes out through
-an **encoder/decoder** behind a tokenizer of your choosing: characters, bytes,
-GPT-2's own tokenizer or a byte-pair encoding of your own size, or the
-repository's phonetic tokenizer at the phoneme or the syllable level.
+an **encoder/decoder** behind a tokenizer. **The phonetic tokenizer is the main
+one**: the model reads phones and writes phones, and the English they spell is
+a second reading of the same ids. Characters, bytes, GPT-2's own tokenizer, a
+byte-pair encoding of your own size and the syllable level are the options.
 
 `PRD.md` says what it is for and what counts as success; `DESIGN.md` is the
 contract the code is written against; this is the manual, and the numbers.
@@ -27,19 +28,27 @@ cd PrimedRadixPair
 make test                                        # 85 tests, seconds; standard library only
 make check                                       # prime small trees by brute force and compare with the arithmetic
 
-python3 -m radixpair prime   --model m.json.gz --codec chars --L 4          # 1,222,981 nodes, 28 MiB
+python3 -m radixpair prime   --model m.json.gz                              # phones at L=3: 787,245 nodes, 18 MiB
 python3 -m radixpair train   --model m.json.gz --data ../RadixCyclicNN/data/sample_corpus.txt
-python3 -m radixpair reward  --model m.json.gz --text "mat" --prefix "a cat sat on the " --strength 5
-python3 -m radixpair punish  --model m.json.gz --text "mat" --prefix "a cat sat on the "
-python3 -m radixpair predict --model m.json.gz --prefix "a cat sat on the " --length 3
-python3 -m radixpair predict --model m.json.gz --prefix "a cat sat on the " --length 3 --traversal punishment
+python3 -m radixpair predict --model m.json.gz --prefix "the cat sat on the" --length 4
+#   DH AH0 # K AE1 T # S AE1 T # AA1 N # DH AH0 # S T #             <- phones out (sixty sentences: "the st")
+#     spelled: the cat sat on the st                               <- the English they spell
+python3 -m radixpair predict --model m.json.gz --prefix "DH AH0 # K AE1 T" --length 4   # a prefix in phones works too
+python3 -m radixpair reward  --model m.json.gz --text "mat" --prefix "a cat sat on the" --strength 5
+#   the outcome is joined to the prefix as words, so the boundary is its first credited step: # M AE1 T
+python3 -m radixpair predict --model m.json.gz --prefix "a cat sat on the" --length 4
+#   AH0 # K AE1 T # S AE1 T # AA1 N # DH AH0 # M AE1 T
+#     spelled: a cat sat on the mat
+python3 -m radixpair punish  --model m.json.gz --text "mat" --prefix "a cat sat on the"
+python3 -m radixpair predict --model m.json.gz --prefix "a cat sat on the" --length 4 --traversal punishment
 python3 -m radixpair score   --model m.json.gz --text "the cat sat on the mat" --per-unit
 python3 -m radixpair info    --model m.json.gz
 
-# the two codecs decided on
-python3 -m radixpair prime --model syl.json.gz --codec syllables --L 2                    # 1,502 syllables of the core lexicon: 2,281,611 nodes
-python3 -m radixpair prime --model gpt.json.gz --codec gpt2 --L 2 --top 2000 \
-                           --tokenizer-data corpus.txt                                   # GPT-2 capped to the corpus's 2,000 most frequent tokens
+# the options
+python3 -m radixpair prime --model c.json.gz   --codec chars                              # letters at L=4: 1,222,981 nodes
+python3 -m radixpair prime --model syl.json.gz --codec syllables                          # 1,502 syllables of the core lexicon at L=2
+python3 -m radixpair prime --model gpt.json.gz --codec gpt2 --top 2000 \
+                           --tokenizer-data corpus.txt                                   # GPT-2 capped to the corpus's 2,000 most frequent tokens, L=2
 ```
 
 `--json` on any command prints one JSON document. `make help` lists the
@@ -61,7 +70,7 @@ package are present. **The phonetic codecs** read the sibling
 | `PRD.md` | the requirement in the author's own words, the hypothesis, goals and non-goals, the requirements, the success criteria, the phases, the decisions |
 | `DESIGN.md` | the specification — the contract every module is implemented against, in 19 sections |
 | `SPEC-DynamicTokenization.md` | **the growing window**: a proposal, measured — the tree deepens one letter of context at a time by appending a level, grows when its deepest contexts are trusted, and its tokens grow with it; not built |
-| `radixpair/codec.py` | the encoder/decoder: `chars`, `bytes`, `bpe`, `phones`, `syllables`, `gpt2`, `external`; the marks; the closed, frozen syllable vocabulary; the `top` cap |
+| `radixpair/codec.py` | the encoder/decoder: `phones` (the main one: phones in, phones out, `spell` for the English), `syllables`, `chars`, `bytes`, `bpe`, `gpt2`, `external`; the marks; the closed, frozen syllable vocabulary; the `top` cap |
 | `radixpair/gpt2.py`, `bpe.py` | GPT-2's byte-level BPE from its two files; the repository's own BPE, trained on a corpus |
 | `radixpair/address.py` | the arithmetic of a primed tree: `base`, `code`, `id`, `append`, `drop_oldest`, `drop_newest`, `level`, the rolling code |
 | `radixpair/count.py`, `reward.py` | the count tree (counts, written by `observe` alone) and the reward tree (`plus` and `minus` kept apart, written by `credit` alone, at every level or the final nodes) |
@@ -108,7 +117,8 @@ context beat four: sixty sentences are not enough to trust a four-character
 window. Both are expected of the corpus, not of the design, and both are what
 `bench compare` on a real corpus will decide.
 
-**The author's case** (S-6, `bench feedback`, `chars, L = 4`, smoothing 0):
+**The author's case** (S-6, `bench feedback`, letters at `L = 4` because two
+phones of context put `a cat` and `the mat` behind the same `AH0 #`; smoothing 0):
 `a cat sat on the mat` and `a cat sat on the log` read; the outcome `mat`
 after `a cat sat on the ` rewarded once at strength 5 and punished once at
 strength 1; `log` never judged.

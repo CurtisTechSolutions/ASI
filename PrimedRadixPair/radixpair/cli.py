@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from . import bench as benches
 from .check import DEFAULT_SIZES, check_address, check_all
 from .checkpoint import CheckpointManager
-from .codec import CODECS, make_codec
+from .codec import CODECS, DEFAULT_CODEC, DEFAULT_L, make_codec
 from .model import PairModel, load_model
 from .pair import BACKOFFS, Settings, TRAVERSALS
 from .search import MODES
@@ -91,7 +91,15 @@ def _load(args) -> PairModel:
 
 # -- commands ------------------------------------------------------------------------
 
+def _resolve(args, feedback: bool = False) -> tuple[str, int]:
+    """The codec preset and depth a command runs at: phones at L=3 unless told otherwise (letters for the mat / log case)."""
+    codec = args.codec or ("chars" if feedback else DEFAULT_CODEC)
+    L = args.L if args.L is not None else DEFAULT_L.get(codec, 2)
+    return codec, L
+
+
 def cmd_prime(args) -> None:
+    args.codec, args.L = _resolve(args)
     options: dict = {}
     if args.codec in ("bpe", "syllables", "gpt2", "external"):
         texts = read_texts(args.tokenizer_data, "tokenizer data") if args.tokenizer_data else None
@@ -184,8 +192,11 @@ def cmd_feedback(args) -> None:
 
 
 def _walk_lines(result, args) -> list[str]:
-    lines = [f"{result.full_text}", f"  continuation: {result.text!r}  cost {result.cost:.3f}  "
-             f"mode {result.mode}  traversal {result.traversal}  {'reached the end' if result.reached_end else ''}"]
+    lines = [f"{result.full_text}"]
+    if result.spelled != result.full_text:
+        lines.append(f"  spelled: {result.spelled}")
+    lines.append(f"  continuation: {result.text!r}  cost {result.cost:.3f}  "
+                 f"mode {result.mode}  traversal {result.traversal}  {'reached the end' if result.reached_end else ''}")
     if args.hops:
         lines.append("  hops: " + " ".join(f"{k}:{i}" for k, i in result.hops))
     return lines
@@ -300,6 +311,7 @@ def _codec_options(args) -> dict:
 
 
 def cmd_bench(args) -> None:
+    args.codec, args.L = _resolve(args, feedback=args.which == "feedback")
     try:
         if args.which == "throughput":
             result = benches.throughput(args.codec, args.L, args.units, args.seed, **_codec_options(args))
@@ -331,8 +343,10 @@ def cmd_bench(args) -> None:
 # -- the parser ------------------------------------------------------------------------------------
 
 def _add_codec_flags(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--codec", default="chars", choices=sorted(CODECS))
-    p.add_argument("--L", type=int, default=4, help="the longest sequence held; contexts up to L-1")
+    p.add_argument("--codec", default=None, choices=sorted(CODECS),
+                   help="the tokenizer (default: phones - the phonetic tokenizer, phones in and phones out)")
+    p.add_argument("--L", type=int, default=None,
+                   help="the longest sequence held; contexts up to L-1 (default: the depth the codec primes to - phones 3, chars 4, syllables and gpt2 2)")
     p.add_argument("--vocab-size", type=int, default=1024, help="bpe: the vocabulary size")
     p.add_argument("--vocabulary", default="lexicon", choices=("lexicon", "corpus"), help="syllables: the source")
     p.add_argument("--top", type=int, default=None, help="gpt2 / syllables / external: keep the most frequent tokens")

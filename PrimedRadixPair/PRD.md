@@ -1,6 +1,6 @@
 # PrimedRadixPair — Product Requirements
 
-**Status** Built through phase P2, 2026-09-28 (v0.3; `README.md` has the numbers). This document says
+**Status** Built through phase P2, 2026-09-28 (v0.4; `README.md` has the numbers). This document says
 *what* is being built and *why*, and what will count as success. `DESIGN.md` is
 the contract that says *how*; every requirement below names the section that
 realises it.
@@ -12,6 +12,12 @@ model reads and writes text through an **encoder/decoder** behind a tokenizer �
 the byte-pair kind LLMs use, or the repository's phonetic tokenizer. The mirror
 reading, the backward scoring and the meeting walk are gone from this document;
 §9.3 records why.
+
+**What changed in v0.4.** The phonetic tokenizer is the **main tokenizer**:
+`phones` is the default codec, the model reads phones and writes phones — its
+output is the tokenizer's text form, which it reads back unchanged — and the
+English the phones spell is a second reading of the same ids (`spell`). Two
+phones of context by default (§9.5).
 
 **What changed in v0.3.** Two decisions made and one correction. The first
 codecs to try are **GPT-2's tokenizer** and the **syllable level of the phonetic
@@ -277,12 +283,15 @@ punishment traversal needs (`SPEC-LeastPunished.md` §1: a step rewarded five
 times and punished once must not read like one rewarded four times and never
 punished). Separate node sets would store the same addresses twice.
 
-**9.5 Which codec, at what depth, first? — decided: GPT-2's tokenizer and
-the syllable phonetic tokenizer.** The table in §6.2 says what each allows,
-and the numbers were measured with the repository's own tokenizer:
+**9.5 Which codec, at what depth? — decided: the phonetic tokenizer is the
+main one, phones in and phones out, at `L = 3`.** GPT-2's tokenizer and the
+syllable level stay as options. The table in §6.2 says what each allows, and
+the numbers were measured with the repository's own tokenizer:
 
 | regime | vocabulary | `R` | `L` | nodes | what it is |
 |---|---|---|---|---|---|
+| **`phones`, the default** | the tokenizer's 92 ids | 92 | **3** | 787,245 · 18 MiB | two phones of context; the model's output is phones, spelled into English on request |
+
 | `syllables`, the core lexicon, stress kept | 1,502 syllables + the tokenizer's 8 specials | 1,510 | **2** | 2,281,611 · 52 MiB | one syllable of context: the language-model regime to measure first |
 | `syllables`, stress dropped | 1,389 + 8 | 1,397 | 2 | 1,953,007 · 45 MiB | the same, a little smaller |
 | `syllables`, the corpus's own | e.g. 244 + 8 for `sample_corpus.txt` | 252 | 2 (3 is 16 million) | 63,757 · 1.5 MiB | a small corpus's syllables; `L = 3` only under 160 syllables |

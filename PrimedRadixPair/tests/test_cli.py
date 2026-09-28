@@ -66,6 +66,15 @@ class TestCli(unittest.TestCase):
             self.assertGreaterEqual(out["samples"], 1)
             run("predict", "--model", os.path.join(d, "none.json"), "--prefix", "x", expect=2)
             run("train", "--model", model, expect=2)
+            # the default codec is phones at L=3: phones out, and the English they spell
+            phones = os.path.join(d, "p.json")
+            out = run("prime", "--model", phones)
+            if out.get("R") == 92:                      # the phonetic tokenizer is importable
+                self.assertEqual(out["N"], 787245)
+                run("train", "--model", phones, "--data", data)
+                out = run("predict", "--model", phones, "--prefix", "the cat", "--length", "3")
+                self.assertTrue(out["full_text"].startswith("DH AH0 # K AE1 T"))
+                self.assertTrue(out["spelled"].startswith("the cat"))
 
 
 if __name__ == "__main__":

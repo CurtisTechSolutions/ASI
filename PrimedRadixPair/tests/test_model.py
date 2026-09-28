@@ -6,9 +6,17 @@ import os
 import tempfile
 import unittest
 
-from radixpair.codec import CharsCodec
+import unittest as _ut
+
+from radixpair.codec import CharsCodec, phonetok_module
 from radixpair.model import PairModel, load_model, prime
 from radixpair.pair import Settings
+
+try:
+    phonetok_module()
+    HAVE_PHONETOK = True
+except ValueError:
+    HAVE_PHONETOK = False
 
 TEXTS = ["the cat sat on the mat", "the cat sat on the log", "the dog ate the bone", "a cat and a dog"]
 
@@ -129,6 +137,30 @@ class TestVerbs(unittest.TestCase):
             m.weights(rungs="final")
         with self.assertRaises(ValueError):
             prime("chars", L=3, kind="sine")
+
+
+@_ut.skipUnless(HAVE_PHONETOK, "the phonetic tokenizer is not importable")
+class TestPhonesAreTheMainTokenizer(unittest.TestCase):
+    def test_the_default_model_reads_and_writes_phones(self):
+        m = prime()                                   # phones at L=3
+        self.assertEqual(m.codec.name, "phones")
+        self.assertEqual(m.L, 3)
+        m.train(["the cat sat on the mat"] * 3)
+        r = m.predict("the cat", 4)
+        self.assertTrue(r.full_text.startswith("DH AH0 # K AE1 T"))         # phones out
+        self.assertTrue(r.spelled.startswith("the cat"))                    # and the English they spell
+        self.assertEqual(m.codec.encode(r.full_text), m.codec.encode("the cat") + r.units)   # phones read back
+        s = m.score("the cat sat")
+        self.assertEqual(s.per_unit[0][0], "DH")
+        p = m.predict("DH AH0 # K AE1 T", 2)          # a prefix given in phones
+        self.assertEqual(p.units, m.predict("the cat", 2).units)
+        # an outcome after a prefix is joined as words: the boundary is the outcome's first credited step
+        m.reward("mat", strength=5.0, prefix="the cat sat on the")
+        boundary = m.codec.encode("#")[0]
+        node = m.pair.address.of(m.codec.encode("the")[-2:] + [boundary])
+        self.assertGreater(m.pair.reward.reward(node), 0.0)
+        self.assertEqual(m.codec.join("the", "mat"), "the mat")
+        self.assertEqual(CharsCodec().join("the ", "mat"), "the mat")
 
 
 class TestPersistence(unittest.TestCase):

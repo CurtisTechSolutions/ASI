@@ -43,10 +43,12 @@ class PathResult:
     full_text: str = ""
     fallback: bool = False
     symbols: list[str] = field(default_factory=list)
+    spelled: str = ""
 
     def to_dict(self) -> dict:
         return {
-            "text": self.text, "full_text": self.full_text, "units": list(self.units), "symbols": list(self.symbols),
+            "text": self.text, "full_text": self.full_text, "spelled": self.spelled, "units": list(self.units),
+            "symbols": list(self.symbols),
             "node_ids": list(self.node_ids), "hops": [[kind, i] for kind, i in self.hops], "cost": self.cost,
             "step_costs": list(self.step_costs), "traversal": self.traversal, "mode": self.mode,
             "expanded": self.expanded, "reached_end": self.reached_end, "fallback": self.fallback,

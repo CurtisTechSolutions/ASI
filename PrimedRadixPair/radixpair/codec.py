@@ -7,7 +7,8 @@ marks; ``padded(text)`` is ``[start] + encode(text) + [end]`` - what the trees
 read.  ``emits()`` is what a walk may emit: every id but the start mark and
 the dead ones (a tokenizer's ``<pad>``).
 
-The presets (``DESIGN.md`` section 5):
+The presets (``DESIGN.md`` section 5); ``phones`` is the main one - the model
+reads phones and writes phones, and ``spell`` gives the English they spell:
 
 ``chars``       3 marks then space, a-z, ``'`` ``.`` ``,``          R = 33
 ``bytes``       3 marks then the 256 byte values                  R = 259
@@ -32,7 +33,7 @@ from .bpe import BPE
 from .gpt2 import Gpt2BPE, gpt2_files
 
 __all__ = [
-    "CODECS", "Codec", "BpeCodec", "BytesCodec", "CharsCodec", "ExternalCodec", "Gpt2Codec", "PhonesCodec",
+    "CODECS", "DEFAULT_CODEC", "DEFAULT_L", "Codec", "BpeCodec", "BytesCodec", "CharsCodec", "ExternalCodec", "Gpt2Codec", "PhonesCodec",
     "SyllablesCodec", "START", "END", "UNK", "MARKS", "CHAR_UNITS", "codec_from_dict", "make_codec", "phonetok_module",
 ]
 
@@ -94,6 +95,15 @@ class Codec:
 
     def padded(self, text: str) -> list[int]:
         return [self.start] + self.encode(text) + [self.end]
+
+    def spell(self, ids: Iterable[int]) -> str:
+        """The ids as the words they spell - the same as ``decode`` unless the units are sounds."""
+        return self.decode(ids)
+
+    def join(self, prefix: str, text: str) -> str:
+        """A prefix and the text that continues it, as one text: plain concatenation - the prefix carries its own
+        trailing space where one belongs.  A tokenizer of words joins them the way it joins words."""
+        return prefix + text
 
     def units(self, ids: Iterable[int]) -> list[int]:
         """The ids that are units: the marks and the dead ids dropped."""
@@ -231,10 +241,24 @@ class _Phonetic(Codec):
         super().__init__(list(self.tok.vocab.tokens), phones.BOS_ID, phones.EOS_ID, phones.UNK_ID, (phones.PAD_ID,))
 
     def encode(self, text: str) -> list[int]:
+        """English or phones in - the tokenizer reads its own text form unchanged - phone ids out."""
         return self.tok.encode(text, grow=False)
 
     def decode(self, ids: Iterable[int]) -> str:
+        """Phones out: the tokenizer's text form, ``DH AH0 # K AE1 T .``, which ``encode`` reads back unchanged."""
+        symbols = self.symbols
+        return " ".join(symbols[i] for i in self.units(ids))
+
+    def spell(self, ids: Iterable[int]) -> str:
+        """The English the phones spell: ``the cat.``"""
         return self.tok.decode(self.units(ids))
+
+    def join(self, prefix: str, text: str) -> str:
+        """Two words apart: the tokenizer puts the boundary ``#`` between them, so an outcome ``mat`` after the
+        prefix ``... the`` is ``# M AE1 T`` - the boundary is the outcome's first step, as the model would emit it."""
+        if prefix.strip() and text.strip():
+            return prefix.rstrip() + " " + text.lstrip()
+        return prefix + text
 
     def _state(self) -> dict:
         return {"stress": self.stress, "boundaries": self.boundaries, "pauses": self.pauses}
@@ -446,8 +470,14 @@ CODECS: dict[str, type[Codec]] = {
 }
 
 
-def make_codec(name: str, **options) -> Codec:
-    """A codec by preset name; ``options`` are the preset's constructor arguments."""
+DEFAULT_CODEC = "phones"
+"""The main tokenizer: the phonetic tokenizer at the phoneme level."""
+DEFAULT_L = {"phones": 3, "syllables": 2, "chars": 4, "bytes": 2, "bpe": 2, "gpt2": 2, "external": 1}
+"""The depth each preset primes to under the default ceiling."""
+
+
+def make_codec(name: str = DEFAULT_CODEC, **options) -> Codec:
+    """A codec by preset name (``phones`` by default); ``options`` are the preset's constructor arguments."""
     try:
         cls = CODECS[name]
     except KeyError:

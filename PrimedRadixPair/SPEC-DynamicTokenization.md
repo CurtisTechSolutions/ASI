@@ -24,7 +24,8 @@ and the grown tree is bit-identical to a tree primed at the new depth and
 trained from scratch (measured: equal counts at every rung).
 
 **The window that grows.** The model starts as small as a primed tree can be —
-`L = 1`, the root and the single units: 34 slots for letters, a unigram — and
+`L = 1`, the root and the single units: 93 slots for phones, 34 for letters, a
+unigram — and
 deepens one letter of context at a time: `L = 2`, `3`, `4` …, each rung `R`
 times the memory of the last, each rung one more letter the model can see. It
 grows when it is *ready* (§3.2): when the contexts at its deepest level have
@@ -80,8 +81,8 @@ The ladder's cost per rung, `N` nodes at 24 bytes each:
 
 | codec | `L = 1` | `L = 2` | `L = 3` | `L = 4` | `L = 5` |
 |---|---|---|---|---|---|
+| `phones` (92), the main codec | 93 | 8,557 | 787,245 · 18 MiB | 72,426,541 · 1.6 GiB | — |
 | `chars` (33) | 34 | 1,123 | 37,060 | 1,222,981 · 28 MiB | 40,358,374 · 924 MiB |
-| `phones` (92) | 93 | 8,557 | 787,245 · 18 MiB | 72,426,541 · 1.6 GiB | — |
 | `syllables` (1,510) | 1,511 | 2,281,611 · 52 MiB | 3,445,232,611 — no | — | — |
 | `gpt2` capped (2,004) | 2,005 | 4,018,021 · 92 MiB | — | — | — |
 

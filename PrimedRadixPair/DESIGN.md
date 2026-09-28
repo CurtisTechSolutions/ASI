@@ -139,7 +139,12 @@ PrimedRadixPair/
 
 A codec is one tokenizer's two halves plus what the tree needs to know about
 its ids. It is chosen at priming, saved whole in the model file, and never
-changed afterwards: the tree's addresses are measured in its units.
+changed afterwards: the tree's addresses are measured in its units. **The
+phonetic tokenizer is the main one**: `phones` is the default preset, the
+model reads phones and writes phones — `decode` gives the tokenizer's text form,
+`DH AH0 # K AE1 T .`, which `encode` reads back unchanged, so a prefix may be
+given in English or in phones — and `spell` gives the English the phones spell.
+For every other preset `spell` is `decode`.
 
 ```python
 class Codec:
@@ -150,6 +155,8 @@ class Codec:
     dead: frozenset[int]            # ids never read and never emitted (a tokenizer's <pad>)
     def encode(self, text: str) -> list[int]         # the encoder: units only, no marks; nothing outside Σ survives (-> unk)
     def decode(self, ids: Iterable[int]) -> str      # the decoder: marks and dead ids dropped; unk rendered as "?" where the tokenizer has no rendering
+    def spell(self, ids: Iterable[int]) -> str       # the words the ids spell: the English behind phones or syllables; decode() elsewhere
+    def join(self, prefix: str, text: str) -> str    # a prefix and its continuation as one text: concatenation, or two words apart for the phonetic codecs
     def padded(self, text: str) -> list[int]         # [start] + encode(text) + [end]
     def emits(self) -> list[int]                     # Σ_out, in id order
     def symbol(self, i: int) -> str                  # the text of one id, for display and the graph view
@@ -168,7 +175,7 @@ family's do; both are views of the one codec.
 | `chars()` | 3 marks, then space, `a`–`z`, `'`, `.`, `,` | **33** | `casefold`; curly quotes to `'`; a run of whitespace to one space; everything else to `unk` |
 | `bytes_()` | 3 marks, then the 256 byte values | **259** | UTF-8 bytes; `unk` is never produced (`unk = None`); decode with replacement for a walk that is not valid UTF-8 |
 | `bpe(vocab_size=1024)` | 3 marks, then `vocab_size` tokens: the 256 bytes and `vocab_size − 256` merges (§5.3) | `vocab_size + 3` | byte-level BPE; `unk` is never produced |
-| `phones(stress=True)` | the phonetic tokenizer's fixed alphabet at the phoneme level: `<pad> <unk> <s> </s> # , . ?` then the 84 ARPAbet symbols of `cmudict.symbols` (§5.4) | **92** | `PhoneticTokenizer.encode` / `.decode`; `stress=False` keeps the same 92 ids and uses fewer of them |
+| `phones(stress=True)` — **the default** | the phonetic tokenizer's fixed alphabet at the phoneme level: `<pad> <unk> <s> </s> # , . ?` then the 84 ARPAbet symbols of `cmudict.symbols` (§5.4) | **92** | `PhoneticTokenizer.encode` in; the phone text out (`decode`), the English on request (`spell`); `stress=False` keeps the same 92 ids and uses fewer of them |
 | `syllables(stress=True, vocabulary="lexicon", top=None)` | the same 8 specials, then every distinct syllable token of the source — the tokenizer's lexicon (**1,502** with stress in the bundled core lexicon, 1,389 without; measured) or the tokenizer-data corpus — sorted, frozen (§5.4) | `syllables + 8` | the tokenizer at `level="syllable"` with a frozen `Vocab`: `encode(text, grow=False)`, so a syllable outside the vocabulary is `<unk>`; `decode` spells the sounds back |
 | `gpt2(files=(encoder.json, vocab.bpe), top=None)` | GPT-2's 50,257 tokens, then the 3 marks appended; or, capped, the `top` most frequent tokens of the tokenizer-data corpus renumbered `3..top+2` after the marks, with `<unk>` for the rest (§5.5) | `50,260`, or `top + 3` | GPT-2's byte-level BPE in the standard library from the two files of the original release; verified against `tiktoken` when it is installed |
 | `external(spec)` | any other published tokenizer's vocabulary, then the 3 marks appended (§5.6) | `V + 3` | the library's own; optional |
@@ -214,14 +221,19 @@ exactly as it was primed, and its own specials are used as they are: `<pad> = 0`
 is dead, `<unk> = 1`, `<s> = 2`, `</s> = 3`, `# = 4` (the gap between words),
 `, . ? = 5..7` (the pauses).
 
-**`phones`** is the phoneme level. Its vocabulary is **frozen** by the
-tokenizer itself — 92 ids, the specials then the 84 ARPAbet symbols, the same
-on every machine — which is what makes it primeable as it stands. `encode` is
-`tok.encode(text, grow=False)`; `decode` is `tok.decode(ids)`, which spells the
-sounds back into words.
+**`phones`** is the phoneme level, and the main tokenizer. Its vocabulary is
+**frozen** by the tokenizer itself — 92 ids, the specials then the 84 ARPAbet
+symbols, the same on every machine — which is what makes it primeable as it
+stands. `encode` is `tok.encode(text, grow=False)`, and it reads English or
+phones alike, because the tokenizer's text form is idempotent; `decode` is that
+text form — the units joined by spaces, `DH AH0 # K AE1 T .` — so the model's
+output is phones and `encode(decode(ids)) == ids`; `spell` is `tok.decode(ids)`,
+the English the phones spell. It primes to `L = 3` — two phones of context,
+787,245 nodes — under the default ceiling (`DEFAULT_L`), and `L = 4` is a
+port's job (§16.1).
 
-**`syllables`** is the syllable level, where the tokenizer gives a syllable
-(`K.AE1.T`) its id the first time it reads one. "Every option" over an open
+**`syllables`** is the syllable level (`decode` and `spell` as for phones),
+where the tokenizer gives a syllable (`K.AE1.T`) its id the first time it reads one. "Every option" over an open
 vocabulary is not a thing, so the codec **closes the vocabulary at priming**
 and freezes it: the 8 specials, then every distinct syllable token of a source,
 in sorted order so that priming is deterministic, as `Vocab(tokens,
@@ -492,7 +504,10 @@ kept so the difference is measured (S-7).
 
 An outcome credits **what the model produced, not what it was given**: `reward`
 and `punish` take the `prefix` the model continued, whose units are context
-for the credited steps and earn nothing themselves (`skip`). Rewarding a whole
+for the credited steps and earn nothing themselves (`skip`). The prefix and the
+outcome are joined by the codec (`join`) before they are encoded, so a phonetic
+model credits the word boundary as the outcome's first step — `mat` after
+`... the` is `# M AE1 T`, the way the model itself would emit it. Rewarding a whole
 sentence instead credits the prefix's steps too — at four characters, `he ` is
 followed by `c` in `the cat` as well as by `m` in `the mat`, and both would
 earn the reward.
@@ -762,6 +777,7 @@ class PairModel:
 
     @classmethod
     def prime(cls, codec: Codec, L: int, kind: str = "count", seed: int = 0, settings: Settings | None = None) -> PairModel
+    # the module-level prime(codec="phones", L=None, ...) takes a preset name and defaults L to DEFAULT_L[codec]: phones 3
 
     # -- reading --
     def train(self, texts: Iterable[str], progress: ProgressFn | None = None) -> dict
@@ -785,7 +801,8 @@ class PairModel:
                 temperature: float = 1.0, to_end: bool = False, backoff: str | None = None) -> PathResult
         # start=True: the prefix begins a text (padded with START); False: a fragment. The context is the last ≤ D
         # units. mode: "greedy" (the exact fold, the default - section 10) | "dijkstra" | "sample".
-        # full_text = codec.decode(prefix units + emitted units).
+        # full_text = codec.decode(prefix units + emitted units): phones for a phonetic model; result.spelled is
+        # codec.spell(the same), the English they spell.
     def generate(self, prefix: str = "", length: int = 60, mode: str = "greedy", **options) -> PathResult
         # the walk runs to END, capped at `length`; from START alone when prefix == "". The cheapest complete text
         # (mode="dijkstra") is one step long whenever END is likelier than any continuation, as the family's is.
@@ -893,7 +910,7 @@ temporary file and `os.replace`, as `RadixCyclicNN`'s `write_bytes_atomic`.
 ## 14. `cli.py` and the `Makefile`
 
 ```
-python3 -m radixpair prime    --model m.json --codec chars|bytes|bpe|phones|syllables|gpt2|external --L 2
+python3 -m radixpair prime    --model m.json [--codec phones|syllables|chars|bytes|bpe|gpt2|external] [--L 3]   # phones at L=3 by default
                               [--vocab-size 1024] [--tokenizer-data corpus.txt] [--vocabulary lexicon|corpus] [--top 2000]
                               [--gpt2-files encoder.json vocab.bpe] [--external tiktoken:cl100k_base] [--no-stress]
                               [--kind count|sine] [--seed 0] [--rungs all|final] [--ceiling N]
@@ -921,8 +938,10 @@ python3 -m radixpair invert   --model m.json
 ```
 
 `--json` on every command prints one JSON document to stdout and progress to
-stderr, as the family does. `--data` reads one text per line, blank lines
-skipped; `--ratings` are marks out of 10, one per text, turned into weights as
+stderr, as the family does. `--codec` defaults to `phones` and `--L` to the
+depth the codec primes to (`DEFAULT_L`); `predict` and `generate` print the
+phones and, on the line below, the English they spell. `--data` reads one text
+per line, blank lines skipped; `--ratings` are marks out of 10, one per text, turned into weights as
 D-050. The `Makefile` has a target per command with the variables overridable
 on the command line (`make train DATA=… L=4`), plus `test`
 (`python3 -m unittest discover -s tests`) and `check`.

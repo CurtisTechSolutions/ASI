@@ -11,12 +11,13 @@ SHELL := /bin/bash
 PY        ?= python3
 RP        ?= $(PY) -m radixpair
 MODEL     ?= model.json.gz
-CODEC     ?= chars
-L         ?= 4
+CODEC     ?= phones
+L         ?= 3
 DATA      ?= ../RadixCyclicNN/data/sample_corpus.txt
 TOKDATA   ?= $(DATA)
 TOP       ?=
 PREFIX    ?= the cat sat on the
+SPELL     ?=
 LENGTH    ?= 20
 MODE      ?= dijkstra
 TRAVERSAL ?= reward
@@ -36,7 +37,7 @@ help: ## Show this help
 	@echo "PrimedRadixPair make targets  (override like: make prime CODEC=syllables L=2)"
 	@awk 'BEGIN {FS = ":.*## "} /^##@/ {printf "\n%s\n", substr($$0, 5)} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo
-	@echo "Defaults: MODEL=$(MODEL) CODEC=$(CODEC) L=$(L) DATA=$(DATA)"
+	@echo "Defaults: MODEL=$(MODEL) CODEC=$(CODEC) L=$(L) DATA=$(DATA)  (phones in, phones out; a prediction also shows the English it spells)"
 
 ##@ Checks
 test: ## Run the test suite (seconds)

@@ -36,7 +36,7 @@ def split(texts: Sequence[str], holdout: float = 0.1, seed: int = 0) -> tuple[li
     return [t for i, t in enumerate(texts) if i not in hold], [t for i, t in enumerate(texts) if i in hold]
 
 
-def throughput(codec: Codec | str = "chars", L: int = 4, units: int = 200_000, seed: int = 0, **options) -> dict:
+def throughput(codec: Codec | str = "phones", L: int = 3, units: int = 200_000, seed: int = 0, **options) -> dict:
     """Random units through ``observe`` and ``credit``: increments per second (PRD S-2)."""
     codec = _codec(codec, **options)
     model = PairModel.prime(codec, L)
@@ -67,7 +67,7 @@ def _bits(model: PairModel, texts: Sequence[str], traversal: str = "reward", bac
     return total / max(1, n)
 
 
-def compare(texts: Sequence[str], codec: Codec | str = "chars", L: int = 4, holdout: float = 0.1, seed: int = 0,
+def compare(texts: Sequence[str], codec: Codec | str = "phones", L: int = 3, holdout: float = 0.1, seed: int = 0,
             smoothing: float | None = None, **options) -> dict:
     """Bits per unit on a held-out split under ``backoff`` all / deepest / none (PRD S-4, S-5)."""
     train, held = split(texts, holdout, seed)
@@ -94,7 +94,8 @@ def feedback(codec: Codec | str = "chars", L: int = 4, smoothing: float = 0.0, *
     The sentences are ``a cat sat on the mat`` / ``... log`` rather than the
     spec's ``the cat ...``: a primed tree of depth ``L`` sees ``L - 1`` units
     of context, and at four characters ``he `` must be followed by ``m`` or
-    ``l`` alone for the branch to be the one the case is about.  It runs at
+    ``l`` alone for the branch to be the one the case is about (at two phones
+    of context ``AH0 #`` precedes ``K`` in *a cat* as well, so letters it stays).  It runs at
     ``smoothing = 0`` by default, as the grown graph the case comes from has no
     smoothing: on two sentences, Jeffreys smoothing gives the root enough say
     to turn a once-seen deep step.
@@ -123,7 +124,7 @@ def feedback(codec: Codec | str = "chars", L: int = 4, smoothing: float = 0.0, *
     }
 
 
-def rungs(texts: Sequence[str], codec: Codec | str = "chars", L: int = 4, seed: int = 0, samples: int = 50,
+def rungs(texts: Sequence[str], codec: Codec | str = "phones", L: int = 3, seed: int = 0, samples: int = 50,
           strength: float = 2.0, **options) -> dict:
     """Rewards at every level against the final nodes only: does a reward reach a sibling context? (PRD S-7)
 

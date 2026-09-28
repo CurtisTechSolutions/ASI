@@ -21,7 +21,7 @@ import time
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 
-from .codec import Codec, codec_from_dict, make_codec
+from .codec import DEFAULT_CODEC, DEFAULT_L, Codec, codec_from_dict, make_codec
 from .pair import BACKOFFS, RadixPair, Score, Settings, TRAVERSALS
 from .search import MODES, PathResult, dijkstra, greedy
 
@@ -162,7 +162,13 @@ class PairModel:
             if w == 0.0 or base == 0.0:
                 skipped += 1
                 continue
-            ids = [codec.start] + prefix_ids + codec.encode(text) + [codec.end]
+            if prefix:
+                joined = codec.encode(codec.join(prefix, text))
+                if joined[:len(prefix_ids)] != prefix_ids:            # a tokenizer that reads the pair differently
+                    joined = prefix_ids + codec.encode(text)
+                ids = [codec.start] + joined + [codec.end]
+            else:
+                ids = codec.padded(text)
             entries += reward.credit(ids, sign * base * w, self.settings.rungs, skip=skip if prefix else 0)
             if read:
                 count.observe(ids)
@@ -253,6 +259,7 @@ class PairModel:
             result = greedy(self.pair, context, length, traversal=traversal, rng=self.rng,
                             temperature=0.0 if mode == "greedy" else temperature, to_end=to_end, backoff=backoff)
         result.full_text = self.codec.decode(prefix_ids + result.units)
+        result.spelled = self.codec.spell(prefix_ids + result.units)
         return result
 
     def generate(self, prefix: str = "", length: int = 60, mode: str = "greedy", **options) -> PathResult:
@@ -383,13 +390,17 @@ def _set_rng_state(rng: random.Random, saved: list) -> None:
     rng.setstate((int(version), tuple(int(v) for v in state), gauss))
 
 
-def prime(codec: Codec | str, L: int, kind: str = "count", seed: int = 0, settings: Settings | None = None,
-          **codec_options) -> PairModel:
-    """A primed model: ``codec`` a :class:`Codec` or a preset name (with its options)."""
+def prime(codec: Codec | str = DEFAULT_CODEC, L: int | None = None, kind: str = "count", seed: int = 0,
+          settings: Settings | None = None, **codec_options) -> PairModel:
+    """A primed model: ``codec`` a :class:`Codec` or a preset name (``phones`` by default, with its options);
+    ``L`` defaults to the depth the preset primes to under the default ceiling (``DEFAULT_L``)."""
+    name = codec if isinstance(codec, str) else codec.name
     if isinstance(codec, str):
         codec = make_codec(codec, **codec_options)
     elif codec_options:
         raise ValueError("codec options go with a preset name, not a Codec object")
+    if L is None:
+        L = DEFAULT_L.get(name, 2)
     return PairModel.prime(codec, L, kind=kind, seed=seed, settings=settings)
 
 

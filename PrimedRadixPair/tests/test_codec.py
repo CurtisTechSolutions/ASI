@@ -85,8 +85,12 @@ class TestPhones(unittest.TestCase):
         from phonetok import Lexicon, PhoneticTokenizer
         tok = PhoneticTokenizer(level="phoneme", lexicon=Lexicon.portable())
         text = "The cat sat on the mat."
-        self.assertEqual(p.encode(text), tok.encode(text, grow=False))
-        self.assertEqual(p.decode(p.encode(text)), "the cat sat on the mat.")
+        ids = p.encode(text)
+        self.assertEqual(ids, tok.encode(text, grow=False))
+        self.assertEqual(p.decode(ids), "DH AH0 # K AE1 T # S AE1 T # AA1 N # DH AH0 # M AE1 T .")   # phones out
+        self.assertEqual(p.spell(ids), "the cat sat on the mat.")                                   # the English they spell
+        self.assertEqual(p.encode(p.decode(ids)), ids)                # the text form reads back unchanged
+        self.assertEqual(p.encode("DH AH0 # K AE1 T"), p.encode("the cat"))   # phones in work too
         q = codec_from_dict(p.to_dict())
         self.assertEqual(q.encode(text), p.encode(text))
         self.assertEqual(PhonesCodec(stress=False).R, 92)
@@ -102,7 +106,8 @@ class TestSyllables(unittest.TestCase):
         self.assertEqual((s.start, s.end, s.unk), (2, 3, 1))
         ids = s.encode("The cat sat on the mat.")
         self.assertNotIn(s.unk, ids)
-        self.assertEqual(s.decode(ids), "the cat sat on the mat.")
+        self.assertEqual(s.decode(ids), "DH.AH0 # K.AE1.T # S.AE1.T # AA1.N # DH.AH0 # M.AE1.T .")
+        self.assertEqual(s.spell(ids), "the cat sat on the mat.")
         unknown = s.encode("The zyxqua mat.")
         self.assertIn(s.unk, unknown)                      # a syllable outside the vocabulary is <unk>
         self.assertEqual(s.R, SyllablesCodec().R)          # deterministic
@@ -194,6 +199,10 @@ class TestGpt2(unittest.TestCase):
 class TestRegistry(unittest.TestCase):
     def test_names(self):
         self.assertEqual(set(CODECS), {"chars", "bytes", "bpe", "phones", "syllables", "gpt2", "external"})
+        from radixpair.codec import DEFAULT_CODEC, DEFAULT_L
+        self.assertEqual(DEFAULT_CODEC, "phones")
+        self.assertEqual(DEFAULT_L["phones"], 3)
+        self.assertEqual(CharsCodec().spell(CharsCodec().encode("hi")), "hi")
         with self.assertRaises(ValueError):
             make_codec("words")
         with self.assertRaises(ValueError):
