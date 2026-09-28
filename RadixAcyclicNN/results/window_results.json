@@ -1,0 +1,47 @@
+{
+ "texts": "/tmp/claude-0/-home-user-ASI/8e43573b-1e2b-5ca1-962b-55fd6bf53d7b/scratchpad/heldout.txt",
+ "rows": [
+  {
+   "window": 1,
+   "tokens": 10737,
+   "accuracy": 0.4612089037906305,
+   "known": 0.8790164850516904
+  },
+  {
+   "window": 2,
+   "tokens": 10737,
+   "accuracy": 0.5173698426003539,
+   "known": 0.8080469404861693
+  },
+  {
+   "window": 3,
+   "tokens": 10737,
+   "accuracy": 0.5438204340132253,
+   "known": 0.7605476390053088
+  },
+  {
+   "window": 4,
+   "tokens": 10737,
+   "accuracy": 0.5455900158331005,
+   "known": 0.7306510198379436
+  },
+  {
+   "window": 6,
+   "tokens": 10737,
+   "accuracy": 0.5519232560305486,
+   "known": 0.6966564217192884
+  },
+  {
+   "window": 8,
+   "tokens": 10737,
+   "accuracy": 0.5547173325882463,
+   "known": 0.68678401788209
+  },
+  {
+   "window": null,
+   "tokens": 10737,
+   "accuracy": 0.5584427679985098,
+   "known": 0.6808233212256682
+  }
+ ]
+}
