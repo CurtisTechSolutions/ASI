@@ -119,7 +119,7 @@ characters). `make compare`.
 | label characters | 11 260 | 1 510 919 |
 | grams per node | 1.20 | 0.07 |
 | transitions per epoch | 42 310 | 219 953 |
-| training seconds | 8 | 992 |
+| training seconds | 9 | 871 |
 | train bits/char | 1.924 | 0.145 |
 | held-out bits/char | 4.057 | 6.514 |
 | held-out miss rate | 12 % | 54 % |
@@ -195,8 +195,9 @@ the window (`depth 8`).
 
 | | real nodes | label chars | training s | train bits/char | held-out bits/char | held-out misses | recited |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| cyclic graph | 3 516 | 11 260 | 8 | 1.924 | 4.057 | 12 % | 0 / 640 |
-| tree, unbounded, `min_count 1` | 61 213 | 1 510 919 | 992 | 0.145 | 6.514 | 54 % | 572 / 640 |
+| cyclic graph | 3 516 | 11 260 | 9 | 1.924 | 4.057 | 12 % | 0 / 640 |
+| tree, unbounded, `min_count 1` | 61 213 | 1 510 919 | 871 | 0.145 | 6.514 | 54 % | 572 / 640 |
+| tree, unbounded, `min_count 2` | 61 213 | 1 510 919 | 879 | 1.288 | 5.629 | 32 % | 198 / 640 |
 
 **What the tree has that the graph cannot.** No clock and no budget in the
 search — "keep going until there is nowhere to go" is a complete algorithm. A

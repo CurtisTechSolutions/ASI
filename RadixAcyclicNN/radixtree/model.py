@@ -615,10 +615,10 @@ class RadixTreeNet:
 
     # -- scoring -------------------------------------------------------------
 
-    def _relocate(self, history: list[str]) -> tuple[int, int]:
+    def _relocate(self, history: list[str], ending: bool = False) -> tuple[int, int]:
         """The deepest usable context of ``history``, or the root (the empty context)."""
         if history:
-            loc = self.tree.locate(history, self.min_count)
+            loc = self.tree.locate(history, self.min_count, ending)
             if loc is not None:
                 return loc[0], loc[1]
         return ROOT, -1
@@ -637,7 +637,9 @@ class RadixTreeNet:
         in ``unknown_transitions`` - the cyclic model's convention, so the two
         read on one scale.  The context never peeks at the answer: a shorter
         context that would have known the gram does not rescue a deeper one
-        that did not.
+        that did not.  Under a bound, a context at the window's limit is asked
+        about END alone (:meth:`RadixTree.locate`), so a text the tree was
+        trained on never misses, at any depth.
         """
         if not isinstance(text, str):
             raise TypeError("text must be a string")
@@ -660,11 +662,19 @@ class RadixTreeNet:
         node, offset = START, -1
         history: list[str] = []
 
-        def settle(node: int, offset: int) -> tuple[int, int]:
+        depth = tree.depth
+        symbols_of = tree.symbols_of
+
+        def settle(node: int, offset: int, ending: bool = False) -> tuple[int, int]:
             """The context the next symbol is read from: the current one while it is trusted and has something
-            to offer, else the deepest usable suffix of what was read so far."""
-            if count[node] < min_count or (offset == held(node) - 1 and not (children[node] or end_leaf[node] >= 0)):
-                return self._relocate(history)
+            to offer - and, for a gram, room in its window to have seen one - else the deepest usable suffix of
+            what was read so far."""
+            if (
+                count[node] < min_count
+                or (offset == held(node) - 1 and not (children[node] or end_leaf[node] >= 0))
+                or (not ending and depth is not None and symbols_of(node, offset) >= depth)
+            ):
+                return self._relocate(history, ending)
             return node, offset
 
         for g in grams:
@@ -689,7 +699,7 @@ class RadixTreeNet:
                 unknown += 1
                 log_prob += _LOG_UNKNOWN
                 node, offset = self._relocate(history)
-        node, offset = settle(node, offset)
+        node, offset = settle(node, offset, ending=True)
         transitions += 1
         lp = tree.log_prob(node, end_leaf[node]) if offset == held(node) - 1 and end_leaf[node] >= 0 else None
         if lp is None:

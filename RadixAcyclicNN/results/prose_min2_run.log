@@ -1,1 +1,54 @@
 tree: training on 640 texts, 10 epochs
+cyclic: training on 640 texts, 10 epochs
+repetition and generalisation
+corpus: data/corpus.txt - 640 texts / 44335 chars to train, 160 texts / 10897 chars held out (sha256 31ea49d2800c)
+settings: seed 1, 10 epochs, lr 0.5, act_lr 0.05, batch 32, depth None, min_count 2
+
+| | cyclic graph | tree |
+|---|---:|---:|
+| real nodes | 3516 | 61213 |
+| END leaves | 1 | 42824 |
+| edges | 9699 | 104037 |
+| distinct grams | 4228 | 4228 |
+| label characters | 11260 | 1510919 |
+| grams per node | 1.203 | 0.069 |
+| transitions per epoch | 42310 | 219953 |
+| training seconds | 8.05 | 879.07 |
+| final epoch loss (nats) | 1.405 | 2.218 |
+| train bits/char | 1.924 | 1.288 |
+| train miss rate | 0.000 | 0.002 |
+| held-out bits/char | 4.057 | 5.629 |
+| held-out miss rate | 0.122 | 0.322 |
+| texts recited whole | 0/640 | 198/640 |
+
+| prefix | cyclic graph says | tree says |
+|---|---|---|
+| `the quick` | 'ets,' | ' 45 because it sounded round. It is the largest rotation a sine' |
+| `the cat` | 'e.' | 'ches the loop directly:' |
+| `knowledge` | 't' | '". It is not sloppiness. It is the only thing that can be said in a graph' |
+| `two plus` | ' up:' | ' a monotone' |
+| `the moon` | '.' | 'handling. Every mainstream network architecture is a DAG for exactly these' |
+| `th` | 'e' | 'eory predicts). I then test whether dividing the decay back out actually helps,' |
+| `zzzq` | 'uest' | 'handling. Every mainstream network architecture is a DAG for exactly these' |
+
+| text | chars | cyclic nodes | tree nodes | cyclic label chars | tree label chars |
+|---|---:|---:|---:|---:|---:|
+| `a` × 4 | 4 | 1 | 3 | 3 | 10 |
+| `a` × 10 | 10 | 1 | 9 | 3 | 34 |
+| `a` × 100 | 100 | 1 | 99 | 3 | 394 |
+| `a` × 1000 | 1000 | 1 | 999 | 3 | 3994 |
+| `abc` × 2 | 6 | 2 | 5 | 7 | 23 |
+| `abc` × 5 | 15 | 2 | 14 | 7 | 77 |
+| `abc` × 50 | 150 | 2 | 149 | 7 | 887 |
+| `abc` × 500 | 1500 | 2 | 1499 | 7 | 8987 |
+
+shown `aaaa` once, scoring `aaaaaaa`:
+- cyclic graph: representable True, 0 unknown of 6 transitions, log-prob -3.59
+- tree: representable False, 3 unknown of 5 transitions, log-prob -41.45
+
+wrote results/prose_min2_results.json
+
+real	14m49.724s
+user	14m40.137s
+sys	0m0.561s
+exit 0

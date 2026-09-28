@@ -633,6 +633,18 @@ class RadixTree:
         traced = self.trace(grams, origin)
         return None if traced is None else traced[1]
 
+    def symbols_of(self, node: int, offset: int) -> int:
+        """How many symbols a located context holds: START counts as one, every gram up to ``offset`` as one."""
+        if self.kind[node] == KIND_REAL:
+            total = offset + 1
+        else:
+            total = 1 if node == START else 0
+        p = self.parent[node]
+        while p > ROOT:
+            total += self.held(p) if self.kind[p] == KIND_REAL else 1
+            p = self.parent[p]
+        return total
+
     def usable(self, node: int, offset: int, min_count: int = 1) -> bool:
         """Whether a located context can answer: seen ``min_count`` times, with something to continue with."""
         if self.count[node] < min_count:
@@ -641,7 +653,7 @@ class RadixTree:
             return True
         return bool(self.children[node]) or self.end_leaf[node] >= 0
 
-    def locate(self, grams: Sequence[str], min_count: int = 1) -> tuple[int, int, int] | None:
+    def locate(self, grams: Sequence[str], min_count: int = 1, ending: bool = False) -> tuple[int, int, int] | None:
         """The deepest usable context of a history: ``(node, offset, symbols)``, or ``None``.
 
         Tries the history from START first (the whole of it, when it fits under
@@ -649,16 +661,21 @@ class RadixTree:
         a suffix tree answers for a prefix it has never seen whole: drop the
         oldest gram and ask again.  ``symbols`` is how many symbols the context
         holds, START included.  ``None`` when not even the last gram is known.
+
+        With a bound, a context of exactly ``depth`` symbols stands at the end
+        of its window: it can never have seen a next gram, only whether texts
+        ended there.  So it is consulted for END alone (``ending=True``) and a
+        gram is asked of a context of at most ``depth - 1`` symbols - what a
+        window can hold, and one more.
         """
         total = len(grams)
         depth = self.depth
-        # a context of exactly ``depth`` symbols can only be followed by END - which it is, when a text ended
-        # there - so the bound is on what a window can hold and :meth:`usable` decides the rest
-        if depth is None or total + 1 <= depth:
+        room = None if depth is None else (depth if ending else depth - 1)
+        if room is None or total + 1 <= room:
             loc = self.walk(START, grams)
             if loc is not None and self.usable(loc[0], loc[1], min_count):
                 return (loc[0], loc[1], total + 1)
-        longest = total if depth is None else min(total, depth)
+        longest = total if room is None else min(total, room)
         for length in range(longest, 0, -1):
             loc = self.walk(ROOT, grams[total - length :])
             if loc is not None and self.usable(loc[0], loc[1], min_count):

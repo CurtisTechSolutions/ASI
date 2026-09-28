@@ -322,11 +322,12 @@ class TestSuffixProperty(unittest.TestCase):
         t.observe_sequence(ENC.encode("the cat sat on the mat"))
         self.assertLessEqual(t.max_depth(), 4)
         node, offset, symbols = t.locate(ENC.encode("the cat sat"))
-        self.assertLessEqual(symbols, 3)  # mid-text, a context holds at most depth - 1 symbols: one must follow
+        self.assertLessEqual(symbols, 3)  # for a gram, a context holds at most depth - 1 symbols: one must follow
         self.assertTrue(t.usable(node, offset))
-        node, offset, symbols = t.locate(ENC.encode("the mat"))  # the text ended here: START and 3 grams, then END
+        node, offset, symbols = t.locate(ENC.encode("the mat"), ending=True)  # for END: START and 3 grams, then END
         self.assertEqual(symbols, 4)
         self.assertGreaterEqual(t.end_leaf[node], 0)
+        self.assertLessEqual(t.locate(ENC.encode("the mat"))[2], 3)  # the same context is never asked for a gram
         t.check_invariants(texts=["the cat sat on the mat"])
 
 
@@ -742,7 +743,7 @@ def score_slow(model: RadixTreeNet, text: str) -> tuple[float, int]:
     history: list[str] = []
     for g in grams + [None]:
         if history:
-            loc = t.locate(history, model.min_count)
+            loc = t.locate(history, model.min_count, ending=g is None)
         else:
             loc = (START, -1, 1) if t.count[START] >= model.min_count else None
         node, offset = (loc[0], loc[1]) if loc is not None else (ROOT, -1)
@@ -804,6 +805,21 @@ class TestScoring(unittest.TestCase):
                 slow = score_slow(model, text)
                 self.assertAlmostEqual(fast["log_prob"], slow[0], places=9, msg=(depth, min_count, text))
                 self.assertEqual(fast["unknown_transitions"], slow[1], (depth, min_count, text))
+
+    def test_a_trained_text_never_misses_at_any_depth(self):
+        """Every context and its next gram were inserted in one window, so a text the tree holds is certain.
+
+        The one way to break this is to ask a context at the window's limit for
+        a gram it could never have seen (it stood at the end of its window), and
+        it was broken that way once: a history whose last ``depth`` grams had
+        ended a line elsewhere matched that line's END context and missed.
+        """
+        for depth in (None, 3, 4, 8):
+            model = RadixTreeNet(seed=1, depth=depth)
+            model.train(CORPUS, epochs=0)
+            bits = model.bits_per_char(CORPUS)
+            self.assertEqual(bits["unknown_transitions"], 0, depth)
+            self.assertEqual(model.bits_per_char(CORPUS[:5])["miss_rate"], 0.0, depth)
 
     def test_min_count_trusts_shorter_contexts(self):
         strict = RadixTreeNet(seed=1, min_count=2)

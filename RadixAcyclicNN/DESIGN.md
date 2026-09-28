@@ -236,9 +236,13 @@ from the root, longest first — drop the oldest gram and ask again. A context i
 with: a run to finish, a child, or an END leaf. `symbols` counts START.
 `None` when not even the last gram is known.
 
-A context of exactly `depth` symbols can only be followed by END — which it is
-when a text ended there — so the bound is on what a window can hold and
-`usable` decides the rest.
+A context of exactly `depth` symbols stands at the end of its window: it can
+never have seen a next gram, only whether texts ended there. So it is consulted
+for END alone (`locate(..., ending=True)`, what `score` asks before the END),
+and a gram is asked of a context of at most `depth - 1` symbols. Without that
+distinction a history whose last `depth` grams had ended a line elsewhere would
+match that line's END context and miss on its own next gram — a text the tree
+was trained on must never miss, at any depth, and the tests hold it to that.
 
 `min_count` is the trust knob. At 1 the deepest known context always decides;
 at 2 a context seen once is never consulted and the walk falls back to the

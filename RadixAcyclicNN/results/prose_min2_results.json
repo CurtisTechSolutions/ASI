@@ -14,7 +14,7 @@
   "act_lr": 0.05,
   "batch_size": 32,
   "depth": null,
-  "min_count": 1
+  "min_count": 2
  },
  "models": {
   "tree": {
@@ -30,7 +30,7 @@
     "max_depth": 14,
     "compression_ratio": 0.06907029552546028
    },
-   "train_seconds": 870.8496278919997,
+   "train_seconds": 879.0651223529999,
    "epoch_loss": [
     2.5027624698375837,
     2.440773947022795,
@@ -45,23 +45,23 @@
    ],
    "transitions_per_epoch": 219953,
    "train_bits": {
-    "bits_per_char": 0.14521249554051474,
+    "bits_per_char": 1.2876887481128896,
     "chars": 44335,
-    "transitions": 2003,
-    "unknown_transitions": 0,
-    "miss_rate": 0.0
+    "transitions": 23677,
+    "unknown_transitions": 52,
+    "miss_rate": 0.0021962241838070704
    },
    "test_bits": {
-    "bits_per_char": 6.514299989265452,
+    "bits_per_char": 5.628596776371522,
     "chars": 10897,
-    "transitions": 5887,
-    "unknown_transitions": 3195,
-    "miss_rate": 0.5427212502123323
+    "transitions": 7386,
+    "unknown_transitions": 2379,
+    "miss_rate": 0.3220958570268075
    },
    "recall": {
     "texts": 640,
-    "recited": 572,
-    "fraction": 0.89375
+    "recited": 198,
+    "fraction": 0.309375
    },
    "predictions": [
     {
@@ -70,7 +70,7 @@
      "cost": 0.8523659443480862,
      "expanded": 4,
      "reached_end": true,
-     "seconds": 5.360100021789549e-05
+     "seconds": 3.4565000532893464e-05
     },
     {
      "prefix": "the cat",
@@ -78,7 +78,7 @@
      "cost": 1.0204392524433787,
      "expanded": 3,
      "reached_end": true,
-     "seconds": 5.38159993084264e-05
+     "seconds": 2.7375999707146548e-05
     },
     {
      "prefix": "knowledge",
@@ -86,7 +86,7 @@
      "cost": 1.8269270470867394,
      "expanded": 5,
      "reached_end": true,
-     "seconds": 6.435300019802526e-05
+     "seconds": 4.23339997723815e-05
     },
     {
      "prefix": "two plus",
@@ -94,15 +94,15 @@
      "cost": 0.3304413626468953,
      "expanded": 3,
      "reached_end": true,
-     "seconds": 3.193199972884031e-05
+     "seconds": 3.490499966574134e-05
     },
     {
      "prefix": "the moon",
-     "text": ". Or the fact that you kept ruminating can change what is",
-     "cost": 0.0,
-     "expanded": 2,
+     "text": "handling. Every mainstream network architecture is a DAG for exactly these",
+     "cost": 5.428857253989044,
+     "expanded": 5,
      "reached_end": true,
-     "seconds": 2.517400025681127e-05
+     "seconds": 0.0001658080000197515
     },
     {
      "prefix": "th",
@@ -110,7 +110,7 @@
      "cost": 1.2045815657102834,
      "expanded": 4,
      "reached_end": true,
-     "seconds": 6.474100064224331e-05
+     "seconds": 5.767600032413611e-05
     },
     {
      "prefix": "zzzq",
@@ -118,7 +118,7 @@
      "cost": 5.428857253989044,
      "expanded": 5,
      "reached_end": true,
-     "seconds": 0.00022000599983584834
+     "seconds": 0.00012142100058554206
     }
    ]
   },
@@ -132,7 +132,7 @@
     "label_chars": 11260,
     "compression_ratio": 1.2025028441410694
    },
-   "train_seconds": 9.039119984000536,
+   "train_seconds": 8.05335127699982,
    "epoch_loss": [
     1.6816631312368508,
     1.582312973043588,
@@ -172,7 +172,7 @@
      "cost": 2.9854812400652797,
      "expanded": 12,
      "reached_end": true,
-     "seconds": 7.812900003045797e-05
+     "seconds": 6.388099973264616e-05
     },
     {
      "prefix": "the cat",
@@ -180,7 +180,7 @@
      "cost": 3.9401594399927697,
      "expanded": 36,
      "reached_end": true,
-     "seconds": 0.0002470780000294326
+     "seconds": 0.00016923899966059253
     },
     {
      "prefix": "knowledge",
@@ -188,7 +188,7 @@
      "cost": 3.5462606576290407,
      "expanded": 26,
      "reached_end": true,
-     "seconds": 0.0001557099994897726
+     "seconds": 0.0001184210004794295
     },
     {
      "prefix": "two plus",
@@ -196,7 +196,7 @@
      "cost": 4.574471016737244,
      "expanded": 73,
      "reached_end": true,
-     "seconds": 0.0004100360001757508
+     "seconds": 0.00034606400004122406
     },
     {
      "prefix": "the moon",
@@ -204,7 +204,7 @@
      "cost": 1.63309883856071,
      "expanded": 4,
      "reached_end": true,
-     "seconds": 2.945300002465956e-05
+     "seconds": 2.427400067972485e-05
     },
     {
      "prefix": "th",
@@ -212,7 +212,7 @@
      "cost": 3.302722829937882,
      "expanded": 12,
      "reached_end": true,
-     "seconds": 0.0009310300001743599
+     "seconds": 0.000754961999518855
     },
     {
      "prefix": "zzzq",
@@ -220,7 +220,7 @@
      "cost": 3.4723439926980086,
      "expanded": 23,
      "reached_end": true,
-     "seconds": 0.0021527700000660843
+     "seconds": 0.0021715569992011297
     }
    ]
   }
@@ -320,5 +320,5 @@
   },
   "cyclic_representable": true
  },
- "seconds": 881.2044336909998
+ "seconds": 889.5389484000002
 }

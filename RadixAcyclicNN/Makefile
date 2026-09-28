@@ -75,10 +75,11 @@ compare: ## Both models on the prose corpus, one fifth held out - about a quarte
 	$(RT) compare --seed $(SEED) --epochs $(EPOCHS) --lr $(LR) --act-lr $(ACT_LR) --batch-size $(BATCH) \
 		--min-count $(MIN_COUNT) $(if $(DEPTH),--depth $(DEPTH),) --out $(RESULTS)/prose_results.json
 
-compare-all: compare-quick ## Every run README.md quotes: the sample corpus, then the prose corpus plain, trusted twice, bounded to eight
+compare-all: compare-quick ## Every run README.md quotes: the sample corpus, then the prose corpus plain, trusted twice, bounded to eight and to two
 	$(RT) compare --seed $(SEED) --out $(RESULTS)/prose_results.json
 	$(RT) compare --seed $(SEED) --min-count 2 --out $(RESULTS)/prose_min2_results.json
 	$(RT) compare --seed $(SEED) --depth 8 --out $(RESULTS)/prose_depth8_results.json
+	$(RT) compare --seed $(SEED) --depth 2 --out $(RESULTS)/prose_depth2_results.json
 
 clean: ## Remove __pycache__ and saved models (results and the corpus are kept)
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true

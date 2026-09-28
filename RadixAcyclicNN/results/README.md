@@ -8,6 +8,7 @@ The numbers in `../README.md`, committed beside the code that produced them.
 | `prose_results.json`, `prose_run.log` | both models on the prose corpus, one fifth held out, the tree unbounded and trusting every context — `make compare` |
 | `prose_min2_results.json`, `prose_min2_run.log` | the same run with `--min-count 2`: the tree consults no context it has seen only once |
 | `prose_depth8_results.json`, `prose_depth8_run.log` | the same run with `--depth 8`: a root path holds at most eight symbols |
+| `prose_depth2_results.json`, `prose_depth2_run.log` | the same run with `--depth 2`: a context is one gram — the cyclic graph's own order, held as a tree |
 
 Each JSON holds the corpus (size, split, SHA-256 of the exact text), the
 settings, and per model: the size of everything it built, training seconds,
@@ -17,14 +18,14 @@ prefix. Then the repetition table (`"a" * n`, `"abc" * k`: nodes and label
 characters each structure needs) and the generalisation row (shown `aaaa`,
 what each says about `aaaaaaa`). `DESIGN.md` §15 says what each field means.
 
-Reproduce with `make compare-all` (about three quarters of an hour) or one at a
-time:
+Reproduce with `make compare-all` (about an hour) or one at a time:
 
 ```bash
 make compare-quick                  # the sample corpus, seconds
 make compare                        # the prose corpus, about a quarter of an hour
-make compare MIN_COUNT=2 RESULTS=results   # trusted twice
-make compare DEPTH=8                # bounded
+make compare MIN_COUNT=2            # trusted twice (writes prose_results.json: rename it)
+make compare DEPTH=8                # bounded to eight
+make compare DEPTH=2                # bounded to two: the graph's order
 ```
 
 `python3 -m radixtree.compare --help` lists every setting. The log files are
