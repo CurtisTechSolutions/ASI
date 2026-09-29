@@ -1,14 +1,21 @@
-"""radixnet - a self-compressing cyclic-graph neural network (Radix Tree idea).
+"""radixnet - a self-compressing cyclic-graph neural network (Radix Tree idea): the core model.
 
 Pure Python (standard library only); ``torch`` is an optional accelerator that
 is imported lazily.  See ``DESIGN.md`` for the full specification.
+
+This package is the model and nothing else: the graph, the four kinds, the
+encodings, training, the searches and the model file.  Everything built around
+it - the command line, the HTTP API and the React frontend, the teaching loops,
+the LLM clients, the agent and its tools, speech, images and voice, MCP - is
+the ``modelkit`` package in ``../ModelKit``, which depends on this one and never
+the other way round.  ``python -m radixnet`` still runs the command line: it
+hands over to ``modelkit.cli``.
 """
 
 from __future__ import annotations
 
 __version__ = "0.1.0"
 
-from .assistant import Ask, Reply, complete, respond, stream, to_anthropic, to_openai
 from .activation import (
     DEFAULT_A,
     DEFAULT_B,
@@ -29,16 +36,13 @@ from .backend import (
     get_backend,
     torch_available,
 )
-from .checkpoint import CheckpointManager
 from .encoding import (
     ACOUSTIC, BACK_LABEL, CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, THINK_LABEL, WINDOW, WORDS, Decoder, Encoder,
     Encoding, parse_encoding,
 )
-from .gan import EvolveConfig, Evolver
 from .graph import BACK, END, FIRST, START, THINK, RadixCyclicGraph
 from .beam import Prediction, beam_predict
 from .countnet import CountRewardGraph, CountRewardNet
-from .duo import FilterConfig, NegativeFilter
 from .metacog import MetaLayer
 from .model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds, new_model
 from .negative import NegativeGraph, NegativeNet
@@ -55,36 +59,19 @@ from .phasesearch import phase_beam, phase_dijkstra, phase_walk
 from .resonance import ResonantGraph, ResonantNet, trigram_phase
 from .search import PathResult, dijkstra_predict, sample_walk
 from .window import DEFAULT_FLOOR as WINDOW_FLOOR, DEFAULT_TOP as WINDOW_TOP, DynamicWindow
-from .speech import (
-    ASR_BACKENDS,
-    CODECS as SPEECH_CODECS,
-    DEFAULT_RATE as SPEECH_RATE,
-    SPEECH_TOKEN,
-    Audio,
-    SpeechError,
-    encode_audio,
-    speech_texts,
-    teach as teach_by_speech,
-    transcribe,
-    utterance_token,
-)
 
 __all__ = [
     "__version__",
-    "Ask", "Reply", "complete", "respond", "stream", "to_anthropic", "to_openai",
     "RadixNet", "TrainConfig", "GraphModel", "CountRewardNet", "CountRewardGraph",
-    "NegativeNet", "NegativeGraph", "NegativeFilter", "FilterConfig",
+    "NegativeNet", "NegativeGraph",
     "ResonantNet", "ResonantGraph", "MetaLayer", "trigram_phase",
     "load_model", "model_class", "model_kinds", "new_model", "Prediction", "beam_predict",
     "Encoder", "Decoder", "SineActivation",
     "get_backend", "describe_backends", "torch_available",
-    "CheckpointManager", "Evolver", "EvolveConfig",
     "DEFAULT_A", "DEFAULT_B", "DEFAULT_H", "DEFAULT_K",
     "edge_signal", "sine_activation", "sine_derivative", "sine_partials",
     "CSR", "Backend", "NodeParams", "PythonBackend",
     "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "Encoding", "parse_encoding",
-    "SPEECH_TOKEN", "SPEECH_CODECS", "SPEECH_RATE", "ASR_BACKENDS", "Audio", "SpeechError",
-    "encode_audio", "speech_texts", "teach_by_speech", "transcribe", "utterance_token",
     "END", "START", "RadixCyclicGraph",
     "DynamicWindow", "WINDOW_TOP", "WINDOW_FLOOR",
     "PathResult", "dijkstra_predict", "sample_walk",

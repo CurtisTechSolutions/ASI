@@ -1517,7 +1517,7 @@ evolve tab can show what the thing actually sounds like alongside the curves.
 
 ## 18. `checkpoint.py`
 
-Identical contract to `RadixCyclicNN/radixnet/checkpoint.py`.
+Identical contract to `ModelKit/modelkit/checkpoint.py`.
 
 ```python
 @dataclass

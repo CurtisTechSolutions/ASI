@@ -16,8 +16,8 @@
 //! each kind answers `train`, `predict`, `generate`, `score`, `feedback`,
 //! `2nrl`, `invert`, `compress`, `info` and `weights` the way Python's does.
 //!
-//! The dispatch lives here rather than in every caller so that the CLI
-//! (`src/bin/radixnet.rs`) and the server ([`crate::service`]) cannot answer a
+//! The dispatch lives here rather than in every caller so that the CLI (the
+//! `radixnet` binary) and the server (the `service` module) cannot answer a
 //! kind differently.
 
 use crate::encoding::Encoding;
@@ -596,7 +596,7 @@ pub fn invert_paths(
                     &ones
                 }
             };
-            Ok(crate::gan::invert_paths(model, texts, amounts, strength)?.to_json())
+            Ok(model.invert_paths(texts, amounts, strength)?.to_json())
         }
     }
 }

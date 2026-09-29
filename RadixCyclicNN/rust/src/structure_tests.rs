@@ -1,6 +1,6 @@
 //! Splits and merges must not change what the count model hangs on its edges -
 //! the recent shares, the verdicts and the prices - and the bottom beam of the
-//! least-punished traversal finds the most punished paths (D-091).
+//! least-punished traversal finds the most punished paths (D-092).
 
 use std::sync::atomic::Ordering;
 
@@ -48,10 +48,14 @@ fn node(g: &Graph, label: &str) -> usize {
         .unwrap_or_else(|| panic!("no node {label:?}"))
 }
 
+/// One way on from a fork: the first three units of the child's label, then
+/// (probability, traversals, windowed traversals).
+type Way = (String, f64, i64, i64);
+
 /// One text trained fifty times and a text that parts from it mid-node once:
 /// the fork, and (probability, traversals, windowed traversals) of each way
 /// on, by the first three units of the child's label.
-fn fork(auto_compress: bool, window: Option<usize>) -> (Model, usize, Vec<(String, f64, i64, i64)>) {
+fn fork(auto_compress: bool, window: Option<usize>) -> (Model, usize, Vec<Way>) {
     let mut m = model(window);
     train(&mut m, &["abcdefghij klmnop"], 50, auto_compress);
     train(&mut m, &["abcdefghij qrstuv"], 1, auto_compress);
@@ -60,7 +64,7 @@ fn fork(auto_compress: bool, window: Option<usize>) -> (Model, usize, Vec<(Strin
         .collect();
     assert_eq!(forks.len(), 1, "one fork: {forks:?}");
     m.g.prepare();
-    let mut ways: Vec<(String, f64, i64, i64)> =
+    let mut ways: Vec<Way> =
         m.g.child_costs(forks[0])
             .into_iter()
             .map(|cc| {

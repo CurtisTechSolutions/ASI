@@ -13,13 +13,10 @@ import json
 import math
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from radixnet import cli  # noqa: E402
-from radixnet.api import ModelService  # noqa: E402
 from radixnet.countnet import CountRewardNet  # noqa: E402
 from radixnet.graph import BACK  # noqa: E402
 from radixnet.model import RadixNet  # noqa: E402
@@ -308,64 +305,6 @@ class TestSearches(unittest.TestCase):
         for model in (counted(), RadixNet(seed=1), ResonantNet(seed=1), NegativeNet(seed=1)):
             with self.assertRaises(ValueError):
                 model.predict("the cat", length=4, traversal="least-blame")
-
-
-class TestFrontDoors(unittest.TestCase):
-    """The option where a person reaches it: the CLI and the HTTP API."""
-
-    def setUp(self):
-        self.dir = tempfile.TemporaryDirectory()
-        self.path = os.path.join(self.dir.name, "model.count.json")
-        counted().save(self.path)
-        self.addCleanup(self.dir.cleanup)
-
-    def test_the_cli_carries_the_traversal(self):
-        doc = _json_cli(["--model", self.path, "--json", "predict", "--prefix", "the cat", "--length", "16"])
-        self.assertEqual(doc["traversal"], "reward")
-        punished = _json_cli([
-            "--model", self.path, "--json", "predict", "--prefix", "the cat", "--length", "16",
-            "--traversal", "punishment", "--merit-scale", "0",
-        ])
-        self.assertEqual(punished["traversal"], "punishment")
-        self.assertNotEqual(doc["continuation"], punished["continuation"])
-
-    def test_the_cli_generates_with_it(self):
-        doc = _json_cli([
-            "--model", self.path, "--json", "generate", "--count", "2", "--mode", "beam",
-            "--max-length", "40", "--traversal", "punishment",
-        ])
-        self.assertEqual(doc["traversal"], "punishment")
-        self.assertTrue(doc["samples"])
-
-    def test_the_cli_rejects_an_unknown_traversal(self):
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            code = cli.main(["--model", self.path, "--json", "predict", "--prefix", "a", "--traversal", "nope"])
-        self.assertNotEqual(code, 0)
-
-    def test_the_api_carries_the_traversal(self):
-        svc = ModelService(self.path, backend="python")
-        plain = svc.predict("the cat", length=16, k=3, mode="beam", guard=False)
-        punished = svc.predict(
-            "the cat", length=16, k=3, mode="beam", guard=False, traversal="punishment", merit_scale=0.0,
-        )
-        self.assertEqual(plain["traversal"], "reward")
-        self.assertEqual(punished["traversal"], "punishment")
-        self.assertNotEqual(plain["continuation"], punished["continuation"])
-
-    def test_the_api_generates_with_it(self):
-        svc = ModelService(self.path, backend="python")
-        out = svc.generate(count=2, mode="beam", max_length=40, guard=False, traversal="punishment")
-        self.assertTrue(out["samples"])
-
-
-def _json_cli(argv):
-    """Run the CLI with ``--json`` and give back the document it printed."""
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        code = cli.main(argv)
-    if code != 0:
-        raise AssertionError(f"cli exited {code}: {buffer.getvalue()}")
-    return json.loads(buffer.getvalue())
 
 
 if __name__ == "__main__":

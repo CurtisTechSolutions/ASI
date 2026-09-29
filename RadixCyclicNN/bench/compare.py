@@ -28,8 +28,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-GO_BIN = ROOT / "go" / "bin" / "radixnet-count"
-RUST_BIN = ROOT / "rust" / "target" / "release" / "radixnet-bench"
+# the Go and Rust binaries are the kit's (../ModelKit), built over this project's model
+KIT = ROOT.parent / "ModelKit"
+GO_BIN = KIT / "go" / "bin" / "radixnet-count"
+RUST_BIN = KIT / "rust" / "target" / "release" / "radixnet-bench"
 
 # The numbers both ports must agree on before any timing is worth reading.
 EXACT_KEYS = [
@@ -52,9 +54,9 @@ def run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 def build() -> None:
     print("building the Go CLI ...", file=sys.stderr)
-    run(["go", "build", "-o", str(GO_BIN), "./cmd/radixnet-count"], cwd=ROOT / "go")
+    run(["go", "build", "-o", str(GO_BIN), "./cmd/radixnet-count"], cwd=KIT / "go")
     print("building the Rust binary ...", file=sys.stderr)
-    run(["cargo", "build", "--release"], cwd=ROOT / "rust")
+    run(["cargo", "build", "--release"], cwd=KIT / "rust")
 
 
 def go_command(args: argparse.Namespace, traversal: str, workers: int, exact: bool) -> list[str]:

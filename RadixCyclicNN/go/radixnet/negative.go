@@ -606,8 +606,8 @@ func (m *Model) makeNegative() {
 // IsNegative reports whether this model is the negative network.
 func (m *Model) IsNegative() bool { return m != nil && m.Neg != nil && m.G.IsNegative() }
 
-// requireNegative guards the operations that only a negative network has.
-func (m *Model) requireNegative(what string) error {
+// RequireNegative guards the operations that only a negative network has.
+func (m *Model) RequireNegative(what string) error {
 	if !m.IsNegative() {
 		return fmt.Errorf("%s needs the negative network (this is the %s model)", what, m.Kind())
 	}
@@ -762,7 +762,7 @@ func (m *Model) Clear(texts []string, weight float64, epochs int) ([]map[string]
 // blamePass is one routine for both halves: blame (which registers and creates
 // structure) and clearing (which only credits what is already there).
 func (m *Model) blamePass(texts []string, o BlameOptions, blame bool, weight float64) ([]map[string]any, error) {
-	if err := m.requireNegative("blaming"); err != nil {
+	if err := m.RequireNegative("blaming"); err != nil {
 		return nil, err
 	}
 	kept, skippedShort := cleanTexts(m.Encoding(), texts)
@@ -964,7 +964,7 @@ type NegativeCorrection struct {
 // its charge for the changed characters its grams see, the gram with a change
 // at its centre the most, rather than severity for the characters it wrote.
 func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeCorrection, error) {
-	if err := m.requireNegative("teaching a correction"); err != nil {
+	if err := m.RequireNegative("teaching a correction"); err != nil {
 		return nil, err
 	}
 	reason := CleanReason(o.Reason)
@@ -1036,7 +1036,7 @@ func (m *Model) BlameCorrection(wrong, right string, o BlameOptions) (*NegativeC
 // Forget drops (or fades) the blame of one reason, or of everything - the
 // tutor can be wrong too.
 func (m *Model) Forget(reason string, factor float64) (*ForgetResult, error) {
-	if err := m.requireNegative("forgetting a reason"); err != nil {
+	if err := m.RequireNegative("forgetting a reason"); err != nil {
 		return nil, err
 	}
 	return m.G.Forget(reason, factor)

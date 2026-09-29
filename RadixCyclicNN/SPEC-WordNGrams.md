@@ -172,7 +172,7 @@ load checks that every symbol every label carries is a word the vocabulary
 holds - a truncated vocabulary is an error, not a decoding surprise later.
 
 Interchange is the same contract the count model has: Python, Go and Rust read
-and write this file, `tests/test_go_parity.py` and `tests/test_rust_parity.py`
+and write this file, `../ModelKit/tests/test_go_parity.py` and `../ModelKit/tests/test_rust_parity.py`
 train a word model on both sides of each pair and require the same structure,
 the same counts, the same vocabulary **in the same order**, and the same
 predictions.
@@ -183,8 +183,8 @@ predictions.
 python -m radixnet --kind word train --data corpus.txt --epochs 5
 python -m radixnet --kind word predict --prefix "the cat sat on" --length 6
 python -m radixnet --kind word words --limit 20        # the alphabet it has read
-go/bin/radixnet-count --kind word train --data corpus.txt
-rust/target/release/radixnet --kind word predict --prefix "the cat" --length 6
+../ModelKit/go/bin/radixnet-count --kind word train --data corpus.txt
+../ModelKit/rust/target/release/radixnet --kind word predict --prefix "the cat" --length 6
 make word-demo                                          # train, predict, generate, list
 ```
 

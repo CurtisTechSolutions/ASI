@@ -5,8 +5,8 @@ The comparison is only worth reading if the two builds did the *same* work, and
 neither language can reproduce the other's random number generator, so neither
 generates the corpus: this does, once, and both are handed the files.
 
-The three recipes are the ones `radixnet/bench.py`, `go/radixnet/bench.go` and
-`rust/src/bench.rs` use for their own synthetic corpora - lines of the sample
+The three recipes are the ones `../ModelKit/modelkit/bench.py`, `../ModelKit/go/kit/bench.go` and
+`../ModelKit/rust/src/bench.rs` use for their own synthetic corpora - lines of the sample
 corpus verbatim, two lines spliced at a word boundary, and a line with a word or
 two swapped for another word of the vocabulary - so the graph has the shape a
 corpus gives it: unary chains to compress, shared prefixes to branch on and

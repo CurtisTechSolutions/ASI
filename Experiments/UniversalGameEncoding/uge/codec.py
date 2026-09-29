@@ -14,7 +14,7 @@ its own initial state, which makes decoding
   ("a rule is invisible while you are obeying it") and it costs nothing to
   produce.
 
-``radixnet.vision`` needs :func:`radixnet.encoding.repair_base64` to survive a
+``modelkit.vision`` needs :func:`modelkit.media.repair_base64` to survive a
 garbled prediction.  Here the repair is :func:`uge.tape.trim_to_tokens` plus
 the replay: cut to the token grid, then let the rules cut the rest.
 

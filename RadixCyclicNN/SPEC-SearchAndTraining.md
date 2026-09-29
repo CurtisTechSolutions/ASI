@@ -18,7 +18,7 @@ frontend (§9).
 
 This document is the contract, and it is precise on purpose. The three ports
 are held to the same graph, the same file and the same prediction by the
-parity suites (`tests/test_go_parity.py`, `tests/test_rust_parity.py`), so
+parity suites (`../ModelKit/tests/test_go_parity.py`, `../ModelKit/tests/test_rust_parity.py`), so
 every rule below says what is compared, in what order, and how a tie breaks.
 
 ---
@@ -272,8 +272,8 @@ The **Settings** tab keeps the search and training settings of this browser —
 the traversal, the sampling filters and the diversity, whether a query is asked
 backwards (§9), and how a run walks its texts — the defaults every tab starts
 from, shared by Predict, Generate and Train the way the traversal already was
-(`frontend/src/hooks/useSiteSettings.jsx`, the rules in
-`frontend/src/settings.js`). A tab sends a setting only when its mode reads it
+(`../ModelKit/frontend/src/hooks/useSiteSettings.jsx`, the rules in
+`../ModelKit/frontend/src/settings.js`). A tab sends a setting only when its mode reads it
 and it is not off, and refuses to send one out of range. The
 **Model settings** tab holds what belongs to the model and is saved with it:
 the model's kind, encoding, size and replay buffer, a form that makes a new
@@ -327,7 +327,7 @@ texts, and turn the list around.
 **Asking it.** A model trained backwards continues what it was given
 backwards: the query has to be turned around too, and the answer turned back.
 The servers leave that to the caller - `Encoding.reverse` is public in every
-port - and the frontend does it (`frontend/src/backwards.js`): with **Query
+port - and the frontend does it (`../ModelKit/frontend/src/backwards.js`): with **Query
 backwards** on (a site-wide setting beside the traversal), Predict and Generate
 send the prefix turned around, in the model's units, and show every answer
 turned back round, so a user types the end of a text and reads what precedes

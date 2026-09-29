@@ -47,12 +47,12 @@ __all__ = ["START", "END", "BACK", "THINK", "FIRST", "RadixCyclicGraph", "Z_RANG
 START, END, BACK, THINK = 0, 1, 2, 3
 """The sentinels.  START and END are where a text begins and ends - observed in the corpus, like everything
 else.  BACK is where the graph has learned that a walk *goes round*: nothing in a corpus says so, so its edges
-are taught by the voices that caught themselves repeating (:func:`radixnet.dialogue.backtrack`).  An edge
+are taught by the voices that caught themselves repeating (:func:`modelkit.dialogue.backtrack`).  An edge
 ``p -> BACK`` competes for probability with ``p``'s real children, so the more often walks through ``p`` had to
 be backed out of, the likelier the search is to hand over there instead of carrying on.
 
 THINK is where the graph *stops to think*, and it faces both ways.  An edge ``p -> THINK`` is taught by
-experience - an event at ``p`` made the model think there (:func:`radixnet.thinking.think`) - and, like BACK's,
+experience - an event at ``p`` made the model think there (:func:`modelkit.thinking.think`) - and, like BACK's,
 competes with ``p``'s real children for probability.  Its out-edges are how thoughts begin: a thought is a text
 whose walk starts at THINK instead of START (:meth:`RadixCyclicGraph.observe_sequence` with ``origin=THINK``),
 observed from an LLM's thinking the way texts are observed from a corpus.  Neither sentinel is a continuation:
@@ -933,7 +933,7 @@ class RadixCyclicGraph:
 
         Nothing in a corpus says where a walk loops, so this is the one thing the graph learns from
         *experience* rather than from observation - a voice that caught itself repeating and had to back up
-        (:func:`radixnet.dialogue.backtrack`).  Three things are taught at once, and all three are ordinary
+        (:func:`modelkit.dialogue.backtrack`).  Three things are taught at once, and all three are ordinary
         learned quantities:
 
         * ``p -> BACK`` is created on first use and bumped like any observed transition, its weight moving to
@@ -980,7 +980,7 @@ class RadixCyclicGraph:
 
         The twin of :meth:`observe_back`, learned the same way - from experience, never from a corpus: an event
         at ``p`` (a voice catching itself repeating, a question asked about the text that ends here, a thought
-        questioning itself) called for a thought, and the model remembers where (:func:`radixnet.thinking.think`).
+        questioning itself) called for a thought, and the model remembers where (:func:`modelkit.thinking.think`).
         ``p -> THINK`` is created on first use and bumped like any observed transition, its weight moving to
         make the transition likelier; it competes with ``p``'s real children for probability, so the oftener
         walks through ``p`` had to stop and think, the likelier a thought passing through ``p`` is to question
@@ -1006,7 +1006,7 @@ class RadixCyclicGraph:
 
         The cost of ``p``'s ``THINK`` edge, to compare with the costs of its real children: when it is the
         cheapest of them the model's most likely next step is to question what it is doing, which is what a
-        thought passing through ``p`` acts on (:func:`radixnet.thinking.think`).
+        thought passing through ``p`` acts on (:func:`modelkit.thinking.think`).
         """
         for c, _e, cost in self.child_costs(p):
             if c == THINK:

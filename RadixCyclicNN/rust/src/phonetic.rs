@@ -14,9 +14,8 @@ use phonetok::acoustic::{AcousticTokenizer, Codebook};
 use phonetok::lexicon::Lexicon;
 use phonetok::tokenizer::{Level, Tokenizer};
 
-use crate::codegen::set;
 use crate::encoding::{Encoding, Unit};
-use crate::json::Json;
+use crate::json::{set, Json};
 
 // -- the acoustic units ------------------------------------------------------------
 
@@ -163,7 +162,7 @@ pub fn spelled_completion(enc: Encoding, prefix: &str, full_text: &str, continua
     (prefix.trim_end().to_string(), tail)
 }
 
-/// A thought's record ([`crate::thinking::Thought::to_json`]) with `spelled`
+/// A thought's record (the `thinking` module's `Thought::to_json`) with `spelled`
 /// beside its text, and its questions' too; any other encoding, the record as
 /// it is.  Python's `spelled_thought`.
 pub fn spelled_thought(enc: Encoding, thought: Json) -> Json {
@@ -187,7 +186,7 @@ pub fn spelled_thought(enc: Encoding, thought: Json) -> Json {
     Json::Obj(pairs)
 }
 
-/// A turn's record ([`crate::dialogue::Turn::to_json`]) with the words it
+/// A turn's record (the `dialogue` module's `Turn::to_json`) with the words it
 /// spells beside its sounds: `spelled` for the whole line, `spelled_reply` for
 /// the part the search added after the context it picked up, and the thought
 /// of a rethink spelled too.  Any other encoding: the record as it is.

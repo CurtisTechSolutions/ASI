@@ -8,7 +8,7 @@ import (
 
 // Splits and merges must not change what the count model hangs on its edges -
 // the recent shares, the verdicts and the prices - and the bottom beam of the
-// least-punished traversal finds the most punished paths (D-091).
+// least-punished traversal finds the most punished paths (D-092).
 
 const (
 	structT1  = "abcdefghij klm" // shares "abcdefghij " with structT2, then parts

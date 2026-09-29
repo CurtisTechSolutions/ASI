@@ -3,7 +3,7 @@
 //!
 //! A corpus arrives as a `.zip` more often than as anything else - a source
 //! tree, a folder of books, an export - and the other two implementations read
-//! one wherever they read a text file (`radixnet/archive.py`,
+//! one wherever they read a text file (`../ModelKit/modelkit/archive.py`,
 //! `go/radixnet/source.go`).  Python has `zipfile`, Go has `archive/zip`, and
 //! the standard library here has neither, so this is the part of APPNOTE.TXT a
 //! reader needs, in the same spirit as the gzip container beside it.

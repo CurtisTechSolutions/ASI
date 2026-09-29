@@ -900,6 +900,16 @@ pub fn read_document(path: &str) -> Result<Json, String> {
     parse(&text).map_err(|err| format!("{path}: {err}"))
 }
 
+/// A text file, gunzipped when its name ends in `.gz`.
+pub fn read_file_text(path: &str) -> Result<String, String> {
+    if path.ends_with(".gz") {
+        let bytes = std::fs::read(path).map_err(|err| format!("cannot read {path}: {err}"))?;
+        String::from_utf8(crate::gzip::decompress(&bytes)?).map_err(|err| format!("{path}: {err}"))
+    } else {
+        std::fs::read_to_string(path).map_err(|err| format!("cannot read {path}: {err}"))
+    }
+}
+
 /// Writes bytes through a temporary file next to the target and renames it over
 /// the top, so a reader never sees a half-written model.
 pub fn write_atomic(path: &str, bytes: &[u8]) -> Result<(), String> {

@@ -160,7 +160,7 @@ func (e Encoding) Validate() error {
 		}
 	}
 	if e.Unit == Acoustic {
-		if _, err := acousticTokenizer(); err != nil {
+		if _, err := AcousticTokenizer(); err != nil {
 			return err // and the acoustic unit its codebook, to hear recordings and be heard
 		}
 	}
@@ -321,7 +321,7 @@ func (e Encoding) Units(text string) Units {
 		// the text read through the tokenizer: a word becomes its sounds, punctuation a
 		// pause, the gap between two words a #.  Text that is already sounds passes
 		// through unchanged, so a label cuts into the units it was made of.
-		return wordUnits(phoneticText(e.Unit, text))
+		return wordUnits(PhoneticText(e.Unit, text))
 	}
 	return charUnits(text)
 }
@@ -364,7 +364,7 @@ func (e Encoding) Len(text string) int {
 		return len(strings.Fields(text))
 	}
 	if e.Unit.Phonetic() {
-		return len(strings.Fields(phoneticText(e.Unit, text)))
+		return len(strings.Fields(PhoneticText(e.Unit, text)))
 	}
 	return utf8.RuneCountInString(text)
 }
@@ -387,7 +387,7 @@ func (e Encoding) Join(parts ...string) string {
 	kept := parts[:0:0]
 	for _, p := range parts {
 		if e.Unit.Phonetic() { // a piece given as text joins as the sounds it makes, so a joined text is all sounds
-			p = phoneticText(e.Unit, p)
+			p = PhoneticText(e.Unit, p)
 		}
 		if p != "" {
 			kept = append(kept, p)
@@ -418,7 +418,7 @@ func (e Encoding) HasUnitPrefix(text, prefix string) bool {
 		return strings.HasPrefix(text, prefix)
 	}
 	if e.Unit.Phonetic() { // a prefix given as text is looked for as the sounds it makes
-		prefix = phoneticText(e.Unit, prefix)
+		prefix = PhoneticText(e.Unit, prefix)
 		if prefix == "" {
 			return true
 		}

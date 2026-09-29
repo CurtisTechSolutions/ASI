@@ -27,16 +27,19 @@
 //!
 //! # What is here
 //!
-//! All of the Python package: the model of every kind - the count / reward
-//! model, the sine-activation `radix` model ([`radix`]), the phase model
-//! ([`resonance`]) and the negative network ([`negative`], [`duo`]) - with the
-//! JSON model files byte for byte what Python writes, and around it every
-//! teaching loop (the tutor, the chat, the critic, evolve, the recall tutor),
-//! the LLM clients ([`llm`], [`ollama`], [`chatgpt`]), the agent and its tools,
-//! code generation, images and speech, MCP, the CLI ([`cli`], `src/bin/radixnet.rs`) and the
-//! HTTP API the frontend talks to ([`http`], [`service`]).  `rust/README.md`
-//! lists every module, and what is deliberately not ported (torch, the Stable
-//! Diffusion encoder, local Whisper) and why.
+//! The model of every kind - the count / reward model, the sine-activation
+//! `radix` model ([`radix`]), the phase model ([`resonance`]) and the negative
+//! network ([`negative`]) - with the JSON model files byte for byte what Python
+//! writes ([`file`](mod@file)), and what they stand on: the encodings, the
+//! search and its traversals, training, feedback and corrections, and the
+//! logger.
+//!
+//! Everything around the model - the teaching loops, the LLM clients, the
+//! agent and its tools, images and speech, MCP, the CLI and the HTTP API the
+//! frontend talks to - is a separate crate built on this one; nothing here
+//! depends on it.  `rust/README.md` lists every module of both, and what is
+//! deliberately not ported (torch, the Stable Diffusion encoder, local
+//! Whisper) and why.
 //!
 //! ```
 //! use radixnet::{GraphOptions, Model, PredictOptions, TrainOptions, REWARD};
@@ -54,66 +57,33 @@
 //! assert!(found.best.full_text.starts_with("the cat"));
 //! ```
 
-pub mod agent;
-pub mod assistant;
 pub mod attention;
 pub mod beam;
-pub mod bench;
-pub mod blame;
-pub mod calc;
-pub mod chat;
-pub mod chatgpt;
-pub mod checkpoint;
-pub mod cli;
 pub mod clock;
-pub mod codegen;
 pub mod correct;
 pub mod counter;
-pub mod critic;
-pub mod dialogue;
 pub mod diff;
-pub mod duo;
 pub mod encoding;
-pub mod fetch;
 pub mod file;
 pub mod fsum;
-pub mod gan;
 pub mod graph;
 pub mod gzip;
 pub mod hash;
-pub mod http;
 pub mod json;
-pub mod llm;
 pub mod log;
-pub mod mcp;
 pub mod model;
 pub mod mt19937;
-pub mod multipart;
 pub mod negative;
-pub mod ollama;
 pub mod parallel;
 pub mod paths;
 pub mod penalty;
 pub mod phonetic;
-pub mod plan;
-pub mod recall;
 pub mod report;
-pub mod review;
 pub mod search;
-pub mod service;
 pub mod source;
-pub mod speech;
 #[cfg(test)]
 mod structure_tests;
-pub mod thinking;
-pub mod toolbox;
-pub mod tools;
 pub mod training;
-pub mod tutor;
-pub mod vision;
-pub mod voice;
-pub mod voicechat;
-pub mod web;
 pub mod weights;
 pub mod window;
 pub mod words;
@@ -130,11 +100,6 @@ pub mod pyheap;
 pub mod radix;
 pub mod resonance;
 pub mod schedule;
-// Chrome over WebDriver behind the web tools (`--browser`)
-pub mod browser;
-// the teaching loops of a model of sounds show the LLM words
-#[cfg(test)]
-mod teaching_in_words;
 
 pub use beam::{BeamOptions, Prediction};
 pub use counter::Counter;

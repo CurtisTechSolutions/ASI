@@ -1,7 +1,7 @@
 //! Logging, written out: levels, a target, a timestamp, and nothing on stdout.
 //!
 //! The Python service logs by writing to stderr when it is not `quiet`
-//! (`radixnet/api.py`), and the Go port does not log at all.  This is the same
+//! (`../ModelKit/modelkit/api.py`), and the Go port does not log at all.  This is the same
 //! idea with the three things that made the Python one awkward to use fixed:
 //! a **level** so a noisy run can be turned down rather than off, a **target**
 //! so a line says which part of the model wrote it, and a **timestamp** so two

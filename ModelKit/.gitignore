@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+frontend/node_modules/
+.pytest_cache/
+build/
+*.egg-info/
+dist/
+!frontend/dist/
+go/bin/
+rust/target/

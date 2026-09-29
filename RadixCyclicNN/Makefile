@@ -1,6 +1,9 @@
 # RadixCyclicNN — run commands.  `make help` lists every target.
 #
 # Local targets call the zero-dependency Python package directly (python3 only).
+# The model is this project; the command line, the API, the frontend, the Go
+# and Rust servers and CLIs, and the kit's tests live in ../ModelKit (KIT), and
+# `python -m radixnet` hands over to it.
 # Docker targets drive the Compose stack in docker-compose.yml.
 # Override any variable on the command line, e.g. `make train EPOCHS=20 LR=0.8`.
 
@@ -9,6 +12,8 @@ SHELL := /bin/bash
 
 # ---- settings ---------------------------------------------------------------
 PY          ?= python3
+KIT         ?= ../ModelKit
+GO_BIN      := $(KIT)/go/bin/radixnet-count
 RADIXNET    ?= $(PY) -m radixnet
 MODEL       ?= model.json
 DATA        ?= data/sample_corpus.txt
@@ -98,7 +103,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
         phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play say acoustic-train acoustic-speak phone-go phone-rust phone-parity \
         rust-build rust-test rust-parity rust-talk go-talk bench-compare train resume predict generate score talk talk-repl 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
-        evolve evolve-forever evolve-blame info checkpoints restore bench demo serve frontend-install frontend-build \
+        evolve evolve-forever evolve-blame info checkpoints restore bench demo serve test-core frontend-install frontend-build \
         frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-correct ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
         speech-info speech-teach speech-listen speech-tutor speech-decode \
@@ -114,42 +119,46 @@ help: ## Show this help
 	@echo "          EPOCHS=$(EPOCHS) LR=$(LR) BATCH=$(BATCH) PORT=$(PORT)"
 
 ##@ Setup
-install: ## Install the package in editable mode (zero runtime dependencies)
-	$(PY) -m pip install -e .
+install: ## Install the model and the kit (../ModelKit) in editable mode (zero runtime dependencies)
+	$(PY) -m pip install -e . -e $(KIT)
 
 install-gpu: ## Install with the optional torch backend (GPU / vectorised CPU)
 	$(PY) -m pip install -e ".[gpu]"
 
-check: ## Byte-compile the package and show which backends are available
-	$(PY) -m compileall -q radixnet
+check: ## Byte-compile the model and the kit, and show which backends are available
+	$(PY) -m compileall -q radixnet $(KIT)/modelkit
 	$(PY) -c "from radixnet import describe_backends; print(describe_backends())"
 
-test: ## Run the unit test suite
+test: test-core ## Run the model's tests, then the kit's (../ModelKit): every Python test
+	cd $(KIT) && $(PY) -m unittest discover -s tests -v
+
+test-core: ## Run the model's own tests (they need nothing from the kit)
 	$(PY) -m unittest discover -s tests -v
 
 GO ?= go
-go-build: ## Build the Go count / reward model CLI into go/bin/radixnet-count
-	cd go && $(GO) build -o bin/radixnet-count ./cmd/radixnet-count
+go-build: ## Build the Go count / reward model CLI into ../ModelKit/go/bin/radixnet-count
+	cd $(KIT)/go && $(GO) build -o bin/radixnet-count ./cmd/radixnet-count
 
-go-test: ## Run the Go tests with the race detector
+go-test: ## Run the Go tests with the race detector: the model's module, then the kit's
 	cd go && $(GO) vet ./... && $(GO) test -race ./...
+	cd $(KIT)/go && $(GO) vet ./... && $(GO) test -race ./...
 
 go-talk: go-build ## Talk to the Go model in today's format: SAY is the message (FORMAT=openai|anthropic)
-	go/bin/radixnet-count --model $(MODEL_COUNT) talk --message "$(SAY)" --format $(FORMAT)
+	$(GO_BIN) --model $(MODEL_COUNT) talk --message "$(SAY)" --format $(FORMAT)
 
 go-negative: go-build ## The Go negative network: blame GARBAGE, then judge TEXT through it
-	go/bin/radixnet-count --model $(MODEL) --negative $(NEGATIVE) negative blame --data $(GARBAGE) --reason $(REASON) --severity $(SEVERITY) --source make
-	go/bin/radixnet-count --model $(MODEL) --negative $(NEGATIVE) negative why --text "$(TEXT)"
+	$(GO_BIN) --model $(MODEL) --negative $(NEGATIVE) negative blame --data $(GARBAGE) --reason $(REASON) --severity $(SEVERITY) --source make
+	$(GO_BIN) --model $(MODEL) --negative $(NEGATIVE) negative why --text "$(TEXT)"
 
 go-parity: ## Cross-language parity of the Go port against the Python model
-	$(PY) -m unittest tests.test_go_parity -v
+	cd $(KIT) && $(PY) -m unittest tests.test_go_parity -v
 
 MODEL_COUNT ?= model.count.json
 go-serve: go-build ## Serve the frontend from the Go count / reward model on http://HOST:PORT (uploads / checkpoints as for `serve`)
-	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) serve --host $(HOST) --port $(PORT) --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
+	$(GO_BIN) --model $(MODEL_COUNT) --seed $(SEED) serve --host $(HOST) --port $(PORT) --frontend-dir $(KIT)/frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
 
 go-mcp: go-build ## The Go MCP server on stdin / stdout: the tools and the network, for any MCP client
-	go/bin/radixnet-count --model $(MODEL_COUNT) --seed $(SEED) mcp --upload-dir $(UPLOAD_DIR)
+	$(GO_BIN) --model $(MODEL_COUNT) --seed $(SEED) mcp --upload-dir $(UPLOAD_DIR)
 
 ##@ Rust port and the cross-language benchmark
 CARGO ?= cargo
@@ -163,19 +172,20 @@ BENCH_EPOCHS ?= 3
 BENCH_REPEAT ?= 3
 PUNISH_EVERY ?= 7
 
-RUST        ?= rust/target/release/radixnet
+RUST        ?= $(KIT)/rust/target/release/radixnet
 MODEL_RUST  ?= $(MODEL_COUNT)
 RUST_GLOBAL := --model $(MODEL_RUST) --seed $(SEED)
 RUST_ENC    ?= char:3:1
 
-rust-build: ## Build the Rust port's CLI and benchmark into rust/target/release (needs Rust 1.82+)
-	cd rust && $(CARGO) build --release
+rust-build: ## Build the Rust port's CLI and benchmark into ../ModelKit/rust/target/release (needs Rust 1.82+)
+	cd $(KIT)/rust && $(CARGO) build --release
 
-rust-test: ## Run the Rust tests, clippy and the formatter check
+rust-test: ## Run the Rust tests, clippy and the formatter check: the model's crate, then the kit's
 	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
+	cd $(KIT)/rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 
-rust-parity: ## Cross-language parity of the Rust port against the Python model (every tests/test_rust_parity*.py)
-	$(PY) -m unittest discover -s tests -p 'test_rust_parity*.py' -t . -v
+rust-parity: ## Cross-language parity of the Rust port against the Python model (every ../ModelKit/tests/test_rust_parity*.py)
+	cd $(KIT) && $(PY) -m unittest discover -s tests -p 'test_rust_parity*.py' -t . -v
 
 rust-train: rust-build ## Train the Rust model on DATA (RUST_ENC=char:3:1|word:3:1|..., MODEL_RUST is its file)
 	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) train --data $(DATA) --epochs $(EPOCHS)
@@ -189,7 +199,7 @@ rust-generate: rust-build ## Generate COUNT whole texts of at most MAX_LENGTH sy
 	    --traversal $(TRAVERSAL)
 
 rust-talk: rust-build ## Talk to the Rust model in today's format: SAY is the message (FORMAT=openai|anthropic)
-	rust/target/release/radixnet --model $(MODEL_RUST) talk --message "$(SAY)" --format $(FORMAT)
+	$(RUST) --model $(MODEL_RUST) talk --message "$(SAY)" --format $(FORMAT)
 
 rust-score: rust-build ## Log-probability of TEXT under the Rust model
 	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) score --text "$(TEXT)"
@@ -223,10 +233,10 @@ rust-invert: rust-build ## Flip the sign of every reward
 
 rust-serve: rust-build ## Serve the API + the prebuilt frontend from the Rust port on http://HOST:PORT
 	$(RUST) $(RUST_GLOBAL) --encoding $(RUST_ENC) serve --host $(HOST) --port $(PORT) \
-	    --frontend-dir frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
+	    --frontend-dir $(KIT)/frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
 
 rust-bench: rust-build ## The Rust port's own benchmark (BENCH_CHARS characters, BENCH_EPOCHS epochs)
-	rust/target/release/radixnet-bench --chars $(BENCH_CHARS) --epochs $(BENCH_EPOCHS) --traversal $(TRAVERSAL)
+	$(KIT)/rust/target/release/radixnet-bench --chars $(BENCH_CHARS) --epochs $(BENCH_EPOCHS) --traversal $(TRAVERSAL)
 
 rust-demo: ## Train on the sample corpus with the Rust port, then predict, generate and read it back
 	$(MAKE) rust-train
@@ -325,15 +335,15 @@ word-demo: ## Train a word model on the sample corpus, then predict, generate an
 	$(MAKE) word-vocab
 
 word-go: ## The Go port over words: train on DATA and continue WORD_PREFIX (needs `make go-build`)
-	go/bin/radixnet-count --encoding $(WORD_ENC) --model $(MODEL_WORD) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
-	go/bin/radixnet-count --model $(MODEL_WORD) predict --prefix "$(WORD_PREFIX)" --length $(WORD_LENGTH)
+	$(GO_BIN) --encoding $(WORD_ENC) --model $(MODEL_WORD) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	$(GO_BIN) --model $(MODEL_WORD) predict --prefix "$(WORD_PREFIX)" --length $(WORD_LENGTH)
 
 word-rust: ## The Rust port over words: train on DATA and continue WORD_PREFIX (needs `make rust-build`)
-	rust/target/release/radixnet --encoding $(WORD_ENC) --model $(MODEL_WORD) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
-	rust/target/release/radixnet --model $(MODEL_WORD) predict --prefix "$(WORD_PREFIX)" --length $(WORD_LENGTH)
+	$(RUST) --encoding $(WORD_ENC) --model $(MODEL_WORD) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	$(RUST) --model $(MODEL_WORD) predict --prefix "$(WORD_PREFIX)" --length $(WORD_LENGTH)
 
 word-parity: ## Cross-language parity of the word model (Go and Rust against Python)
-	$(PY) -m unittest tests.test_go_parity.TestGoWordParity tests.test_rust_parity.TestRustWordParity -v
+	cd $(KIT) && $(PY) -m unittest tests.test_go_parity.TestGoWordParity tests.test_rust_parity.TestRustWordParity -v
 
 # ---- the phonetic units: the text read as sounds (../PhoneticTokenizer) ------------
 PHONE_ENC   ?= phone:3:1
@@ -342,7 +352,7 @@ PHONE       := --model $(MODEL_PHONE) --kind count --encoding $(PHONE_ENC) --bac
 PHONE_PREFIX ?= the cat sat
 PHONE_LENGTH ?= 8
 SPEECH      ?= speech.wav
-export PYTHONPATH := $(PYTHONPATH):../PhoneticTokenizer
+export PYTHONPATH := $(PYTHONPATH):../PhoneticTokenizer:$(KIT)
 
 phone-train: ## Train a model over sounds on DATA (PHONE_ENC = phone:3:1 | syllable:2:1; MODEL_PHONE is its file)
 	$(RADIXNET) $(PHONE) train --data $(DATA) --epochs $(EPOCHS) --checkpoint-dir $(CKPT_DIR)
@@ -357,7 +367,8 @@ phone-words: ## The sounds the model has read, most read first
 	$(RADIXNET) $(PHONE) words --limit $(WORD_LIMIT)
 
 phone-test: ## The phonetic units' tests (Python), and the encoding suites they ride in
-	$(PY) -m unittest tests.test_phonetic tests.test_voice tests.test_encoding tests.test_encodings_end_to_end -v
+	$(PY) -m unittest tests.test_phonetic tests.test_encoding tests.test_encodings_end_to_end -v
+	cd $(KIT) && $(PY) -m unittest tests.test_voice -v
 
 phone-demo: ## Train a model over sounds on the sample corpus, then predict, generate, list its sounds and speak
 	$(MAKE) phone-train
@@ -385,15 +396,15 @@ say: ## The output decoder: SAY spoken in the sound model's units (the model fil
 	$(RADIXNET) --model $(MODEL_PHONE) --encoding $(PHONE_ENC) say "$(SAY)" --out $(SPEECH)
 
 phone-go: ## The Go port over sounds: train on DATA and continue PHONE_PREFIX (needs `make go-build`)
-	go/bin/radixnet-count --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
-	go/bin/radixnet-count --model $(MODEL_PHONE) predict --prefix "$(PHONE_PREFIX)" --length $(PHONE_LENGTH)
+	$(GO_BIN) --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	$(GO_BIN) --model $(MODEL_PHONE) predict --prefix "$(PHONE_PREFIX)" --length $(PHONE_LENGTH)
 
 phone-rust: ## The Rust port over sounds: train on DATA and continue PHONE_PREFIX (needs `make rust-build`)
-	rust/target/release/radixnet --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
-	rust/target/release/radixnet --model $(MODEL_PHONE) predict --prefix "$(PHONE_PREFIX)" --length $(PHONE_LENGTH)
+	$(RUST) --encoding $(PHONE_ENC) --model $(MODEL_PHONE) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	$(RUST) --model $(MODEL_PHONE) predict --prefix "$(PHONE_PREFIX)" --length $(PHONE_LENGTH)
 
 phone-parity: ## Cross-language parity of the models over sounds (Go and Rust against Python)
-	$(PY) -m unittest tests.test_go_parity.TestGoEncodingParity tests.test_rust_parity.TestRustWordParity.test_the_other_dials_agree_too -v
+	cd $(KIT) && $(PY) -m unittest tests.test_go_parity.TestGoEncodingParity tests.test_rust_parity.TestRustWordParity.test_the_other_dials_agree_too -v
 
 ##@ The negative network (failures only; it filters the positive model)
 negative-blame: ## Blame every line of GARBAGE for REASON with SEVERITY (the negative model is NEGATIVE)
@@ -556,17 +567,17 @@ mcp: ## Serve the tools and the network over the Model Context Protocol (stdio)
 serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)
 	$(RADIXNET) $(GLOBAL) serve --host $(HOST) --port $(PORT) --checkpoint-dir $(CKPT_DIR) --upload-dir $(UPLOAD_DIR)
 
-frontend-install: ## Install the frontend dependencies (npm)
-	cd frontend && npm install --no-audit --no-fund
+frontend-install: ## Install the frontend dependencies (npm) in ../ModelKit/frontend
+	cd $(KIT)/frontend && npm install --no-audit --no-fund
 
-frontend-build: ## Rebuild frontend/dist (what `make serve` serves)
-	cd frontend && npm run build
+frontend-build: ## Rebuild ../ModelKit/frontend/dist (what `make serve` serves)
+	cd $(KIT)/frontend && npm run build
 
 frontend-dev: ## Vite dev server with hot reload on http://localhost:5173 (expects `make serve` running)
-	cd frontend && npm run dev
+	cd $(KIT)/frontend && npm run dev
 
 frontend-test: ## Unit tests of the frontend's settings store and site-wide settings (node --test, no npm install needed)
-	cd frontend && npm test
+	cd $(KIT)/frontend && npm test
 
 ##@ Docker (Compose stack)
 docker-build: ## Build the image (WITH_TORCH=1 adds torch)
@@ -623,4 +634,4 @@ clean: ## Remove Python caches
 	rm -rf .pytest_cache
 
 clean-all: clean ## Also remove local models, checkpoints and frontend node_modules
-	rm -rf $(CKPT_DIR) model.json model.json.gz discriminator.json model-from-docker.json frontend/node_modules
+	rm -rf $(CKPT_DIR) model.json model.json.gz discriminator.json model-from-docker.json $(KIT)/frontend/node_modules

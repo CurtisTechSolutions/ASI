@@ -27,10 +27,10 @@ var (
 	acousticErr  error
 )
 
-// acousticTokenizer is the acoustic units' tokenizer over its codebook - the
+// AcousticTokenizer is the acoustic units' tokenizer over its codebook - the
 // bundled one, or the file PHONETOK_CODEBOOK names - made once; a model's units
 // mean nothing without the codebook that made them, so the two travel together.
-func acousticTokenizer() (*phonetok.AcousticTokenizer, error) {
+func AcousticTokenizer() (*phonetok.AcousticTokenizer, error) {
 	acousticOnce.Do(func() {
 		var book *phonetok.Codebook
 		if path := os.Getenv("PHONETOK_CODEBOOK"); path != "" {
@@ -50,7 +50,7 @@ func acousticTokenizer() (*phonetok.AcousticTokenizer, error) {
 // HearAudio is a WAV file's bytes as a text of acoustic units - "q2 q28 q55 ...",
 // runs collapsed.  One recording is one utterance, and so one text.
 func HearAudio(data []byte) (string, error) {
-	tok, err := acousticTokenizer()
+	tok, err := AcousticTokenizer()
 	if err != nil {
 		return "", err
 	}
@@ -71,7 +71,7 @@ func OutputRate(enc Encoding, rate int) (int, error) {
 	if enc.Unit != Acoustic {
 		return rate, nil
 	}
-	tok, err := acousticTokenizer()
+	tok, err := AcousticTokenizer()
 	if err != nil {
 		return 0, err
 	}
@@ -112,9 +112,9 @@ func phoneticTokenizer(unit UnitKind) (*phoneticBridge, error) {
 	return b, b.err
 }
 
-// phoneticText is the text as the sounds it is made of, joined by single
+// PhoneticText is the text as the sounds it is made of, joined by single
 // spaces: the text form of the tokenizer, which is idempotent.
-func phoneticText(unit UnitKind, text string) string {
+func PhoneticText(unit UnitKind, text string) string {
 	b, err := phoneticTokenizer(unit)
 	if err != nil {
 		panic(err) // Validate refused the encoding before any text could reach here
@@ -122,6 +122,20 @@ func phoneticText(unit UnitKind, text string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.tok.Text(text)
+}
+
+// PhoneticTokens is text read through the tokenizer of a phonetic unit - the
+// one every model with that unit shares, which remembers what it reads so that
+// it can be spelled back - as its tokens, or the reason that tokenizer could
+// not be made.
+func PhoneticTokens(unit UnitKind, text string) ([]string, error) {
+	b, err := phoneticTokenizer(unit)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.tok.Tokens(text), nil
 }
 
 // Spell is the words a phonetic text spells ("DH AH0 # K AE1 T" -> "the cat"):
@@ -248,62 +262,4 @@ func sameWords(a, b string) bool {
 		}
 	}
 	return true
-}
-
-// SpelledThought is a thought's record (Thought.ToDict) with "spelled" beside
-// its text, and its questions' too; any other encoding, the record as it is.
-func SpelledThought(enc Encoding, t *Thought) map[string]any {
-	doc := t.ToDict()
-	if !enc.Unit.Phonetic() {
-		return doc
-	}
-	doc["spelled"] = enc.Spell(t.Text)
-	questions := make([]map[string]any, 0, len(t.Questions))
-	for _, q := range t.Questions {
-		questions = append(questions, SpelledThought(enc, q))
-	}
-	doc["questions"] = questions
-	return doc
-}
-
-// SpelledTurnRecord is a turn of a model of sounds as it is written out: the
-// turn, the words it spells ("spelled"), the part of them the search added
-// after the context it picked up ("spelled_reply"), and its rethink with the
-// thought spelled.
-type SpelledTurnRecord struct {
-	*Turn
-	Spelled      string          `json:"spelled"`
-	SpelledReply string          `json:"spelled_reply"`
-	Rethink      *spelledRethink `json:"rethink"` // shadows the turn's own
-}
-
-type spelledRethink struct {
-	*Rethink
-	Thought map[string]any `json:"thought"` // shadows the rethink's own
-}
-
-// SpelledTurn is a turn as it is written out: with the words it spells beside
-// its sounds for a model of sounds (SpelledTurnRecord), the turn itself for any
-// other encoding.  Python's spelled_turn.
-func SpelledTurn(enc Encoding, t *Turn) any {
-	if !enc.Unit.Phonetic() {
-		return t
-	}
-	out := &SpelledTurnRecord{Turn: t, Spelled: enc.Spell(t.Text), SpelledReply: enc.SpellTail(t.Text, t.Reply)}
-	if t.Rethink != nil {
-		out.Rethink = &spelledRethink{Rethink: t.Rethink}
-		if t.Rethink.Thought != nil {
-			out.Rethink.Thought = SpelledThought(enc, t.Rethink.Thought)
-		}
-	}
-	return out
-}
-
-// SpelledTurns is every turn as SpelledTurn writes it out.
-func SpelledTurns(enc Encoding, turns []*Turn) []any {
-	out := make([]any, 0, len(turns))
-	for _, t := range turns {
-		out = append(out, SpelledTurn(enc, t))
-	}
-	return out
 }

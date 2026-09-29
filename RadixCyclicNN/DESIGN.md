@@ -27,7 +27,7 @@ imported lazily and never required.
 | A correction blames only what changed | `NegativeNet.correct(wrong, right)` (section 24.2): the same character alignment the count model's `correct` teaches from (`diff.py`) decides which steps are blamed - the words the teacher kept carry no verdict, and a blamed transition is never compressed away. |
 | The pair as a GAN at output time | `NegativeFilter` (section 24.3): the positive model over-samples candidates, the negative one vetoes them by blame or by the likelihood ratio `log P_negative - log P_positive`; what survives is returned ranked, what does not comes back with its reason. |
 | 2NRL (*Double-Negative Reinforcement Learning*) | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) `invert()` the network, (3) fine-tune on correct data with a smaller learning rate. The two negatives of the name are (1) and (2); (3) is the positive one. |
-| CLI / API / React frontend | `radixnet.cli` (argparse), `radixnet.api` (stdlib `http.server`, JSON), `frontend/` (Vite + React). |
+| CLI / API / React frontend | `modelkit.cli` (argparse), `modelkit.api` (stdlib `http.server`, JSON), `../ModelKit/frontend/` (Vite + React): the ModelKit package beside the model (section 2). |
 | Checkpointing / save / load | JSON (optionally gzip) model files, `CheckpointManager` with rotation + `latest` pointer + resume. |
 | GPU acceleration / performance | `Backend` abstraction: `PythonBackend` (always available, optimised pure Python over flat CSR arrays) and `TorchBackend` (optional; picks `cuda` > `mps` > `cpu`). The graph exports CSR arrays once per epoch; the backend runs vectorised mini-batch steps. |
 
@@ -35,15 +35,23 @@ imported lazily and never required.
 
 ## 2. Package layout
 
+Two packages, side by side at the repository root (D-093). **RadixCyclicNN** is
+the model; **ModelKit** is everything built around it, broken out so other
+directories and repositories can use it. The dependency runs one way: the kit
+imports the model, and nothing in the model imports the kit, in every port.
+The one sanctioned exception is `radixnet/__main__.py`, which hands
+`python -m radixnet` to the kit's command line so every command keeps working.
+
 ```
-RadixCyclicNN/
-  DESIGN.md                 this file
+RadixCyclicNN/              the model
+  DESIGN.md                 this file (it specifies both packages: they are one system)
   README.md                 user docs (install, CLI, API, frontend, concepts)
-  pyproject.toml            zero runtime deps; console script `radixnet = radixnet.cli:main`
+  pyproject.toml            zero runtime deps; console script `radixnet = radixnet.__main__:main` (runs modelkit.cli)
   radixnet/
-    __init__.py             exports RadixNet, TrainConfig, Encoder, Decoder, SineActivation, get_backend,
-                            CheckpointManager, Evolver, EvolveConfig, __version__
-    __main__.py             `python -m radixnet` -> cli.main()
+    __init__.py             exports RadixNet, GraphModel, the kinds, TrainConfig, Encoder, Decoder, Encoding,
+                            SineActivation, get_backend, the searches and the traversals, __version__
+    __main__.py             `python -m radixnet` -> modelkit.cli.main() (the ModelKit checkout beside this one when
+                            the package is not installed)
     activation.py           sine activation (parametric sine + derivatives)
     encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 34)
     attention.py            the attention band: where inside a gram a correction's blame and credit land (section 38)
@@ -57,49 +65,71 @@ RadixCyclicNN/
                             cost function that prices a step by the punishment it carries (section 31)
                             (ported to Go as go/radixnet/penalty.go)
     model.py                GraphModel (shared base), RadixNet, TrainConfig, model-kind factories (load_model, new_model, ...)
-    countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19)
-    wordnet.py              WordGraph, WordNGramNet - the same model over an alphabet of words (section 34)
+    countnet.py             CountRewardGraph, CountRewardNet - the count / reward model (section 19); over a word
+                            encoding, the word n-gram model (section 34)
     negative.py             NegativeGraph, NegativeNet - the negative network: the failures, and why (section 24)
-                            (ported to Go as go/radixnet/negative.go + blame.go + duo.go, section 24.5)
+                            (ported to Go as go/radixnet/negative.go)
+    resonance.py            ResonantGraph, ResonantNet - the phase model; phasesearch.py and metacog.py beside it
+    diff.py                 character diff of a sentence against its correction (section 16.4)
+    schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
+    training.py             the training plan: order, curriculum, replay and early stop
+  tests/                    unittest of the model (run: `python -m unittest discover -s tests -v` from RadixCyclicNN/)
+  go/radixnet/              the Go port of the model; rust/ the Rust port (the `radixnet` crate)
+  data/
+    sample_corpus.txt       good/correct data (one text per line)
+    sample_garbage.txt      bad/garbage data (one text per line)
+
+ModelKit/                   everything around the model (../ModelKit/README.md)
+  pyproject.toml            zero runtime deps; console script `modelkit = modelkit.cli:main`; the media extras
+  modelkit/
+    __init__.py             lazy exports: CheckpointManager, Evolver, EvolveConfig, NegativeFilter, FilterConfig,
+                            converse, the assistant formats, the speech names, the LLM client
+    __main__.py             `python -m modelkit` -> cli.main()
     blame.py                the tutors' verdicts -> faults for the negative network (section 24.2)
+                            (the Go twin is go/kit/blame.go, beside duo.go, section 24.5)
     duo.py                  FilterConfig, NegativeFilter - the pair as a GAN at output time (section 24.3),
                             and the guard: the same pair on every output path (section 24.7)
     dialogue.py             Turn, Heard, stutter, backtrack, teach_back, Rethink, reply, converse, repeats -
-                            the model conversing with itself, thinking twice about a repeat, and teaching the
-                            graph where it goes round (section 22); StreamFn, the events a conversation is
-                            watched through as it happens (section 22.1)
+                            the model conversing with itself (converse(model, ...)), thinking twice about a repeat,
+                            and teaching the graph where it goes round (section 22); StreamFn, the events a
+                            conversation is watched through as it happens (section 22.1)
     thinking.py             Thought, think, think_on, questions_in, place, summarize - the THINK sentinel at
                             work: what makes the model think, what it thinks, how a thought questions itself
                             and what it triggers when it stops (section 36)
     chat.py                 Chat, ChatConfig - the model conversing with an LLM that marks it (section 28)
-                            (ported to Go as go/radixnet/chat.go, section 28.1)
+                            (ported to Go as go/kit/chat.go, section 28.1)
     speech.py               teaching by talking: transcription, the waveform as text, the unique token (section 25)
+    vision.py               images as text (section 21); media.py the base64 repair the two share
     recall.py               the speech / image recall tutor: ask for it back, mark it, blame it (section 26)
     critic.py               the negative network feeding itself: an LLM reviewer on a loop (section 24.6)
-                            (ported to Go as go/radixnet/critic.go + review.go)
-    schedule.py             learning-rate schedules as graph functions of the epoch (section 18)
+                            (ported to Go as go/kit/critic.go + review.go)
     gan.py                  Evolver, EvolveConfig (GAN-style self-upgrade loop)
     checkpoint.py           CheckpointManager
     bench.py                benchmarks (chars/sec, predictions/sec)
-    llm.py                  provider layer: LLMClient / LLMError, make_client("ollama" | "chatgpt") (section 16)
+    llm.py                  provider layer: LLMClient / LLMError, make_client("ollama" | "chatgpt") (section 16);
+                            reader_text, what an LLM is shown of a model of sounds' text
     ollama.py               Ollama client, prompt-driven corpora, adversarial review (section 16.1)
     chatgpt.py              ChatGPT client over OpenAI's chat-completions API (section 16.2)
     tutor.py                automated English lessons: exercise -> completion -> grade -> 2NRL, and the lesson
                             plan the report card at the end calls for (section 16.3)
-    diff.py                 character diff of a sentence against its correction (section 16.4)
     codegen.py              code generation with a sandbox, an LLM judge and 2NRL rewards (section 17)
+    tools.py, browser.py    the agent's tools and the browser behind them; agent.py the agent (section 27)
+    mcp.py                  the Model Context Protocol server (section 29)
+    assistant.py            today's format: OpenAI's and Anthropic's dialects (section 37)
+    voice.py, voicechat.py  the model heard as it walks, and talking with it by voice
+    archive.py              ZIP uploads (section 20)
     cli.py                  argparse CLI
     api.py                  HTTP JSON API + static file serving
-  tests/                    unittest (run: `python -m unittest discover -s tests -v` from RadixCyclicNN/)
+  tests/                    unittest of the kit, run against the model beside it; the Go and Rust parity suites
   frontend/                 Vite + React app (`npm install && npm run build` -> frontend/dist)
-  data/
-    sample_corpus.txt       good/correct data (one text per line)
-    sample_garbage.txt      bad/garbage data (one text per line)
+  go/                       kit/ (library), server/ (HTTP API), cmd/radixnet-count (CLI)
+  rust/                     the `modelkit` crate and the `radixnet` / `radixnet-bench` binaries
 ```
 
-`RadixCyclicNN/` is the working directory for all commands. Tests import
-`radixnet` from the parent directory (`tests/__init__.py` or a `conftest`-style
-`sys.path` insert at the top of each test file).
+`RadixCyclicNN/` is the working directory for all commands; `python -m radixnet`
+there runs the kit's command line. Tests import `radixnet` from the parent
+directory (a `sys.path` insert at the top of each test file); the kit's tests
+put both checkouts on the path.
 
 ---
 
@@ -198,10 +228,10 @@ same `Encoder` then cuts into windows of three, so the graph never learns what a
 symbol stands for. Section 34 and `SPEC-WordNGrams.md` are the whole of it.
 
 ```python
-def repair_base64(body: str) -> tuple[bytes, bool]   # (payload, repaired)
+def repair_base64(body: str) -> tuple[bytes, bool]   # (payload, repaired) - ModelKit's media.py
 ```
 
-The tail shared by the *media* text formats (`img:...`, section 21, and `aud:...`, section 25): a base64 payload the
+Not the model's (it lives in `../ModelKit/modelkit/media.py` since D-093, beside the two that use it): the tail shared by the *media* text formats (`img:...`, section 21, and `aud:...`, section 25): a base64 payload the
 network **predicted** is rarely clean, so characters outside the alphabet are dropped, a single dangling character
 goes with them, the padding is completed and `repaired` reports whether any of that changed the text. The payload is
 returned as it decodes; each format pads or truncates it to the length it needs.
@@ -751,7 +781,7 @@ output only, one JSON document on stdout).
 | `info` | | stats + history tail |
 | `checkpoints` | `--dir DIR`, `--restore NAME --out PATH` | list / restore |
 | `bench` | `--chars N`, `--epochs` | training transitions/sec + chars/sec, predictions/sec, Dijkstra expansions/sec |
-| `serve` | `--host 127.0.0.1 --port 8000 --frontend-dir frontend/dist --checkpoint-dir checkpoints --upload-dir uploads` | starts the API |
+| `serve` | `--host 127.0.0.1 --port 8000 --frontend-dir ../ModelKit/frontend/dist --checkpoint-dir checkpoints --upload-dir uploads` | starts the API |
 
 Exit codes: 0 ok, 1 error (message on stderr). Every command supports `--json`.
 
@@ -828,10 +858,10 @@ Mutating endpoints refuse (409) while a job is running.
 
 ---
 
-## 13. `frontend/` — Vite + React
+## 13. `../ModelKit/frontend/` — Vite + React
 
 Dependencies: `react`, `react-dom`, `vite`, `@vitejs/plugin-react` only. `vite.config.js` proxies `/api`
-to `http://127.0.0.1:8000` in dev; `npm run build` writes `frontend/dist`, which the API serves.
+to `http://127.0.0.1:8000` in dev; `npm run build` writes `../ModelKit/frontend/dist`, which the API serves.
 Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper with JSON + error handling),
 `src/styles.css`, `src/components/`:
 
@@ -841,7 +871,7 @@ Files: `index.html`, `src/main.jsx`, `src/App.jsx`, `src/api.js` (fetch wrapper 
 * `GeneratePanel.jsx` — prefix, count, max length, mode (beam = the K most likely complete texts from the prediction search, the default; sample; dijkstra), temperature; list of samples with cost and probability, thumbs up / down per sample (`RateButtons`). With **Query backwards** on, the prefix is sent turned around - every text then *ends* with it - and every sample is shown turned back round; a rating keeps the model's own text (what feedback trains on) and carries `shown`, which the ratings card lists. Every sample has a 🔊 Hear button (`HearButton.jsx`): the sample spoken through the model's voice, in its own units, played back inline.
 * `ConversePanel.jsx` — the model talks to itself (section 22): opening line, turns, context, max length, mode (beam / sample), K, temperature, the two voices' names, "Second voice is" (the same model, or the other kind kept in memory - `GET /api/model` `in_memory`), "Avoid repeated words" (`avoid_word_repeats`), "Explore" (`explore`), "Learn where it goes round" (`learn`), "Think before backing up" (`think`) with its "Think depth" (`think_depth`), "Punish duplicates"; Start / Start over runs `POST /api/converse`, Continue sends the transcript as `history` and appends the new turns, Clear empties it. The chat view is **newest first**: a new turn is appended to the top of the `<ol reversed>` and pushes the older ones down, so the latest reply is where the eye already is and nothing scrolls (the `RateButtons` label and the key keep counting from the start of the conversation). It puts the first voice left and the second right, dims the picked-up context inside each bubble, shows cost / probability / skipped candidates and badges (given, new topic, repeat, repeats itself, thought again, N vetoed), spells out any second thoughts in the meta line (`rethinkSays`), and every turn has the thumbs. "Punish duplicates" (on by default) passes the response's `repeats` to `useRatings().punish`, so the utterances the model could only repeat are marked 👎 and "Train on ratings" runs the 2NRL negative phase on them; a note above the transcript says how many were marked. "Stream" (on by default) runs `POST /api/converse/stream` instead (`api.converseStream`, section 22.1): every `turn` event is appended the moment it is spoken, and while a voice speaks a `LiveTurn` sits at the top of the list - the draft it caught itself on with what it backed out of struck through and the way on it found underlined, its meta line saying what it is doing (`applyEvent` in `src/stream.js` folds the events into that state; `LineParser` there cuts the chunks into lines, both with tests in `test/stream.test.mjs`). A committed turn keeps the draft it caught itself on in its meta line. A server without the route answers 404 and the panel falls back to `POST /api/converse`.
 * `ThinkPanel.jsx` — **Think** (section 36): one thought per press - "About" (think at the node where a text ends, and with "Learn where it thinks" teach the model to stop and think there), mode (beam / sample), K, max length, depth, questions, and temperature / seed for sample - through `POST /api/think`; the thoughts are listed newest first, each a `ThoughtView`: its summary, the thought, the trigger, the node, how it stopped, what it triggered, what it taught, its cost and the path from `<think>` as chips, with the questions it asked itself nested one level deeper each. A model taught no thoughts says so and points at the Ollama tab's thinking cards.
-* `ThoughtView.jsx` + `src/thinking.js` — the thought records read for display: `ThoughtView` (a thought in full, recursive over its questions) and `ThoughtLine` (the 💭 line under a Converse or Chat turn whose rethink thought before backing up); `thinking.js` holds the pure helpers - `summarizeThought` (radixnet.thinking.summarize's wording), `questionsIn` / `questionRuns` (radixnet.thinking.questions_in, to mark the questions in an LLM's thinking), the request builders for `/api/think` and `/api/ollama/think`, `isSentinel` (node ids 0-3) - tested with `node --test` in `test/thinking.test.mjs`.
+* `ThoughtView.jsx` + `src/thinking.js` — the thought records read for display: `ThoughtView` (a thought in full, recursive over its questions) and `ThoughtLine` (the 💭 line under a Converse or Chat turn whose rethink thought before backing up); `thinking.js` holds the pure helpers - `summarizeThought` (modelkit.thinking.summarize's wording), `questionsIn` / `questionRuns` (modelkit.thinking.questions_in, to mark the questions in an LLM's thinking), the request builders for `/api/think` and `/api/ollama/think`, `isSentinel` (node ids 0-3) - tested with `node --test` in `test/thinking.test.mjs`.
 * `ChatPanel.jsx` — the model in conversation with an LLM that marks it (section 28): the settings, the live transcript, the table of conversations and the report card. Its transcript is **newest first** too - a new exchange is appended to the top of the `<ol reversed>` and pushes the older ones down, so a running conversation never has to be scrolled to (the partner's line stays directly above the reply it drew) - and a line above it says how many replies were duplicates punished with the failures.
 * `RatingsCard.jsx` — shared by Generate and Converse: `useRatings()` (one rating per distinct text, toggling; `punish(texts)` marks a whole batch thumbs-down without toggling and returns how many), `RateButtons` (the thumbs pair) and the "Ratings → 2NRL" card (rated texts, the action that will run, epochs / learning rates / strength, Train on ratings → `POST /api/feedback` through the panel's `useJob("feedback")`, the job's phase table).
 * `TwoNRLPanel.jsx` — bad textarea, good textarea, epochs/lrs; shows negative/positive losses; button to Invert manually.
@@ -917,7 +947,7 @@ back and the hook is plain `useState`.
 What is *not* a setting and never stored: results, transcripts and recordings, ratings, job state, server data
 (the model list, presets, checkpoints) and uploaded-file selections (the file may be gone by the next visit). The
 footer's "settings saved in this browser" button (`SettingsReset` in `App.jsx`, two clicks) calls `clearSettings`
-and reloads. Tests: `frontend/test/storage.test.mjs` (`npm test`, `make frontend-test`) runs the store against a
+and reloads. Tests: `../ModelKit/frontend/test/storage.test.mjs` (`npm test`, `make frontend-test`) runs the store against a
 `localStorage` stand-in, including ones whose methods throw.
 
 Plain readable CSS, responsive (single column under 800px). No TypeScript.
@@ -971,7 +1001,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_thinking.py` — `questions_in` (sentences ending in `?`, a terminator run with no sentence, a comma question), `place` (the node cut so the prefix ends there; an unknown text and an empty prefix place nowhere), `think` (a model taught no thoughts has nothing to think with; asking about a text teaches the node to think and ends; learning off writes nothing; `think_on` teaches thoughts from `THINK` and not from `START`, and the questions they asked themselves; a thought questions itself where the model learned to think, once, one level down, saying something new, bounded by depth and count; a thought out of a repeat hands over to `BACK`; validation; the model file keeps its thoughts), `POST /api/think` and the conversation's thoughts, the `think` and `converse --no-think` commands.
 * `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation; `stream` (section 22.1): the turns streamed are the turns returned, the window between two turns belongs to the one that follows and shows the backing up event for event against the rethink record, a `backtrack` streamed on its own, and streaming changing nothing (the same turns and the same graph afterwards). `test_api.py::test_converse_stream` reads the route's JSON Lines, `test_cli.py` the `--stream` output in both modes, and the Go / Rust sides are held to the same events by `test_go_parity.py::test_the_same_conversation_streamed` and `test_rust_parity_dialogue.py`.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
-* `test_window.py` — the **dynamic window** (section 40, `../SPEC-DynamicWindow.md`): the ladder and what it refuses; `ABCD` cut into `AB` and `CD` under a grouping encoding and into `ABC` and `BCD` under the trigram; a node halved at its middle gram, again until it fits, never below one gram; the halves carrying the same state, parameters and count, joined by the heavy connection (the sine model's weight and its sign while inverted, the counting kinds' count, the phase model's through-traffic); compression stopping at the window and resuming when it is off; a step merging, halving and moving, and the top regrowing what stayed unary; the settings; the automatic step on every kind; the file block beside the band, and off being the old file to the bit; the CLI and the HTTP API. The cross-language half is `test_go_parity.py::test_the_dynamic_window_halves_the_same_nodes` and `test_rust_parity_tools.py::TestRustWindowParity / TestRustWindowRoutes`, with `go/radixnet/window_test.go`, `go/server/window_test.go` and the unit tests of `rust/src/window.rs` on their own sides.
+* `test_window.py` — the **dynamic window** (section 40, `../SPEC-DynamicWindow.md`): the ladder and what it refuses; `ABCD` cut into `AB` and `CD` under a grouping encoding and into `ABC` and `BCD` under the trigram; a node halved at its middle gram, again until it fits, never below one gram; the halves carrying the same state, parameters and count, joined by the heavy connection (the sine model's weight and its sign while inverted, the counting kinds' count, the phase model's through-traffic); compression stopping at the window and resuming when it is off; a step merging, halving and moving, and the top regrowing what stayed unary; the settings; the automatic step on every kind; the file block beside the band, and off being the old file to the bit; the CLI and the HTTP API. The cross-language half is `test_go_parity.py::test_the_dynamic_window_halves_the_same_nodes` and `test_rust_parity_tools.py::TestRustWindowParity / TestRustWindowRoutes`, with `go/radixnet/window_test.go`, `../ModelKit/go/server/window_test.go` and the unit tests of `rust/src/window.rs` on their own sides.
 
 ---
 
@@ -1093,7 +1123,7 @@ Frontend: an "Ollama" tab with a connection card (URL, model list), "Corpus from
 
 Docker: the API container gets `OLLAMA_HOST` (default `http://host.docker.internal:11434`, reachable through `extra_hosts`); the `ollama` profile runs the official `ollama/ollama` image with a model volume (`OLLAMA_HOST=http://ollama:11434`).
 
-Tests (`tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, JSON corrections for copy-editing prompts — `fake_copy_edit`: `howe` → `how`, `??` → `?`, a comma after an opening `Hi` —, questions for a thinking prompt, configurable failures) and `/api/chat`; asked to think, it answers with its thinking as Ollama's field, inline between `<think>` tags, or not at all.
+Tests (`../ModelKit/tests/test_ollama.py`) use a fake Ollama server (stdlib `http.server`) that answers `/api/tags`, `/api/generate` (numbered lines for corpus prompts, JSON ratings for review prompts, JSON corrections for copy-editing prompts — `fake_copy_edit`: `howe` → `how`, `??` → `?`, a comma after an opening `Hi` —, questions for a thinking prompt, configurable failures) and `/api/chat`; asked to think, it answers with its thinking as Ollama's field, inline between `<think>` tags, or not at all.
 
 ### 16.2 ChatGPT (`chatgpt.py`) — the hosted alternative, same interface
 
@@ -1132,7 +1162,7 @@ class ChatGPTClient(url=None, model=None, timeout=None, *, api_key=None)
   [--system TEXT] [--temperature 0.7] [--json]`.
 * Docker: the API container takes `OPENAI_API_KEY`, `RADIXNET_OPENAI_MODEL` and `OPENAI_BASE_URL` (empty key =
   ChatGPT tutoring stays off and the Code tab says so).
-* Tests (`tests/test_chatgpt.py`) use a fake OpenAI server (stdlib `http.server`) answering `/v1/models` and
+* Tests (`../ModelKit/tests/test_chatgpt.py`) use a fake OpenAI server (stdlib `http.server`) answering `/v1/models` and
   `/v1/chat/completions`, recording the Authorization header, scripting tutor programs, judging by content and
   rejecting configurable fields or whole requests.
 
@@ -1195,7 +1225,7 @@ severity because the student never wrote them - and they reach nothing else: the
 sentence it did not write.  The question is only asked when a negative network is attached (`--blame`) and
 `variants` > 0, so a run without one asks nothing extra; a teacher that cannot answer costs the widening, not the
 round (a `"note"` record).  Cost: one call per batch of failures.  The Go tutor does the same, word for word
-(`ExplainMistakes`, `TutorTrainer.Widen`, `FaultsFromLessons`, `-variants` / `-variant-weight`): `tests/test_go_parity.py`
+(`ExplainMistakes`, `TutorTrainer.Widen`, `FaultsFromLessons`, `-variants` / `-variant-weight`): `../ModelKit/tests/test_go_parity.py`
 runs both with `--blame --variants 2` against one fake teacher and asserts the same conversation, the same family
 on every lesson and byte-identical negative networks afterwards.
 
@@ -1369,19 +1399,19 @@ button becomes *Start auto run*, the Rounds table gains a `batch` column, the re
 every `"batch"` record fills the brief, the level, the openings, the pass mark and the drills into the form (once
 per batch) so the settings show what the server is teaching.  **The teacher's thinking** settings are *The marker
 thinks* (the level; blank leaves it to the server, and the blank option says which way that goes), *Train on the
-teacher's thinking* and *Learn where it questions itself* (`tutorThinkingBody` in `frontend/src/thinking.js`); a
+teacher's thinking* and *Learn where it questions itself* (`tutorThinkingBody` in `../ModelKit/frontend/src/thinking.js`); a
 dry run shows *What the marker thought* under its report card, and a run adds a `thoughts` column to the Rounds
 table (`1 (+2?)`: one thought and the two questions it asked itself) and a list of what the teacher thought round
 by round, the questions marked as the Ollama tab marks them (`ThinkingText`) with what the network learned from
 them (`roundThinkingSays`).
 
-Tests: `tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, explains a mistake and writes
+Tests: `../ModelKit/tests/test_tutor.py` (a fake Ollama that writes exercises, marks by a rule, explains a mistake and writes
 it again, answers drill requests and plans the next lessons; the parsers, the marking, the widening -
 `_parse_explanations`, `explain_mistakes`, `TutorTrainer.widen`, a round that widens and one that does not - the
-planner, the loop with a scripted model, the endpoints and the CLI), `tests/test_blame.py` (a widened lesson
-becomes its whole family of faults) and the same in Go (`go/radixnet/tutor_test.go`, `blame_test.go`), the ChatGPT teacher of
-`tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
-model) and `go/radixnet/tutor_test.go` + `go/server/tutor_test.go` for the port.  The fake teacher thinks aloud
+planner, the loop with a scripted model, the endpoints and the CLI), `../ModelKit/tests/test_blame.py` (a widened lesson
+becomes its whole family of faults) and the same in Go (`../ModelKit/go/kit/tutor_test.go`, `blame_test.go`), the ChatGPT teacher of
+`../ModelKit/tests/test_chatgpt.py` (the same lessons against the fake OpenAI, including a ChatGPT teacher marked by a local
+model) and `../ModelKit/go/kit/tutor_test.go` + `../ModelKit/go/server/tutor_test.go` for the port.  The fake teacher thinks aloud
 when asked (in Ollama's `thinking` field, or inline in `<think>` tags), so the thinking cases - asked or not, read
 from either place, taught with and without its questions, shown by a dry run, a bad level, the negative network
 refused - run in Python and Go, and `test_go_parity.py` / `test_rust_parity_teach.py` hold the Go and Rust
@@ -1400,7 +1430,7 @@ one change), neighbouring edits of one kind are merged, and an equal run shorter
 is swallowed (`MIN_EQUAL_RUN`), because no trigram fits in such a gap - "mat" -> "park", not "m" -> "p" and "t" ->
 "rk". `changed_spans` returns the half-open rune ranges each side disagrees on; an insertion is an *empty* span at
 the position where the text belongs. The Go port (`go/radixnet/diff.go`) is the same algorithm with the same
-tie-breaks, and `tests/test_go_parity.py` compares the two on a set of sentence pairs.
+tie-breaks, and `../ModelKit/tests/test_go_parity.py` compares the two on a set of sentence pairs.
 
 `CountRewardNet.correct(wrong, right, strength=, weight=, reward=, keep=, count=)` turns that alignment into edge
 updates. Both sentences join the structure first (observing one can split a node the other's path runs through), and
@@ -1455,7 +1485,7 @@ edge)` - the step in the company it kept - and the row is `[seen, correct, incor
   inverse: the contexts of the absorbed node's out-edges, keyed by the merged node, are re-keyed to every node that
   calls it (exact with one caller; with several, each carries the pooled row, which is what the merged node's
   predecessor priced the step by), the ones that arrived through the absorbed node are re-keyed to it, and the
-  dying edge's own die with it - a unary chain has one way through (D-091). `edge_parent` is maintained alongside,
+  dying edge's own die with it - a unary chain has one way through (D-092). `edge_parent` is maintained alongside,
   as Go has always had `EdgeParent`.
 * **What it reports.** `path_stats` adds `correct_ratio` (of the judged traffic) and `seen_ratio` (of the edge's
   traversals), `path_totals` the four counters that reach `stats()` as `path_contexts`, `path_judged`, `path_seen`,
@@ -1466,7 +1496,7 @@ edge)` - the step in the company it kept - and the row is `[seen, correct, incor
 Tests: `tests/test_countnet.py::TestPathCounters` and `go/radixnet/paths_test.go` (training judges nothing, a
 judgement starts the table and a later pass only updates it, the same edge is right after one word and wrong after
 another and its cost follows, the round trip, compression, the scale off), and
-`tests/test_go_parity.py::test_judged_paths_price_the_same_step_differently` for the two implementations.
+`../ModelKit/tests/test_go_parity.py::test_judged_paths_price_the_same_step_differently` for the two implementations.
 
 ### 16.6 Node ratios (`CountRewardGraph.node_ratios`) — the same numbers, read from the node
 
@@ -1499,7 +1529,7 @@ Tests: `tests/test_countnet.py::TestNodeRatios` and `go/radixnet/nodes_test.go` 
 the reward share is signed and its magnitudes add up to one, the judged paths land on the arm that was walked, an
 unjudged graph has the shares but no verdicts, the shares are of the side and not of the visits, the table is most
 visited first), the endpoint in both server test suites, and
-`tests/test_go_parity.py::test_a_node_is_read_the_same_way_from_both_sides`.
+`../ModelKit/tests/test_go_parity.py::test_a_node_is_read_the_same_way_from_both_sides`.
 
 ---
 
@@ -1572,9 +1602,9 @@ problems as table rows and round summaries. API: `POST /api/codegen/start` (job 
 model or the teacher, no training), `POST /api/codegen/run` (sandbox + style + verdict without an LLM). `start` and
 `solve` take `teacher_provider` / `judge_provider` (and `url` / `judge_url` / `teacher_model` / `judge_model`); a
 `chatgpt` tutor on a server without a key is refused with 400 before anything is sent. Frontend: the "Code" tab, whose
-**Teacher** selector switches the provider (model, URL, notes and badges follow it). Tests (`tests/test_codegen.py`)
+**Teacher** selector switches the provider (model, URL, notes and badges follow it). Tests (`../ModelKit/tests/test_codegen.py`)
 use a fake Ollama whose teacher answers come from a scripted queue and whose judge rejects programs containing
-`BAD_ANSWER`; `tests/test_chatgpt.py` runs the same loop against the fake OpenAI server, including a ChatGPT tutor
+`BAD_ANSWER`; `../ModelKit/tests/test_chatgpt.py` runs the same loop against the fake OpenAI server, including a ChatGPT tutor
 judged by a local model.
 
 ## 18. Learning-rate schedules (`schedule.py`) — rates as graph functions of the epoch
@@ -1629,7 +1659,7 @@ and the window's edge ids (remapped like the edges); `from_dict` rebuilds the wi
 from before the dual function loads with `count_scale = 1, global_scale = window_scale = 0` so it behaves as it did. Every node is created with `a = 0, k = 1`, so the sine activation is the constant 1 and the
 base class's score `w * f_p * f_c` is the weight itself: `child_probs`, `child_costs`, Dijkstra, sampling, `split`
 (the new internal edge gets the node's count, the window history of the edges it now stands before and reward 0,
-section 40.3 and D-091) and `merge_child` (activation ratios are 1; what the dying edge alone was taught goes onto
+section 40.3 and D-092) and `merge_child` (activation ratios are 1; what the dying edge alone was taught goes onto
 the edges into the merged node, and the contexts of the choice it led to onto the nodes that call it) work
 unchanged. `add_reward(edge_ids, amount)` and `recompute_weights()` keep `edge_w` in sync and bump `version` so the
 cost cache refreshes; `invert()` negates the rewards; `to_dict` / `from_dict` carry `edges.reward` and the two scales
@@ -1732,13 +1762,13 @@ stores it as an upload so several images can be trained on together), `POST /api
 the Images tab (choose an image -> encoded text, latent size, copy, decode back to an image side by side with the
 original; train on it; save as upload; ask it for the picture back and blame what it misremembered; decode any
 pasted text such as a prediction).
-Dependencies: `pip install radixnet[images]` (pillow) or `radixnet[diffusion]` (pillow, torch, diffusers).
+Dependencies: `pip install modelkit[images]` (pillow) or `modelkit[diffusion]` (pillow, torch, diffusers).
 
 ## 22. The model conversing with itself (`dialogue.py`) — replies are predictions picking up the last words
 
 `converse(model, opening="", turns=6, mode="beam", max_length=60, context=12, temperature=1.0, k=5, beam=None,
 step_penalty=0.0, seed=None, speakers=("A", "B"), history=(), partner=None, avoid_repeats=True) -> list[Turn]`
-(also `GraphModel.converse(opening, turns, **options)`). Two voices take turns; the voice of turn `i` is
+(a function of the kit's, not a method of the model: `GraphModel.converse` went with the split, D-093). Two voices take turns; the voice of turn `i` is
 `speakers[i % len(speakers)]` and its model `model` for even `i`, `partner or model` for odd `i`, so the radix and
 the count model can talk to each other. A given `opening` is spoken as turn 0 (`given=True`, its cost is
 `-score(opening).log_prob`); `history` holds the utterances of a conversation being continued (indices and voices
@@ -1932,7 +1962,7 @@ one stream, event for event, the costs to `1e-9`.  D-081 records the decision.
 (The negative network is ported too; section 24.5 covers what it adds to the types below.)
 
 `go/` is a standalone Go module (`github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no dependencies
-beyond the standard library) porting section 19's model: `go/radixnet` is the library, `go/cmd/radixnet-count` the
+beyond the standard library) porting section 19's model: `go/radixnet` is the library, `../ModelKit/go/cmd/radixnet-count` the
 CLI (`train`, `predict`, `generate`, `score`, `feedback`, `2nrl`, `invert`, `compress`, `weights`, `info`,
 `converse`, `correct`, `negative`, `codegen`, `tutor`, `evolve`, `ollama`, `chatgpt`, `checkpoints`, `bench`,
 `serve`). The
@@ -1970,7 +2000,7 @@ Code tab too), and there is no `checkpoint_every` because the Go CLI has no chec
 `--blame` teaches the negative network why a program was rejected on both sides.  `cmd/radixnet-count/codegen.go`
 is the CLI command and `server/codegen.go` the four endpoints (`/api/codegen/start|history|solve|run`), which
 takes the **Code** tab off the frontend's `pythonOnly` list.
-`tests/test_go_parity.py::TestGoCodeGenParity` points both trainers at one fake teacher and holds them to the
+`../ModelKit/tests/test_go_parity.py::TestGoCodeGenParity` points both trainers at one fake teacher and holds them to the
 same conversation prompt for prompt (masking the two things that cannot match: the sandbox's scratch directory,
 which is named in tracebacks, and how long a program took), the same solutions and the same blame on disk.
 
@@ -1983,7 +2013,7 @@ because it is the only place in this port where the two sides do not produce ide
   **float32**, not float64, because Python's `array("f")` rounds every stored value to single precision, and
   `blake2b.go` is BLAKE2b written out (RFC 7693), because Go's standard library has none and this module takes no
   dependencies.  That is the same reasoning that put MT19937 and Shewchuk summation here by hand.
-  `tests/test_go_parity.py::TestGoMediaParity` checks the token, the texts and the decoded WAV byte for byte.
+  `../ModelKit/tests/test_go_parity.py::TestGoMediaParity` checks the token, the texts and the decoded WAV byte for byte.
 * **Image encoding is not at parity, and cannot cheaply be.**  Python's thumbnail resamples with Pillow's Lanczos
   filter; the Go one uses a box filter, because reproducing Pillow's exact coefficients and rounding *without
   Pillow to check against* would be a guess rather than a port.  So the same picture gives two different (equally
@@ -2069,7 +2099,7 @@ inline, are parsed whole - held in memory while they are, as the Python server h
 (D-035). `GET /api/status` reports `heap_bytes` and `memory_limit_bytes` so the status bar can show how close a run
 is to its ceiling.
 
-Parity (`tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
+Parity (`../ModelKit/tests/test_go_parity.py`, skipped without a Go toolchain): both implementations train the sample corpus
 with the same seed and settings and must agree on labels, counts, edges, rewards, window events, RNG state (exact),
 weights (1e-12), predictions, generated texts, scores and conversation transcripts; each side loads and continues
 the other's file with identical results; feedback, invert and weight changes match too. `go test -race ./...`
@@ -2138,7 +2168,7 @@ The three structural operations generalise exactly:
 **Persistence.** The `encoding` block of the graph document is written **only when it is not the default**, so an
 ordinary model file is byte for byte what it always was and the existing parity tests are unaffected. Both sides
 read the block, so a word model written by either continues in the other:
-`tests/test_go_parity.py::TestGoEncodingParity` trains the same corpus under nine encodings on both sides and
+`../ModelKit/tests/test_go_parity.py::TestGoEncodingParity` trains the same corpus under nine encodings on both sides and
 compares labels, counts, edges, weights and the RNG state, has each side continue the other's file, and holds the
 two to the same prediction in words.
 
@@ -2160,10 +2190,10 @@ so a word model's correction marks whole words. `GraphModel._adopt(graph)` is wh
 a model is constructed before its file's graph is read, so its encoder and decoder have to be rebuilt from the
 graph that arrives, or a word graph would be fed character trigrams.
 
-### 23.2 The Go HTTP server (`go/server`) and the frontend hookup
+### 23.2 The Go HTTP server (`../ModelKit/go/server`) and the frontend hookup
 
-`radixnet-count serve --port 8001 --frontend-dir frontend/dist --upload-dir uploads --checkpoint-dir checkpoints`
-runs `go/server`: `service.go` (the `Service` - model, `Job`, uploads, checkpoints; `startJob` runs the work on a
+`radixnet-count serve --port 8001 --frontend-dir ../ModelKit/frontend/dist --upload-dir uploads --checkpoint-dir checkpoints`
+runs `../ModelKit/go/server`: `service.go` (the `Service` - model, `Job`, uploads, checkpoints; `startJob` runs the work on a
 goroutine holding the model's write lock and, in the progress hook, releases it between epochs so readers get a
 turn - the Python `_yield_to_readers`; one job at a time, 409 otherwise), `http.go` (the route table, typed body
 fields with the Python server's error messages, upload bodies as JSON / multipart / raw, static files with the SPA
@@ -2176,8 +2206,8 @@ over; `/api/health`, `/api/status` and `/api/model` carry `engine: "go"`, `worke
 this server does not implement (`/api/schedule/preview`, which would be dead code here - the count model ignores
 learning rates) answers 404 with a message naming the Python server rather than blankly.
 
-The tutor is ported too (`go/radixnet/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `plan.go`,
-`go/server/tutor.go`): the same prompts, the same records and the same endpoints (`GET /api/tutor`,
+The tutor is ported too (`../ModelKit/go/kit/llm.go`, `ollama.go`, `chatgpt.go`, `tutor.go`, `plan.go`,
+`../ModelKit/go/server/tutor.go`): the same prompts, the same records and the same endpoints (`GET /api/tutor`,
 `POST /api/tutor/start`, `GET /api/tutor/history`, `POST /api/tutor/lesson`, `POST /api/tutor/plan`,
 `GET /api/chatgpt/models`), with the count / reward model
 answering the exercises and `serve --ollama-url / --ollama-model / --chatgpt-url / --chatgpt-model` (or
@@ -2206,10 +2236,10 @@ replaces the accelerator chips with `engine go · workers · goroutines` (`Statu
 the pasted text is sent whole as `text` together with `split`, and the server cuts it and the selected uploads.
 Everything else is unchanged: the panels only ever spoke the JSON contract.
 
-Tests: `go/server/server_test.go` (httptest: every endpoint, the job lifecycle with 409 and stop, readers answering
+Tests: `../ModelKit/go/server/server_test.go` (httptest: every endpoint, the job lifecycle with 409 and stop, readers answering
 while a job runs, uploads in all three body forms with a ZIP built in the test, training from uploads with and
 without `whole_file`, graph, save / load / reset, checkpoints in the Python layout, static files, the error shapes)
-and `tests/test_go_parity.py::TestGoServer` (a live `serve` process: the key sets of `tests/test_api.py`, a
+and `../ModelKit/tests/test_go_parity.py::TestGoServer` (a live `serve` process: the key sets of `../ModelKit/tests/test_api.py`, a
 model saved by the server loaded in Python with identical predictions, ZIP uploads, `split: paragraphs`, and the
 Python `CheckpointManager` reading the server's checkpoints).
 
@@ -2402,14 +2432,14 @@ prefix. `describe()` reports both halves and the settings.
   journal; the Ollama tab's review card has a *teach the negative network* checkbox and reports what it learned.
 * Tests: `tests/test_negative.py` (weight function, evidence, blame / clear, corrections, judge, crossings,
   prediction, forget, inversion, persistence, the kind registry, the API routes, the CLI group),
-  `tests/test_blame.py` (classification, severities, faults from lessons / reviews / attempts, teaching, and the
-  tutor, evolve and codegen hooks) and `tests/test_duo.py` (all three rules, the coverage gate, strict, learn,
+  `../ModelKit/tests/test_blame.py` (classification, severities, faults from lessons / reviews / attempts, teaching, and the
+  tutor, evolve and codegen hooks) and `../ModelKit/tests/test_duo.py` (all three rules, the coverage gate, strict, learn,
   generate / predict, the count model as the positive half).
 
-### 24.5 The negative network in Go (`go/radixnet/negative.go`, `blame.go`, `duo.go`)
+### 24.5 The negative network in Go (`go/radixnet/negative.go`, `../ModelKit/go/kit/blame.go`, `../ModelKit/go/kit/duo.go`)
 
 The Go port carries the negative network too, and the two implementations are held to the same numbers by
-`tests/test_go_parity.py::TestGoNegativeParity`: the same blame, the same corrections, the same file layout and the
+`../ModelKit/tests/test_go_parity.py::TestGoNegativeParity`: the same blame, the same corrections, the same file layout and the
 same verdicts character for character (the sentence a verdict carries is quoted the way Python's `repr()` quotes it,
 `pythonRepr`).  Go has one `Graph` type rather than a class hierarchy, so the negative arrays hang off it in an
 optional block:
@@ -2437,13 +2467,13 @@ optional block:
 * Go tests: `radixnet/negative_test.go`, `radixnet/blame_test.go`, `radixnet/duo_test.go`,
   `server/negative_test.go`.
 
-The loop of section 24.6 is ported too (`go/radixnet/critic.go`), and with it the two things it is built out of
+The loop of section 24.6 is ported too (`../ModelKit/go/kit/critic.go`), and with it the two things it is built out of
 that Go did not have: `review.go` is the Python `ollama.py` - `CorpusFromPrompt`, `ReviewTexts`, `SampleTexts`,
 `AdversarialReview` and `SummariseReviews` - duck-typed on `LLMClient`, so ChatGPT reviews as happily as a local
 model, and `blame.go` gains `FaultsFromReviews` / `TeachReviews`.  `negative auto`, `ollama models | corpus |
 review`, `chatgpt models | ask`, `POST /api/negative/auto`, `GET /api/negative/auto/history` and the three
 `/api/ollama/*` endpoints all speak the Python server's contract, and
-`tests/test_go_parity.py::TestGoCriticParity` holds the two loops to the same prompts, the same marks, the same
+`../ModelKit/tests/test_go_parity.py::TestGoCriticParity` holds the two loops to the same prompts, the same marks, the same
 rounds and the same blame on disk.
 
 Porting it turned up one thing worth stating, because it applies to both languages: a round **samples under the
@@ -2504,7 +2534,7 @@ to stderr as a notice, so `--json` still writes one document to stdout).  API: `
 `critic` job over `ModelService.start_critic` — which quizzes `positive_model()` and teaches `negative_model()` —
 and `GET /api/negative/auto/history` is its record.  Frontend: the Negative tab's **Automatic** card, whose job
 history also drives a refresh of the reason table, the stats and the journal below it, so the tab fills in by itself
-as rounds land.  Tests: `tests/test_critic.py` — the config, one round, what reaches the negative network, the mark
+as rounds land.  Tests: `../ModelKit/tests/test_critic.py` — the config, one round, what reaches the negative network, the mark
 setting the severity, stopping between rounds, the report card, a real `OllamaClient` against the fake server, the
 job, the endpoint and the CLI.
 
@@ -2557,9 +2587,9 @@ surviving texts, so a caller can still report cost, probability and path; it is 
 * Frontend: `GuardNotice.jsx` under the Generate, Predict and Converse tabs — "the negative network judged N
   candidates and vetoed M", with *why* opening the full verdicts and their blamed fragments — and a *Filter with
   the negative network* checkbox on each of the three forms.
-* Tests: `tests/test_guard.py` (the filter's additions, the three service methods, the three routes, the three CLI
-  commands), `go/radixnet/guard_test.go`, `go/server/guard_test.go`, and
-  `tests/test_go_parity.py::TestGoNegativeParity` holds the two guards to the same vetoes, the same survivors and
+* Tests: `../ModelKit/tests/test_guard.py` (the filter's additions, the three service methods, the three routes, the three CLI
+  commands), `../ModelKit/go/kit/guard_test.go`, `../ModelKit/go/server/guard_test.go`, and
+  `../ModelKit/tests/test_go_parity.py::TestGoNegativeParity` holds the two guards to the same vetoes, the same survivors and
   the same order.
 
 ---
@@ -2599,7 +2629,7 @@ per sample and packed as `aud:<codec>:<rate>x<channels>:<base64>` (`pack_text` /
 
 `parse_text` looks for the header **anywhere** in the text, because a spoken text carries its token first and a
 paired one its transcript last; the payload runs from the header to the next whitespace and its base64 is repaired
-with `encoding.repair_base64` (section 4). `decode_text(text, codec=None) -> {"wav", "codec", "rate", "channels",
+with `media.repair_base64` (section 4). `decode_text(text, codec=None) -> {"wav", "codec", "rate", "channels",
 "samples", "seconds", "bytes", "repaired"}` turns an encoded - or **predicted** - text back into a 16-bit PCM WAV
 (`wav_bytes`), so what the graph says can be listened to.
 
@@ -2642,12 +2672,12 @@ CLI: `speech info | transcribe | teach | listen | tutor | decode` (`listen` reco
 `--train` trains on the texts and saves; `tutor` is the recall tutor of section 26). API: `GET /api/speech`,
 `POST /api/speech/transcribe`, `POST /api/speech/teach`, `POST /api/speech/tutor`, `POST /api/speech/decode`
 (section 12). Frontend: the Speech tab (section 13). Dependencies: none for the waveform,
-the token and the browser's dictation; `pip install radixnet[speech]` (faster-whisper) or `radixnet[whisper]`
+the token and the browser's dictation; `pip install modelkit[speech]` (faster-whisper) or `modelkit[whisper]`
 (openai-whisper) for server-side transcription, ffmpeg for audio formats other than WAV.
 
 ---
 
-### 25.9 Talking with it: the Voice tab (`radixnet/voicechat.py`, `frontend/src/voice.js`, `VoicePanel.jsx`) - D-089
+### 25.9 Talking with it: the Voice tab (`../ModelKit/modelkit/voicechat.py`, `../ModelKit/frontend/src/voice.js`, `VoicePanel.jsx`) - D-089
 
 The Speech tab teaches one utterance at a time, by hand: record, stop, teach. The **Voice tab** is the same teaching
 with nothing to press, and a reply: the microphone stays on, and everything the person says is one **turn**.
@@ -2665,7 +2695,7 @@ with nothing to press, and a reply: the microphone stays on, and everything the 
   default; off, the sound is learned unheard), and while the mouth speaks the dictation is muted, so the reply is
   never written down as the person's. A browser without dictation sends the audio alone and the server's own
   transcription (section 25.3) takes over, or the sound is learned unheard.
-* **The turn** (`radixnet/voicechat.py`, `turn`): *heard* - `speech.teach` makes the transcript and the waveform behind
+* **The turn** (`../ModelKit/modelkit/voicechat.py`, `turn`): *heard* - `speech.teach` makes the transcript and the waveform behind
   one token (a model of acoustic units hears the recording as its units instead, `hear_audio`, the one text of sound
   it can learn); *trained* - the model is trained on those texts before it answers, under the mutating lock, so the
   reply already knows them; *answered* - `dialogue.reply` picks up the end of the line, with the conversation so far
@@ -2697,14 +2727,14 @@ with nothing to press, and a reply: the microphone stays on, and everything the 
   search and length, the voice's dials, the silence and the sensitivity of the endpointer. `historyOf` sends the
   last turns as the `history` every turn continues. A server without the stream route gets the plain one.
 * **From the shell**: `speech talk FILE | --seconds N | --text` is one turn with every dial (`cmd_speech_talk`),
-  `--history FILE` continuing a conversation and the model saved when it learned; `tests/test_voicechat.py`.
-* **In the other ports**: the Rust server and CLI (`rust/src/voicechat.rs`: `turn`, the routes, `talk_cli`; the
-  Ollama line in `review.rs`) and the Go server and CLI (`go/radixnet/voicechat.go`: `VoiceTurn`; `go/server/voice.go`;
-  `speech talk` in `go/cmd/radixnet-count/voice.go`) carry the same turn with the same document and the same events,
+  `--history FILE` continuing a conversation and the model saved when it learned; `../ModelKit/tests/test_voicechat.py`.
+* **In the other ports**: the Rust server and CLI (`../ModelKit/rust/src/voicechat.rs`: `turn`, the routes, `talk_cli`; the
+  Ollama line in `review.rs`) and the Go server and CLI (`../ModelKit/go/kit/voicechat.go`: `VoiceTurn`; `../ModelKit/go/server/voice.go`;
+  `speech talk` in `../ModelKit/go/cmd/radixnet-count/voice.go`) carry the same turn with the same document and the same events,
   so the tab works on whichever server serves it. The model's parts are closures there too (`Learn`, `ModelReply` /
   `VoiceParts`), taken under each service's locks; the Go build takes the words with the audio, as it transcribes
-  nothing itself, and records from no microphone. `tests/test_rust_parity_media.py` (`TestRustVoiceParity`) and
-  `tests/test_go_parity.py` (`speech talk`, the routes) hold the three to the same recording heard the same, learned
+  nothing itself, and records from no microphone. `../ModelKit/tests/test_rust_parity_media.py` (`TestRustVoiceParity`) and
+  `../ModelKit/tests/test_go_parity.py` (`speech talk`, the routes) hold the three to the same recording heard the same, learned
   the same, the same reply found and spoken.
 
 ## 26. The recall tutor (`recall.py`) — the tutor that needs no teacher
@@ -2778,7 +2808,7 @@ therefore off by default.  Without it `match` is `None` and nothing is claimed a
 
 Nothing here needs Pillow, torch or a transcriber: the marking is over the payload bytes both codecs already
 produce, so the whole module works in an environment where neither the diffusion weights nor Whisper exist (which
-is why `tests/test_recall.py` skips nothing).  Decoding a *picture* to look at needs Pillow and `listen_back` needs
+is why `../ModelKit/tests/test_recall.py` skips nothing).  Decoding a *picture* to look at needs Pillow and `listen_back` needs
 a transcriber, but grading does not.
 
 The one real cost is the search: a second of 8 kHz audio is ~10 700 characters, so `length` is usually what you
@@ -2799,7 +2829,7 @@ CLI: `speech tutor FILE...` and `image tutor FILE...`, sharing `_add_recall_opti
 negative network beside the model.  API: `POST /api/speech/tutor` and `POST /api/images/tutor` over
 `ModelService.recall_quiz`, which quizzes `positive_model()` (quizzing the negative network itself is meaningless)
 and teaches `negative_model()` under the mutating lock when `blame` is set.  Frontend: the **What does it
-remember?** card (`RecallCard.jsx`), shared by the Speech and Images tabs.  Tests: `tests/test_recall.py` — the
+remember?** card (`RecallCard.jsx`), shared by the Speech and Images tabs.  Tests: `../ModelKit/tests/test_recall.py` — the
 exercise, every way a completion can be wrong, the agreement curve, the mark, the loop over a real model, the
 faults, the CLI and the endpoints.
 ## 27. Tool use (`tools.py`, `agent.py`) — the network browses, Ollama sets the bar and teaches
@@ -2874,7 +2904,7 @@ once made every page that has one read as empty. `$RADIXNET_SEARCH_URL` (`{query
 `default_toolbox(web=None, *, sandbox=None, upload_dir=None, offline=False, extra=()) -> ToolBox` installs
 `web_search(query, [limit])`, `web_fetch(url, [max_chars])` (its `meta.links` is what an exploration follows next),
 `web_links(url, [limit])`, `calculator(expression)` (`safe_eval`: an AST walk that allows numbers, operators and the
-`math` functions and nothing else), plus `python(code)` when a :class:`~radixnet.codegen.Sandbox` is given and
+`math` functions and nothing else), plus `python(code)` when a :class:`~modelkit.codegen.Sandbox` is given and
 `read_file(name, [max_chars])` when an upload directory is.
 
 ### 27.2 `agent.py` — criteria, mediation, judging, teaching
@@ -2991,13 +3021,13 @@ Frontend: the **Agent** tab (`AgentPanel.jsx`) — the mode (tasks / explore), t
 options, the failure fieldset of section 27.3, a live log of criteria, proposals, tool calls (tagged by who wrote
 them) and attempts, and a table of finished tasks with `own` calls, `failures`, `blatant` and `boost`.
 
-Tests: `tests/test_tools.py` (a fake website: pages, a JSON and an HTML search endpoint, redirects — including one
+Tests: `../ModelKit/tests/test_tools.py` (a fake website: pages, a JSON and an HTML search endpoint, redirects — including one
 to a refused scheme — a byte cap; the format, the registry, the guards, `safe_eval`, every built-in tool) and
-`tests/test_agent.py` (a fake Ollama that plays all four roles and switches between native `tool_calls` and JSON,
+`../ModelKit/tests/test_agent.py` (a fake Ollama that plays all four roles and switches between native `tool_calls` and JSON,
 the fake website, and a *real* untrained network: criteria, both mediation paths, judging, teaching, the gap and
 the weighting, the whole loop, exploring, the API endpoints and the CLI).
 
-### 27.6 Tool use in Go (`go/radixnet/tools.go`, `web.go`, `calc.go`, `toolbox.go`, `agent.go`)
+### 27.6 Tool use in Go (`../ModelKit/go/kit/tools.go`, `web.go`, `calc.go`, `toolbox.go`, `agent.go`)
 
 The last Python-only module, and the one where the standard library had to be taken at its word: Go has no
 `html.parser`, no `ast.literal_eval` and no `eval`, so three pieces are written out rather than translated.
@@ -3126,16 +3156,16 @@ reply badged with its mark once the conversation has been judged), the table of 
 The transcript reads **newest first**: a new exchange is appended to the top and pushes the older ones down, so a
 running conversation never has to be scrolled to, and a line above it says how many replies were duplicates
 punished with the failures.
-Tests: `tests/test_chat.py` — a fake partner and judge, a real trained model: the conversation, a given opening,
+Tests: `../ModelKit/tests/test_chat.py` — a fake partner and judge, a real trained model: the conversation, a given opening,
 the reply really continuing the line, the marking, what reaches the negative network and the positive one, a
 reply it could only repeat punished however well it was marked, the
 guard silencing a reply, stalling, the report card, stopping, the endpoint and the CLI.
 
-### 28.1 The conversation in Go (`go/radixnet/chat.go`, `review.go`, `dialogue.go`)
+### 28.1 The conversation in Go (`../ModelKit/go/kit/chat.go`, `review.go`, `dialogue.go`)
 
 The Go half is the same four steps, from the same prompts, and the parity test holds them to it call by call.
 
-* `dialogue.go` gained `Model.Reply(previous, ReplyOptions)` — the same extraction the Python side made, for the
+* `dialogue.go` gained `kit.Reply(m, previous, ReplyOptions)` — the same extraction the Python side made, for the
   same reason: `Converse` is now a loop over it, and the chat loop calls it for the model's own lines while an LLM
   speaks the others.  One implementation of "what does this model say next", whoever is on the other side.
 * `review.go` gained the two prompts character for character (`chatSystem`, `conversationSystem`), `ChatLine`
@@ -3255,7 +3285,7 @@ Tests: `tests/test_counter.py` (the odometer itself; counters wrapping mid-train
 without losing history; weights, shares and rankings identical to what unbounded
 integers would give; the save / load round trip; a format 1 file; the guard;
 the lifetime counters), `go/radixnet/counter_test.go` (the same in Go) and
-`tests/test_go_parity.py::test_a_wrapped_model_file_crosses_over_unchanged`
+`../ModelKit/tests/test_go_parity.py::test_a_wrapped_model_file_crosses_over_unchanged`
 (a wrapped file trained on by both sides, with identical counters, weights and
 predictions).
 
@@ -3293,7 +3323,7 @@ here and the remote browser's own binary is used. Headless by default, `--no-san
 browser executes whatever a page sends it, so this is isolation from nothing — untrusted browsing belongs in the
 Docker image. `radixnet tools browser` reports what would be driven without starting it; the API's `GET /api/tools`
 carries the same under `"browser"`, and the server keeps one Chrome for every request (`ModelService.browser`),
-closed with the server. Tests (`tests/test_browser.py`) drive a **fake WebDriver** over HTTP so the whole protocol
+closed with the server. Tests (`../ModelKit/tests/test_browser.py`) drive a **fake WebDriver** over HTTP so the whole protocol
 runs without a browser, and skip the one real-Chrome test when the versions do not match.
 
 ---
@@ -3634,7 +3664,7 @@ walk is indifferent.  Both scales must be `>= 0`.
 * HTTP API: `traversal`, `penalty_scale`, `merit_scale` on `POST /api/predict` and `POST /api/generate`
   (`_traversal_fields`), both servers.
 * Frontend: the **Settings** tab (section 31.4) and, as the same control, the Predict and Generate tabs
-  (`frontend/src/components/TraversalFields.jsx` over the shared `useNetworkSettings`), with the two scales shown
+  (`../ModelKit/frontend/src/components/TraversalFields.jsx` over the shared `useNetworkSettings`), with the two scales shown
   only when the punishment traversal is chosen; the Result card reports the traversal that ran.
 * Go: `Graph.ChildEvidence`, `Graph.PenaltyCosts`, `Graph.TraversalCosts`, a `CostFn` on `SampleWalk` and
   `BeamOptions`, and `Traversal` / `PenaltyScale` / `MeritScale` on `PredictOptions` and `GenerateOptions`.
@@ -3642,7 +3672,7 @@ walk is indifferent.  Both scales must be `>= 0`.
 Tests: `tests/test_penalty.py` (the split per kind, that the rewards really do leave the score, the cheapest path
 being the least punished one, the distribution invariant, the cache, every mode of every kind, the CLI and the HTTP
 API), `go/radixnet/penalty_test.go` (the same contract in Go) and
-`tests/test_go_parity.py::TestGoParity::test_the_punishment_traversal_matches` (both sides walk the same
+`../ModelKit/tests/test_go_parity.py::TestGoParity::test_the_punishment_traversal_matches` (both sides walk the same
 least-punished paths at the same costs, under three settings of the scales, for `predict` and `generate`).
 
 ### 31.4 The Settings and Model settings tabs
@@ -3755,7 +3785,7 @@ new field.  Nothing in the traversal writes to the graph, and nothing about it t
 `rust/tests/model.rs`: identical answers, costs and expansions where nothing is punished; the blamed step left even
 when it is five times rewarded and an order of magnitude cheaper; 50 units of reward failing to buy the blame off;
 the filter's minimum, tolerance and infinity; the names; and a model with no record of failure refusing the option.
-Both parity suites (`tests/test_go_parity.py`, `tests/test_rust_parity.py`) punish the same texts on both sides and
+Both parity suites (`../ModelKit/tests/test_go_parity.py`, `../ModelKit/tests/test_rust_parity.py`) punish the same texts on both sides and
 require the same continuation, cost, ranking **and punishment** under the traversal - and require that the punished
 model answers the two searches differently somewhere, so neither can pass by the traversal doing nothing.
 
@@ -3767,22 +3797,24 @@ traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished o
 prediction, generation, scoring, reward / punish / 2NRL, **the encoding dial** (§34) and **the model file** - and,
 since D-077, the rest of the package: the sine-activation and phase models, the negative network and the guard,
 every teaching loop, the LLM clients (HTTPS through the system `curl`, D-076), the tools, code generation and the
-agent, images and speech, MCP and the WebDriver browser, one module per area with one parity suite per area (`tests/test_rust_parity*.py`).  What it
-deliberately leaves out - the torch backend, the Stable Diffusion encoder, local Whisper - `rust/README.md` names.
+agent, images and speech, MCP and the WebDriver browser, one module per area with one parity suite per area (`../ModelKit/tests/test_rust_parity*.py`).
+Since D-093 everything but the model - the teaching loops, the clients, the tools, media, MCP, the CLI and the
+server - is a crate of its own, `modelkit` in `../ModelKit/rust`, built on this one and never the other way round.
+What the port deliberately leaves out - the torch backend, the Stable Diffusion encoder, local Whisper - `rust/README.md` names.
 
 The dial is the one place the port paid a representation for generality.  A trigram used to be three code points
 packed into a `u64` - `Copy`, hashable, no allocation - which is why its encoding pass allocated nothing and is one
 of the three reasons D-072 measured it faster than Go.  A gram of *any* n over *any* unit is arbitrary text, so the
 index is keyed by the gram as Python and Go key it, and what that costs is measured rather than argued
 (`bench/RESULTS.md`).  `src/encoding.rs` carries `Encoding{unit, n, stride}` and a `Units` view that indexes a text
-once so slicing by unit stays O(1), which is what the graph does on every split, merge and re-index.  Its binaries
-are `radixnet` (the CLI: every command of Python's, the model's own in `src/bin/radixnet.rs` and every other area's
-through `cli::COMMANDS`) and `radixnet-bench`.
+once so slicing by unit stays O(1), which is what the graph does on every split, merge and re-index.  The binaries
+are the kit crate's: `radixnet` (the CLI: every command of Python's, the model's own in
+`../ModelKit/rust/src/bin/radixnet.rs` and every other area's through `cli::COMMANDS`) and `radixnet-bench`.
 
-**The server is here too** (`src/http.rs`, `src/service.rs`): HTTP/1.1 written out over `TcpListener` - the request
-line, the headers, `Content-Length`, the static files of `frontend/dist` with the SPA fallback, and a thread per
+**The server is in the kit crate** (`../ModelKit/rust/src/http.rs`, `../ModelKit/rust/src/service.rs`): HTTP/1.1 written out over `TcpListener` - the request
+line, the headers, `Content-Length`, the static files of `../ModelKit/frontend/dist` with the SPA fallback, and a thread per
 connection - under the whole JSON contract §12 defines and the Python and Go servers answer, down to `engine` naming which one
-is replying.  `frontend/dist` runs against `radixnet serve` unmodified: `/api/status` lists every route the server
+is replying.  `../ModelKit/frontend/dist` runs against `radixnet serve` unmodified: `/api/status` lists every route the server
 has (`routes`) and a tab is shown against the Rust server when the route it needs is in that list, and what it
 will not serve says so with a 400 rather than a half answer (`/api/words` on a character model).
 
@@ -3830,7 +3862,7 @@ Python's `json.dumps` renders it - compact separators, UTF-8 rather than `\u` es
 gzip container, inflate included, because `model.json.gz` is an ordinary model file and the standard library has no
 gzip; and the ISO-8601 timestamp `saved_at` carries.  What comes out is Python's graph document **byte for byte**,
 but for the `version` cache stamp that every load bumps - a stricter bar than the Go port meets, and free once the
-writer is right.  `tests/test_rust_parity.py` asserts exactly that, alongside the structure, the predictions, the
+writer is right.  `../ModelKit/tests/test_rust_parity.py` asserts exactly that, alongside the structure, the predictions, the
 judged paths, the node ratios, the wrapped counters and each side continuing the other's file, gzipped or not.
 
 What the port has to get right, beyond the algorithm:
@@ -3923,7 +3955,7 @@ continuation  "the mat"
 **The file** is a format of its own, `radixnet-word`, so every reader written before it existed refuses it by the
 check it already makes; the graph block gains `units: "words"` and `vocabulary` in id order, and a load checks that
 every symbol every label carries is a word the vocabulary holds.  Interchange is the contract the count model has:
-Python, Go and Rust read and write it, `tests/test_go_parity.py` and `tests/test_rust_parity.py` train a word model
+Python, Go and Rust read and write it, `../ModelKit/tests/test_go_parity.py` and `../ModelKit/tests/test_rust_parity.py` train a word model
 on both sides of each pair and require the same structure, the same counts, the same vocabulary **in the same
 order** and the same predictions, and the Rust word document is Python's byte for byte.
 
@@ -3991,13 +4023,13 @@ model's score counted `chars` in characters and its `trained_chars` too. All cou
 
 Tests: `tests/test_search_training.py` (the rules, pinned keys, every kind's planned training, the phase rule, the
 HTTP API and the CLI; reading backwards on every kind and both units, an upload trained on backwards over HTTP and a
-file with `train --reverse`), `tests/test_rust_parity_methods.py` (Rust against Python on eight plans in three kinds,
+file with `train --reverse`), `../ModelKit/tests/test_rust_parity_methods.py` (Rust against Python on eight plans in three kinds,
 two of them backwards - graph, history and replay block byte for byte - the filters and the diverse beam, and the
-server), `tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`,
-`go/radixnet/sampling_test.go`, `go/server/server_test.go`, the `training`, `search`, `beam` and `cli` unit tests
-and `tests/server.rs` in Rust, and `frontend/test/settings.test.mjs` and `frontend/test/backwards.test.mjs`.
+server), `../ModelKit/tests/test_go_parity.py::TestGoSearchAndTraining`, `go/radixnet/training_test.go`,
+`go/radixnet/sampling_test.go`, `../ModelKit/go/server/server_test.go`, the `training`, `search`, `beam` and `cli` unit tests
+and `tests/server.rs` in Rust, and `../ModelKit/frontend/test/settings.test.mjs` and `../ModelKit/frontend/test/backwards.test.mjs`.
 
-## 36. Thinking (`radixnet/thinking.py`, `go/radixnet/thinking.go`, `rust/src/thinking.rs`) — the `THINK` sentinel at work
+## 36. Thinking (`../ModelKit/modelkit/thinking.py`, `../ModelKit/go/kit/thinking.go`, `../ModelKit/rust/src/thinking.rs`) — the `THINK` sentinel at work
 
 Section 5.1.2 gives the graph a fourth sentinel that faces both ways: `p -> THINK` is where the model has learned
 to stop and think, `THINK -> ...` is how its thoughts begin. This section is what happens between the two - what
@@ -4063,7 +4095,7 @@ network learns to question itself where its teacher did, about its own mistakes.
 * `tutor.py`: `_complete`, `think` / `thinking` on `grade_completions`, `TutorConfig.think` / `learn_thinking` /
   `think_questions` / `resolved_think`, `TutorTrainer.teach_thinking`; `tutor --think --learn-thinking
   --no-think-questions`, the same fields on `/api/tutor/start` and `/api/tutor/lesson` (section 16.3).
-* Go - `thinking.go` (`Model.Think`, `ThinkOn`, `Place`, `QuestionsIn`, `Summarize`, `ThoughtsOf`), `graph.go`
+* Go - `thinking.go` (`kit.Think`, `ThinkOn`, `Place`, `QuestionsIn`, `Summarize`, `ThoughtsOf`), `graph.go`
   (`Think`, `First`, `IsOrigin`, `ThinkZ`, `ObserveThink`, `ThinkCost`, `ThinksAt`, `ObserveFrom` / `TraceFrom` /
   `NodePathFrom`), `json.go` (`withSentinels`), `search.go`, `model.go` (`TrainOptions.Origin`, `walkStart`),
   `dialogue.go` (`ThinkBack`, `Rethink.Thought`), `ollama.go` (`Complete`, `ThinkValue`, `SplitThinking`,
@@ -4072,13 +4104,13 @@ network learns to question itself where its teacher did, about its own mistakes.
   `search.rs`, `model.rs`, `dialogue.rs`, `ollama.rs`, `llm.rs`'s `complete_thinking`, `tutor/trainer.rs`'s
   `teach_thinking`, the `think` command and routes) produce the same records: the Go parity tests compare the
   rethinks' thoughts field for field, the Rust ones the model files byte for byte.
-* Tests: `tests/test_thinking.py`, `TestThinkSentinel` in `test_graph.py`, the origin cases in `test_search.py`,
+* Tests: `../ModelKit/tests/test_thinking.py`, `TestThinkSentinel` in `test_graph.py`, the origin cases in `test_search.py`,
   `TestThinksBeforeBackingUp` in `test_dialogue.py`, the thinking cases in `test_ollama.py` and `test_tutor.py`;
-  `go/radixnet/thinking_test.go`, `go/server/thinking_test.go`, the thinking cases in `go/radixnet/tutor_test.go`
-  and `go/server/tutor_test.go`; the unit tests in `rust/src/thinking.rs` and `rust/src/ollama.rs`; the tutor's
+  `../ModelKit/go/kit/thinking_test.go`, `../ModelKit/go/server/thinking_test.go`, the thinking cases in `../ModelKit/go/kit/tutor_test.go`
+  and `../ModelKit/go/server/tutor_test.go`; the unit tests in `../ModelKit/rust/src/thinking.rs` and `../ModelKit/rust/src/ollama.rs`; the tutor's
   thinking held to Python's by `test_go_parity.py` and `test_rust_parity_teach.py`.
 
-## 37. Today's format (`radixnet/assistant.py`, `go/radixnet/assistant.go`, `rust/src/assistant.rs`) — messages in, thinking and a streamed reply out
+## 37. Today's format (`../ModelKit/modelkit/assistant.py`, `../ModelKit/go/kit/assistant.go`, `../ModelKit/rust/src/assistant.rs`) — messages in, thinking and a streamed reply out
 
 Every language model is talked to through one shape now - a list of `{"role", "content"}` messages in, an assistant
 message out, its *thinking* first and then the text, streamed over server-sent events - and every client, SDK and
@@ -4244,11 +4276,11 @@ collapsible list that fills line by line and the text as it arrives, newest firs
 context and rethink under it and the guard's report; the last card shows the `curl` for either dialect. The tab is shown
 against the Rust server when `POST /v1/messages` is in `/api/status`'s `routes`.
 
-Tests: `tests/test_assistant.py` (both requests, the reply, the thinking, the deltas, the guard, the tool calls, the
-documents, the streams, the trace), `tests/test_api.py::TestTodaysFormat`, `tests/test_cli.py::TestTalk`,
-`frontend/test/sse.test.mjs`, `go/radixnet/assistant_test.go`, `go/server/assistant_test.go`, the `assistant` tests
-and `tests/server.rs` in Rust, and the parity suites `tests/test_rust_parity_assistant.py` and
-`tests/test_go_parity.py::TestGoAssistantParity` (the same thinking, text, stop reason and units from the CLIs and the
+Tests: `../ModelKit/tests/test_assistant.py` (both requests, the reply, the thinking, the deltas, the guard, the tool calls, the
+documents, the streams, the trace), `../ModelKit/tests/test_api.py::TestTodaysFormat`, `../ModelKit/tests/test_cli.py::TestTalk`,
+`../ModelKit/frontend/test/sse.test.mjs`, `../ModelKit/go/kit/assistant_test.go`, `../ModelKit/go/server/assistant_test.go`, the `assistant` tests
+and `tests/server.rs` in Rust, and the parity suites `../ModelKit/tests/test_rust_parity_assistant.py` and
+`../ModelKit/tests/test_go_parity.py::TestGoAssistantParity` (the same thinking, text, stop reason and units from the CLIs and the
 servers; ids and timestamps aside, the turn's floats to 1e-9).
 
 ## 38. The attention band (`radixnet/attention.py`, `go/radixnet/attention.go`, `rust/src/attention.rs`) — where inside a gram a correction lands
@@ -4311,7 +4343,7 @@ one gram sees is charged to it in full.
 
 Tests: `tests/test_attention.py` (the band, `spread`'s three properties, the charged steps, both kinds'
 corrections, off to the bit, the file, the refusals, the CLI and the API), `go/radixnet/attention_test.go`,
-`go/server/attention_test.go`, the unit tests in `rust/src/attention.rs`, `frontend/test/attention.test.mjs`, and
+`../ModelKit/go/server/attention_test.go`, the unit tests in `rust/src/attention.rs`, `../ModelKit/frontend/test/attention.test.mjs`, and
 the parity cases: `TestGoParity` / `TestGoWordParity` / `TestGoNegativeParity` in `test_go_parity.py` and
 `TestRustCorrectionParity` / `TestRustAttentionRoutes` in `test_rust_parity_tools.py`, which hold both ports to
 Python's previews, rewards, blame and - for Rust - model files byte for byte.
@@ -4421,7 +4453,7 @@ contexts (`split`). The bridge `A -> B` is the **heavy connection**, in each kin
 it the node's whole visit count, which is what makes it heavy where weights are computed from counts, and the
 window history of the out-edges it now stands before - every windowed traversal of those went through the node,
 so the window is rewritten with a bridge event before each of them and trimmed back to its size from the oldest
-end, and the bridge's recent share is the node's rather than nothing (D-091); the sine
+end, and the bridge's recent share is the node's rather than nothing (D-092); the sine
 model sets its weight to `W_HEAVY = 8` (negated while inverted, as every fresh weight is), a score of `8 · f²`
 between two copies of one activation; the phase model, which counts edges and not nodes, gives it what passed
 through the node - the traversals of the out-edges it stands before, read before the halving (`_heavy_bridge`);
@@ -4449,8 +4481,8 @@ chain the window holds apart. The graph is never left in a state the old rules c
 * **Frontend**: the Dynamic window card on Model settings (`DynamicWindowCard.jsx`, section 13), with its display
   helpers in `src/window.js` (the same ladder the servers walk, drawn before it is applied).
 
-Tests: `tests/test_window.py` (section 14), `go/radixnet/window_test.go`, `go/server/window_test.go`, the unit
-tests in `rust/src/window.rs`, `frontend/test/window.test.mjs`, and the parity cases
+Tests: `tests/test_window.py` (section 14), `go/radixnet/window_test.go`, `../ModelKit/go/server/window_test.go`, the unit
+tests in `rust/src/window.rs`, `../ModelKit/frontend/test/window.test.mjs`, and the parity cases
 `test_the_dynamic_window_halves_the_same_nodes` in `test_go_parity.py` and `TestRustWindowParity` /
 `TestRustWindowRoutes` in `test_rust_parity_tools.py`, which hold both ports to Python's nodes, bridges, records
 and - for Rust - model files byte for byte.

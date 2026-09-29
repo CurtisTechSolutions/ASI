@@ -1,0 +1,634 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/CurtisTechSolutions/ASI/ModelKit/go/kit"
+	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
+)
+
+// The LLM command groups: a training corpus written to order, the adversarial
+// review and the copy editor's corrections that feed the negative network, and
+// ChatGPT's own two actions.
+
+func ollamaUsage() {
+	fmt.Fprint(os.Stderr, `usage: radixnet-count [global options] ollama <action> [options]
+
+Three ways of hooking the network into a local large language model: a corpus written to
+order, an adversarial review of what the network itself writes, a copy editor's
+letter-level corrections of it, and a thinking model's thoughts taught to the network.
+
+actions:
+  models   list the models the endpoint offers (never fails: it answers "is it there?")
+  corpus   ask for --lines lines about --prompt (--style good | garbage), optionally training on them
+  review   let the LLM mark --count samples (or --text / --data), optionally blaming the failures
+  correct  let the LLM write --count samples (or --text / --data) out correctly, changing as little
+           as it can; with --blame only the characters it changed are blamed
+  think    a thinking model thinks about --prompt: --lines questions and the thinking behind each answer;
+           --train teaches the thinking as thoughts that begin at the THINK sentinel
+
+--url and --ollama-model override $OLLAMA_HOST and $RADIXNET_OLLAMA_MODEL.
+`)
+}
+
+func cmdOllama(args []string) {
+	if len(args) == 0 {
+		ollamaUsage()
+		os.Exit(2)
+	}
+	action, rest := args[0], args[1:]
+	switch action {
+	case "models":
+		cmdOllamaModels(rest)
+	case "corpus":
+		cmdOllamaCorpus(rest)
+	case "review":
+		cmdOllamaReview(rest)
+	case "correct":
+		cmdOllamaCorrect(rest)
+	case "think":
+		cmdOllamaThink(rest)
+	case "help", "-h", "--help":
+		ollamaUsage()
+	default:
+		fail("unknown ollama action %q (models, corpus, review, correct, think)", action)
+	}
+}
+
+// llmFlags registers the provider flags an LLM command shares.
+type llmFlags struct {
+	url     *string
+	model   *string
+	timeout *float64
+}
+
+func addLLMFlags(fs *flag.FlagSet, modelFlag string) llmFlags {
+	return llmFlags{
+		url:     fs.String("url", "", "the endpoint's base URL (default: the provider's)"),
+		model:   fs.String(modelFlag, "", "the model to answer with (default: the provider's)"),
+		timeout: fs.Float64("timeout", 0, "per-request timeout in seconds"),
+	}
+}
+
+func (f llmFlags) client(provider string) kit.LLMClient {
+	client, err := kit.NewLLMClient(provider, *f.url, *f.model, time.Duration(*f.timeout*float64(time.Second)))
+	if err != nil {
+		fail("%v", err)
+	}
+	return client
+}
+
+func cmdOllamaModels(args []string) {
+	fs := flag.NewFlagSet("ollama models", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	_ = fs.Parse(args)
+	client := flags.client(kit.ProviderOllama)
+	models, err := client.Models()
+	doc := map[string]any{
+		"available": err == nil, "url": client.BaseURL(), "model": client.ModelName(),
+		"models": models, "error": nil,
+	}
+	say("ollama         %s", client.BaseURL())
+	say("default model  %s", client.ModelName())
+	if err != nil {
+		doc["error"] = err.Error()
+		doc["models"] = []map[string]any{}
+		say("error          %v", err)
+	} else {
+		say("")
+		say("%-32s %12s", "model", "size")
+		for _, model := range models {
+			name, _ := model["name"].(string)
+			say("%-32s %12s", name, humanSize(model["size"]))
+		}
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+// clip shortens a text for a table cell, marking that it was cut.
+func clip(text string, width int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len([]rune(text)) <= width {
+		return text
+	}
+	return string([]rune(text)[:width-1]) + "…"
+}
+
+// humanSize renders a model's byte count the way `ollama list` does.
+func humanSize(value any) string {
+	bytes, ok := value.(float64)
+	if !ok || bytes <= 0 {
+		return "-"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	at := 0
+	for bytes >= 1024 && at < len(units)-1 {
+		bytes /= 1024
+		at++
+	}
+	return fmt.Sprintf("%.1f %s", bytes, units[at])
+}
+
+func cmdOllamaCorpus(args []string) {
+	fs := flag.NewFlagSet("ollama corpus", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	prompt := fs.String("prompt", "", "what the lines should be about (required)")
+	lines := fs.Int("lines", 20, "lines to ask for")
+	style := fs.String("style", "good", "good (correct text) | garbage (deliberately wrong text)")
+	out := fs.String("out", "", "write the lines to this file")
+	train := fs.Bool("train", false, "train the model on the lines, then save it")
+	epochs := fs.Int("epochs", 3, "training epochs with -train")
+	modelOut := fs.String("model-out", "", "where to save the model with -train (default: --model)")
+	_ = fs.Parse(args)
+
+	if strings.TrimSpace(*prompt) == "" {
+		fail("-prompt is required: say what the lines should be about")
+	}
+	client := flags.client(kit.ProviderOllama)
+	say("ollama   %s: %s", client.BaseURL(), client.ModelName())
+	say("prompt   %s", *prompt)
+	say("style    %s", *style)
+	texts, err := kit.CorpusFromPrompt(client, *prompt, *lines, *style, client.ModelName())
+	if err != nil {
+		fail("%v", err)
+	}
+	say("lines    %d", len(texts))
+	say("")
+	for _, text := range texts {
+		say("  %s", text)
+	}
+	doc := map[string]any{
+		"prompt": *prompt, "style": *style, "lines": len(texts), "texts": texts,
+		"model": client.ModelName(), "url": client.BaseURL(), "out": nil, "trained": nil,
+	}
+	if *out != "" {
+		if err := os.WriteFile(*out, []byte(strings.Join(texts, "\n")+"\n"), 0o644); err != nil {
+			fail("cannot write %s: %v", *out, err)
+		}
+		doc["out"] = *out
+		say("")
+		say("written to %s", *out)
+	}
+	if *train {
+		if len(texts) == 0 {
+			fail("the model answered with no usable lines, so there is nothing to train on")
+		}
+		m := openModel(false)
+		records, err := m.Train(texts, radixnet.TrainOptions{Epochs: *epochs})
+		if err != nil {
+			fail("%v", err)
+		}
+		target := *modelOut
+		if target == "" {
+			target = modelFile()
+		}
+		if err := m.Save(target); err != nil {
+			fail("cannot save %s: %v", target, err)
+		}
+		doc["trained"] = map[string]any{"epochs": len(records), "texts": len(texts), "saved": target}
+		say("")
+		say("trained %d epoch(s) on %d line(s); saved to %s", len(records), len(texts), target)
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+// cmdOllamaThink has Ollama think about a prompt, and the network taught its
+// thinking as thoughts of its own (kit.ThinkOn).
+func cmdOllamaThink(args []string) {
+	fs := flag.NewFlagSet("ollama think", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	prompt := fs.String("prompt", "", "what to think about (required)")
+	lines := fs.Int("lines", 5, "questions to think about")
+	think := fs.String("think", "true", "ask the model to think: true | false | low | medium | high ('' leaves it to the model)")
+	temperature := fs.Float64("temperature", 0.7, "sampling temperature")
+	out := fs.String("out", "", "write the thinking to this file, one thought per line")
+	train := fs.Bool("train", false, "teach the model the thinking as thoughts, then save it")
+	withAnswers := fs.Bool("with-answers", false, "with -train: train the answers as texts too")
+	noQuestions := fs.Bool("no-questions", false, "with -train: do not teach where a thought questions itself")
+	epochs := fs.Int("epochs", 10, "training epochs with -train")
+	fs.Float64("lr", 0.5, "accepted for the Python CLI's sake; the count model has no learning rate")
+	fs.Int("batch-size", 4, "accepted for the Python CLI's sake; the count model has no batches")
+	modelOut := fs.String("model-out", "", "where to save the model with -train (default: --model)")
+	_ = fs.Parse(args)
+
+	if strings.TrimSpace(*prompt) == "" {
+		fail("-prompt is required: say what to think about")
+	}
+	level, err := kit.ThinkValue(*think)
+	if err != nil {
+		fail("%v", err)
+	}
+	client, ok := flags.client(kit.ProviderOllama).(*kit.OllamaClient)
+	if !ok {
+		fail("thinking needs an Ollama client")
+	}
+	levelText := "the model's choice"
+	if level != nil {
+		levelText = fmt.Sprint(level)
+	}
+	say("ollama     %s: %s", client.BaseURL(), client.ModelName())
+	say("prompt     %s", quote(clip(*prompt, 60)))
+	say("questions  %d", *lines)
+	say("think      %s", levelText)
+	thoughts, err := kit.ThoughtsFromPrompt(client, *prompt, *lines, client.ModelName(), level, *temperature)
+	if err != nil {
+		fail("%v", err)
+	}
+	if len(thoughts) == 0 {
+		fail("Ollama model %q wrote no questions to think about", client.ModelName())
+	}
+	thinking, answers := []string{}, []string{}
+	for _, t := range thoughts {
+		if t.Thinking != "" {
+			thinking = append(thinking, t.Thinking)
+		}
+		if t.Answer != "" {
+			answers = append(answers, t.Answer)
+		}
+	}
+	say("")
+	for i, entry := range thoughts {
+		say("%3d  %s", i+1, entry.Question)
+		if entry.Thinking != "" {
+			say("     thinking: %s", clip(entry.Thinking, 200))
+		} else {
+			say("     thinking: (none: the model did not think)")
+		}
+		say("     answer:   %s", clip(entry.Answer, 200))
+	}
+	doc := map[string]any{
+		"url": client.BaseURL(), "model": client.ModelName(), "prompt": *prompt, "think": level,
+		"count": len(thoughts), "thinking": len(thinking), "thoughts": thoughts, "out": nil, "trained": nil,
+	}
+	if *out != "" {
+		text := strings.Join(thinking, "\n")
+		if len(thinking) > 0 {
+			text += "\n"
+		}
+		if err := os.WriteFile(*out, []byte(text), 0o644); err != nil {
+			fail("cannot write %s: %v", *out, err)
+		}
+		doc["out"] = *out
+		say("")
+		say("wrote %d thought(s) to %s", len(thinking), *out)
+	}
+	if *train {
+		if len(thinking) == 0 {
+			fail("Ollama model %q returned no thinking to train on: use a thinking model (qwen3, deepseek-r1, "+
+				"gpt-oss, ...) on an Ollama that separates it, or -think true", client.ModelName())
+		}
+		m := openModel(false)
+		if m.IsNegative() {
+			fail("the negative network judges; it does not think (a negative model cannot be taught thoughts)")
+		}
+		target := *modelOut
+		if target == "" {
+			target = modelFile()
+		}
+		say("")
+		say("model      %s", modelFile())
+		say("training   thoughts=%d epochs=%d%s", len(thinking), *epochs, map[bool]string{true: " +answers", false: ""}[*withAnswers])
+		say("output     %s", target)
+		opts := radixnet.TrainOptions{Epochs: *epochs, AutoCompress: true}
+		learned, err := kit.ThinkOn(m, thinking, opts, !*noQuestions, 1.0)
+		if err != nil {
+			fail("%v", err)
+		}
+		answerEpochs := 0
+		if *withAnswers && len(answers) > 0 {
+			records, err := m.Train(answers, opts)
+			if err != nil {
+				fail("%v", err)
+			}
+			answerEpochs = len(records)
+		}
+		if err := m.Save(target); err != nil {
+			fail("cannot save %s: %v", target, err)
+		}
+		doc["trained"] = map[string]any{
+			"out": target, "thoughts": learned.Thoughts, "questions": learned.Questions, "taught": learned.Taught,
+			"epochs": learned.Epochs, "answers": answerEpochs, "saved": target, "stats": m.Stats(),
+		}
+		say("")
+		say("taught %d thought(s) and %d question(s) it asked itself; it now stops to think at %d more node(s)",
+			learned.Thoughts, learned.Questions, learned.Taught)
+		say("saved to %s", target)
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+func cmdOllamaReview(args []string) {
+	var texts, data multiFlag
+	fs := flag.NewFlagSet("ollama review", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	fs.Var(&texts, "text", "review this text instead of sampling (repeatable)")
+	fs.Var(&data, "data", "review the texts of FILE (one per line) instead of sampling")
+	count := fs.Int("count", 8, "samples to draw from the model")
+	prefix := fs.String("prefix", "", "continue this prefix instead of generating from scratch")
+	maxLength := fs.Int("max-length", 60, "characters per sample")
+	temperature := fs.Float64("temperature", 1.0, "sampling temperature")
+	threshold := fs.Float64("threshold", 6.0, "ratings at or above this pass")
+	context := fs.String("context", "", "what the texts are meant to be (the reviewer's yardstick)")
+	blame := fs.Bool("blame", false, "teach the negative network what failed and why")
+	addNegativeFlag(fs)
+	_ = fs.Parse(args)
+
+	client := flags.client(kit.ProviderOllama)
+	o := kit.AdversarialReviewOptions{
+		Count: *count, Prefix: *prefix, MaxLength: *maxLength, Temperature: *temperature,
+		Threshold: *threshold, Context: *context, Model: client.ModelName(),
+	}
+	var model *radixnet.Model
+	given := []string{}
+	for _, text := range texts {
+		if strings.TrimSpace(text) != "" {
+			given = append(given, text)
+		}
+	}
+	if len(data) > 0 {
+		given = append(given, readTexts(data, "lines", 0)...)
+	}
+	if len(given) > 0 {
+		o.Texts = given
+	} else {
+		model = openModel(true)
+		seed := seedFlag
+		o.Seed = &seed
+	}
+	say("ollama    %s: %s", client.BaseURL(), client.ModelName())
+	if len(given) > 0 {
+		say("reviewing %d given text(s), pass at %g/10", len(given), *threshold)
+	} else {
+		say("reviewing %d sample(s) of %d chars, pass at %g/10", *count, *maxLength, *threshold)
+	}
+	say("")
+	result, err := kit.AdversarialReview(model, client, o)
+	if err != nil {
+		fail("%v", err)
+	}
+	say("%-7s %6s %s", "verdict", "rating", "text / critique")
+	for _, review := range result.Reviews {
+		rating := "-"
+		if review.Rating != nil {
+			rating = fmt.Sprintf("%.1f", *review.Rating)
+		}
+		say("%-7s %6s %s", review.Verdict, rating, clip(review.Text, 48))
+		say("%-7s %6s   %s", "", "", clip(review.Critique, 64))
+	}
+	say("")
+	say("%d passed, %d failed; mean mark %s/10", len(result.Good), len(result.Bad), fmtMark(result.MeanRating))
+	doc := map[string]any{
+		"source": result.Source, "model": result.Model, "threshold": result.Threshold,
+		"texts": result.Texts, "reviews": result.Reviews, "mean_rating": result.MeanRating,
+		"pass_rate": result.PassRate, "good": result.Good, "bad": result.Bad, "negative": nil,
+	}
+	if *blame {
+		negative := openNegative(false)
+		report, err := kit.TeachReviews(negative, result.Reviews, result.Threshold, true, "review",
+			kit.TeachOptions{})
+		if err != nil {
+			fail("%v", err)
+		}
+		saved := saveNegative(negative)
+		say("")
+		say("blamed %d failure(s) over %d edge(s); cleared %d", report.Blamed, report.Edges, report.Cleared)
+		say("negative model: %s", saved)
+		reasonTable(negative, 10)
+		doc["negative"] = map[string]any{
+			"path": saved, "taught": report, "reasons": negative.Reasons(), "stats": negative.Stats(),
+		}
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+// cmdOllamaCorrect lets the LLM copy-edit the network's samples (or the given
+// texts); the diff is what the negative network learns.
+func cmdOllamaCorrect(args []string) {
+	var texts, data multiFlag
+	fs := flag.NewFlagSet("ollama correct", flag.ExitOnError)
+	flags := addLLMFlags(fs, "ollama-model")
+	fs.Var(&texts, "text", "correct this text instead of sampling (repeatable)")
+	fs.Var(&data, "data", "correct the texts of FILE (one per line) instead of sampling")
+	count := fs.Int("count", 8, "samples to draw from the model")
+	prefix := fs.String("prefix", "", "continue this prefix instead of generating from scratch")
+	maxLength := fs.Int("max-length", 60, "characters per sample")
+	temperature := fs.Float64("temperature", 1.0, "sampling temperature")
+	context := fs.String("context", "", "extra context for the editor (e.g. what the model was trained on)")
+	blame := fs.Bool("blame", false, "teach the negative network: blame only the characters the editor changed, "+
+		"under its reason, and let the unchanged texts clear blame")
+	severity := fs.Float64("severity", kit.CorrectionSeverity, "blame per corrected text with -blame (1 = one ordinary failure)")
+	addNegativeFlag(fs)
+	_ = fs.Parse(args)
+
+	if *severity < 0 {
+		fail("-severity must be >= 0, got %v", *severity)
+	}
+	client := flags.client(kit.ProviderOllama)
+	o := kit.AdversarialCorrectionOptions{
+		Count: *count, Prefix: *prefix, MaxLength: *maxLength, Temperature: *temperature,
+		Context: *context, Model: client.ModelName(),
+	}
+	var model *radixnet.Model
+	given := append([]string{}, texts...) // a blank text is handed back uncorrected, so it stays in the set
+	if len(data) > 0 {
+		given = append(given, readTexts(data, "lines", 0)...)
+	}
+	if len(given) > 0 {
+		o.Texts = given
+	} else {
+		model = openModel(true)
+		seed := seedFlag
+		o.Seed = &seed
+	}
+	say("ollama     %s: %s", client.BaseURL(), client.ModelName())
+	if len(given) > 0 {
+		say("correcting %d given text(s)", len(given))
+	} else {
+		say("correcting %d sample(s) of %d chars", *count, *maxLength)
+	}
+	say("")
+	result, err := kit.AdversarialCorrection(model, client, o)
+	if err != nil {
+		fail("%v", err)
+	}
+	say("%-11s %-42s %-42s %-14s %s", "verdict", "text", "correction", "reason", "changes")
+	for _, entry := range result.Corrections {
+		correction := "-"
+		if entry.Correction != nil {
+			correction = quote(clip(*entry.Correction, 40))
+		}
+		reason := entry.Reason
+		if reason == "" {
+			reason = "-"
+		}
+		say("%-11s %-42s %-42s %-14s %s", entry.Verdict, quote(clip(entry.Text, 40)), correction, reason,
+			changesOf(entry.Changes, 4))
+	}
+	say("")
+	say("%d texts: %d corrected (%d change(s), %d wrong character(s)), %d unchanged, %d uncorrected; change rate %s",
+		len(result.Corrections), len(result.Corrected), result.Edits, result.WrongChars, len(result.Unchanged),
+		len(result.Uncorrected), fmtRate(result.ChangeRate))
+	doc := map[string]any{
+		"source": result.Source, "model": result.Model, "texts": result.Texts, "corrections": result.Corrections,
+		"corrected": result.Corrected, "unchanged": result.Unchanged, "uncorrected": result.Uncorrected,
+		"edits": result.Edits, "wrong_chars": result.WrongChars, "right_chars": result.RightChars,
+		"change_rate": result.ChangeRate, "negative": nil,
+	}
+	if *blame {
+		negative := openNegative(false)
+		say("")
+		say("negative model: %s", negativeFile())
+		say("blaming the changed characters of %d corrected text(s) at severity %g", len(result.Corrected), *severity)
+		report, err := kit.TeachCorrections(negative, result.Corrections, *severity, true, "correction",
+			kit.TeachOptions{})
+		if err != nil {
+			fail("%v", err)
+		}
+		saved := saveNegative(negative)
+		say("blamed %d text(s) over %d edge(s) (%d changed unit(s)), cleared %d of %d unchanged",
+			report.Blamed, report.Edges, report.Edits, report.Cleared, report.Passed)
+		say("negative model: %s", saved)
+		reasonTable(negative, 10)
+		doc["negative"] = map[string]any{
+			"path": saved, "taught": report, "reasons": negative.Reasons(), "stats": negative.Stats(),
+		}
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+// changesOf renders the edits of one correction for a table cell:
+// "e" -> "", "??" -> "?".
+func changesOf(changes []kit.Change, limit int) string {
+	parts := []string{}
+	for i, change := range changes {
+		if i >= limit {
+			parts = append(parts, fmt.Sprintf("+%d", len(changes)-limit))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s -> %s", quote(change.Wrong), quote(change.Right)))
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// fmtRate renders a share that may be unknown.
+func fmtRate(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.4f", *value)
+}
+
+// -- ChatGPT ------------------------------------------------------------------
+
+func chatgptUsage() {
+	fmt.Fprint(os.Stderr, `usage: radixnet-count [global options] chatgpt <action> [options]
+
+ChatGPT (or any OpenAI-compatible server) as the teacher, judge or reviewer.  Needs
+$OPENAI_API_KEY (or $OPENAI_API_KEY_FILE); $OPENAI_BASE_URL points at another server.
+
+actions:
+  models   which models the key may use (never fails)
+  ask      one completion of --prompt (--system, --temperature, --json-answer)
+`)
+}
+
+func cmdChatGPT(args []string) {
+	if len(args) == 0 {
+		chatgptUsage()
+		os.Exit(2)
+	}
+	action, rest := args[0], args[1:]
+	switch action {
+	case "models":
+		cmdChatGPTModels(rest)
+	case "ask":
+		cmdChatGPTAsk(rest)
+	case "help", "-h", "--help":
+		chatgptUsage()
+	default:
+		fail("unknown chatgpt action %q (models, ask)", action)
+	}
+}
+
+func cmdChatGPTModels(args []string) {
+	fs := flag.NewFlagSet("chatgpt models", flag.ExitOnError)
+	flags := addLLMFlags(fs, "chatgpt-model")
+	_ = fs.Parse(args)
+	configured := kit.ChatGPTConfigured()
+	doc := map[string]any{"configured": configured, "available": false, "models": []any{}, "error": nil}
+	if !configured {
+		doc["error"] = "no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE)"
+		say("configured  no (set OPENAI_API_KEY or OPENAI_API_KEY_FILE)")
+		if jsonMode {
+			emit(doc)
+		}
+		return
+	}
+	client := flags.client(kit.ProviderChatGPT)
+	doc["url"], doc["model"] = client.BaseURL(), client.ModelName()
+	models, err := client.Models()
+	say("chatgpt        %s", client.BaseURL())
+	say("default model  %s", client.ModelName())
+	if err != nil {
+		doc["error"] = err.Error()
+		say("error          %v", err)
+	} else {
+		doc["available"], doc["models"] = true, models
+		say("")
+		for _, model := range models {
+			name, _ := model["name"].(string)
+			say("  %s", name)
+		}
+	}
+	if jsonMode {
+		emit(doc)
+	}
+}
+
+func cmdChatGPTAsk(args []string) {
+	fs := flag.NewFlagSet("chatgpt ask", flag.ExitOnError)
+	flags := addLLMFlags(fs, "chatgpt-model")
+	prompt := fs.String("prompt", "", "what to ask (required)")
+	system := fs.String("system", "", "a system instruction")
+	temperature := fs.Float64("temperature", 0.7, "sampling temperature")
+	jsonAnswer := fs.Bool("json-answer", false, "ask for a JSON answer")
+	_ = fs.Parse(args)
+
+	if strings.TrimSpace(*prompt) == "" {
+		fail("-prompt is required")
+	}
+	if !kit.ChatGPTConfigured() {
+		fail("no OpenAI API key: set OPENAI_API_KEY (or OPENAI_API_KEY_FILE)")
+	}
+	client := flags.client(kit.ProviderChatGPT)
+	answer, err := client.Generate(*prompt, kit.LLMOptions{
+		System: *system, JSON: *jsonAnswer, Temperature: *temperature,
+	})
+	if err != nil {
+		fail("%v", err)
+	}
+	say("%s", answer)
+	if jsonMode {
+		emit(map[string]any{
+			"prompt": *prompt, "system": *system, "answer": answer,
+			"model": client.ModelName(), "url": client.BaseURL(),
+		})
+	}
+}

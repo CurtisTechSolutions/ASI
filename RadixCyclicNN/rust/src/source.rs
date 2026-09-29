@@ -1,5 +1,5 @@
 //! Streaming corpora: texts read part by part, ZIP archives entry by entry
-//! (`go/radixnet/source.go`, `go/radixnet/pipeline.go`, `radixnet/archive.py`).
+//! (`go/radixnet/source.go`, `go/radixnet/pipeline.go`, `../ModelKit/modelkit/archive.py`).
 //!
 //! A corpus is a file of lines, or an archive of such files - and an archive
 //! is **kept whole** (D-034): it is never unpacked to disk, and nothing holds
@@ -337,7 +337,7 @@ pub fn archive_record(path: &Path, workers: usize) -> Option<Json> {
     let name = path.file_name()?.to_string_lossy().into_owned();
     let modified = meta
         .modified()
-        .map(|t| crate::checkpoint::iso_time(t, 3))
+        .map(|t| crate::clock::iso_time(t, 3))
         .unwrap_or_default();
     let mut pairs = vec![
         ("name".to_string(), Json::str(name)),
@@ -401,7 +401,7 @@ pub struct FileSource {
 
 impl TextSource for FileSource {
     fn each(&self, emit: &mut dyn FnMut(String) -> ControlFlow<()>) -> Result<ControlFlow<()>, String> {
-        let content = crate::cli::read_file_text(&self.path.to_string_lossy())?;
+        let content = crate::file::read_file_text(&self.path.to_string_lossy())?;
         for text in split_texts(&content, &self.unit, self.page_lines) {
             if emit(text).is_break() {
                 return Ok(ControlFlow::Break(()));

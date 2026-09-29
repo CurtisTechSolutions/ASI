@@ -904,7 +904,7 @@ class GraphModel:
     def _walk_start(self, prefix: str, origin: int = START) -> tuple[int, int, str]:
         """Where a walk begins: at the end of ``prefix``, or - with no prefix - at the ``origin`` sentinel.
 
-        ``origin=THINK`` is a thought (:mod:`radixnet.thinking`): the same
+        ``origin=THINK`` is a thought (:mod:`modelkit.thinking`): the same
         search from the other sentinel, through the openings the model learned
         for its thoughts rather than for its texts.  A prefix wins over the
         origin, because a located prefix already says where the walk stands.
@@ -959,7 +959,7 @@ class GraphModel:
         what a walk is *ranked* by (``../SPEC-LeastPunished.md``).  ``top_k`` / ``top_p`` / ``min_p`` narrow what
         a sampled step draws from and ``diversity`` spreads the top beam out
         (``../SPEC-SearchAndTraining.md`` §1-2); each is off at its default.  ``origin=THINK`` with an empty
-        prefix walks a *thought* (:mod:`radixnet.thinking`)."""
+        prefix walks a *thought* (:mod:`modelkit.thinking`)."""
         graph = self.graph
         enc = self.encoding
         traversal = resolve_traversal(traversal)
@@ -1080,13 +1080,6 @@ class GraphModel:
             step_penalty=step_penalty, diversity=diversity, **walk_options,
         )
         return [_whole_text(result, prefix, self.encoding) for result in found.top]
-
-    def converse(self, opening: str = "", turns: int = 6, **options):
-        """The model converses with itself: two voices, each reply the prediction search picking up the end of
-        the previous line (:func:`radixnet.dialogue.converse`; ``partner=`` lets another model answer)."""
-        from .dialogue import converse
-
-        return converse(self, opening, turns, **options)
 
     def _edge_log_prob(self, p: int, offset: int, c: int) -> float | None:
         """``log P(c | p)`` for the edge ``p -> c`` taken from ``p``'s trigram at ``offset``.
@@ -1264,7 +1257,7 @@ class RadixNet(GraphModel):
         a punished text is not one to rehearse.
 
         ``origin`` is the sentinel every text's walk begins at: START, or
-        THINK to train the texts as *thoughts* (:mod:`radixnet.thinking`).
+        THINK to train the texts as *thoughts* (:mod:`modelkit.thinking`).
         """
         cfg = _resolve_config(config, overrides)
         if origin not in ORIGINS:

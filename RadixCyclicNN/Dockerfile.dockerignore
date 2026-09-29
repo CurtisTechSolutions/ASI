@@ -1,0 +1,27 @@
+# The build context is the repository root (docker-compose.yml, `docker build -f RadixCyclicNN/Dockerfile ..`):
+# keep it to the model and the kit, small and deterministic.  BuildKit reads this file because it sits
+# beside the Dockerfile and carries its name.
+*
+!RadixCyclicNN/
+!ModelKit/
+**/.git
+**/.gitignore
+**/.env
+**/*.log
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+ModelKit/frontend/node_modules/
+ModelKit/frontend/dist/
+ModelKit/go/
+ModelKit/rust/
+RadixCyclicNN/go/
+RadixCyclicNN/rust/
+RadixCyclicNN/checkpoints/
+RadixCyclicNN/*-checkpoints/
+RadixCyclicNN/model*.json
+RadixCyclicNN/model*.json.gz
+RadixCyclicNN/discriminator*.json
+RadixCyclicNN/discriminator*.json.gz
+RadixCyclicNN/Makefile
+RadixCyclicNN/docker-compose*.yml

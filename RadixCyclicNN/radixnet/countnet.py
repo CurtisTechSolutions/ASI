@@ -1159,7 +1159,7 @@ class CountRewardNet(GraphModel):
 
         The loss is the mean ``-log P`` of the transitions after the pass;
         ``lr`` / ``act_lr`` / ``batch_size`` in the config are ignored.
-        ``origin=THINK`` trains the texts as thoughts (:mod:`radixnet.thinking`).
+        ``origin=THINK`` trains the texts as thoughts (:mod:`modelkit.thinking`).
         """
         cfg = _resolve_config(config, overrides)
         return self._passes(

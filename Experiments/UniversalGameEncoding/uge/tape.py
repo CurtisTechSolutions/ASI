@@ -386,7 +386,7 @@ def trim_to_tokens(text: str) -> str:
     """Drop a trailing partial token.
 
     A *predicted* tape is cut wherever the search stopped emitting, which is
-    almost never a token boundary - :func:`radixnet.encoding.repair_base64` is
+    almost never a token boundary - :func:`modelkit.media.repair_base64` is
     the same job for the media formats.  Here the repair is one line, because
     the grid is fixed.
     """

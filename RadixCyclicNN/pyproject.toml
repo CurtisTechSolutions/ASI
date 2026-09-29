@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "radixnet"
 version = "0.1.0"
-description = "Self-compressing cyclic-graph neural network (Radix Tree inspired) with a sine activation, Dijkstra prediction, 2NRL and GAN-style self-upgrading. Pure Python, optional torch acceleration."
+description = "Self-compressing cyclic-graph neural network (Radix Tree inspired): the core model - the graph, its four kinds, the encodings, training, the searches and the model file. Pure Python, optional torch acceleration. The command line, the HTTP API, the frontend and the teaching loops built around it are the modelkit package (../ModelKit)."
 readme = "README.md"
 requires-python = ">=3.11"
 # Licensed under the custom source-available license in ../LICENSE (repository root).
@@ -13,15 +13,10 @@ dependencies = []
 
 [project.optional-dependencies]
 gpu = ["torch"]
-images = ["pillow"]
-diffusion = ["pillow", "torch", "diffusers"]
-# Speech to text; the waveform encoder itself needs nothing, and the browser's
-# Web Speech API (or --text) supplies the words without any of these.
-speech = ["faster-whisper"]
-whisper = ["openai-whisper"]
 
 [project.scripts]
-radixnet = "radixnet.cli:main"
+# the command line is modelkit's (../ModelKit): install that package too, or keep its checkout beside this one
+radixnet = "radixnet.__main__:main"
 
 [tool.setuptools]
 packages = ["radixnet"]

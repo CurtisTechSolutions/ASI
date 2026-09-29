@@ -9,8 +9,8 @@ import (
 	"github.com/CurtisTechSolutions/ASI/PhoneticTokenizer/go/phonetok"
 )
 
-// The acoustic unit (D-082): a recording is heard as a text of learned units, a
-// model learns from such texts alone, and is heard back through the vocoder.
+// The acoustic unit (D-082): a recording is heard as a text of learned units, and
+// a model learns from such texts alone.
 func TestAcousticUnit(t *testing.T) {
 	enc, err := ParseEncoding("acoustic:3:1")
 	if err != nil || enc.Unit != Acoustic || enc.N != 3 {
@@ -97,33 +97,7 @@ func TestAcousticUnit(t *testing.T) {
 			}
 		}
 	}
-	// and is heard back
-	seed := int64(1)
-	var said []string
-	pcm := 0
-	err = m.SpeakWalks(SpeakOptions{Count: 2, MaxLength: 30, Temperature: 1, Seed: &seed, Rate: 8000, Pitch: 120, Tempo: 1, Gain: 0.5},
-		func(chunk []byte) { pcm += len(chunk) },
-		func(i int, text, spelled string) {
-			said = append(said, text)
-			if spelled != text {
-				t.Errorf("spelled %q for %q", spelled, text)
-			}
-		})
-	if err != nil || len(said) != 2 || pcm < 16000 {
-		t.Fatalf("%v: %d utterances, %d bytes", err, len(said), pcm)
-	}
-	for _, u := range strings.Fields(said[0]) {
-		if !strings.HasPrefix(u, "q") {
-			t.Fatalf("said %q", said[0])
-		}
-	}
-	sp, err := NewSpeaker(enc, 8000, 120, 1, 0.5)
-	if err != nil || sp.Rate != 16000 {
-		t.Fatalf("%v rate %d", err, sp.Rate)
-	}
-	if len(sp.Feed("q2 q28")) == 0 || len(sp.End()) == 0 || strings.Join(sp.Tokens, " ") != "q2 q28 </s>" {
-		t.Errorf("the speaker: %v", sp.Tokens)
-	}
+	// and is heard at the codebook's rate
 	if r, _ := OutputRate(enc, 8000); r != 16000 {
 		t.Errorf("output rate %d", r)
 	}

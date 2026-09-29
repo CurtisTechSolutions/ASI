@@ -1019,9 +1019,9 @@ func (m *Model) bestNodeWithPrefix(prefix string) (int, bool) {
 	return best, best >= 0
 }
 
-// prefixStart is (node, offset, lead): where the prefix ends and the unmatched
+// PrefixStart is (node, offset, lead): where the prefix ends and the unmatched
 // remainder of the located gram, which every predicted path starts with.
-func (m *Model) prefixStart(prefix string) (int, int, string) {
+func (m *Model) PrefixStart(prefix string) (int, int, string) {
 	node, offset, matched := m.locate(prefix)
 	lead := ""
 	if node != Start && matched < m.G.Enc.N {
@@ -1042,7 +1042,7 @@ func (m *Model) walkStart(prefix string, origin int) (int, int, string, error) {
 	if prefix == "" && origin != Start {
 		return origin, 0, "", nil
 	}
-	node, offset, lead := m.prefixStart(prefix)
+	node, offset, lead := m.PrefixStart(prefix)
 	return node, offset, lead, nil
 }
 
@@ -1177,6 +1177,18 @@ func (w walkCosts) resolve(g *Graph) (CostFn, error) {
 // orders exactly as the reward one does, so it reads as ByReward here.
 func (w walkCosts) ranking() (Traversal, error) {
 	return ParseTraversal(w.Traversal)
+}
+
+// Search is the prediction engine behind Predict and Generate, for what is
+// built on the model - a conversation, a thought: prefix continued by mode
+// ("beam" or "sample") through the model's own distribution, a walk with no
+// prefix beginning at origin - Start, or Think for a thought.  rng is a private
+// generator for a sampled walk (nil draws from the model's own); lengths are
+// counted in the encoding's units.
+func (m *Model) Search(prefix string, length int, mode string, k, beam int, stepPenalty, temperature float64, toEnd bool, maxLength int, rng *MT19937, origin int) (*Prediction, error) {
+	walk := rewardWalk
+	walk.Origin = origin
+	return m.search(prefix, length, mode, k, beam, stepPenalty, temperature, toEnd, maxLength, rng, walk)
 }
 
 // search is the prediction engine shared by Predict, Generate and Converse.

@@ -480,6 +480,15 @@ pub fn queue(value: &Json) -> VecDeque<&Json> {
     value.as_array().iter().collect()
 }
 
+/// Sets `key` in a record: replaced where it already is, else added at the
+/// end - `dict.update`, which keeps an existing key's place.
+pub fn set(record: &mut Vec<(String, Json)>, key: &str, value: Json) {
+    match record.iter_mut().find(|(k, _)| k == key) {
+        Some(slot) => slot.1 = value,
+        None => record.push((key.to_string(), value)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

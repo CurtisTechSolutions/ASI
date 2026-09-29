@@ -1,19 +1,24 @@
 # tests
 
-The RadixCyclicNN test suite. Plain `unittest`, no plugins — everything a test
-needs it builds.
+The core model's test suite: the graph, the four kinds, the encodings,
+training, the searches and the model file. Plain `unittest`, no plugins —
+everything a test needs it builds. Everything built around the model — the
+command line, the HTTP API, the teaching loops, the LLM clients, the agent,
+speech, images and voice, MCP, and the Go and Rust parity suites — is tested
+with the kit, in `../../ModelKit/tests`.
 
 ## Running them
 
 ```bash
 cd ..
-make test                                     # the whole suite
+make test-core                                # this suite (make test runs it, then the kit's)
 python3 -m unittest tests.test_graph -v       # one module
-make go-test                                  # the Go side: cd go && go test -race ./...
+make go-test                                  # the Go side: the core module, then the kit's
 ```
 
-`make test` includes the cross-language parity test when `go` is on `PATH`, and
-skips it when it is not.
+Nothing here imports `modelkit`: the suite passes with the kit refused at
+import time, which is how the split between the two packages was checked, and
+`../../ModelKit/tests/test_layers.py` keeps it that way.
 
 ## Layout
 
@@ -23,38 +28,27 @@ A few cover a behaviour rather than a module:
 | file | covers |
 |---|---|
 | `__init__.py` | puts the project root on `sys.path` so `radixnet` imports from a checkout |
-| `test_attention.py` | the **attention band** (`../radixnet/attention.py`, `../SPEC-AttentionBand.md`): the band's shape; the rule's three properties (one charge per changed unit, a whole text left alone, a unit one gram sees charged to it in full) over eight encodings; the charged steps; both kinds' corrections under the band, and off to the bit; the file block; the refusals; the CLI and the HTTP API |
-| `test_window.py` | the **dynamic window** (`../radixnet/window.py`, `../SPEC-DynamicWindow.md`): the ladder and what it refuses; `ABCD` into `AB` and `CD` under a grouping encoding, into `ABC` and `BCD` under the trigram; a node halved at its middle gram until it fits, never below one gram; the halves' same data and the heavy connection in every kind's currency; compression stopping at the window and the top regrowing what stayed unary; the automatic step on every kind; the file block; off to the bit; the CLI and the HTTP API |
-| `test_go_parity.py` | **the cross-language contract.** Trains the same corpus on both implementations and compares structure, counts, rewards, window, RNG state, predictions, generated texts, scores and conversations; blames the same failures and corrections and compares the verdicts character for character; and has each side read the other's model files. Skipped when `go` is not on `PATH`, and when `go build` of the CLI fails.; **talking by voice** (D-089): `speech talk` hears, learns, answers and speaks the same on both sides, and the Go server's `/api/voice` routes answer the Voice tab |
-| `test_guard.py` | what the negative network stops on the way out, on every answer path |
-| `test_feedback.py` | ratings and the 2NRL phases they drive |
-| `test_api_uploads.py` | uploads through the API, including ZIP archives kept as one entry and unpacked behind the scenes |
-| `test_penalty.py` | the **punishment traversal** (`../radixnet/penalty.py`): the merit / penalty split per model kind, that the rewards really do leave the score, that the cheapest path is the least punished one, and the option's way through every search mode, the CLI and the HTTP API |
-| `test_phonetic.py` | the **phonetic units** (`../PhoneticTokenizer`, D-080): the text read as sounds, a label cut into the units it was made of, a prefix matched by its sounds, a prediction spelled back into words; skipped when the tokenizer is not importable |
-| `test_voice.py` | the **voice** (D-081): a walk reports every step and its END sentinel, and is heard as it goes; words and letters are read through the tokenizer; the `speak` command writes a WAV; the **output decoder** (D-088): `say` speaks any text in the model's units, one utterance each, the streaming form makes the same bytes, a walk heard as it walks and its text said afterwards are the same audio, what a text spells; the `say` command (texts, `--data`), `--speak FILE` on `predict` and `generate`, and `speech decode` speaking a text that is not a waveform |
-| `test_voicechat.py` | **talking with the model by voice** (D-089): one turn on the module alone - heard (the transcript and the waveform behind one token; a model of acoustic units' units), trained before the reply, answered by the model with the conversation heard, spoken as audio events that reassemble to what the decoder says, typed lines, nobody answering, Ollama answering for the model (a fake Ollama), taught to the model, `auto` asking Ollama only when the model has nothing to say, an unreachable Ollama recorded not raised, a model of sounds and one of units, the small parts - then over the API whole and streamed, the refusals, and `speech talk` on the command line with a conversation file |
-| `test_acoustic_units.py` | the **acoustic unit** (D-082): a recording is heard as a text of learned units, a model is trained on such texts alone, saved and loaded, and spoken back through the vocoder; `train --data *.wav` and `speak` on the command line; `say` over units through the vocoder, polished (Griffin-Lim, the same length) or not, refusing a token that is not a unit, on the library and the command line |
-| `test_search_training.py` | the **search and training methods** (`../SPEC-SearchAndTraining.md`): the sampling filters, the diverse beam, the keys (pinned - Go and Rust assert the same numbers), the curriculum, the replay buffer and early stopping on every kind that learns by walking texts, the rule that a feedback pass never touches the buffer, and the settings through the HTTP API and the CLI; reading backwards (`reverse`) on every kind and both units - a reversed run is a run over the reversed texts - with an upload trained on backwards over HTTP and a file with `train --reverse` |
-| `test_rust_parity_methods.py` | the same methods against the Rust port: eight training plans on three kinds (two read backwards), held to Python's graph, history and `replay` block byte for byte; the filters and the diverse beam, text for text; the server's 400s and a planned run over HTTP (`test_go_parity.py::TestGoSearchAndTraining` does the same for Go) |
-| `test_rust_parity_media.py` | images and speech as text, the recall tutor and the media routes against the Rust port; **talking by voice** (D-089, `TestRustVoiceParity`): `speech talk` hears, learns, answers and speaks the same as Python's, and the voice routes answer as Python's turn does - whole, from a raw or multipart recording, streamed, refused alike |
+| `test_attention.py` | the **attention band** (`../radixnet/attention.py`, `../SPEC-AttentionBand.md`): the band's shape; the rule's three properties (one charge per changed unit, a whole text left alone, a unit one gram sees charged to it in full) over eight encodings; the charged steps; both kinds' corrections under the band, and off to the bit; the file block; the refusals (the CLI and the HTTP API: the kit's `test_attention.py`) |
+| `test_window.py` | the **dynamic window** (`../radixnet/window.py`, `../SPEC-DynamicWindow.md`): the ladder and what it refuses; `ABCD` into `AB` and `CD` under a grouping encoding, into `ABC` and `BCD` under the trigram; a node halved at its middle gram until it fits, never below one gram; the halves' same data and the heavy connection in every kind's currency; compression stopping at the window and the top regrowing what stayed unary; the automatic step on every kind; the file block; off to the bit (the CLI and the HTTP API: the kit's `test_window.py`) |
+| `test_penalty.py` | the **punishment traversal** (`../radixnet/penalty.py`): the merit / penalty split per model kind, that the rewards really do leave the score, that the cheapest path is the least punished one, and the option's way through every search mode (the CLI and the HTTP API: the kit's `test_penalty.py`) |
+| `test_phonetic.py` | the **phonetic units** (`../../PhoneticTokenizer`, D-080): the text read as sounds, a label cut into the units it was made of, a prefix matched by its sounds, a prediction spelled back into words; skipped when the tokenizer is not importable |
+| `test_acoustic_units.py` | the **acoustic unit** (D-082): a recording is heard as a text of learned units, and a model is trained on such texts alone, saved and loaded (spoken back through the vocoder, `say` and the command line: the kit's `test_acoustic_units.py`); skipped when the tokenizer is not importable |
+| `test_search_training.py` | the **search and training methods** (`../SPEC-SearchAndTraining.md`): the sampling filters, the diverse beam, the keys (pinned - Go and Rust assert the same numbers), the curriculum, the replay buffer and early stopping on every kind that learns by walking texts, the rule that a feedback pass never touches the buffer; reading backwards (`reverse`) on every kind and both units - a reversed run is a run over the reversed texts (the settings through the HTTP API and the CLI: the kit's `test_search_training.py`) |
 
-Six modules have no file of their own, and are exercised through the callers
-that use them:
+Three core modules have no file of their own, and are exercised through the
+callers that use them:
 
 | module | tested by |
 |---|---|
-| `archive.py` | `test_api_uploads.py` |
 | `beam.py` | `test_model.py`, `test_countnet.py`, `test_resonance.py` |
-| `diff.py` | `test_countnet.py` |
-| `llm.py` | `test_chatgpt.py`, `test_tutor.py` |
+| `diff.py` | `test_countnet.py`, `test_attention.py` |
 | `metacog.py` | `test_resonance.py` |
-| `phasesearch.py` | `test_resonance.py` |
+
+`phasesearch.py` is covered by `test_resonance.py` too.
 
 ## Conventions
 
-* **Nothing external is contacted.** The LLM clients (`ollama`, `chatgpt`,
-  `llm`), the browser and the web tools are exercised against fake servers
-  built on `http.server` and run on localhost for the duration of a test.
-* **Seeded.** Anything random takes a seed, and the parity suite depends on the
-  Mersenne Twister state being identical on both sides.
+* **Nothing external is contacted.**
+* **Seeded.** Anything random takes a seed, and the parity suites (in the kit)
+  depend on the Mersenne Twister state being identical in every port.
 * **`torch` is optional.** `test_backend_torch.py` skips when it is absent.

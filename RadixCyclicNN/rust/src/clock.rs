@@ -5,6 +5,9 @@
 //! `2026-09-20T01:23:45+00:00` - so the three implementations' files look the
 //! same to anything that reads the field.  The standard library has no calendar,
 //! so this is the civil-from-days algorithm, which is twenty lines.
+//!
+//! [`iso_time`] is the same stamp to a fraction of the second, for the times
+//! a checkpoint index and an archive listing record.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,6 +31,19 @@ pub fn iso8601(unix_seconds: i64) -> String {
         (secs / 60) % 60,
         secs % 60
     )
+}
+
+/// An ISO-8601 UTC time with `digits` fractional digits of the second
+/// (`isoformat(timespec="microseconds")` is 6, `"milliseconds"` 3).
+pub fn iso_time(time: SystemTime, digits: usize) -> String {
+    let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let whole = iso8601(since.as_secs() as i64);
+    let fraction = format!("{:09}", since.subsec_nanos());
+    let cut = digits.min(9);
+    match whole.strip_suffix("+00:00") {
+        Some(head) if cut > 0 => format!("{head}.{}+00:00", &fraction[..cut]),
+        _ => whole,
+    }
 }
 
 /// Howard Hinnant's `civil_from_days`: a day count since 1970-01-01 as a date.
@@ -56,5 +72,13 @@ mod tests {
         assert_eq!(iso8601(1_788_000_000), "2026-08-29T10:40:00+00:00");
         assert_eq!(iso8601(951_782_400), "2000-02-29T00:00:00+00:00"); // a leap day
         assert_eq!(utc_now().len(), "1970-01-01T00:00:00+00:00".len());
+    }
+
+    #[test]
+    fn a_time_to_a_fraction_of_the_second() {
+        let t = UNIX_EPOCH + std::time::Duration::new(1_000_000_000, 123_456_789);
+        assert_eq!(iso_time(t, 6), "2001-09-09T01:46:40.123456+00:00");
+        assert_eq!(iso_time(t, 3), "2001-09-09T01:46:40.123+00:00");
+        assert_eq!(iso_time(t, 0), "2001-09-09T01:46:40+00:00");
     }
 }
