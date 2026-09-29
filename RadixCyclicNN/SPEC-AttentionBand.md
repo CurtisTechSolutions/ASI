@@ -167,7 +167,7 @@ an error from the CLI.
 | test | pins |
 |---|---|
 | `tests/test_attention.py` | the band's shape; `spread`'s three properties; off is `_steps_over`; compressed nodes capped; the centre takes most of the penalty and the whole verdict; `keep` tops up a partial charge; a word model blames END; the negative network blamed by share; off is the old file to the bit; the file block; the refusals; the CLI; the API |
-| `go/radixnet/attention_test.go`, `go/server/attention_test.go` | the same, in Go |
+| `go/radixnet/attention_test.go`, `../ModelKit/go/server/attention_test.go` | the same, in Go |
 | `rust/src/attention.rs` (unit tests) | the same, in Rust |
 | `../ModelKit/frontend/test/attention.test.mjs` | the frontend's band: the same doubles |
 | `../ModelKit/tests/test_go_parity.py` | Go against Python: the same previews, the same rewards to the bit, the same paths, the same blame; a word model with and without the band |

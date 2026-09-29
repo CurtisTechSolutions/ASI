@@ -1,7 +1,7 @@
 # server (Go)
 
 `package server` — the HTTP API of the Go count / reward model. **The same JSON
-contract as the Python server** (`../../DESIGN.md` §12) for everything the count
+contract as the Python server** (`../../../RadixCyclicNN/DESIGN.md` §12) for everything the count
 model supports, so the prebuilt React frontend in `../../frontend/dist` runs
 against it unchanged.
 
@@ -30,12 +30,15 @@ Tests sit beside the code: `server_test.go` plus one `*_test.go` per area, and
 
 ## Running it
 
-From `../..`:
+From `../..` (the kit, whose `frontend/dist` it serves):
 
 ```bash
-make go-serve                                  # builds, then serves on HOST:PORT
+make go-build
 go/bin/radixnet-count --model model.count.json serve
 ```
+
+Or from `../../../RadixCyclicNN`, `make go-serve` (builds, then serves on
+HOST:PORT).
 
 Then open the address it prints — the same page the Python server serves.
 

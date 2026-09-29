@@ -2,12 +2,15 @@
 
 A Go port of the **count / reward model** (`CountRewardNet`) and of the
 **negative network**. A standalone module — the Python implementation in
-`../radixnet/` stays exactly as it is.
+`../radixnet/` stays exactly as it is. Everything built on the model — the
+tutors, the tools, the LLM clients, the conversation, the HTTP server and the
+`radixnet-count` CLI — is the kit's Go module, `../../ModelKit/go`, which
+requires this one; nothing here imports it.
 
 **Model files are interchangeable.** Both sides read and write the
 `radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
 Twister state, so a model trained here continues in Python and vice versa with
-identical numbers. `../tests/test_go_parity.py` enforces that in both directions.
+identical numbers. `../../ModelKit/tests/test_go_parity.py` enforces that in both directions.
 That holds in every encoding: a model built with anything but the character
 trigram says so in its file, and the Python implementation reads it.
 
@@ -15,10 +18,10 @@ trigram says so in its file, and the Python implementation reads it.
 a choice, fixed when a model is created and carried in its file:
 
 ```bash
-go/bin/radixnet-count --model m.json --ngram 5 train --data book.txt              # 5-character sliding window
-go/bin/radixnet-count --model m.json --ngram 4 --stride 4 train --data book.txt   # groups of four letters
-go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt    # word bigrams
-go/bin/radixnet-count --model m.json --encoding word:3:1 train --data book.txt    # word trigrams
+../ModelKit/go/bin/radixnet-count --model m.json --ngram 5 train --data book.txt              # 5-character sliding window
+../ModelKit/go/bin/radixnet-count --model m.json --ngram 4 --stride 4 train --data book.txt   # groups of four letters
+../ModelKit/go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt    # word bigrams
+../ModelKit/go/bin/radixnet-count --model m.json --encoding word:3:1 train --data book.txt    # word trigrams
 ```
 
 `--units char|word` says what one unit is, `--ngram N` how many units a gram
@@ -37,30 +40,36 @@ split or a merge) takes a write lock.
 
 | directory | what it is |
 |---|---|
-| `radixnet/` | the library — the graph, the model, the negative network, the tutors, the tools, the LLM clients, the MCP server (`mcp.go`) and today's format (`assistant.go`) |
-| `server/` | the HTTP API — the same JSON contract as the Python server, so the prebuilt React frontend runs unchanged against it |
-| `cmd/radixnet-count/` | the CLI binary |
-| `go.mod` | the module — `github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, **no dependencies** |
+| `radixnet/` | the library — the graph, the model, the encodings, training, the searches and the negative network |
+| `go.mod` | the module — `github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go`, Go 1.24, no third-party dependencies (the phonetic tokenizer beside it) |
+
+The kit's module (`../../ModelKit/go`) holds the rest: `kit/` (the tutors, the
+tools, the LLM clients, the MCP server and today's format), `server/` (the HTTP
+API — the same JSON contract as the Python server, so the prebuilt React
+frontend runs unchanged against it) and `cmd/radixnet-count/` (the CLI binary).
 
 ## Building and running
 
 From `..`:
 
 ```bash
-make go-build                                   # -> go/bin/radixnet-count (needs Go 1.24+)
-make go-test                                    # cd go && go test -race ./...
+make go-build                                   # -> ../ModelKit/go/bin/radixnet-count (needs Go 1.24+)
+make go-test                                    # go test -race ./... here, then in ../ModelKit/go
 
-go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.txt --epochs 5
-go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
-go/bin/radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
-go/bin/radixnet-count --kind word words --limit 20            # the alphabet it has read
-go/bin/radixnet-count --model model.count.json serve          # the API and the frontend
-go/bin/radixnet-count --model model.count.json mcp            # MCP on stdin / stdout, for any client
+../ModelKit/go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.txt --epochs 5
+../ModelKit/go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
+../ModelKit/go/bin/radixnet-count --kind word train --data data/sample_corpus.txt --epochs 5   # -> model.word.json
+../ModelKit/go/bin/radixnet-count --kind word words --limit 20            # the alphabet it has read
+../ModelKit/go/bin/radixnet-count --model model.count.json serve --frontend-dir ../ModelKit/frontend/dist   # the API and the frontend
+../ModelKit/go/bin/radixnet-count --model model.count.json mcp            # MCP on stdin / stdout, for any client
 python -m radixnet --model model.count.json info              # the Python side reads the same file
 ```
 
-`go/bin/` is ignored by git; the checked-in `cmd/radixnet-count/radixnet-count`
-is a prebuilt binary for convenience.
+`../ModelKit/go/bin/` is ignored by git; the checked-in
+`../ModelKit/go/cmd/radixnet-count/radixnet-count` is a prebuilt binary for
+convenience. `serve` looks for the frontend at `frontend/dist` under the working
+directory, so from here pass `--frontend-dir ../ModelKit/frontend/dist` (`make
+go-serve` does).
 
 `../README.md` § *Go implementation of the count / reward model* lists every
 command and every global flag, and says where the goroutines go.
@@ -74,8 +83,9 @@ server answers `POST /v1/chat/completions` (OpenAI's dialect) and `POST
 /v1/messages` (Anthropic's), streamed with `stream: true`, with `GET
 /v1/models` and `POST /v1/messages/count_tokens` beside them.  The same
 documents as the Python server's, held to them by
-`../tests/test_go_parity.py::TestGoAssistantParity`; `radixnet/assistant.go`,
-`server/assistant.go`, `cmd/radixnet-count/talk.go`.
+`../../ModelKit/tests/test_go_parity.py::TestGoAssistantParity`;
+`../../ModelKit/go/kit/assistant.go`, `../../ModelKit/go/server/assistant.go`,
+`../../ModelKit/go/cmd/radixnet-count/talk.go`.
 
 ## Search and training methods
 
@@ -84,7 +94,7 @@ step draws from) and `--diversity` (the beam's K picked apart); `train` takes
 `--order`, `--curriculum`, `--replay`, `--replay-size`, `--patience` and
 `--min-delta`, and the model keeps its replay buffer at the end of its file.
 The HTTP server takes the same names.  All off by default, and held to Python's
-graph, history and buffer by `../tests/test_go_parity.py::TestGoSearchAndTraining`
+graph, history and buffer by `../../ModelKit/tests/test_go_parity.py::TestGoSearchAndTraining`
 (`../SPEC-SearchAndTraining.md`; `radixnet/training.go`).  A streaming source
 is read into memory when a run asks for an order, a curriculum or replay.
 
@@ -103,7 +113,7 @@ ranked by the **blame** on its worst step before its cost, and at every node it
 may only take the children the model has the least against
 (`../SPEC-LeastPunished.md`).  Where nothing has been punished it is the
 ordinary search, to the bit.  Python and the Rust port have it too, and
-`../tests/test_go_parity.py` holds this one to Python's answers under it -
+`../../ModelKit/tests/test_go_parity.py` holds this one to Python's answers under it -
 the same continuations, the same costs and the same punishment per path.  `--workers 1` also runs the two beams of a
 prediction in turn rather than side by side, so a one-worker run means the same
 thing here as it does in the Rust port (`../rust/`), which the cross-language

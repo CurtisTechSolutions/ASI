@@ -1,8 +1,9 @@
 # cmd
 
 The commands of this module, one directory per binary — the standard Go layout.
-Everything importable lives in `../radixnet/` and `../server/`; nothing in here
-is imported by anything else.
+Everything importable lives in `../kit/` and `../server/`, over the model in
+`../../../RadixCyclicNN/go/radixnet/`; nothing in here is imported by anything
+else.
 
 | directory | binary |
 |---|---|

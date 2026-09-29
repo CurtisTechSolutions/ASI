@@ -659,7 +659,7 @@ One **round** is:
    ```bash
    python -m radixnet correct --wrong "the cat sit on the mat" --right "the cat sits on the mat"
    python -m radixnet correct --wrong "he go to school" --right "he goes to school" --dry-run
-   go/bin/radixnet-count correct --wrong "a apple a day" --right "an apple a day" --keep 0
+   ../ModelKit/go/bin/radixnet-count correct --wrong "a apple a day" --right "an apple a day" --keep 0
    ```
 
    Which steps answer for a changed character is the **attention band**'s to
@@ -722,7 +722,7 @@ cheapest path and the sampler all see the context-aware costs.
 ```bash
 python -m radixnet --model model.count.json paths --limit 20   # the judged steps and their counters
 python -m radixnet --model model.count.json weights --path-scale 0   # ignore the path counters
-go/bin/radixnet-count --model model.count.json paths
+../ModelKit/go/bin/radixnet-count --model model.count.json paths
 curl localhost:8000/api/paths?limit=20
 ```
 
@@ -757,7 +757,7 @@ often than everything arriving at it adds up to.
 ```bash
 python -m radixnet --model model.count.json nodes --limit 10        # the most visited nodes
 python -m radixnet --model model.count.json nodes --node "at "      # one node, by label or by a trigram it holds
-go/bin/radixnet-count --model model.count.json nodes --node "at "
+../ModelKit/go/bin/radixnet-count --model model.count.json nodes --node "at "
 curl 'localhost:8000/api/nodes?node=at%20'
 ```
 
@@ -1203,7 +1203,7 @@ python -m radixnet mcp --browser                 # browsing in a real Chrome
 make go-mcp                                      # the Go server, same protocol
 ```
 
-The **Go port speaks it too** (`go/radixnet/mcp.go`, `radixnet-count mcp`): the
+The **Go port speaks it too** (`../ModelKit/go/kit/mcp.go`, `radixnet-count mcp`): the
 same protocol revision, the same tool names and schemas, and the same answers
 down to the error text, so a client cannot tell which one it is connected to.
 It offers `radixnet_solve` only when an LLM is reachable, and `radixnet_judge`
@@ -1215,7 +1215,7 @@ Point a client at either the usual way:
 
 ```json
 {"mcpServers": {"radixnet": {"command": "python", "args": ["-m", "radixnet", "--model", "model.json", "mcp"]}}}
-{"mcpServers": {"radixnet": {"command": "go/bin/radixnet-count", "args": ["--model", "model.count.json", "mcp"]}}}
+{"mcpServers": {"radixnet": {"command": "../ModelKit/go/bin/radixnet-count", "args": ["--model", "model.count.json", "mcp"]}}}
 ```
 
 MCP is JSON-RPC 2.0 over a stream, so this is the standard library and nothing
@@ -1508,7 +1508,7 @@ radixnet feedback --bad-text  "the cat ate the rat"    --strength 4   # correct 
 radixnet predict --prefix "the cat" --length 16        # " sat on the mat" - it follows the reward
 radixnet predict --prefix "the cat" --length 16 \
     --traversal punishment --merit-scale 0             # " on the mat"     - it only avoids the penalty
-go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal punishment
+../ModelKit/go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal punishment
 ```
 
 At the fork after `the cat`, with one branch praised, one corrected and one
@@ -2343,7 +2343,7 @@ epochs while the structure is unchanged.
 
 Three dials decide how a text becomes the grams the graph is built from, fixed
 when a model is created and carried in its file.  **Both implementations have
-them** (`python -m radixnet` and `go/bin/radixnet-count` take the same flags,
+them** (`python -m radixnet` and `../ModelKit/go/bin/radixnet-count` take the same flags,
 build the same graph and read each other's files):
 
 | flag | what it sets | default |
@@ -2364,8 +2364,8 @@ python -m radixnet --model m.json --encoding char:5:groups train --data book.txt
 python -m radixnet --model m.json --encoding word:2:1 train --data book.txt   # word bigrams
 python -m radixnet --model m.json --encoding word:3:1 train --data book.txt   # word trigrams
 
-go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt   # the same dial in Go
-go/bin/radixnet-count --model m.json predict --prefix "the cat sat" --k 5        # ... and the same file
+../ModelKit/go/bin/radixnet-count --model m.json --encoding word:2:1 train --data book.txt   # the same dial in Go
+../ModelKit/go/bin/radixnet-count --model m.json predict --prefix "the cat sat" --k 5        # ... and the same file
 
 python -m radixnet --model s.json --encoding phone:3:1 train --data book.txt   # trigrams of sounds
 python -m radixnet --model s.json predict --prefix "the cat sat" --k 5         # ... spelled back into words
@@ -2596,7 +2596,7 @@ of a text have one gram each seeing a unit, which takes all of it as before.
 python -m radixnet --model model.count.json attention            # show it
 python -m radixnet --model model.count.json attention --on       # on, at blur 0.5
 python -m radixnet --model model.count.json attention --off      # the writer rule again
-go/bin/radixnet-count --model model.count.json attention --blur 0.3
+../ModelKit/go/bin/radixnet-count --model model.count.json attention --blur 0.3
 rust/target/release/radixnet --model model.count.json attention --blur 0.3
 ```
 
@@ -2648,7 +2648,7 @@ python -m radixnet --model model.json window --manual --step 4       # by hand: 
 python -m radixnet --model model.json window --step                  # at 32 again: what stayed unary merges back
 python -m radixnet --model model.json window                         # show it
 python -m radixnet --model model.json window --off                   # compression is unbounded again
-go/bin/radixnet-count --model model.count.json window --on --top 16 --floor 4
+../ModelKit/go/bin/radixnet-count --model model.count.json window --on --top 16 --floor 4
 rust/target/release/radixnet --model model.count.json window --step 2
 ```
 
@@ -2664,7 +2664,7 @@ the specification and `DECISIONS.md` D-087 the reasoning.
 
 `go/` holds a Go port of the count / reward model (`CountRewardNet`) **and of
 the negative network**, a standalone module with a library (`go/radixnet`) and
-a CLI (`go/cmd/radixnet-count`); the Python implementation stays as it is.
+a CLI (`../ModelKit/go/cmd/radixnet-count`); the Python implementation stays as it is.
 Model files are interchangeable: both sides read and write the
 `radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
 Twister state, so a model trained on one side continues on the other with
@@ -2675,34 +2675,34 @@ compares the verdicts character for character, and lets each side read the
 other's files).
 
 ```bash
-make go-build                                   # -> go/bin/radixnet-count (needs Go 1.24+)
-go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.txt --epochs 5
-go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
-go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal punishment   # the least punished way on
-go/bin/radixnet-count --model model.count.json generate --mode beam --count 5
-go/bin/radixnet-count --model model.count.json converse --opening "the cat sat on the mat"
-go/bin/radixnet-count --model model.count.json chat --conversations 2 --topic animals   # an LLM talks to it and marks it
-go/bin/radixnet-count --model model.count.json tutor --topic "everyday life" --rounds 3   # Ollama teaches it English
-go/bin/radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame    # ... and blames what it marks down
-go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
-go/bin/radixnet-count --model model.count.json negative why --text "the the the the cat"
-go/bin/radixnet-count --model model.count.json negative filter --count 3   # the pair: write, then veto
-go/bin/radixnet-count --model model.count.json generate --count 3          # ... and the same pair on every answer
-go/bin/radixnet-count --model model.count.json negative auto --rounds 5 --blame   # Ollama reviews, the failures are blamed
-go/bin/radixnet-count --model model.count.json codegen --problems problems.txt --phase teacher   # write programs, run them, learn
-go/bin/radixnet-count tools call --tool calculator --arg 'expression=2*(3+4)'   # the tools the network can call
-go/bin/radixnet-count --model model.count.json agent --tasks tasks.txt          # it browses, an LLM judges, 2NRL follows
-go/bin/radixnet-count --model model.count.json explore --steps 0               # ... and picks its own tasks, until Ctrl-C
-go/bin/radixnet-count --model model.count.json evolve --data data/sample_corpus.txt --generations 0   # until Ctrl-C
-go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
-go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the cat sat on the mat" --train
-go/bin/radixnet-count --model model.count.json speech tutor clip.wav --length 400 --blame   # does it remember?
-go/bin/radixnet-count --model model.count.json image encode photo.png --size 128 --train
-go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished  # walk by the blame
-go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
-go/bin/radixnet-count --model five.json --ngram 5 --stride 5 train --data book.txt   # groups of five letters
-go/bin/radixnet-count --model words.json --encoding word:2:1 train --data book.txt   # word bigrams
-go/bin/radixnet-count --model words.json predict --prefix "the cat sat" --k 5        # ... predicted in words
+make go-build                                   # -> ../ModelKit/go/bin/radixnet-count (needs Go 1.24+)
+../ModelKit/go/bin/radixnet-count --model model.count.json train --data data/sample_corpus.txt --epochs 5
+../ModelKit/go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --k 5
+../ModelKit/go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal punishment   # the least punished way on
+../ModelKit/go/bin/radixnet-count --model model.count.json generate --mode beam --count 5
+../ModelKit/go/bin/radixnet-count --model model.count.json converse --opening "the cat sat on the mat"
+../ModelKit/go/bin/radixnet-count --model model.count.json chat --conversations 2 --topic animals   # an LLM talks to it and marks it
+../ModelKit/go/bin/radixnet-count --model model.count.json tutor --topic "everyday life" --rounds 3   # Ollama teaches it English
+../ModelKit/go/bin/radixnet-count --model model.count.json tutor --topic animals --rounds 3 --blame    # ... and blames what it marks down
+../ModelKit/go/bin/radixnet-count --model model.count.json train --data book.txt --split paragraphs --workers 8
+../ModelKit/go/bin/radixnet-count --model model.count.json negative why --text "the the the the cat"
+../ModelKit/go/bin/radixnet-count --model model.count.json negative filter --count 3   # the pair: write, then veto
+../ModelKit/go/bin/radixnet-count --model model.count.json generate --count 3          # ... and the same pair on every answer
+../ModelKit/go/bin/radixnet-count --model model.count.json negative auto --rounds 5 --blame   # Ollama reviews, the failures are blamed
+../ModelKit/go/bin/radixnet-count --model model.count.json codegen --problems problems.txt --phase teacher   # write programs, run them, learn
+../ModelKit/go/bin/radixnet-count tools call --tool calculator --arg 'expression=2*(3+4)'   # the tools the network can call
+../ModelKit/go/bin/radixnet-count --model model.count.json agent --tasks tasks.txt          # it browses, an LLM judges, 2NRL follows
+../ModelKit/go/bin/radixnet-count --model model.count.json explore --steps 0               # ... and picks its own tasks, until Ctrl-C
+../ModelKit/go/bin/radixnet-count --model model.count.json evolve --data data/sample_corpus.txt --generations 0   # until Ctrl-C
+../ModelKit/go/bin/radixnet-count --model model.count.json ollama review --count 8 --blame
+../ModelKit/go/bin/radixnet-count --model model.count.json speech teach clip.wav --text "the cat sat on the mat" --train
+../ModelKit/go/bin/radixnet-count --model model.count.json speech tutor clip.wav --length 400 --blame   # does it remember?
+../ModelKit/go/bin/radixnet-count --model model.count.json image encode photo.png --size 128 --train
+../ModelKit/go/bin/radixnet-count --model model.count.json predict --prefix "the cat" --traversal least-punished  # walk by the blame
+../ModelKit/go/bin/radixnet-count --seed 1 bench --chars 200000           # how fast this build counts and predicts
+../ModelKit/go/bin/radixnet-count --model five.json --ngram 5 --stride 5 train --data book.txt   # groups of five letters
+../ModelKit/go/bin/radixnet-count --model words.json --encoding word:2:1 train --data book.txt   # word bigrams
+../ModelKit/go/bin/radixnet-count --model words.json predict --prefix "the cat sat" --k 5        # ... predicted in words
 python -m radixnet --model model.count.json info    # the Python side reads the same file
 python -m radixnet negative why --text "..." --negative model.count.negative.json   # ... and the same negative one
 ```
@@ -2830,7 +2830,7 @@ contract for everything the count model supports, and it serves the same
 prebuilt frontend:
 
 ```bash
-make go-serve PORT=8001           # go/bin/radixnet-count --model model.count.json serve --port 8001 \
+make go-serve PORT=8001           # ../ModelKit/go/bin/radixnet-count --model model.count.json serve --port 8001 \
                                   #   --frontend-dir ../ModelKit/frontend/dist --upload-dir uploads --checkpoint-dir checkpoints
 open http://localhost:8001        # the React app, now backed by the Go model
 ```

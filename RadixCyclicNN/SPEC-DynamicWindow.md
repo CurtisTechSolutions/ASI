@@ -203,7 +203,7 @@ kind, and `GET /api/status` with it.
 | test | pins |
 |---|---|
 | `tests/test_window.py` | the ladder and what it refuses; `ABCD` into `AB` and `CD` under a grouping encoding and into `ABC` and `BCD` under the trigram; a node halved at its middle gram, again until it fits, never below one gram; the halves carrying the same state, parameters and count; the sine model's heavy weight (and its sign while inverted) keeping the bridge the likeliest way on against a fresh competitor; the counting kinds heavy by their count, the phase model by what passed through; compression stopping at the window and resuming when it is off; a step merging, halving and moving; the top regrowing what stayed unary; the settings; the automatic step on every kind, feedback passes included, and the negative network's blame passes; the file block beside the band; off is the old file to the bit; the CLI; the API |
-| `go/radixnet/window_test.go`, `go/server/window_test.go` | the same, in Go |
+| `go/radixnet/window_test.go`, `../ModelKit/go/server/window_test.go` | the same, in Go |
 | `rust/src/window.rs` (unit tests) | the same, in Rust, with the sine model's heavy weight |
 | `../ModelKit/frontend/test/window.test.mjs` | the frontend's ladder: the same sizes |
 | `../ModelKit/tests/test_go_parity.py` | Go against Python: the same nodes halved at the same grams, the same bridges with the same counts, the same chains held apart and regrown, by hand and at the end of every epoch; each reads the other's window |
