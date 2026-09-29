@@ -32,14 +32,17 @@ bin/latentpair predict --model model.json.gz --prefix "the cat sat on the " --le
 bin/latentpair fold --model model.json.gz --prefix "the cat sat on the "
 bin/latentpair reward --model model.json.gz --prefix "the cat sat on the " --text "mat" --strength 5
 bin/latentpair punish --model model.json.gz --prefix "the cat sat on the " --text "log"
+bin/latentpair reward --model model.json.gz --prefix "1. e4 e5 2. " --text "Nf3" --outcomes 2   # a game verdict
 bin/latentpair predict --model model.json.gz --prefix "the cat sat on the " --traversal punishment
 bin/latentpair score --model model.json.gz --text "the cat sat on the mat"
 bin/latentpair tokenizer classes --tokenizer tok.json.gz corpus/*.txt   # what the first symbol stands for
 bin/latentpair bench --tokenizer tok.json.gz corpus/*.txt              # held-out bits against raw byte contexts
 ```
 
-`--text -` reads standard input. Settings (`--alpha`, `--floor`, `--smoothing`, `--rungs all|final`,
-`--backoff all|deepest|none`, ...) are flags of `prime` and `bench`; tokenizer shape (`--window`,
+`--text -` reads standard input. A verdict is worth `strength / outcomes` per rung, `outcomes` being the
+number of potential outcomes of the space it comes from: 69 by default, one per English phone; a
+two-outcome game says `--outcomes 2`. Settings (`--alpha`, `--floor`, `--smoothing`, `--outcomes`,
+`--rungs all|final`, `--backoff all|deepest|none`, ...) are flags of `prime` and `bench`; tokenizer shape (`--window`,
 `--levels 4,4:4,4:4,4`, `--recency`, `--predict`, `--noise`, ...) flags of `tokenizer train` and `demo`.
 
 ## What the numbers say

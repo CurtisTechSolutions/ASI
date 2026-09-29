@@ -16,18 +16,26 @@ type Settings struct {
 	RewardScale  float64 `json:"reward_scale"`  // weight of net reward in the reward traversal
 	MeritScale   float64 `json:"merit_scale"`   // weight of merit in the punishment traversal
 	PenaltyScale float64 `json:"penalty_scale"` // weight of penalties in the punishment traversal
-	Strength     float64 `json:"strength"`      // default amount of a judgement
+	Strength     float64 `json:"strength"`      // default strength of a judgement
+	Outcomes     int     `json:"outcomes"`      // potential outcomes of the judged space: a verdict is worth strength / outcomes
 	Rungs        string  `json:"rungs"`         // all | final: which levels a judgement credits
 	Backoff      string  `json:"backoff"`       // all | deepest | none
 	CellCeiling  int     `json:"cell_ceiling"`  // largest address space allowed
 }
 
+// EnglishPhones is the outcome count of English as the repository's phonetic tokenizer spells it: 24
+// consonants and 15 vowels at three stress levels. Without stress there are 39 phonemes; with the word
+// boundary and the three pauses the tokenizer emits 88 symbols.
+const EnglishPhones = 69
+
 // DefaultSettings are the reference's numbers, except that the smoothing is 0: a pseudo-count on each of
 // 257 outcomes would swamp a context read a few times, and the fold's backoff already covers what a context
-// has not seen. The ceiling allows 16 million cells (384 MB of trees).
+// has not seen. Verdicts are in outcome units, English's by default: a verdict at strength 1 credits
+// 1/69 per rung, and a two-outcome game's would credit 1/2. The ceiling allows 16 million cells (384 MB of
+// trees).
 func DefaultSettings() Settings {
 	return Settings{Alpha: 2, Floor: 0.02, Smoothing: 0, ShareScale: 1, RewardScale: 1, MeritScale: 1, PenaltyScale: 1,
-		Strength: 1, Rungs: "all", Backoff: "all", CellCeiling: 16_777_216}
+		Strength: 1, Outcomes: EnglishPhones, Rungs: "all", Backoff: "all", CellCeiling: 16_777_216}
 }
 
 // Validate checks the ranges.
@@ -43,6 +51,9 @@ func (s Settings) Validate() error {
 	}
 	if s.CellCeiling < 1 {
 		return fmt.Errorf("cell_ceiling must be positive")
+	}
+	if s.Outcomes < 1 {
+		return fmt.Errorf("outcomes must be at least 1, got %d", s.Outcomes)
 	}
 	return nil
 }

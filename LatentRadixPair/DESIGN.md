@@ -157,10 +157,23 @@ the worst penalty of its steps at the full code.
 | call | what it does |
 |---|---|
 | `Train(texts)` | read into the count tree |
-| `Reward(texts, strength, weights, read, prefix)` | +strength * weight per text on the outcome positions |
-| `Punish(texts, strength, weights, prefix)` | the same on the minus side; never read |
-| `TwoNRL(bad, good, strength, prefix)` | punish the bad, reward the good |
-| `Feedback(texts, marks, prefix)` | a mark in (0, 1] rewards with that weight, in [-1, 0) punishes with its size, 0 is ignored |
+| `Reward(texts, strength, weights, read, prefix, outcomes)` | +strength * weight / outcomes per text on the outcome positions |
+| `Punish(texts, strength, weights, prefix, outcomes)` | the same on the minus side; never read |
+| `TwoNRL(bad, good, strength, prefix, outcomes)` | punish the bad, reward the good |
+| `Feedback(texts, marks, prefix, outcomes)` | a mark in (0, 1] rewards with that weight, in [-1, 0) punishes with its size, 0 is ignored |
+
+**Outcome units.** A verdict is worth strength / outcomes per rung, where outcomes is the number of
+potential outcomes of the space the verdict comes from: the more finite the space, the more one verdict
+says. A two-outcome game credits 1/2 per verdict at strength 1. English credits 1/69, one part per phone:
+the 24 consonants and 15 vowels at three stress levels of the repository's phonetic tokenizer (39 phonemes
+without stress, 88 emitted symbols with the word boundary and the three pauses, 26 letters and 257 bytes
+are the other counts one could choose, and `outcomes` takes any of them). The model's `outcomes` setting
+(69 by default) is the unit of verdicts that do not state their own; each call may state one, so one
+reward tree holds verdicts from games and from English on a common scale. `outcomes` 1 restores raw
+amounts. In the fold the amount lands in the log score, so from a uniform node a verdict moves its outcome
+from 1/n to e^(1/n) / (e^(1/n) + n - 1): to 0.62 in a two-outcome game, and by a hundredth of a percent in
+English, which is the point: a single English verdict is a small share of all the evidence a 69-way
+position can produce.
 
 ## 6. Prediction and inspection
 
@@ -273,3 +286,4 @@ byte). The width-128 encoder is about 2.5 times faster at 0.09 more bits per byt
   bytes and was no better a context than raw bytes.
 - D-5 Smoothing 0 by default over 257 outcomes; the fold backs off instead.
 - D-6 Go, no dependencies: the numeric core is 300 lines and the matrices are small.
+- D-7 Verdicts are in outcome units, strength / outcomes, English's 69 phones by default. Section 5.

@@ -189,7 +189,7 @@ func TestFeedback(t *testing.T) {
 	m, _ := Prime(tok, DefaultSettings(), 1)
 	m.Train(texts)
 	before, _ := m.Fold("a cat sat on the ", "reward", "")
-	if _, err := m.Reward([]string{"mat"}, 5, nil, true, "a cat sat on the "); err != nil {
+	if _, err := m.Reward([]string{"mat"}, 5, nil, true, "a cat sat on the ", 2); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := m.Fold("a cat sat on the ", "reward", "")
@@ -207,14 +207,14 @@ func TestFeedback(t *testing.T) {
 		t.Error("the end of the outcome should be credited")
 	}
 	pen, _ := m.Fold("a cat sat on the ", "punishment", "")
-	if _, err := m.Punish([]string{"mat"}, 20, nil, "a cat sat on the "); err != nil {
+	if _, err := m.Punish([]string{"mat"}, 20, nil, "a cat sat on the ", 2); err != nil {
 		t.Fatal(err)
 	}
 	pen2, _ := m.Fold("a cat sat on the ", "punishment", "")
 	if pen2['m'] >= pen['m'] {
 		t.Errorf("punishment should sink 'm' in the punishment traversal: %.4f -> %.4f", pen['m'], pen2['m'])
 	}
-	if _, err := m.Reward([]string{"mat"}, 100, nil, false, "a cat sat on the "); err != nil {
+	if _, err := m.Reward([]string{"mat"}, 100, nil, false, "a cat sat on the ", 2); err != nil {
 		t.Fatal(err)
 	}
 	pen3, _ := m.Fold("a cat sat on the ", "punishment", "")
@@ -229,7 +229,7 @@ func TestFeedback(t *testing.T) {
 	s.Rungs = "final"
 	m2, _ := Prime(tok, s, 1)
 	m2.Train(texts)
-	if _, err := m2.Reward([]string{"log"}, 1, nil, false, "the cat sat on the "); err != nil {
+	if _, err := m2.Reward([]string{"log"}, 1, nil, false, "the cat sat on the ", 0); err != nil {
 		t.Fatal(err)
 	}
 	for node := 0; node < m2.Pair.Addr.Bases[m2.Pair.Addr.D()]; node++ {
@@ -241,13 +241,13 @@ func TestFeedback(t *testing.T) {
 		}
 	}
 	// two_nrl and feedback marks
-	if _, err := m.TwoNRL([]string{"the cat sat on the fire"}, []string{"the cat sat on the mat"}, 1, ""); err != nil {
+	if _, err := m.TwoNRL([]string{"the cat sat on the fire"}, []string{"the cat sat on the mat"}, 1, "", 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Feedback([]string{"good one", "bad one", "ignored"}, []float64{0.5, -0.25, 0}, "prefix "); err != nil {
+	if _, err := m.Feedback([]string{"good one", "bad one", "ignored"}, []float64{0.5, -0.25, 0}, "prefix ", 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Feedback([]string{"x"}, []float64{1, 2}, ""); err == nil {
+	if _, err := m.Feedback([]string{"x"}, []float64{1, 2}, "", 0); err == nil {
 		t.Error("expected mismatched marks to be refused")
 	}
 	if len(m.History) != 6 {
@@ -301,13 +301,64 @@ func TestWalkAndScore(t *testing.T) {
 	}
 }
 
+// A verdict is worth strength / outcomes per rung: 1/2 in a two-outcome game, 1/69 for English by default,
+// the raw amount at outcomes 1; every judging call takes the unit and records it.
+func TestOutcomeUnits(t *testing.T) {
+	tok := tinyTokenizer(t)
+	m, _ := Prime(tok, DefaultSettings(), 1)
+	if m.Pair.Settings.Outcomes != EnglishPhones || EnglishPhones != 69 {
+		t.Fatalf("default outcomes %d", m.Pair.Settings.Outcomes)
+	}
+	cell := func(prefix string, x byte) int {
+		code := m.Code(prefix)
+		return m.Pair.Addr.Cell(m.Pair.Addr.Of(code, m.Pair.Addr.D()), int(x))
+	}
+	r, err := m.Reward([]string{"x"}, 1, nil, false, "game ", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Pair.Reward.Plus[cell("game ", 'x')]; math.Abs(got-0.5) > 1e-12 {
+		t.Errorf("two-outcome verdict credited %v, want 0.5", got)
+	}
+	if r["outcomes"] != 2 || math.Abs(r["amount"].(float64)-0.5) > 1e-12 {
+		t.Errorf("record %v", r)
+	}
+	m.Reward([]string{"y"}, 1, nil, false, "english ", 0)
+	if got := m.Pair.Reward.Plus[cell("english ", 'y')]; math.Abs(got-1.0/69) > 1e-12 {
+		t.Errorf("English verdict credited %v, want 1/69", got)
+	}
+	m.Punish([]string{"z"}, 3, nil, "raw ", 1)
+	if got := m.Pair.Reward.Minus[cell("raw ", 'z')]; math.Abs(got-3) > 1e-12 {
+		t.Errorf("raw punishment charged %v, want 3", got)
+	}
+	r, _ = m.TwoNRL([]string{"b"}, []string{"g"}, 1, "p ", 4)
+	if r["outcomes"] != 4 || math.Abs(r["amount"].(float64)-0.25) > 1e-12 {
+		t.Errorf("two_nrl record %v", r)
+	}
+	if got := m.Pair.Reward.Minus[cell("p ", 'b')]; math.Abs(got-0.25) > 1e-12 {
+		t.Errorf("two_nrl charged %v, want 0.25", got)
+	}
+	r, _ = m.Feedback([]string{"f"}, []float64{0.5}, "q ", 10)
+	if r["outcomes"] != 10 {
+		t.Errorf("feedback record %v", r)
+	}
+	if got := m.Pair.Reward.Plus[cell("q ", 'f')]; math.Abs(got-0.05) > 1e-12 {
+		t.Errorf("feedback credited %v, want 0.05", got)
+	}
+	s := DefaultSettings()
+	s.Outcomes = 0
+	if _, err := Prime(tok, s, 1); err == nil {
+		t.Error("outcomes 0 should be refused")
+	}
+}
+
 // A saved model reloads with the same counts, rewards, history and random state.
 func TestSaveLoad(t *testing.T) {
 	tok := tinyTokenizer(t)
 	m, _ := Prime(tok, DefaultSettings(), 3)
 	m.Train(texts)
-	m.Reward([]string{"mat"}, 2, nil, true, "a cat sat on the ")
-	m.Punish([]string{"fire"}, 1, nil, "a cat sat on the ")
+	m.Reward([]string{"mat"}, 2, nil, true, "a cat sat on the ", 0)
+	m.Punish([]string{"fire"}, 1, nil, "a cat sat on the ", 0)
 	s1, _ := m.Predict("the ", 4, "sample", "reward", 1, false, "", 0)
 	path := filepath.Join(t.TempDir(), "model.json.gz")
 	if err := m.Save(path); err != nil {

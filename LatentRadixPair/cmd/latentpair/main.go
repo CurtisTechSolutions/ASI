@@ -120,7 +120,8 @@ func settingsFlags(fs *flag.FlagSet, s *pair.Settings) {
 	fs.Float64Var(&s.RewardScale, "reward-scale", s.RewardScale, "weight of net reward (reward traversal)")
 	fs.Float64Var(&s.MeritScale, "merit-scale", s.MeritScale, "weight of merit (punishment traversal)")
 	fs.Float64Var(&s.PenaltyScale, "penalty-scale", s.PenaltyScale, "weight of penalties (punishment traversal)")
-	fs.Float64Var(&s.Strength, "strength", s.Strength, "default judgement amount")
+	fs.Float64Var(&s.Strength, "strength", s.Strength, "default judgement strength")
+	fs.IntVar(&s.Outcomes, "outcomes", s.Outcomes, "potential outcomes of the judged space; a verdict is worth strength/outcomes")
 	fs.StringVar(&s.Rungs, "rungs", s.Rungs, "levels a judgement credits: all | final")
 	fs.StringVar(&s.Backoff, "backoff", s.Backoff, "all | deepest | none")
 	fs.IntVar(&s.CellCeiling, "cell-ceiling", s.CellCeiling, "largest address space allowed")
@@ -393,7 +394,8 @@ func judgeOneCmd(kind string, args []string) error {
 	fs := flag.NewFlagSet(kind, flag.ExitOnError)
 	text := fs.String("text", "", "the outcome")
 	prefix := fs.String("prefix", "", "context the outcome followed (not judged itself)")
-	strength := fs.Float64("strength", 0, "amount (0: the model's default)")
+	strength := fs.Float64("strength", 0, "strength (0: the model's default)")
+	outcomes := fs.Int("outcomes", 0, "potential outcomes of the space this verdict comes from (0: the model's setting)")
 	noRead := fs.Bool("no-read", false, "reward without counting the text")
 	m, out, err := loadModel(fs, args)
 	if err != nil {
@@ -405,9 +407,9 @@ func judgeOneCmd(kind string, args []string) error {
 	}
 	var r pair.Record
 	if kind == "reward" {
-		r, err = m.Reward([]string{t}, *strength, nil, !*noRead, *prefix)
+		r, err = m.Reward([]string{t}, *strength, nil, !*noRead, *prefix, *outcomes)
 	} else {
-		r, err = m.Punish([]string{t}, *strength, nil, *prefix)
+		r, err = m.Punish([]string{t}, *strength, nil, *prefix, *outcomes)
 	}
 	if err != nil {
 		return err
@@ -421,12 +423,13 @@ func judgeCmd(args []string) error {
 	good := fs.String("good", "", "the correct outcome")
 	bad := fs.String("bad", "", "the wrong outcome")
 	prefix := fs.String("prefix", "", "context both followed")
-	strength := fs.Float64("strength", 0, "amount (0: the model's default)")
+	strength := fs.Float64("strength", 0, "strength (0: the model's default)")
+	outcomes := fs.Int("outcomes", 0, "potential outcomes of the space this verdict comes from (0: the model's setting)")
 	m, out, err := loadModel(fs, args)
 	if err != nil {
 		return err
 	}
-	r, err := m.TwoNRL([]string{*bad}, []string{*good}, *strength, *prefix)
+	r, err := m.TwoNRL([]string{*bad}, []string{*good}, *strength, *prefix, *outcomes)
 	if err != nil {
 		return err
 	}
@@ -626,25 +629,30 @@ func demoCmd(args []string) error {
 		return err
 	}
 	fmt.Printf("%q -> %q (%.2f bits/unit)\n", ctx, p.Text, p.Cost/math.Ln2/float64(max(len(p.Units), 1)))
-	fmt.Printf("\n== reward and punishment\n")
+	fmt.Printf("\n== verdicts in outcome units\n")
 	before, _ := m.Fold(ctx, "reward", "")
 	first := p.Text
 	if len(first) > 4 {
 		first = first[:4]
 	}
 	alt := "zzz"
-	if _, err := m.Reward([]string{alt}, 5, nil, true, ctx); err != nil {
+	if _, err := m.Reward([]string{alt}, 1, nil, true, ctx, 0); err != nil {
 		return err
 	}
-	after, _ := m.Fold(ctx, "reward", "")
-	fmt.Printf("rewarded %q after the context (strength 5): P(%q) %.3f -> %.3f\n", alt, pair.Symbol(int(alt[0])), before[alt[0]], after[alt[0]])
+	english, _ := m.Fold(ctx, "reward", "")
+	if _, err := m.Reward([]string{alt}, 1, nil, false, ctx, 2); err != nil {
+		return err
+	}
+	game, _ := m.Fold(ctx, "reward", "")
+	fmt.Printf("rewarded %q after the context at strength 1: P(%q) %.4f; as an English verdict (1/%d per rung) %.4f; as a two-outcome verdict (1/2 per rung) %.4f\n",
+		alt, pair.Symbol(int(alt[0])), before[alt[0]], m.Pair.Settings.Outcomes, english[alt[0]], game[alt[0]])
 	if first != "" {
-		if _, err := m.Punish([]string{first}, 5, nil, ctx); err != nil {
+		if _, err := m.Punish([]string{first}, 1, nil, ctx, 2); err != nil {
 			return err
 		}
 		pen, _ := m.Fold(ctx, "punishment", "")
 		rew, _ := m.Fold(ctx, "reward", "")
-		fmt.Printf("punished %q after the context (strength 5): P(%q) reward traversal %.3f, punishment traversal %.3f\n",
+		fmt.Printf("punished %q after the context as a two-outcome verdict: P(%q) reward traversal %.4f, punishment traversal %.4f\n",
 			first, pair.Symbol(int(first[0])), rew[first[0]], pen[first[0]])
 	}
 	p2, _ := m.Predict(ctx, 12, "greedy", "punishment", 0, false, "", 0)

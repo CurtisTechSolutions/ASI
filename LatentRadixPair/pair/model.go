@@ -62,12 +62,17 @@ func asBytes(texts []string) [][]byte {
 	return out
 }
 
-// credit judges texts: amount = sign * strength * weight each, from the position after the prefix on. It
-// records the call in the history unless call is empty.
-func (m *Model) credit(texts [][]byte, sign, strength float64, weights []float64, read bool, call string, prefix []byte) (Record, error) {
+// credit judges texts: amount = sign * strength * weight / outcomes each, from the position after the
+// prefix on, where outcomes is the number of potential outcomes of the space the verdict comes from (0: the
+// model's setting). It records the call in the history unless call is empty.
+func (m *Model) credit(texts [][]byte, sign, strength float64, weights []float64, read bool, call string, prefix []byte, outcomes int) (Record, error) {
 	if strength <= 0 {
 		strength = m.Pair.Settings.Strength
 	}
+	if outcomes <= 0 {
+		outcomes = m.Pair.Settings.Outcomes
+	}
+	unit := 1 / float64(outcomes)
 	if weights != nil && len(weights) != len(texts) {
 		return nil, fmt.Errorf("%d weights for %d texts", len(weights), len(texts))
 	}
@@ -82,17 +87,17 @@ func (m *Model) credit(texts [][]byte, sign, strength float64, weights []float64
 		}
 		full := append(append([]byte(nil), prefix...), text...)
 		codes := m.Tok.EncodeAll(full)
-		outcomes := Outcomes(full)
+		steps := Outcomes(full)
 		if read {
-			m.Pair.Count.Observe(codes, outcomes)
+			m.Pair.Count.Observe(codes, steps)
 		}
-		n, err := m.Pair.Reward.Credit(codes, outcomes, sign*strength*w, m.Pair.Settings.Rungs, len(prefix))
+		n, err := m.Pair.Reward.Credit(codes, steps, sign*strength*w*unit, m.Pair.Settings.Rungs, len(prefix))
 		if err != nil {
 			return nil, err
 		}
 		cells += n
 	}
-	r := Record{"call": call, "texts": len(texts), "strength": strength, "cells": cells, "read": read}
+	r := Record{"call": call, "texts": len(texts), "strength": strength, "outcomes": outcomes, "amount": strength * unit, "cells": cells, "read": read}
 	if len(prefix) > 0 {
 		r["prefix"] = string(prefix)
 	}
@@ -102,27 +107,29 @@ func (m *Model) credit(texts [][]byte, sign, strength float64, weights []float64
 	return m.record(r), nil
 }
 
-// Reward credits texts as correct outcomes (read: also count them), the prefix being context, not outcome.
-func (m *Model) Reward(texts []string, strength float64, weights []float64, read bool, prefix string) (Record, error) {
-	return m.credit(asBytes(texts), 1, strength, weights, read, "reward", []byte(prefix))
+// Reward credits texts as correct outcomes (read: also count them), the prefix being context, not outcome;
+// outcomes is the size of the space the verdict comes from (0: the model's setting).
+func (m *Model) Reward(texts []string, strength float64, weights []float64, read bool, prefix string, outcomes int) (Record, error) {
+	return m.credit(asBytes(texts), 1, strength, weights, read, "reward", []byte(prefix), outcomes)
 }
 
 // Punish charges texts as wrong outcomes; they are never counted.
-func (m *Model) Punish(texts []string, strength float64, weights []float64, prefix string) (Record, error) {
-	return m.credit(asBytes(texts), -1, strength, weights, false, "punish", []byte(prefix))
+func (m *Model) Punish(texts []string, strength float64, weights []float64, prefix string, outcomes int) (Record, error) {
+	return m.credit(asBytes(texts), -1, strength, weights, false, "punish", []byte(prefix), outcomes)
 }
 
 // TwoNRL punishes the bad texts and rewards the good ones.
-func (m *Model) TwoNRL(bad, good []string, strength float64, prefix string) (Record, error) {
-	a, err := m.credit(asBytes(bad), -1, strength, nil, false, "", []byte(prefix))
+func (m *Model) TwoNRL(bad, good []string, strength float64, prefix string, outcomes int) (Record, error) {
+	a, err := m.credit(asBytes(bad), -1, strength, nil, false, "", []byte(prefix), outcomes)
 	if err != nil {
 		return nil, err
 	}
-	b, err := m.credit(asBytes(good), 1, strength, nil, true, "", []byte(prefix))
+	b, err := m.credit(asBytes(good), 1, strength, nil, true, "", []byte(prefix), outcomes)
 	if err != nil {
 		return nil, err
 	}
-	r := Record{"call": "two_nrl", "punished": a["cells"], "rewarded": b["cells"], "bad": len(bad), "good": len(good), "strength": strength}
+	r := Record{"call": "two_nrl", "punished": a["cells"], "rewarded": b["cells"], "bad": len(bad), "good": len(good),
+		"strength": strength, "outcomes": a["outcomes"], "amount": a["amount"]}
 	if prefix != "" {
 		r["prefix"] = prefix
 	}
@@ -131,7 +138,7 @@ func (m *Model) TwoNRL(bad, good []string, strength float64, prefix string) (Rec
 
 // Feedback judges each text by its mark: a positive mark rewards with that weight, a negative one punishes
 // with its size, zero is ignored.
-func (m *Model) Feedback(texts []string, marks []float64, prefix string) (Record, error) {
+func (m *Model) Feedback(texts []string, marks []float64, prefix string, outcomes int) (Record, error) {
 	if len(marks) != len(texts) {
 		return nil, fmt.Errorf("%d marks for %d texts", len(marks), len(texts))
 	}
@@ -147,14 +154,17 @@ func (m *Model) Feedback(texts []string, marks []float64, prefix string) (Record
 			bw = append(bw, -mk)
 		}
 	}
-	r := Record{"call": "feedback", "rewarded": len(good), "punished": len(bad), "ignored": len(texts) - len(good) - len(bad)}
+	if outcomes <= 0 {
+		outcomes = m.Pair.Settings.Outcomes
+	}
+	r := Record{"call": "feedback", "rewarded": len(good), "punished": len(bad), "ignored": len(texts) - len(good) - len(bad), "outcomes": outcomes}
 	if len(good) > 0 {
-		if _, err := m.credit(asBytes(good), 1, 0, gw, true, "", []byte(prefix)); err != nil {
+		if _, err := m.credit(asBytes(good), 1, 0, gw, true, "", []byte(prefix), outcomes); err != nil {
 			return nil, err
 		}
 	}
 	if len(bad) > 0 {
-		if _, err := m.credit(asBytes(bad), -1, 0, bw, false, "", []byte(prefix)); err != nil {
+		if _, err := m.credit(asBytes(bad), -1, 0, bw, false, "", []byte(prefix), outcomes); err != nil {
 			return nil, err
 		}
 	}
@@ -313,6 +323,9 @@ func FromJSON(data []byte) (*Model, error) {
 	tok, err := tokenizer.FromJSON(f.Tokenizer)
 	if err != nil {
 		return nil, fmt.Errorf("tokenizer: %v", err)
+	}
+	if f.Settings.Outcomes == 0 {
+		f.Settings.Outcomes = EnglishPhones // files written before verdicts had units
 	}
 	m, err := Prime(tok, f.Settings, f.Seed)
 	if err != nil {
