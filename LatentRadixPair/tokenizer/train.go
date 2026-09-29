@@ -27,7 +27,7 @@ type Options struct {
 
 // DefaultOptions: 2000 steps of 256 windows.
 func DefaultOptions() Options {
-	return Options{Steps: 2000, Batch: 256, LR: 2e-3, Seed: 1, EvalEvery: 100, EvalWindows: 512, Clip: 5, Quantize: true}
+	return Options{Steps: 2000, Batch: 256, LR: 3e-3, Seed: 1, EvalEvery: 100, EvalWindows: 512, Clip: 5, Quantize: true}
 }
 
 // Stat is one line of the training log.

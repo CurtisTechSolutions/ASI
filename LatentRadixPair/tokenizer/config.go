@@ -44,7 +44,7 @@ type Config struct {
 // the newest byte's reconstruction weighing 1 and each older byte 0.6 of the next, and predicting the next
 // byte weighing four times the reconstruction (the measured best of the shapes tried; DESIGN.md section 10).
 func DefaultConfig() Config {
-	return Config{Window: 16, Embed: 16, EncHidden: 128, DecHidden: 256, OutEmbed: 32,
+	return Config{Window: 16, Embed: 16, EncHidden: 256, DecHidden: 256, OutEmbed: 32,
 		Levels: [][]int{{4, 4}, {4, 4}, {4, 4}}, Noise: 0.1, Recency: 0.6, Predict: 4, StartShare: 0.05}
 }
 

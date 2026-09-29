@@ -44,7 +44,7 @@ input symbol) goes through:
 
 1. **Embedding.** Each of the W symbols is looked up in a 257 x E table (E = 16) and the rows are
    concatenated: W E numbers.
-2. **Encoder.** Two dense layers of width 128 with SiLU, then a dense layer to d numbers, one per latent
+2. **Encoder.** Two dense layers of width 256 with SiLU, then a dense layer to d numbers, one per latent
    dimension (d = 6 by default: three symbols of two dimensions).
 3. **Quantiser.** Finite scalar quantisation: each latent dimension is squashed by tanh into [-1, 1] and
    rounded to one of its l levels (l = 4 by default). A symbol's dimensions form a mixed-radix integer, its
