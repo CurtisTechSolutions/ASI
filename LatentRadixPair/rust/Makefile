@@ -43,8 +43,13 @@ model: build
 bench: build
 	$(BIN) bench --tokenizer $(TOKENIZER) $(DOCS)
 
-## the web frontend and JSON API on $(ADDR)
-serve: build
+## build the frontend and the backend, make a model if there is none, and serve on $(ADDR)
+serve: frontend build
+	@if [ ! -f "$(MODEL)" ]; then \
+		echo "no $(MODEL): making one from the documents"; \
+		if [ ! -f "$(TOKENIZER)" ]; then $(MAKE) tokenizer; fi; \
+		$(MAKE) model; \
+	fi
 	$(BIN) serve --model $(MODEL) --addr $(ADDR)
 
 ## regenerate the parity fixtures from the Go implementation (needs Go)

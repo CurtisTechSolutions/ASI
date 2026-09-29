@@ -7,11 +7,16 @@ within floating-point noise (the codes and the chosen bytes exactly).
 
 ```sh
 cd LatentRadixPair/rust
+make serve               # builds the frontend and the backend, makes a model if there is none, serves it
 make build test          # target/release/latentpair; tests take about 20 s
 make demo                # trains a small tokenizer on the repository's documents and shows the loop
 make tokenizer model     # a 2000-step tokenizer and a model that has read the documents
-make serve               # http://127.0.0.1:8080/ : the frontend on model.json.gz
 ```
+
+`make serve` opens http://127.0.0.1:8080/ (`ADDR=...` to change). When `model.json.gz` does not exist yet
+it first trains a tokenizer on the repository's documents (`STEPS=2000` by default, about four minutes;
+`make serve STEPS=300` for a quick one) and reads them; an existing model is served as it is. `MODEL=`
+and `TOKENIZER=` name other files, `DOCS=` another corpus.
 
 The command line is the same as the Go one (`latentpair help`), plus `serve`.
 
