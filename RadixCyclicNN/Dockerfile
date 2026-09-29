@@ -1,8 +1,13 @@
 # RadixCyclicNN image: build the React frontend with Node, then ship a slim
 # Python runtime that serves the JSON API together with the built frontend.
 #
-#   docker build -t radixcyclicnn .                          pure Python, zero dependencies
-#   docker build --build-arg WITH_TORCH=1 -t radixcyclicnn . + torch (GPU / vectorised backend, adds a few GB)
+# The build context is the repository root: the model is this directory, and
+# the command line, the API and the frontend are the kit beside it
+# (../ModelKit).  The image mirrors that layout - /app/RadixCyclicNN beside
+# /app/ModelKit - and Dockerfile.dockerignore keeps the context to the two.
+#
+#   docker build -f RadixCyclicNN/Dockerfile -t radixcyclicnn ..                          (from this directory)
+#   docker build -f RadixCyclicNN/Dockerfile --build-arg WITH_TORCH=1 -t radixcyclicnn .. + torch (a few GB more)
 #
 # Behind a registry mirror, point the base images elsewhere:
 #   --build-arg PYTHON_IMAGE=mirror.gcr.io/library/python:3.11-slim --build-arg NODE_IMAGE=mirror.gcr.io/library/node:22-alpine
@@ -18,9 +23,9 @@ ARG NODE_IMAGE=node:22-alpine
 # ---- Stage 1: frontend ------------------------------------------------------
 FROM ${NODE_IMAGE} AS frontend
 WORKDIR /build
-COPY frontend/package.json frontend/package-lock.json ./
+COPY ModelKit/frontend/package.json ModelKit/frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
-COPY frontend/ ./
+COPY ModelKit/frontend/ ./
 RUN npm run build
 
 # ---- Stage 2: runtime -------------------------------------------------------
@@ -34,14 +39,17 @@ ENV PYTHONUNBUFFERED=1 \
     RADIXNET_CHECKPOINT_DIR=/data/checkpoints
 WORKDIR /app
 
-COPY pyproject.toml README.md DESIGN.md ./
-COPY radixnet/ ./radixnet/
-COPY tests/ ./tests/
-COPY data/ ./data/
-COPY docker/entrypoint.sh /usr/local/bin/radixnet-entrypoint
-COPY --from=frontend /build/dist ./frontend/dist
+COPY RadixCyclicNN/pyproject.toml RadixCyclicNN/README.md RadixCyclicNN/DESIGN.md ./RadixCyclicNN/
+COPY RadixCyclicNN/radixnet/ ./RadixCyclicNN/radixnet/
+COPY RadixCyclicNN/tests/ ./RadixCyclicNN/tests/
+COPY RadixCyclicNN/data/ ./RadixCyclicNN/data/
+COPY ModelKit/pyproject.toml ModelKit/README.md ./ModelKit/
+COPY ModelKit/modelkit/ ./ModelKit/modelkit/
+COPY ModelKit/tests/ ./ModelKit/tests/
+COPY RadixCyclicNN/docker/entrypoint.sh /usr/local/bin/radixnet-entrypoint
+COPY --from=frontend /build/dist ./ModelKit/frontend/dist
 
-RUN pip install . \
+RUN pip install ./RadixCyclicNN ./ModelKit \
  && if [ "$WITH_TORCH" = "1" ]; then pip install torch; fi \
  && chmod +x /usr/local/bin/radixnet-entrypoint \
  && useradd --create-home --uid 1000 radixnet \
@@ -49,6 +57,7 @@ RUN pip install . \
  && chown -R radixnet:radixnet /data
 
 USER radixnet
+WORKDIR /app/RadixCyclicNN
 VOLUME ["/data"]
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
@@ -56,4 +65,4 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
 
 ENTRYPOINT ["radixnet-entrypoint"]
 CMD ["--model", "/data/model.json", "serve", "--host", "0.0.0.0", "--port", "8000", \
-     "--frontend-dir", "/app/frontend/dist", "--checkpoint-dir", "/data/checkpoints"]
+     "--frontend-dir", "/app/ModelKit/frontend/dist", "--checkpoint-dir", "/data/checkpoints"]

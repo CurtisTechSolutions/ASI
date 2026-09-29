@@ -34,7 +34,7 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up api   # with a
 ```
 
 `../.env.example` lists every setting the compose files read, `../README.md`
-§ *Docker Compose* explains the services, and `../.dockerignore` decides what
+§ *Docker Compose* explains the services, and `../Dockerfile.dockerignore` decides what
 reaches the build context.
 
 Note that `api` and `evolve` are stopped with `SIGINT` rather than `SIGTERM`, so

@@ -1,0 +1,875 @@
+"""Where the negative network's data comes from: the tutor's verdicts, turned into blame.
+
+Nothing in :class:`~radixnet.negative.NegativeNet` is invented.  Every failure
+it knows was handed to it by something outside the network that looked at an
+output and said it was wrong, and why:
+
+* the **English tutor** (:mod:`modelkit.tutor`): the LLM sets an exercise, the
+  network completes it and the LLM marks the sentence - a mark out of 10, the
+  single worst mistake named out of :data:`modelkit.tutor.ERROR_TYPES`
+  (``agreement``, ``tense``, ``article``, ``plural``, ...), one sentence of
+  teaching and the *correction*, the same sentence written out in correct
+  English.  The mistake is the reason, the mark is the severity, and the diff
+  against the correction says which characters were wrong
+  (:func:`faults_from_lessons`, :meth:`radixnet.negative.NegativeNet.correct`).
+  A failure the teacher was also asked *why* about
+  (:func:`modelkit.tutor.explain_mistakes`) arrives with the rule it broke and
+  with more sentences that break it the same way, each with its own correct
+  form: they are blamed under the same reason at ``weight`` of the severity,
+  so one mistake teaches the shape of the mistake instead of one sentence;
+* the **adversarial reviewer** (:mod:`modelkit.ollama`): an Ollama model rates
+  the network's own texts 0-10, passes or fails each one and writes a
+  one-sentence critique;
+* the **copy editor** (:func:`modelkit.ollama.correct_texts`): the same LLM
+  writes each of the network's texts out correctly, changing as little as it
+  can, and the diff between the two is the lesson - ``"Hi howe are you??"``
+  against ``"Hi, how are you?"`` blames the ``e`` and the second ``?``, not
+  the sentence (:func:`faults_from_corrections`,
+  :meth:`radixnet.negative.NegativeNet.correct`); a text it handed back
+  unchanged clears blame;
+* the **code-generation teacher and judge** (:mod:`modelkit.codegen`): the
+  sandbox says a program crashed, timed out or printed the wrong thing, the
+  style checker names its issues and the LLM judge says whether the task was
+  accomplished at all;
+* a **person** pressing thumbs down in the frontend, and the evolve loop's
+  discriminator, which is the network's own critic.
+
+This module turns those verdicts into **faults**.  A fault is a text, a
+**reason** (a short tag - the tutor's own error type, or one out of
+:data:`REASONS` / :data:`CODE_REASONS` picked from the tutor's words by
+:func:`classify`), a **severity** (how badly it failed) and a **note** (the
+tutor's sentence, kept verbatim for the journal).  :func:`teach` hands faults
+to the negative network; the texts the tutor *passed* are cleared in the same
+call, so a fragment that shows up in good and bad output alike stops carrying
+the verdict on its own.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from typing import Any
+
+__all__ = [
+    "AGENT_REASONS",
+    "AGENT_SEVERITY",
+    "CODE_REASONS",
+    "CODE_SEVERITY",
+    "CORRECTION_REASONS",
+    "CORRECTION_SEVERITY",
+    "DEFAULT_REASON",
+    "IMAGE_REASONS",
+    "REASONS",
+    "RECALL_AGREEMENT",
+    "RECALL_OVERRUN",
+    "RECALL_TRUNCATED",
+    "SPEECH_REASONS",
+    "agent_reason",
+    "classify",
+    "code_reason",
+    "correction_reason",
+    "faults_from_agent",
+    "faults_from_attempts",
+    "faults_from_corrections",
+    "faults_from_lessons",
+    "faults_from_recall",
+    "faults_from_reviews",
+    "reason_from_changes",
+    "recall_reason",
+    "severity_from_gap",
+    "severity_from_rating",
+    "teach",
+    "teach_agent",
+    "teach_attempts",
+    "teach_corrections",
+    "teach_lessons",
+    "teach_recall",
+    "teach_reviews",
+]
+
+DEFAULT_REASON = "other"
+
+REASONS = (
+    "empty",
+    "gibberish",
+    "repetition",
+    "truncated",
+    "grammar",
+    "spelling",
+    "contradiction",
+    "false",
+    "incoherent",
+    "off-topic",
+    DEFAULT_REASON,
+)
+"""Reason tags for reviewed *text* (the order is the order :func:`classify` tries them in)."""
+
+CORRECTION_REASONS = (
+    "spelling",
+    "punctuation",
+    "capitalisation",
+    "spacing",
+    "agreement",
+    "tense",
+    "article",
+    "preposition",
+    "plural",
+    "pronoun",
+    "word-order",
+    "vocabulary",
+    "repetition",
+    "fragment",
+    "nonsense",
+    "grammar",
+    "none",
+)
+"""Reason tags for a *corrected* text: what the copy editor's smallest change put right (``"none"``: nothing)."""
+
+CORRECTION_SEVERITY = 1.0
+"""How heavily one correction is blamed: one ordinary failure per corrected text, placed only on its changed characters."""
+
+_CORRECTION_ALIASES = {
+    "typo": "spelling", "misspelling": "spelling", "misspelt": "spelling", "spell": "spelling",
+    "capitalization": "capitalisation", "case": "capitalisation", "casing": "capitalisation",
+    "capital": "capitalisation", "uppercase": "capitalisation", "lowercase": "capitalisation",
+    "whitespace": "spacing", "space": "spacing", "spaces": "spacing",
+    "subject-verb": "agreement", "verb-agreement": "agreement", "conjugation": "agreement",
+    "articles": "article", "prepositions": "preposition", "plurals": "plural", "number": "plural",
+    "pronouns": "pronoun", "order": "word-order", "word order": "word-order", "syntax": "grammar",
+    "wording": "vocabulary", "word-choice": "vocabulary", "word choice": "vocabulary", "word": "vocabulary",
+    "repeat": "repetition", "repeated": "repetition", "duplicate": "repetition", "duplication": "repetition",
+    "incomplete": "fragment", "truncated": "fragment", "unfinished": "fragment",
+    "gibberish": "nonsense", "meaningless": "nonsense", "garbled": "nonsense",
+    "ok": "none", "correct": "none", "nothing": "none", "unchanged": "none", "no change": "none",
+}
+
+CODE_REASONS = (
+    "timeout",
+    "crash",
+    "wrong-output",
+    "task-not-done",
+    "style",
+    "naming",
+    DEFAULT_REASON,
+)
+"""Reason tags for reviewed *programs*."""
+
+AGENT_REASONS = (
+    "no-call",
+    "bad-call",
+    "tool-error",
+    "no-answer",
+    DEFAULT_REASON,
+)
+"""Reason tags for an attempt at a task with *tools* (the order :func:`agent_reason` tries them in)."""
+
+AGENT_SEVERITY = {
+    "no-call": 1.0,
+    "bad-call": 0.75,   # one step of one attempt, not the whole attempt
+    "tool-error": 1.0,
+    "no-answer": 1.5,
+    DEFAULT_REASON: 1.0,
+}
+"""How heavily each tool-use failure is blamed (1 = one ordinary failure)."""
+
+CODE_SEVERITY = {
+    "timeout": 1.5,
+    "crash": 1.5,
+    "wrong-output": 1.25,
+    "task-not-done": 1.0,
+    "style": 0.5,
+    "naming": 0.5,
+    DEFAULT_REASON: 1.0,
+}
+"""How heavily each code failure is blamed (1 = one ordinary failure)."""
+
+SPEECH_REASONS = (
+    "unreadable",
+    "truncated",
+    "overrun",
+    "garbled",
+    "silence",
+    "clipping",
+    "mishearing",
+    "distortion",
+)
+"""Reason tags for a waveform the network was asked to remember (:mod:`modelkit.recall`)."""
+
+IMAGE_REASONS = (
+    "unreadable",
+    "truncated",
+    "overrun",
+    "garbled",
+    "blank",
+    "noise",
+    "drift",
+)
+"""Reason tags for an image the network was asked to remember."""
+
+RECALL_TRUNCATED, RECALL_OVERRUN = 0.9, 1.1
+"""Payload length ratios outside which a recalled text is short or long rather than merely wrong."""
+
+RECALL_AGREEMENT = 0.9
+"""Below this payload agreement a readable, right-length recall is still a distortion (an image: a drift)."""
+
+_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("empty", ("empty output", "no output", "produced nothing", "blank")),
+    ("gibberish", ("gibberish", "nonsense word", "word salad", "garbled", "random character", "not words", "noise")),
+    ("repetition", ("repeat", "repetit", "duplicat", "over and over", "loops")),
+    ("truncated", ("truncat", "cut off", "cut short", "incomplete", "unfinished", "mid-sentence", "mid sentence")),
+    ("grammar", ("grammar", "grammatic", "syntax", "word order", "punctuation", "agreement", "tense", "malformed sentence")),
+    ("spelling", ("spelling", "misspell", "typo")),
+    ("contradiction", ("contradict", "inconsisten", "conflicts with")),
+    ("false", ("false", "factual", "inaccurate", "untrue", "wrong fact", "not true", "misleading")),
+    ("incoherent", ("incoheren", "meaningless", "make no sense", "does not make sense", "doesn't make sense",
+                    "nonsensical", "confusing", "unintelligible")),
+    ("off-topic", ("off-topic", "off topic", "irrelevant", "unrelated", "does not answer", "ignores the prompt")),
+)
+
+
+def classify(critique: str | None, *, verdict: str | None = None, rating: float | None = None,
+             default: str = DEFAULT_REASON) -> str:
+    """The reason tag behind a tutor's critique (its own words decide; ``default`` when nothing matches).
+
+    ``"unrated"`` comes back when the tutor failed a text without a critique
+    the vocabulary recognises - it still failed, and the network records that
+    nobody said why.
+    """
+    text = " ".join(str(critique or "").split()).lower()
+    for reason, needles in _PATTERNS:
+        if any(needle in text for needle in needles):
+            return reason
+    if (verdict or "").strip().lower() == "unrated":
+        return "unrated"  # the tutor failed it without saying anything the vocabulary knows
+    if rating is not None and rating <= 0 and not text:
+        return "gibberish"
+    return default
+
+
+def severity_from_rating(rating: float | None, threshold: float = 6.0, floor: float = 0.25,
+                         ceiling: float = 2.0) -> float:
+    """How heavily a rated failure is blamed: ``ceiling`` at rating 0, ``floor`` at the pass threshold.
+
+    An unrated failure (``rating`` ``None``) is blamed like one ordinary
+    failure (1.0).
+    """
+    if rating is None:
+        return 1.0
+    limit = float(threshold) if threshold > 0 else 1.0
+    share = max(0.0, min(1.0, (limit - float(rating)) / limit))
+    return floor + (ceiling - floor) * share
+
+
+def code_reason(attempt: Any) -> str:
+    """The reason a code attempt was rejected, from the sandbox, the style report and the judge."""
+    data = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt or {})
+    run = data.get("run") or {}
+    style = data.get("style") or {}
+    verdict = data.get("verdict") or {}
+    if run.get("timed_out"):
+        return "timeout"
+    if run.get("ok") is False:
+        return "crash"
+    if run.get("expected_ok") is False:
+        return "wrong-output"
+    if verdict.get("task") is False:
+        return "task-not-done"
+    if verdict.get("naming") is False or style.get("naming_ok") is False:
+        return "naming"
+    if verdict.get("pep8") is False or style.get("pep8_ok") is False:
+        return "style"
+    critique = verdict.get("critique") or ""
+    issues = verdict.get("issues") or []
+    return classify(critique or "; ".join(str(i) for i in issues[:3]))
+
+
+def recall_reason(facts: Any) -> str:
+    """The single worst thing wrong with a recalled waveform or image (:func:`modelkit.recall.check`).
+
+    The order is the order the faults matter in: a completion that cannot be
+    read at all is not also judged on its length, and one that stopped early is
+    not blamed for the base64 it never got to.  ``"none"`` comes back when
+    nothing is wrong with it.
+    """
+    data = dict(facts or {})
+    speech = str(data.get("modality") or "speech") == "speech"
+    if not data.get("readable"):
+        return "unreadable"
+    ratio = float(data.get("length_ratio") or 0.0)
+    if ratio < RECALL_TRUNCATED:
+        return "truncated"
+    if ratio > RECALL_OVERRUN:
+        return "overrun"
+    if data.get("repaired"):
+        return "garbled"
+    if data.get("flat") and not data.get("reference_flat"):
+        return "silence" if speech else "blank"
+    if data.get("extreme") and not data.get("reference_extreme"):
+        return "clipping" if speech else "noise"
+    if data.get("match") is False:
+        return "mishearing"
+    if float(data.get("agreement") or 0.0) < RECALL_AGREEMENT:
+        return "distortion" if speech else "drift"
+    return "none"
+
+
+def agent_reason(attempt: Any) -> str:
+    """Why an agent attempt was rejected, read from how far through the task it got.
+
+    The order is how far it got: a network that never called anything is not
+    also judged on the answer it never gave, and one whose calls had to be
+    written for it is not blamed for the tool failing afterwards.  When it did
+    get through, the judge's own words decide (:func:`classify`).
+    """
+    data = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt or {})
+    steps = list(data.get("steps") or ())
+    verdict = data.get("verdict") or {}
+    if not steps:
+        return "no-call"
+    if any((s or {}).get("source") == "mediator" for s in steps):
+        return "bad-call"  # what it wrote could not be read as a call; the mediator had to step in
+    if any((s or {}).get("ok") is False for s in steps):
+        return "tool-error"
+    if not data.get("answer"):
+        return "no-answer"
+    return classify(
+        verdict.get("critique") or "; ".join(str(i) for i in (verdict.get("issues") or [])[:3]),
+        rating=verdict.get("score"),
+    )
+
+
+def severity_from_gap(gap: float | None, floor: float = 0.25, ceiling: float = 2.0) -> float:
+    """How heavily a failure is blamed, from how badly it failed (``gap`` in ``[0, 1]``).
+
+    The agent's own measure of a failure (:meth:`modelkit.agent.AgentTrainer.gap_of`
+    - the share of the acceptance criteria missed, or how far below the pass
+    score the judge put it) on the same scale
+    :func:`severity_from_rating` maps ratings onto.
+    """
+    if gap is None:
+        return 1.0
+    return floor + (ceiling - floor) * max(0.0, min(1.0, float(gap)))
+
+
+_PUNCTUATION = set(".,;:!?'\"-()[]{}\u2018\u2019\u201c\u201d\u2013\u2014/&")
+
+
+def reason_from_changes(changes: Iterable[dict]) -> str:
+    """The reason a diff speaks for itself, from what its edits touched (``"none"`` when nothing changed).
+
+    ``changes`` are ``{"op", "wrong", "right"}`` edits (:func:`radixnet.diff.summary`
+    or the ``changes`` of :func:`modelkit.ollama.correct_texts`).  Every edit
+    is read for what it moved and the widest kind wins: a whole word inserted
+    or struck out is ``grammar``, a change that only turns a word into
+    another word is ``spelling``, and one that only touches punctuation,
+    letter case or spaces is that.
+    """
+    kinds: set[str] = set()
+    for edit in changes or []:
+        if not isinstance(edit, dict) or edit.get("op") == "equal":
+            continue
+        wrong, right = str(edit.get("wrong") or ""), str(edit.get("right") or "")
+        if wrong == right:
+            continue
+        kinds.add(_change_kind(wrong, right))
+    for kind in ("grammar", "spelling", "punctuation", "spacing", "capitalisation"):
+        if kind in kinds:
+            return kind
+    return "none"
+
+
+def _change_kind(wrong: str, right: str) -> str:
+    moved = wrong + right
+    if moved and all(ch in _PUNCTUATION for ch in moved):
+        return "punctuation"
+    if moved and all(ch.isspace() for ch in moved):
+        return "spacing"
+    if wrong.lower() == right.lower():
+        return "capitalisation"
+    without = lambda s: "".join(ch for ch in s if ch not in _PUNCTUATION and not ch.isspace())  # noqa: E731
+    if without(wrong) == without(right):
+        # only punctuation and spaces moved, however the letters were carried along
+        return "punctuation" if any(ch in _PUNCTUATION for ch in moved) else "spacing"
+    if any(ch.isspace() for ch in wrong) or any(ch.isspace() for ch in right):
+        return "grammar"  # a space moved with the letters: a word was added, dropped or reordered
+    return "spelling"  # letters changed inside one word
+
+
+def correction_reason(reason: str | None, note: str | None = None, changes: Iterable[dict] = ()) -> str:
+    """The reason tag behind a copy editor's correction, out of :data:`CORRECTION_REASONS`.
+
+    The editor's own word wins when the vocabulary knows it (aliases such as
+    ``typo`` or ``capitalization`` are accepted); failing that its note is read
+    the way a critique is (:func:`classify`), and failing that the diff
+    decides (:func:`reason_from_changes`).  ``"none"`` is only ever what the
+    diff says about an unchanged text.
+    """
+    word = " ".join(str(reason or "").split()).lower().strip(".:;,\"'")
+    word = _CORRECTION_ALIASES.get(word, word)
+    if word in CORRECTION_REASONS and word != "none":
+        return word
+    if word.replace(" ", "-") in CORRECTION_REASONS and word != "none":
+        return word.replace(" ", "-")
+    spoken = classify(note, default="")
+    if spoken:
+        mapped = {"gibberish": "nonsense", "truncated": "fragment", "incoherent": "nonsense"}.get(spoken, spoken)
+        if mapped in CORRECTION_REASONS:
+            return mapped
+    from_diff = reason_from_changes(changes)
+    return from_diff if from_diff != "none" else "grammar"
+
+
+def _fault(text: str, reason: str, severity: float, note: str, source: str) -> dict:
+    return {"text": text, "reason": reason, "severity": float(severity), "note": note, "source": source}
+
+
+def faults_from_reviews(reviews: Iterable[dict], threshold: float = 6.0, source: str = "review") -> tuple[list[dict], list[str]]:
+    """``(faults, passed_texts)`` from :func:`modelkit.ollama.review_texts` entries.
+
+    Everything the reviewer did not pass becomes a fault whose reason comes
+    from its critique and whose severity comes from its rating; the texts it
+    passed come back separately so they can clear blame.
+    """
+    faults: list[dict] = []
+    passed: list[str] = []
+    for entry in reviews or []:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text") or "")
+        if not text:
+            continue
+        verdict = str(entry.get("verdict") or "").strip().lower()
+        rating = entry.get("rating")
+        rating = float(rating) if isinstance(rating, (int, float)) else None
+        if verdict == "pass":
+            passed.append(text)
+            continue
+        critique = str(entry.get("critique") or "")
+        faults.append(_fault(
+            text,
+            classify(critique, verdict=verdict, rating=rating),
+            severity_from_rating(rating, threshold),
+            critique,
+            source,
+        ))
+    return faults, passed
+
+
+def faults_from_corrections(
+    corrections: Iterable[dict], severity: float = CORRECTION_SEVERITY, source: str = "correction"
+) -> tuple[list[dict], list[str]]:
+    """``(faults, unchanged_texts)`` from :func:`modelkit.ollama.correct_texts` entries.
+
+    Every text the editor changed becomes a fault that carries its
+    ``correction``, so :func:`teach` routes it through
+    :meth:`radixnet.negative.NegativeNet.correct` and only the characters the
+    editor struck out or replaced are blamed; its reason is the editor's word
+    for the mistake (:func:`correction_reason`) and its note the editor's
+    sentence.  The texts it handed back unchanged come back separately to
+    clear blame.  A text it gave no usable answer for (``"uncorrected"``) is
+    neither: nobody said anything about it.
+    """
+    faults: list[dict] = []
+    unchanged: list[str] = []
+    amount = abs(float(severity))
+    for entry in corrections or []:
+        if not isinstance(entry, dict):
+            continue
+        text = str(entry.get("text") or "")
+        correction = entry.get("correction")
+        if not text or not isinstance(correction, str):
+            continue
+        verdict = str(entry.get("verdict") or "").strip().lower()
+        read = str(entry.get("spelled") or text)  # what the editor read: a model of sounds' words
+        if verdict == "unchanged" or (not verdict and correction == read):
+            unchanged.append(text)
+            continue
+        if correction == read:
+            continue
+        note = str(entry.get("note") or "")
+        reason = str(entry.get("reason") or "").strip().lower()
+        if reason not in CORRECTION_REASONS or reason == "none":
+            reason = correction_reason(reason, note, entry.get("changes") or ())
+        fault = _fault(text, reason, amount, note, source)
+        fault["correction"] = correction
+        faults.append(fault)
+    return faults, unchanged
+
+
+def faults_from_attempts(attempts: Iterable[Any], source: str = "codegen") -> tuple[list[dict], list[str]]:
+    """``(faults, correct_texts)`` from :class:`modelkit.codegen.Attempt` objects (or their dicts).
+
+    A rejected program is blamed for what the sandbox, the style checker or
+    the judge found (:func:`code_reason`), with the tutor's feedback as the
+    note; the programs that were accepted come back to clear blame.
+    """
+    faults: list[dict] = []
+    correct: list[str] = []
+    for attempt in attempts or []:
+        data = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt or {})
+        text = getattr(attempt, "text", None) or data.get("text") or data.get("code") or ""
+        text = str(text)
+        if not text:
+            continue
+        if data.get("correct") or (data.get("verdict") or {}).get("correct"):
+            correct.append(text)
+            continue
+        reason = code_reason(attempt)
+        note = attempt.feedback() if hasattr(attempt, "feedback") else "; ".join(
+            str(i) for i in ((data.get("verdict") or {}).get("issues") or [])[:4]
+        )
+        faults.append(_fault(text, reason, CODE_SEVERITY.get(reason, 1.0), note, source))
+    return faults, correct
+
+
+def faults_from_agent(
+    attempts: Iterable[Any],
+    *,
+    correction: str | None = None,
+    threshold: float = 6.0,
+    source: str = "agent",
+    steps: bool = True,
+) -> tuple[list[dict], list[str]]:
+    """``(faults, correct_texts)`` from :class:`modelkit.agent.Attempt` objects (or their dicts).
+
+    A failed attempt is blamed at every granularity it went wrong at, because
+    they are different failures and the network has to be able to tell them
+    apart:
+
+    * the **transcript** as a whole, for how badly it failed
+      (:func:`severity_from_gap`) and for what the judge said about the answer.
+      ``correction`` is the transcript of a correct run of the same task -
+      usually the teacher's demonstration - which routes the fault through
+      :meth:`radixnet.negative.NegativeNet.correct`, so only the characters
+      that differ from a run that worked are blamed;
+    * each **emission the mediator had to repair** (``bad-call``): what the
+      network actually wrote is the failure, and it never appears in the
+      transcript, which holds the repaired call instead.  Blaming the
+      transcript for those characters would teach the network that a
+      well-formed call is a mistake;
+    * each **call the network wrote itself that the tool refused**
+      (``tool-error``): it chose that call and it did not work.
+
+    ``steps=False`` keeps only the attempt-level faults.
+    """
+    faults: list[dict] = []
+    correct: list[str] = []
+    seen: set[str] = set()
+    for attempt in attempts or []:
+        data = attempt.to_dict() if hasattr(attempt, "to_dict") else dict(attempt or {})
+        text = str(getattr(attempt, "text", None) or data.get("text") or "")
+        verdict = data.get("verdict") or {}
+        if data.get("correct") or verdict.get("correct"):
+            if text:
+                correct.append(text)
+            continue
+        note = str(verdict.get("critique") or "")
+        issues = [str(i) for i in (verdict.get("issues") or [])]
+        if issues:
+            note = (note + " Unmet: " + "; ".join(issues[:4])).strip()
+        if text:
+            gap = data.get("gap")
+            fault = _fault(
+                text,
+                agent_reason(attempt),
+                severity_from_gap(gap) if gap is not None
+                else severity_from_rating(verdict.get("score"), threshold),
+                note or "the attempt was judged incorrect",
+                source,
+            )
+            if correction and correction != text:
+                fault["correction"] = correction
+            faults.append(fault)
+        if not steps:
+            continue
+        for step in data.get("steps") or ():
+            step = step or {}
+            if step.get("source") == "mediator":
+                emission = " ".join(str(step.get("emission") or "").split())
+                if len(emission) >= 3 and emission not in seen:
+                    seen.add(emission)
+                    faults.append(_fault(
+                        emission, "bad-call", AGENT_SEVERITY["bad-call"],
+                        f"could not be read as a call to {step.get('tool')}, which the mediator had to write instead",
+                        source,
+                    ))
+            elif step.get("ok") is False and step.get("source") == "model":
+                call = str(step.get("text") or "").strip()
+                if call and call not in seen:
+                    seen.add(call)
+                    faults.append(_fault(
+                        call, "tool-error", AGENT_SEVERITY["tool-error"],
+                        str(step.get("error") or "the tool refused the call"), source,
+                    ))
+    # `correct` already clears everything a correction shares with the failure structure, so the text
+    # used as one must not be cleared a second time: it would take off the blame the diff just placed.
+    return faults, [t for t in correct if t != correction]
+
+
+def faults_from_lessons(lessons: Iterable[Any], threshold: float = 6.0, source: str = "tutor") -> tuple[list[dict], list[str]]:
+    """``(faults, passed_texts)`` from :class:`modelkit.tutor.Lesson` objects (or their dicts).
+
+    The English tutor is the richest source of negatives there is: the mistake
+    it named (``grade.error``, one of :data:`modelkit.tutor.ERROR_TYPES`) is
+    the reason, its mark is the severity, its sentence of teaching is the note
+    and its **correction** rides along in the fault, so :func:`teach` can blame
+    only the characters the teacher actually changed
+    (:meth:`radixnet.negative.NegativeNet.correct`).  The sentences that
+    passed, the corrections themselves and the teacher's own model answers all
+    come back as cleared text.
+
+    A lesson that was widened (:func:`modelkit.tutor.explain_mistakes`) also
+    carries the teacher's explanation of *why* it is wrong and its
+    ``variants`` - more sentences that make the same mistake, each with its
+    correct form.  Every variant becomes a fault of its own under the same
+    reason, at its own ``weight`` of the failure's severity, noted with the
+    explanation and sourced as ``<source>:similar``; its correct form clears
+    blame like any other sentence the teacher wrote.  Nothing else in the
+    system reads them: a sentence the student never wrote is the negative
+    network's lesson alone.
+    """
+    faults: list[dict] = []
+    passed: list[str] = []
+    for lesson in lessons or []:
+        data = lesson.to_dict() if hasattr(lesson, "to_dict") else dict(lesson or {})
+        sentence = " ".join(str(data.get("sentence") or "").split())
+        # what the network wrote in its own units - a model of sounds is marked on the words they spell, and
+        # blamed for the sounds it said (a correction in words is read as the sounds it makes)
+        own = " ".join(str(data.get("said") or "").split()) or sentence
+        grade = data.get("grade") or {}
+        exercise = data.get("exercise") or {}
+        correction = " ".join(str(grade.get("correction") or "").split())
+        answer = " ".join(str(exercise.get("answer") or "").split())
+        if sentence and grade.get("passed"):
+            passed.append(own)
+        elif sentence:
+            error = str(grade.get("error") or "").strip().lower()
+            comment = str(grade.get("comment") or "")
+            reason = error if error and error != "none" else classify(comment, verdict=grade.get("graded_by"))
+            score = grade.get("score")
+            fault = _fault(
+                own,
+                reason,
+                severity_from_rating(score if isinstance(score, (int, float)) else None, threshold),
+                comment,
+                source,
+            )
+            if correction and correction != sentence:
+                fault["correction"] = correction
+            faults.append(fault)
+            why = " ".join(str(data.get("why") or "").split())
+            for variant in data.get("variants") or []:
+                item = variant.to_dict() if hasattr(variant, "to_dict") else dict(variant or {})
+                wrong = " ".join(str(item.get("wrong") or "").split())
+                right = " ".join(str(item.get("right") or "").split())
+                if not wrong or wrong == sentence:
+                    continue
+                similar = _fault(
+                    wrong,
+                    reason,
+                    fault["severity"] * max(0.0, float(item.get("weight", 0.5))),
+                    why or comment,
+                    f"{source}:similar",
+                )
+                if right and right != wrong:
+                    similar["correction"] = right
+                    if right not in passed:
+                        passed.append(right)
+                faults.append(similar)
+        for text in (correction, answer):
+            if text and text not in passed:
+                passed.append(text)
+    return faults, passed
+
+
+def faults_from_recall(lessons: Iterable[Any], threshold: float = 6.0,
+                       source: str = "recall") -> tuple[list[dict], list[str]]:
+    """``(faults, passed_texts)`` from :class:`modelkit.recall.RecallLesson` objects (or their dicts).
+
+    The recall tutor needs no LLM: it asked the network to write out an
+    utterance or a picture it had been taught, so the *correct* text is on file
+    and rides along in the fault as the correction.  Only the characters the
+    network got wrong are therefore blamed, and a payload it remembered exactly
+    clears blame like any other text the tutor passed.
+    """
+    faults: list[dict] = []
+    passed: list[str] = []
+    for lesson in lessons or []:
+        data = lesson.to_dict() if hasattr(lesson, "to_dict") else dict(lesson or {})
+        text = str(data.get("sentence") or data.get("text") or "")
+        if not text:
+            continue
+        grade = data.get("grade") or {}
+        correction = str(grade.get("correction") or "")
+        if grade.get("passed"):
+            passed.append(text)
+            continue
+        reason = str(grade.get("error") or "").strip().lower()
+        if not reason or reason == "none":
+            reason = recall_reason(grade.get("facts") or {})
+        if reason == "none":
+            reason = DEFAULT_REASON
+        score = grade.get("score")
+        fault = _fault(
+            text,
+            reason,
+            severity_from_rating(score if isinstance(score, (int, float)) else None, threshold),
+            str(grade.get("comment") or ""),
+            source,
+        )
+        if correction and correction != text:
+            fault["correction"] = correction
+        faults.append(fault)
+        if correction and correction not in passed:
+            passed.append(correction)  # the original is correct by construction
+    return faults, passed
+
+
+def teach(
+    negative: Any,
+    faults: Sequence[dict],
+    passed: Sequence[str] = (),
+    *,
+    epochs: int = 1,
+    clear_epochs: int = 1,
+    progress: Any = None,
+    stop_event: Any = None,
+) -> dict:
+    """Hand the tutor's faults to the negative network; ``passed`` texts clear blame afterwards.
+
+    Returns ``{"blamed", "cleared", "unmatched", "edges", "reasons",
+    "severity_mean", "records"}``.
+    """
+    records: list[dict] = []
+    reasons: dict[str, int] = {}
+    edges = 0
+    severities: list[float] = []
+    for fault in faults:
+        if stop_event is not None and stop_event.is_set():
+            break
+        text = str(fault.get("text") or "")
+        if not text:
+            continue
+        reason = str(fault.get("reason") or DEFAULT_REASON)
+        severity = float(fault.get("severity", 1.0))
+        correction = str(fault.get("correction") or "")
+        source = str(fault.get("source") or "tutor")
+        note = str(fault.get("note") or "")
+        if correction and hasattr(negative, "correct"):
+            # the tutor wrote the sentence out correctly: blame only the characters it changed
+            outcome = negative.correct(
+                text, correction, reason=reason, severity=severity, source=source, note=note,
+            )
+            edges += outcome["blamed"]
+            reasons[reason] = reasons.get(reason, 0) + 1
+            severities.append(severity)
+            records.append(outcome)
+            continue
+        out = negative.blame(
+            [text], reason=reason, severity=severity, source=source, note=note,
+            epochs=epochs, progress=progress, stop_event=stop_event,
+        )
+        if out:
+            edges += out[-1].get("edges_touched", 0)
+        records.extend(out)
+        reasons[reason] = reasons.get(reason, 0) + 1
+        severities.append(severity)
+    cleared = 0
+    unmatched = 0
+    texts = [str(t) for t in passed if str(t)]
+    if texts and not (stop_event is not None and stop_event.is_set()):
+        out = negative.clear(texts, epochs=clear_epochs, progress=progress, stop_event=stop_event)
+        records.extend(out)
+        if out:
+            cleared = out[-1].get("matched", 0)
+            unmatched = out[-1].get("unmatched", 0)
+    return {
+        "blamed": len(severities),
+        "cleared": cleared,
+        "unmatched": unmatched,
+        "edges": edges,
+        "reasons": reasons,
+        "severity_mean": sum(severities) / len(severities) if severities else 0.0,
+        "records": records,
+    }
+
+
+def _reviews_of(reviews: Any) -> tuple[list[dict], float | None]:
+    """Accept the ``reviews`` list or the whole :func:`modelkit.ollama.adversarial_review` result."""
+    if isinstance(reviews, dict):
+        return list(reviews.get("reviews") or []), reviews.get("threshold")
+    return list(reviews or []), None
+
+
+def teach_reviews(negative: Any, reviews: Any, *, threshold: float = 6.0, clear_passes: bool = True,
+                  source: str = "review", **options: Any) -> dict:
+    """Feed an adversarial review straight into the negative network (see :func:`teach`)."""
+    entries, own = _reviews_of(reviews)
+    limit = float(own) if isinstance(own, (int, float)) else float(threshold)
+    faults, passed = faults_from_reviews(entries, limit, source)
+    report = teach(negative, faults, passed if clear_passes else (), **options)
+    report.update(source=source, threshold=limit, faults=faults, passed=len(passed))
+    return report
+
+
+def _corrections_of(corrections: Any) -> list[dict]:
+    """Accept the ``corrections`` list or the whole :func:`modelkit.ollama.adversarial_correction` result."""
+    if isinstance(corrections, dict):
+        return list(corrections.get("corrections") or [])
+    return list(corrections or [])
+
+
+def teach_corrections(negative: Any, corrections: Any, *, severity: float = CORRECTION_SEVERITY,
+                      clear_passes: bool = True, source: str = "correction", **options: Any) -> dict:
+    """Feed a copy editor's corrections straight into the negative network (see :func:`faults_from_corrections`).
+
+    The report is :func:`teach`'s plus ``source``, ``severity``, ``faults``,
+    ``passed`` (unchanged texts), ``edits`` (the characters the editor changed
+    over all faults, in units of the network's encoding) and ``uncorrected``.
+    """
+    entries = _corrections_of(corrections)
+    faults, unchanged = faults_from_corrections(entries, severity, source)
+    report = teach(negative, faults, unchanged if clear_passes else (), **options)
+    report.update(
+        source=source, severity=abs(float(severity)), faults=faults, passed=len(unchanged),
+        edits=sum(int(r.get("edits") or 0) for r in report["records"] if r.get("phase") == "correction"),
+        uncorrected=sum(1 for e in entries if isinstance(e, dict) and e.get("verdict") == "uncorrected"),
+    )
+    return report
+
+
+def teach_lessons(negative: Any, lessons: Iterable[Any], *, threshold: float = 6.0, clear_passes: bool = True,
+                  source: str = "tutor", **options: Any) -> dict:
+    """Feed a round of English lessons into the negative network (see :func:`faults_from_lessons`)."""
+    faults, passed = faults_from_lessons(lessons, threshold, source)
+    report = teach(negative, faults, passed if clear_passes else (), **options)
+    report.update(source=source, threshold=float(threshold), faults=faults, passed=len(passed))
+    return report
+
+
+def teach_recall(negative: Any, lessons: Iterable[Any], *, threshold: float = 6.0, clear_passes: bool = True,
+                 source: str = "recall", **options: Any) -> dict:
+    """Feed a round of the speech / image recall tutor into the negative network (see :func:`faults_from_recall`)."""
+    faults, passed = faults_from_recall(lessons, threshold, source)
+    report = teach(negative, faults, passed if clear_passes else (), **options)
+    report.update(source=source, threshold=float(threshold), faults=faults, passed=len(passed))
+    return report
+
+
+def teach_agent(negative: Any, attempts: Iterable[Any], *, correction: str | None = None, threshold: float = 6.0,
+                clear_passes: bool = True, source: str = "agent", steps: bool = True, **options: Any) -> dict:
+    """Feed one task's attempts at using tools into the negative network (see :func:`faults_from_agent`)."""
+    faults, correct = faults_from_agent(
+        attempts, correction=correction, threshold=threshold, source=source, steps=steps,
+    )
+    report = teach(negative, faults, correct if clear_passes else (), **options)
+    report.update(source=source, threshold=float(threshold), faults=faults, passed=len(correct))
+    return report
+
+
+def teach_attempts(negative: Any, attempts: Iterable[Any], *, clear_passes: bool = True, source: str = "codegen",
+                   **options: Any) -> dict:
+    """Feed the code-generation teacher's rejected attempts into the negative network (see :func:`teach`)."""
+    faults, correct = faults_from_attempts(attempts, source)
+    report = teach(negative, faults, correct if clear_passes else (), **options)
+    report.update(source=source, faults=faults, passed=len(correct))
+    return report

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "modelkit"
+version = "0.1.0"
+description = "Everything around a model: the teaching loops, the LLM clients, the agent and its tools, speech, images and voice, MCP, the command line, the HTTP API and the React frontend. Broken out of RadixCyclicNN; the model layer is built on its radixnet package, the model-free layer needs nothing. Pure Python, standard library only."
+readme = "README.md"
+requires-python = ">=3.11"
+# Licensed under the custom source-available license in ../LICENSE (repository root).
+# The model layer imports the radixnet package (../RadixCyclicNN): install it too, or keep its checkout beside this one.
+dependencies = []
+
+[project.optional-dependencies]
+images = ["pillow"]
+diffusion = ["pillow", "torch", "diffusers"]
+# Speech to text; the waveform encoder itself needs nothing, and the browser's
+# Web Speech API (or --text) supplies the words without any of these.
+speech = ["faster-whisper"]
+whisper = ["openai-whisper"]
+
+[project.scripts]
+modelkit = "modelkit.cli:main"
+
+[tool.setuptools]
+packages = ["modelkit"]

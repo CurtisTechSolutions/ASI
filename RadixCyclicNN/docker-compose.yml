@@ -23,13 +23,16 @@ name: radixcyclicnn
 
 x-radixnet: &radixnet
   build:
-    context: .
+    # the repository root: the model is this directory, the command line, the API
+    # and the frontend are the kit beside it (../ModelKit)
+    context: ..
+    dockerfile: RadixCyclicNN/Dockerfile
     args:
       WITH_TORCH: ${WITH_TORCH:-0}
   image: radixcyclicnn:latest
   volumes:
     - radixnet-data:/data
-    - ./data:/app/data:ro
+    - ./data:/app/RadixCyclicNN/data:ro
 
 services:
   # ---- the API + frontend -------------------------------------------------
@@ -47,7 +50,7 @@ services:
       - --port
       - "8000"
       - --frontend-dir
-      - /app/frontend/dist
+      - /app/ModelKit/frontend/dist
       - --checkpoint-dir
       - /data/checkpoints
       - --upload-dir
@@ -113,7 +116,7 @@ services:
     command:
       - |
         import json, os, sys, urllib.error, urllib.request
-        corpus_path = "/app/data/" + os.environ.get("RADIXNET_CORPUS", "sample_corpus.txt")
+        corpus_path = "/app/RadixCyclicNN/data/" + os.environ.get("RADIXNET_CORPUS", "sample_corpus.txt")
         with open(corpus_path, encoding="utf-8") as fh:
             corpus = [line.strip() for line in fh if line.strip()]
         body = {
@@ -147,7 +150,7 @@ services:
       - ${RADIXNET_BACKEND:-auto}
       - train
       - --data
-      - /app/data/${RADIXNET_CORPUS:-sample_corpus.txt}
+      - /app/RadixCyclicNN/data/${RADIXNET_CORPUS:-sample_corpus.txt}
       - --epochs
       - "${EPOCHS:-10}"
       - --lr
@@ -169,7 +172,7 @@ services:
       - ${RADIXNET_BACKEND:-auto}
       - evolve
       - --data
-      - /app/data/${RADIXNET_CORPUS:-sample_corpus.txt}
+      - /app/RadixCyclicNN/data/${RADIXNET_CORPUS:-sample_corpus.txt}
       - --generations
       - "0"
       - --samples
@@ -196,8 +199,9 @@ services:
   test:
     <<: *radixnet
     profiles: ["tools"]
-    entrypoint: ["python", "-m", "unittest"]
-    command: ["discover", "-s", "tests", "-v"]
+    # the model's tests, then the kit's (the Go and Rust parity suites skip: the image has neither toolchain)
+    entrypoint: ["sh", "-c"]
+    command: ["python -m unittest discover -s tests -v && cd ../ModelKit && python -m unittest discover -s tests -v"]
 
   bench:
     <<: *radixnet
@@ -210,7 +214,7 @@ services:
     profiles: ["dev"]
     working_dir: /app
     volumes:
-      - ./frontend:/app
+      - ../ModelKit/frontend:/app
       - frontend-node-modules:/app/node_modules
     environment:
       VITE_PROXY_TARGET: http://api:8000

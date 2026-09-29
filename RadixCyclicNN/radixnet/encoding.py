@@ -20,17 +20,10 @@ gram holds, and how far apart consecutive grams start:
 because that is how the rest of the package holds them; ``Encoder(window=5)``
 still means what it always did.  :meth:`Decoder.decode_path` reverses the
 (possibly path-compressed) node labels of the graph.
-
-:func:`repair_base64` is the shared tail of the *media* text formats
-(``img:...`` in :mod:`radixnet.vision`, ``aud:...`` in :mod:`radixnet.speech`):
-the base64 payload of a text the network predicted is rarely clean, so it is
-repaired before it is decoded.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import importlib
 import os
 import re
@@ -468,19 +461,6 @@ DEFAULT_ENCODING = Encoding()
 # ---------------------------------------------------------------------------
 
 
-def reader_text(encoding: Encoding | None, text: str) -> str:
-    """What a reader - a teacher, a reviewer, a partner - is shown of a text a model wrote.
-
-    A model of sounds is shown the English its sounds spell (:meth:`Encoding.spell`), so an LLM marks,
-    corrects and answers words rather than ``DH.AH0 # K.AE1.T``; every other text, and every text of a
-    caller that names no encoding, is shown as it is.  What the reader writes back stays in words: a model
-    of sounds reads it as the sounds it makes.
-    """
-    if encoding is None or not encoding.phonetic:
-        return text
-    return encoding.spell(text)
-
-
 def spelled_prediction(encoding: Encoding, full_text: str, continuation: str) -> dict:
     """The words a prediction of a model of sounds spells: ``{"spelled", "spelled_continuation"}``.
 
@@ -682,33 +662,6 @@ class Decoder:
 
     def __repr__(self) -> str:
         return f"Decoder(encoding={self.encoding})"
-
-
-_B64_JUNK = re.compile(r"[^A-Za-z0-9+/=]")
-
-
-def repair_base64(body: str) -> tuple[bytes, bool]:
-    """Decode the base64 tail of a media text, repairing it first; ``(payload, repaired)``.
-
-    The media encoders (:mod:`radixnet.vision`, :mod:`radixnet.speech`) pack
-    their payload as base64 into a text the network trains on and *predicts*,
-    so what comes back may be cut off, padded with junk or interrupted by
-    whitespace.  Characters outside the base64 alphabet are dropped, a single
-    dangling character (which can never decode) is removed with them, the
-    padding is completed, and ``repaired`` says whether any of that changed
-    the text.  The payload is returned as it decodes - callers pad or truncate
-    it to the length their format needs.
-    """
-    clean = _B64_JUNK.sub("", body).rstrip("=")
-    if len(clean) % 4 == 1:  # a single dangling character can never decode
-        clean = clean[:-1]
-    padded = clean + "=" * (-len(clean) % 4)
-    repaired = padded != body.strip()  # a clean text comes back unchanged, padding included
-    try:
-        payload = base64.b64decode(padded, validate=True)
-    except (ValueError, binascii.Error) as exc:  # pragma: no cover - the junk filter makes this rare
-        raise ValueError(f"the base64 part cannot be decoded: {exc}") from exc
-    return payload, repaired
 
 
 # ---------------------------------------------------------------------------
