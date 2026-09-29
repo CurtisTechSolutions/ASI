@@ -1,5 +1,10 @@
 # PrimedRadixPair
 
+> **Next layer:** [LatentRadixPair](../LatentRadixPair) keeps these two trees and replaces the tokenizer with
+> a trained network that compresses the context into the tree's address, so the units are bytes and the
+> model reads anything.
+
+
 **Two radix trees, primed with every option, connected at every equal node —
 one written by reading, the other by what worked.**
 

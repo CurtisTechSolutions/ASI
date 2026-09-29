@@ -1,0 +1,3 @@
+bin/
+*.json.gz
+*.tmp
