@@ -4,6 +4,11 @@
 # library, the Go port is the standard library, and so is this one.  Everything
 # the model needs - the hash, the RNG, the exact sum, the worker pool - is
 # written out in src/.
+#
+# A library only.  Everything around the model - the teaching loops, the LLM
+# clients, the agent and its tools, media, MCP, the CLI (the `radixnet` and
+# `radixnet-bench` binaries) and the HTTP API - is the modelkit crate in
+# ../../ModelKit/rust, which depends on this one; this one never on it.
 [package]
 name = "radixnet"
 version = "0.1.0"
@@ -22,10 +27,6 @@ phonetok = { path = "../../PhoneticTokenizer/rust" }
 [lib]
 name = "radixnet"
 path = "src/lib.rs"
-
-[[bin]]
-name = "radixnet-bench"
-path = "src/bin/radixnet-bench.rs"
 
 [profile.release]
 opt-level = 3

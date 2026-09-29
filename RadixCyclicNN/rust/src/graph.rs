@@ -494,6 +494,14 @@ impl Graph {
     pub fn edge_reward(&self, e: usize) -> f64 {
         self.edge_reward.get(e).copied().unwrap_or(0.0)
     }
+    /// Every edge's weight, by edge id.
+    pub fn edge_weights(&self) -> &[f64] {
+        &self.edge_w
+    }
+    /// Every edge's traversals inside the sliding window, by edge id.
+    pub fn window_edge_counts(&self) -> &[i64] {
+        &self.window_edge_count
+    }
     /// Whether a node id is alive (a tombstoned or unknown id is not).
     pub fn is_alive(&self, node: usize) -> bool {
         self.alive.get(node).copied().unwrap_or(false)

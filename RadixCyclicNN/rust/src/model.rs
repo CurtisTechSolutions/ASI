@@ -388,7 +388,7 @@ pub struct Model {
     /// Called at the end of every training epoch with the model as the epoch
     /// left it - what writes a checkpoint mid-run, as Python's training loops
     /// do (the `checkpoint` module's `train`).  `None` outside such a run.
-    pub(crate) epoch_hook: Option<EpochHook>,
+    pub epoch_hook: Option<EpochHook>,
     /// The replay buffer: a uniform sample of every text this model was
     /// trained on, rehearsed by a run with `replay > 0` - or `None`, and then
     /// the file does not mention it (`../../SPEC-SearchAndTraining.md`
@@ -397,7 +397,7 @@ pub struct Model {
 }
 
 /// What [`Model::epoch_hook`] runs: the model and the epoch's record.
-pub(crate) type EpochHook = Box<dyn FnMut(&mut Model, &EpochRecord) -> Result<(), String> + Send>;
+pub type EpochHook = Box<dyn FnMut(&mut Model, &EpochRecord) -> Result<(), String> + Send>;
 
 impl Model {
     /// Runs the epoch hook, if one is set, on the model as this epoch left it.
@@ -1140,7 +1140,7 @@ impl Model {
 
     /// `(node, offset, lead)`: where the prefix ends and the unmatched
     /// remainder of the located trigram, which every predicted path starts with.
-    pub(crate) fn prefix_start(&self, prefix: &str) -> (usize, usize, String) {
+    pub fn prefix_start(&self, prefix: &str) -> (usize, usize, String) {
         let (node, offset, matched) = self.locate(prefix);
         let enc = self.g.enc;
         let lead = if node != START && matched < enc.n {
@@ -1210,7 +1210,7 @@ impl Model {
 
     /// The prediction engine shared by [`Model::predict`] and [`Model::generate`].
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn search(
+    pub fn search(
         &mut self,
         prefix: &str,
         length: usize,

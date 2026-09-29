@@ -9,7 +9,7 @@ use crate::weights::ChildCost;
 
 /// A listener a sampled walk calls at every step it takes: the node stepped
 /// onto and its label - the sentinels included, so END is heard as the walk
-/// reaches it (`radixnet/voice.rs` speaks from one).
+/// reaches it (the `voice` module speaks from one).
 pub type StepListener<'a> = &'a mut dyn FnMut(usize, &str);
 
 /// How a walk chooses its way through the graph.
@@ -304,7 +304,7 @@ impl Graph {
     /// [`Graph::sample_walk_filtered`] with a listener: `on_step` is told every
     /// node the walk steps onto, with its label, as it steps onto it - END
     /// included, which is the walk's own final sentinel - so a listener can act
-    /// on the walk while it is walking (`voice.rs` speaks it).
+    /// on the walk while it is walking (the `voice` module speaks it).
     #[allow(clippy::too_many_arguments)] // the walk's knobs, one per knob
     pub fn sample_walk_listening(
         &mut self,

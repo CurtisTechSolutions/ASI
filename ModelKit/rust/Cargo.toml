@@ -1,0 +1,42 @@
+# modelkit (Rust) - everything around the RadixCyclicNN model: the teaching
+# loops, the LLM clients, the agent and its tools, images and speech, MCP, the
+# CLI and the HTTP API, built on the radixnet crate.
+#
+# No third-party dependencies, on purpose, like radixnet itself: the two below
+# are this repository's own crates, and everything else - HTTP/1.1, multipart,
+# PNG / JPEG / GIF, base64 - is written out in src/.
+[package]
+name = "modelkit"
+# `radixnet version`, `/api/health`, the MCP server's info and the fetch
+# User-Agent print this version: it moves with radixnet's.
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Everything around the RadixCyclicNN model: teaching loops, LLM clients, the agent and its tools, media, MCP, the CLI and the HTTP API"
+license = "LicenseRef-ASI"
+publish = false
+
+# The model and the phonetic tokenizer live beside this package in the same
+# repository.  This crate depends on the model; the model never on it.
+[dependencies]
+radixnet = { path = "../../RadixCyclicNN/rust" }
+phonetok = { path = "../../PhoneticTokenizer/rust" }
+
+[lib]
+name = "modelkit"
+path = "src/lib.rs"
+
+# The binaries keep the names they had in RadixCyclicNN/rust.
+[[bin]]
+name = "radixnet"
+path = "src/bin/radixnet.rs"
+
+[[bin]]
+name = "radixnet-bench"
+path = "src/bin/radixnet-bench.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
