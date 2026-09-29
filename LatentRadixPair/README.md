@@ -66,7 +66,7 @@ in Rust. DESIGN.md section 10 has the full tables.
 ## Rust port and frontend
 
 [`rust/`](rust/) is the same model in Rust, file-compatible with the Go implementation and checked
-against it by parity tests, with a web frontend (`latentpair serve`) that predicts, folds, judges in
+against it by parity tests, with a React frontend (`latentpair serve`) that predicts, folds, judges in
 outcome units, reads, scores and trains tokenizers from the browser. `cd rust && make build test serve`.
 
 ## Layout

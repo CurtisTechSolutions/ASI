@@ -227,7 +227,8 @@ end.
 `rust/` holds the same model in Rust, reading and writing the same files. Its `tests/parity.rs` loads
 a tokenizer and a model written by the Go implementation (`rust/testdata/`) and reproduces every code,
 decode, fold, prediction and score to within floating-point noise, the codes and chosen bytes exactly.
-`latentpair serve` adds a JSON API and a single-page frontend (`rust/web/`): a card each for predicting,
+`latentpair serve` adds a JSON API and a React frontend (`rust/web/`, built with Vite and embedded in
+the binary): a card each for predicting,
 the fold with its levels, judging in outcome units, reading, scoring and training a tokenizer; the
 `rust/README.md` lists the endpoints.
 

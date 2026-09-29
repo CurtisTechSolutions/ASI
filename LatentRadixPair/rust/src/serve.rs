@@ -11,9 +11,10 @@ use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server};
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_JS: &str = include_str!("../web/app.js");
-const STYLE_CSS: &str = include_str!("../web/style.css");
+// The React frontend's build (`cd web && npm run build`; `make frontend`).
+const INDEX_HTML: &str = include_str!("../web/dist/index.html");
+const APP_JS: &str = include_str!("../web/dist/app.js");
+const APP_CSS: &str = include_str!("../web/dist/app.css");
 
 struct State {
     model: Model,
@@ -48,7 +49,7 @@ pub fn run(model: Model, path: String, addr: &str) -> Result<(), String> {
         let response = match (request.method(), url.as_str()) {
             (Method::Get, "/") | (Method::Get, "/index.html") => text_response(200, INDEX_HTML, "text/html; charset=utf-8"),
             (Method::Get, "/app.js") => text_response(200, APP_JS, "application/javascript; charset=utf-8"),
-            (Method::Get, "/style.css") => text_response(200, STYLE_CSS, "text/css; charset=utf-8"),
+            (Method::Get, "/app.css") => text_response(200, APP_CSS, "text/css; charset=utf-8"),
             (Method::Get, "/api/info") => json_result(info(&state, &progress)),
             (Method::Get, "/api/tokenizer/progress") => json_result(Ok(progress_json(&progress))),
             (Method::Post, p) => json_result(post(p, &body, &state, &progress)),

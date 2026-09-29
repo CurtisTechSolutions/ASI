@@ -8,10 +8,19 @@ TOKENIZER ?= tokenizer.json.gz
 MODEL ?= model.json.gz
 ADDR ?= 127.0.0.1:8080
 
-.PHONY: build test demo tokenizer model bench serve fixtures clean
+.PHONY: build test demo tokenizer model bench serve fixtures frontend frontend-dev clean
 
+## the binary embeds web/dist, so run `make frontend` first when the frontend changed (needs Node)
 build:
 	$(CARGO) build --release
+
+## the React frontend (Vite + TypeScript) into web/dist, which the binary embeds
+frontend:
+	cd web && npm install --no-audit --no-fund && npm run build
+
+## the Vite dev server with hot reload, proxying /api to a running `latentpair serve` on 127.0.0.1:8080
+frontend-dev:
+	cd web && npm install --no-audit --no-fund && npm run dev
 
 ## unit tests, the parity tests against the Go implementation's fixtures, and the server's compile
 test:
