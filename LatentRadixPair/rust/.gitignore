@@ -1,0 +1,4 @@
+target/
+*.json.gz
+*.json.gz.tmp
+!testdata/*.json.gz

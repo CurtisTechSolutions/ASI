@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LatentRadixPair</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>LatentRadixPair</h1>
+    <p id="summary" class="muted">connecting…</p>
+  </div>
+  <div class="top-actions">
+    <button id="theme" type="button" title="Switch light and dark">Theme</button>
+    <button id="save" type="button" title="Save the model file on the server">Save model</button>
+  </div>
+</header>
+
+<main>
+<section class="card" id="predict-card">
+  <h2>Predict</h2>
+  <p class="muted">Continue a prefix one byte at a time from the exact fold. Each bar is what a step cost in bits.</p>
+  <div class="row">
+    <label class="grow">Prefix <textarea id="p-prefix" rows="2">the cat sat on the </textarea></label>
+  </div>
+  <div class="row">
+    <label>Length <input id="p-length" type="number" value="32" min="1" max="4096"></label>
+    <label>Mode <select id="p-mode"><option value="greedy">greedy</option><option value="sample">sample</option></select></label>
+    <label>Traversal <select id="p-traversal"><option value="reward">reward</option><option value="punishment">punishment</option></select></label>
+    <label>Backoff <select id="p-backoff"><option value="">model's</option><option value="all">all</option><option value="deepest">deepest</option><option value="none">none</option></select></label>
+    <label>Temperature <input id="p-temperature" type="number" value="1" step="0.1" min="0.01"></label>
+    <label class="check"><input id="p-toend" type="checkbox"> to end</label>
+    <button id="p-run" type="button" class="primary">Predict</button>
+  </div>
+  <div id="p-out" class="out"></div>
+  <div id="p-chart" class="chart"></div>
+</section>
+
+<section class="card" id="fold-card">
+  <h2>Fold</h2>
+  <p class="muted">What the model expects after a context: its code, what each level of the code stands for, and the next-byte distribution.</p>
+  <div class="row">
+    <label class="grow">Context <input id="f-prefix" type="text" value="the cat sat on the "></label>
+    <label>Traversal <select id="f-traversal"><option value="reward">reward</option><option value="punishment">punishment</option></select></label>
+    <label>Backoff <select id="f-backoff"><option value="">model's</option><option value="all">all</option><option value="deepest">deepest</option><option value="none">none</option></select></label>
+    <button id="f-run" type="button" class="primary">Fold</button>
+  </div>
+  <div id="f-levels" class="out"></div>
+  <div id="f-chart" class="chart"></div>
+</section>
+
+<section class="card" id="judge-card">
+  <h2>Judge</h2>
+  <p class="muted">A verdict is worth strength ÷ outcomes per rung: the more finite the space it comes from, the more one verdict says. The prefix is context, not outcome.</p>
+  <div class="row">
+    <label class="grow">Prefix (context) <input id="j-prefix" type="text" value="the cat sat on the "></label>
+  </div>
+  <div class="row">
+    <label>Kind <select id="j-kind"><option value="reward">reward</option><option value="punish">punish</option><option value="two_nrl">two-sided</option></select></label>
+    <label class="grow" id="j-text-label">Outcome <input id="j-text" type="text" value="mat"></label>
+    <label class="grow hidden" id="j-bad-label">Wrong outcome <input id="j-bad" type="text" value="log"></label>
+  </div>
+  <div class="row">
+    <label>Strength <input id="j-strength" type="number" value="1" step="0.5" min="0"></label>
+    <label>Outcomes <input id="j-outcomes" type="number" value="0" min="0"> <span class="muted">0 = model's</span></label>
+    <span class="presets">
+      <button type="button" data-outcomes="2">game: 2</button>
+      <button type="button" data-outcomes="69">phones: 69</button>
+      <button type="button" data-outcomes="39">phonemes: 39</button>
+      <button type="button" data-outcomes="257">bytes: 257</button>
+    </span>
+    <label class="check"><input id="j-read" type="checkbox" checked> also read (rewards)</label>
+    <button id="j-run" type="button" class="primary">Judge</button>
+  </div>
+  <div id="j-out" class="out"></div>
+  <div id="j-chart" class="chart"></div>
+</section>
+
+<section class="card" id="read-card">
+  <h2>Read</h2>
+  <p class="muted">Read texts into the count tree. Blank lines separate texts; one file is one text.</p>
+  <div class="row">
+    <label class="grow">Texts <textarea id="r-texts" rows="5">the cat sat on the mat
+
+the cat sat on the log</textarea></label>
+  </div>
+  <div class="row">
+    <input id="r-files" type="file" multiple>
+    <button id="r-run" type="button" class="primary">Read</button>
+  </div>
+  <div id="r-out" class="out"></div>
+</section>
+
+<section class="card" id="score-card">
+  <h2>Score</h2>
+  <p class="muted">Price a text: bits per unit under the model's belief, and the reward tree's readings of its steps.</p>
+  <div class="row">
+    <label class="grow">Text <input id="s-text" type="text" value="the cat sat on the mat"></label>
+    <label>Traversal <select id="s-traversal"><option value="reward">reward</option><option value="punishment">punishment</option></select></label>
+    <button id="s-run" type="button" class="primary">Score</button>
+  </div>
+  <div id="s-out" class="out"></div>
+  <div id="s-chart" class="chart"></div>
+</section>
+
+<section class="card" id="tok-card">
+  <h2>Tokenizer</h2>
+  <p class="muted">Train a new context tokenizer on a corpus. This replaces the model on the server with a fresh one (the trees are primed again and, if asked, read the corpus).</p>
+  <div class="row">
+    <label class="grow">Corpus <textarea id="t-texts" rows="4" placeholder="Paste text, or choose files below. Blank lines separate texts."></textarea></label>
+  </div>
+  <div class="row">
+    <input id="t-files" type="file" multiple>
+    <label>Steps <input id="t-steps" type="number" value="400" min="1"></label>
+    <label>Batch <input id="t-batch" type="number" value="256" min="1"></label>
+    <label>Rate <input id="t-lr" type="number" value="0.003" step="0.001" min="0.0001"></label>
+    <label>Window <input id="t-window" type="number" value="16" min="1"></label>
+    <label>Levels <input id="t-levels" type="text" value="4,4:4,4:4,4" size="12"></label>
+    <label>Recency <input id="t-recency" type="number" value="0.6" step="0.1" min="0.05" max="1"></label>
+    <label>Predict <input id="t-predict" type="number" value="4" step="0.5" min="0"></label>
+    <label class="check"><input id="t-read" type="checkbox" checked> then read the corpus</label>
+    <button id="t-run" type="button" class="primary">Train new tokenizer</button>
+    <button id="t-classes" type="button">Classes</button>
+  </div>
+  <div id="t-out" class="out"></div>
+  <div id="t-chart" class="chart"></div>
+  <div id="t-classes-out" class="out"></div>
+</section>
+</main>
+<footer class="muted">Rust port with a web frontend. Design in <code>../DESIGN.md</code>.</footer>
+<script src="/app.js"></script>
+</body>
+</html>

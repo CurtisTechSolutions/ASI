@@ -222,6 +222,15 @@ cells of both trees as parallel lists (`counts.cells/values`, `rewards.cells/plu
 usual runs; `make demo` trains a small tokenizer on this repository's documents and shows the loop end to
 end.
 
+### The Rust port and the frontend
+
+`rust/` holds the same model in Rust, reading and writing the same files. Its `tests/parity.rs` loads
+a tokenizer and a model written by the Go implementation (`rust/testdata/`) and reproduces every code,
+decode, fold, prediction and score to within floating-point noise, the codes and chosen bytes exactly.
+`latentpair serve` adds a JSON API and a single-page frontend (`rust/web/`): a card each for predicting,
+the fold with its levels, judging in outcome units, reading, scoring and training a tokenizer; the
+`rust/README.md` lists the endpoints.
+
 ## 10. Measurements
 
 Measured on this repository's Markdown files on four cores. Bits per byte are the fold's on the held-out
@@ -261,9 +270,16 @@ it replaced; the objective, more than the network, is what made it one.
 reconstruction loss on evaluation windows fell to 2.43 bits per byte; the next-byte head reached 3.23 bits
 from all three symbols and 3.89 from the first alone, which is the coarse-to-fine ordering at work.
 
-**Throughput** with the default tokenizer: reading (encoder plus counting) 43,000 bytes/s, scoring
-24,500 bytes/s, encoding alone 35,000 bytes/s, greedy prediction 11,000 bytes/s (one encoder pass per
-byte). The width-128 encoder is about 2.5 times faster at 0.09 more bits per byte.
+**Throughput** with the default tokenizer, Go and then the Rust port on the same tokenizer file (which
+scores the same 3.189 bits per byte, the two being file-compatible):
+
+| | read (encode + count) | score | encode alone | greedy predict |
+|---|---|---|---|---|
+| Go | 43,000 bytes/s | 24,500 bytes/s | 35,000 bytes/s | 11,000 bytes/s |
+| Rust | 96,000 bytes/s | 47,000 bytes/s | 74,000 bytes/s | 18,600 bytes/s |
+
+Prediction runs one encoder pass per byte. The width-128 encoder is about 2.5 times faster at 0.09 more
+bits per byte.
 
 ## 11. Limits and next steps
 

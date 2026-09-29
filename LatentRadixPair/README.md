@@ -60,8 +60,14 @@ the last k bytes.
 
 Twelve learned bits of context are worth about fourteen raw bits; the same code trained only to
 reconstruct its window was worth eleven. Training the tokenizer takes 0.11 s a step on four cores (220 s
-for the default 2,000 steps); the model then reads 43 kB/s and predicts 11 kB/s. DESIGN.md section 10 has
-the full tables.
+for the default 2,000 steps); the model then reads 43 kB/s and predicts 11 kB/s in Go, 96 kB/s and 19 kB/s
+in Rust. DESIGN.md section 10 has the full tables.
+
+## Rust port and frontend
+
+[`rust/`](rust/) is the same model in Rust, file-compatible with the Go implementation and checked
+against it by parity tests, with a web frontend (`latentpair serve`) that predicts, folds, judges in
+outcome units, reads, scores and trains tokenizers from the browser. `cd rust && make build test serve`.
 
 ## Layout
 
@@ -71,6 +77,7 @@ the full tables.
 | `tokenizer/` | the network, its training (masking, noise, recency, next-byte head), encode/decode, files |
 | `pair/` | the mixed-radix address space, count and reward trees, the fold, walks, feedback, the model file |
 | `cmd/latentpair/` | the command line, the demo and the benchmark |
+| `rust/` | the Rust port, its parity tests and the web frontend |
 | `DESIGN.md` | the design |
 
 Files are JSON (`.gz` gzipped); a model file embeds its tokenizer, so one file is one model.
