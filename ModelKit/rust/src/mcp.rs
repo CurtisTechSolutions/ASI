@@ -1,5 +1,5 @@
 //! The tools and the network itself over the Model Context Protocol
-//! (`radixnet/mcp.py`, `go/radixnet/mcp.go`).
+//! (`modelkit/mcp.py`, `go/kit/mcp.go`).
 //!
 //! Two things are offered to any MCP client (Claude Desktop, an editor,
 //! another agent), and the second is the interesting one:

@@ -1,5 +1,5 @@
 //! Programs written by the network, run in a sandbox and judged
-//! (`radixnet/codegen.py`, `go/radixnet/codegen.go`, `go/server/codegen.go`).
+//! (`modelkit/codegen.py`, `go/kit/codegen.go`, `go/server/codegen.go`).
 //!
 //! ```text
 //! problem -> Python program -> sandbox run -> style check -> judge -> 2NRL (punish / reward)
@@ -290,7 +290,7 @@ impl StyleReport {
 
 /// The Python half of the style check: the rules that need to know where the
 /// definitions are.  It reports a syntax error, the E302 blank-line rule and
-/// the naming rules as JSON, with `radixnet/codegen.py`'s own regexes and
+/// the naming rules as JSON, with `modelkit/codegen.py`'s own regexes and
 /// messages.  The source arrives as UTF-8 bytes on stdin, so no newline is
 /// translated on the way in.
 pub const STYLE_HELPER: &str = r##"import ast, json, re, sys

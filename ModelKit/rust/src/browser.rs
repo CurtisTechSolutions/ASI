@@ -1,5 +1,5 @@
 //! A real browser behind the web tools: Chrome driven over the W3C WebDriver
-//! protocol (`radixnet/browser.py`).
+//! protocol (`modelkit/browser.py`).
 //!
 //! The web tools fetch a page and read its HTML, which is enough for a
 //! document and nothing at all for a page that draws itself with JavaScript -

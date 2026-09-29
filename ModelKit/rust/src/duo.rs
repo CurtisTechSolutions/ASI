@@ -1,5 +1,5 @@
 //! The two networks as one output path: the positive model writes, the
-//! negative one vetoes (`radixnet/duo.py`, `go/radixnet/duo.go`).
+//! negative one vetoes (`modelkit/duo.py`, `go/kit/duo.go`).
 //!
 //! This is the GAN at output time rather than at training time.  The finished
 //! pair works together on every answer:

@@ -1,5 +1,5 @@
-//! The ChatGPT (OpenAI) client (`radixnet/chatgpt.py`,
-//! `go/radixnet/chatgpt.go`), the `radixnet chatgpt` command and
+//! The ChatGPT (OpenAI) client (`modelkit/chatgpt.py`,
+//! `go/kit/chatgpt.go`), the `radixnet chatgpt` command and
 //! `GET /api/chatgpt/models`.
 //!
 //! The same three calls as the Ollama client - the models a key may use

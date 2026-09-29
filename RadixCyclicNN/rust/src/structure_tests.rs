@@ -1,6 +1,6 @@
 //! Splits and merges must not change what the count model hangs on its edges -
 //! the recent shares, the verdicts and the prices - and the bottom beam of the
-//! least-punished traversal finds the most punished paths (D-091).
+//! least-punished traversal finds the most punished paths (D-092).
 
 use std::sync::atomic::Ordering;
 

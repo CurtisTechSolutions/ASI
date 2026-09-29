@@ -1,5 +1,5 @@
 //! The sandbox a Python program runs in: the `python` tool's, and code
-//! generation's (`radixnet/codegen.py` `Sandbox`, `go/radixnet/codegen.go`).
+//! generation's (`modelkit/codegen.py` `Sandbox`, `go/kit/codegen.go`).
 //!
 //! Isolation from accidents, not from a hostile program - the same promise
 //! the other two make, kept the same way, because the isolation is *the same
@@ -45,7 +45,7 @@ const LOG: &str = "tools";
 pub const MAX_OUTPUT_CHARS: usize = 4000;
 
 /// The Python the child runs: it sets its own limits, then runs the program.
-/// Character for character `radixnet/codegen.py`'s `_BOOTSTRAP`.
+/// Character for character `modelkit/codegen.py`'s `_BOOTSTRAP`.
 pub const BOOTSTRAP: &str = "
 import runpy, sys
 try:

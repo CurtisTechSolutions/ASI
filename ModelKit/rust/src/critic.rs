@@ -1,5 +1,5 @@
 //! The negative network feeding itself: an LLM reviewer on a loop - the
-//! Negative tab, automatic (`radixnet/critic.py`, `go/radixnet/critic.go`,
+//! Negative tab, automatic (`modelkit/critic.py`, `go/kit/critic.go`,
 //! `go/server/critic.go`).
 //!
 //! Every other tutor hands the negative network its failures as a side effect

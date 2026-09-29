@@ -1,7 +1,7 @@
 //! The adversarial LLM review, the letter-level LLM correction and the
-//! prompt-driven corpus, over any LLM client (`radixnet/ollama.py`,
-//! `go/radixnet/review.go`), and the bridges from a review or a correction to
-//! the negative network (`radixnet/blame.py`'s `faults_from_reviews` /
+//! prompt-driven corpus, over any LLM client (`modelkit/ollama.py`,
+//! `go/kit/review.go`), and the bridges from a review or a correction to
+//! the negative network (`modelkit/blame.py`'s `faults_from_reviews` /
 //! `teach_reviews` and `faults_from_corrections` / `teach_corrections`).
 //!
 //! Three ways of hooking the network into an LLM; the first two are the pair

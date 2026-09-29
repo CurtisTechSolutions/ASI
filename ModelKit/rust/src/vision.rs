@@ -1,5 +1,5 @@
 //! Images as text: a thumbnail encoder, the text format and its decoder
-//! (`radixnet/vision.py`, `go/radixnet/vision.go`).
+//! (`modelkit/vision.py`, `go/kit/vision.go`).
 //!
 //! Stable Diffusion generates an image by decoding a latent - 4 x H/8 x W/8
 //! numbers - with its VAE, and Python runs that backwards: an image becomes

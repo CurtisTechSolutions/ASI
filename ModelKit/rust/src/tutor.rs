@@ -1,6 +1,6 @@
 //! Automated English lessons: the teacher writes the exercise, the network
-//! completes it, the teacher marks it (`radixnet/tutor.py`,
-//! `go/radixnet/tutor.go`).
+//! completes it, the teacher marks it (`modelkit/tutor.py`,
+//! `go/kit/tutor.go`).
 //!
 //! ```text
 //! topic -> prefix (LLM) -> completion (the prediction search) -> grade (LLM) -> 2NRL
@@ -1263,7 +1263,7 @@ pub(crate) fn card_pairs(card: Json) -> Vec<(String, Json)> {
 // -- what the lessons teach the negative network ---------------------------------------------------
 
 /// `(faults, passed texts)` from a round of English lessons
-/// (`radixnet/blame.py`'s `faults_from_lessons`).
+/// (`modelkit/blame.py`'s `faults_from_lessons`).
 ///
 /// The English tutor is the richest source of negatives there is: the
 /// mistake it named is the reason, its mark the severity, its sentence of

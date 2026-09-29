@@ -1,5 +1,5 @@
 //! The model in today's format: messages in, an assistant message out -
-//! thinking, text, tool calls, streamed (Python's `radixnet/assistant.py`).
+//! thinking, text, tool calls, streamed (Python's `modelkit/assistant.py`).
 //!
 //! Every language model is talked to the same way now: a list of `{"role",
 //! "content"}` messages goes in, an assistant message comes back, and while it

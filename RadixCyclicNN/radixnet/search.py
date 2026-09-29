@@ -121,7 +121,7 @@ def onward(costs: list[tuple]) -> list[tuple]:
 
     ``THINK`` is not a continuation either, and the walk never takes it: stopping to think is not stopping, so
     it is dropped from the options and the real children stay on offer.  What a thought does with the node is
-    the thinker's business (:func:`radixnet.thinking.think`), not the walk's.
+    the thinker's business (:func:`modelkit.thinking.think`), not the walk's.
     """
     onward = [item for item in costs if item[0] != BACK and item[0] != THINK]
     if len(onward) == len(costs):
@@ -372,7 +372,7 @@ def sample_walk(
 
     ``on_step``, if given, is called with every node the walk steps onto, as it
     steps onto it - END included, which is the walk's own final sentinel - so a
-    listener can act on the walk while it is walking (:mod:`radixnet.voice`
+    listener can act on the walk while it is walking (:mod:`modelkit.voice`
     speaks it).
 
     Stops at END (if ``stop_at_end``), once ``max_chars`` characters were

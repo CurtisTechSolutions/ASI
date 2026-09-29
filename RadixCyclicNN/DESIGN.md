@@ -1485,7 +1485,7 @@ edge)` - the step in the company it kept - and the row is `[seen, correct, incor
   inverse: the contexts of the absorbed node's out-edges, keyed by the merged node, are re-keyed to every node that
   calls it (exact with one caller; with several, each carries the pooled row, which is what the merged node's
   predecessor priced the step by), the ones that arrived through the absorbed node are re-keyed to it, and the
-  dying edge's own die with it - a unary chain has one way through (D-091). `edge_parent` is maintained alongside,
+  dying edge's own die with it - a unary chain has one way through (D-092). `edge_parent` is maintained alongside,
   as Go has always had `EdgeParent`.
 * **What it reports.** `path_stats` adds `correct_ratio` (of the judged traffic) and `seen_ratio` (of the edge's
   traversals), `path_totals` the four counters that reach `stats()` as `path_contexts`, `path_judged`, `path_seen`,
@@ -1659,7 +1659,7 @@ and the window's edge ids (remapped like the edges); `from_dict` rebuilds the wi
 from before the dual function loads with `count_scale = 1, global_scale = window_scale = 0` so it behaves as it did. Every node is created with `a = 0, k = 1`, so the sine activation is the constant 1 and the
 base class's score `w * f_p * f_c` is the weight itself: `child_probs`, `child_costs`, Dijkstra, sampling, `split`
 (the new internal edge gets the node's count, the window history of the edges it now stands before and reward 0,
-section 40.3 and D-091) and `merge_child` (activation ratios are 1; what the dying edge alone was taught goes onto
+section 40.3 and D-092) and `merge_child` (activation ratios are 1; what the dying edge alone was taught goes onto
 the edges into the merged node, and the contexts of the choice it led to onto the nodes that call it) work
 unchanged. `add_reward(edge_ids, amount)` and `recompute_weights()` keep `edge_w` in sync and bump `version` so the
 cost cache refreshes; `invert()` negates the rewards; `to_dict` / `from_dict` carry `edges.reward` and the two scales
@@ -2728,7 +2728,7 @@ with nothing to press, and a reply: the microphone stays on, and everything the 
   last turns as the `history` every turn continues. A server without the stream route gets the plain one.
 * **From the shell**: `speech talk FILE | --seconds N | --text` is one turn with every dial (`cmd_speech_talk`),
   `--history FILE` continuing a conversation and the model saved when it learned; `../ModelKit/tests/test_voicechat.py`.
-* **In the other ports**: the Rust server and CLI (`rust/src/voicechat.rs`: `turn`, the routes, `talk_cli`; the
+* **In the other ports**: the Rust server and CLI (`../ModelKit/rust/src/voicechat.rs`: `turn`, the routes, `talk_cli`; the
   Ollama line in `review.rs`) and the Go server and CLI (`../ModelKit/go/kit/voicechat.go`: `VoiceTurn`; `../ModelKit/go/server/voice.go`;
   `speech talk` in `../ModelKit/go/cmd/radixnet-count/voice.go`) carry the same turn with the same document and the same events,
   so the tab works on whichever server serves it. The model's parts are closures there too (`Learn`, `ModelReply` /
@@ -3797,19 +3797,21 @@ traversals** (§31's punishment one in `src/penalty.rs`, §32's least-punished o
 prediction, generation, scoring, reward / punish / 2NRL, **the encoding dial** (§34) and **the model file** - and,
 since D-077, the rest of the package: the sine-activation and phase models, the negative network and the guard,
 every teaching loop, the LLM clients (HTTPS through the system `curl`, D-076), the tools, code generation and the
-agent, images and speech, MCP and the WebDriver browser, one module per area with one parity suite per area (`tests/test_rust_parity*.py`).  What it
-deliberately leaves out - the torch backend, the Stable Diffusion encoder, local Whisper - `rust/README.md` names.
+agent, images and speech, MCP and the WebDriver browser, one module per area with one parity suite per area (`../ModelKit/tests/test_rust_parity*.py`).
+Since D-093 everything but the model - the teaching loops, the clients, the tools, media, MCP, the CLI and the
+server - is a crate of its own, `modelkit` in `../ModelKit/rust`, built on this one and never the other way round.
+What the port deliberately leaves out - the torch backend, the Stable Diffusion encoder, local Whisper - `rust/README.md` names.
 
 The dial is the one place the port paid a representation for generality.  A trigram used to be three code points
 packed into a `u64` - `Copy`, hashable, no allocation - which is why its encoding pass allocated nothing and is one
 of the three reasons D-072 measured it faster than Go.  A gram of *any* n over *any* unit is arbitrary text, so the
 index is keyed by the gram as Python and Go key it, and what that costs is measured rather than argued
 (`bench/RESULTS.md`).  `src/encoding.rs` carries `Encoding{unit, n, stride}` and a `Units` view that indexes a text
-once so slicing by unit stays O(1), which is what the graph does on every split, merge and re-index.  Its binaries
-are `radixnet` (the CLI: every command of Python's, the model's own in `src/bin/radixnet.rs` and every other area's
-through `cli::COMMANDS`) and `radixnet-bench`.
+once so slicing by unit stays O(1), which is what the graph does on every split, merge and re-index.  The binaries
+are the kit crate's: `radixnet` (the CLI: every command of Python's, the model's own in
+`../ModelKit/rust/src/bin/radixnet.rs` and every other area's through `cli::COMMANDS`) and `radixnet-bench`.
 
-**The server is here too** (`src/http.rs`, `src/service.rs`): HTTP/1.1 written out over `TcpListener` - the request
+**The server is in the kit crate** (`../ModelKit/rust/src/http.rs`, `../ModelKit/rust/src/service.rs`): HTTP/1.1 written out over `TcpListener` - the request
 line, the headers, `Content-Length`, the static files of `../ModelKit/frontend/dist` with the SPA fallback, and a thread per
 connection - under the whole JSON contract §12 defines and the Python and Go servers answer, down to `engine` naming which one
 is replying.  `../ModelKit/frontend/dist` runs against `radixnet serve` unmodified: `/api/status` lists every route the server
@@ -4027,7 +4029,7 @@ server), `../ModelKit/tests/test_go_parity.py::TestGoSearchAndTraining`, `go/rad
 `go/radixnet/sampling_test.go`, `../ModelKit/go/server/server_test.go`, the `training`, `search`, `beam` and `cli` unit tests
 and `tests/server.rs` in Rust, and `../ModelKit/frontend/test/settings.test.mjs` and `../ModelKit/frontend/test/backwards.test.mjs`.
 
-## 36. Thinking (`../ModelKit/modelkit/thinking.py`, `../ModelKit/go/kit/thinking.go`, `rust/src/thinking.rs`) — the `THINK` sentinel at work
+## 36. Thinking (`../ModelKit/modelkit/thinking.py`, `../ModelKit/go/kit/thinking.go`, `../ModelKit/rust/src/thinking.rs`) — the `THINK` sentinel at work
 
 Section 5.1.2 gives the graph a fourth sentinel that faces both ways: `p -> THINK` is where the model has learned
 to stop and think, `THINK -> ...` is how its thoughts begin. This section is what happens between the two - what
@@ -4105,10 +4107,10 @@ network learns to question itself where its teacher did, about its own mistakes.
 * Tests: `../ModelKit/tests/test_thinking.py`, `TestThinkSentinel` in `test_graph.py`, the origin cases in `test_search.py`,
   `TestThinksBeforeBackingUp` in `test_dialogue.py`, the thinking cases in `test_ollama.py` and `test_tutor.py`;
   `../ModelKit/go/kit/thinking_test.go`, `../ModelKit/go/server/thinking_test.go`, the thinking cases in `../ModelKit/go/kit/tutor_test.go`
-  and `../ModelKit/go/server/tutor_test.go`; the unit tests in `rust/src/thinking.rs` and `rust/src/ollama.rs`; the tutor's
+  and `../ModelKit/go/server/tutor_test.go`; the unit tests in `../ModelKit/rust/src/thinking.rs` and `../ModelKit/rust/src/ollama.rs`; the tutor's
   thinking held to Python's by `test_go_parity.py` and `test_rust_parity_teach.py`.
 
-## 37. Today's format (`../ModelKit/modelkit/assistant.py`, `../ModelKit/go/kit/assistant.go`, `rust/src/assistant.rs`) — messages in, thinking and a streamed reply out
+## 37. Today's format (`../ModelKit/modelkit/assistant.py`, `../ModelKit/go/kit/assistant.go`, `../ModelKit/rust/src/assistant.rs`) — messages in, thinking and a streamed reply out
 
 Every language model is talked to through one shape now - a list of `{"role", "content"}` messages in, an assistant
 message out, its *thinking* first and then the text, streamed over server-sent events - and every client, SDK and
@@ -4451,7 +4453,7 @@ contexts (`split`). The bridge `A -> B` is the **heavy connection**, in each kin
 it the node's whole visit count, which is what makes it heavy where weights are computed from counts, and the
 window history of the out-edges it now stands before - every windowed traversal of those went through the node,
 so the window is rewritten with a bridge event before each of them and trimmed back to its size from the oldest
-end, and the bridge's recent share is the node's rather than nothing (D-091); the sine
+end, and the bridge's recent share is the node's rather than nothing (D-092); the sine
 model sets its weight to `W_HEAVY = 8` (negated while inverted, as every fresh weight is), a score of `8 · f²`
 between two copies of one activation; the phase model, which counts edges and not nodes, gives it what passed
 through the node - the traversals of the out-edges it stands before, read before the halving (`_heavy_bridge`);

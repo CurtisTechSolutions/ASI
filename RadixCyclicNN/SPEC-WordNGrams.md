@@ -184,7 +184,7 @@ python -m radixnet --kind word train --data corpus.txt --epochs 5
 python -m radixnet --kind word predict --prefix "the cat sat on" --length 6
 python -m radixnet --kind word words --limit 20        # the alphabet it has read
 ../ModelKit/go/bin/radixnet-count --kind word train --data corpus.txt
-rust/target/release/radixnet --kind word predict --prefix "the cat" --length 6
+../ModelKit/rust/target/release/radixnet --kind word predict --prefix "the cat" --length 6
 make word-demo                                          # train, predict, generate, list
 ```
 

@@ -533,7 +533,7 @@ class ResonantGraph(RadixCyclicGraph):
         :meth:`recompute_weights` would erase it.  Going round is taught by counting the ``BACK`` edge and what
         to do instead by a penalty on the step it looped through and a reward on the step it took after backing
         up.  The hand-over is counted **without a phase**: a voice that backed out of a repeat
-        (:func:`radixnet.dialogue.backtrack`) walked outside this model's search and cannot say which phase it
+        (:func:`modelkit.dialogue.backtrack`) walked outside this model's search and cannot say which phase it
         was in, so the edge competes on its share rather than pretending to a phase it never learned.
         """
         e = super().observe_back(p, amount=0.0)  # no weight is nudged by hand here
@@ -792,7 +792,7 @@ class ResonantNet(GraphModel):
         sentinel) is for, so with ``teach_back`` it is passed on: a walk reached
         ``p``, could have gone round, and did not.  That is the same thing a
         voice reports when it catches itself repeating and backs out
-        (:func:`radixnet.dialogue.backtrack`), arrived at by observation rather
+        (:func:`modelkit.dialogue.backtrack`), arrived at by observation rather
         than by experience, so it is taught the same way - the child that would
         have looped gets dearer, the one the text took instead gets cheaper, and
         ``p``'s hand-over estimate goes up.  It rolls the layer's per-cycle
@@ -937,7 +937,7 @@ class ResonantNet(GraphModel):
     ) -> list[dict]:
         """Learn from texts: count every traversal at its phase, and the cycle decisions beside it.
 
-        ``origin=THINK`` trains the texts as thoughts (:mod:`radixnet.thinking`)."""
+        ``origin=THINK`` trains the texts as thoughts (:mod:`modelkit.thinking`)."""
         cfg = _resolve_config(config, overrides)
         texts = self._read(texts, cfg)
         cleaned, _ = self._clean_texts(texts)
@@ -1194,7 +1194,7 @@ class ResonantNet(GraphModel):
         """The shared search hook, routed through :meth:`predict`.
 
         ``GraphModel.generate(mode="sample")`` and
-        :func:`radixnet.dialogue.converse` reach the search through here; the
+        :func:`modelkit.dialogue.converse` reach the search through here; the
         base implementation walks the phase-free graph, which would ignore both
         the phase and the metacognitive layer.
         """
@@ -1252,7 +1252,7 @@ class ResonantNet(GraphModel):
         ``top_k`` / ``top_p`` / ``min_p`` narrow what ``"sample"`` draws from and
         ``diversity`` spreads ``"beam"`` out (``../SPEC-SearchAndTraining.md``);
         the two exact searches take neither.  ``origin=THINK`` with an empty
-        prefix walks a *thought* (:mod:`radixnet.thinking`).
+        prefix walks a *thought* (:mod:`modelkit.thinking`).
         """
         mode = (mode or "kbest").lower()
         if mode not in ("kbest", "beam", "dijkstra", "sample"):

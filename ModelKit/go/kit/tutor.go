@@ -7,7 +7,7 @@ package kit
 //
 //	topic -> prefix (LLM) -> completion (the prediction search) -> grade (LLM) -> 2NRL
 //
-// The Go port of radixnet/tutor.py, working the same way and speaking the same
+// The Go port of modelkit/tutor.py, working the same way and speaking the same
 // JSON.  One lesson is the whole prediction process run without a human:
 //
 //  1. the LLM writes sentence openings about a topic, each drilling one point

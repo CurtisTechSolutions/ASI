@@ -12,7 +12,7 @@ package kit
 // one of solving the task for the network unless it has to: criteria,
 // mediator, judge and teacher.
 //
-// The Go twin of the Python radixnet.agent: the same prompts, the same
+// The Go twin of the Python modelkit.agent: the same prompts, the same
 // records and the same 2NRL.
 
 import (

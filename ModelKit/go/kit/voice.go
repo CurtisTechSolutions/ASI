@@ -1,7 +1,7 @@
 package kit
 
 // Speech from a walk: the model is heard as it traverses its graph (the port of
-// radixnet/voice.py).  A model whose symbols are sounds emits phones as it
+// modelkit/voice.py).  A model whose symbols are sounds emits phones as it
 // walks; a model of words or letters emits text.  Speaker takes either, one
 // step at a time, turns it into the tokens of the phonetic tokenizer and feeds
 // the formant synthesizer, which hands back 16-bit PCM as soon as a word can be

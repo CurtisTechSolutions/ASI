@@ -1,5 +1,5 @@
 //! External tools the network can call, and the text format it learns them
-//! in (`radixnet/tools.py`, `go/radixnet/tools.go`).
+//! in (`modelkit/tools.py`, `go/kit/tools.go`).
 //!
 //! The network is a character-level graph model: it cannot *decide* to call a
 //! function, it can only emit characters.  So a tool call is a piece of text

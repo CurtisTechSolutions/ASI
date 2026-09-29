@@ -2235,7 +2235,7 @@ class TestGoSearchAndTraining(unittest.TestCase):
 
 
 class TestGoAssistantParity(unittest.TestCase):
-    """Today's format (``go/radixnet/assistant.go``) against ``modelkit/assistant.py``: the same thinking, the same text,
+    """Today's format (``go/kit/assistant.go``) against ``modelkit/assistant.py``: the same thinking, the same text,
     the same stop reason and units from the CLI, and the same documents from the server's ``/v1`` routes."""
 
     FLOATS = ("cost", "probability", "step_costs")

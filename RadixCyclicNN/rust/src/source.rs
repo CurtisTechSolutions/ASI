@@ -1,5 +1,5 @@
 //! Streaming corpora: texts read part by part, ZIP archives entry by entry
-//! (`go/radixnet/source.go`, `go/radixnet/pipeline.go`, `radixnet/archive.py`).
+//! (`go/radixnet/source.go`, `go/radixnet/pipeline.go`, `../ModelKit/modelkit/archive.py`).
 //!
 //! A corpus is a file of lines, or an archive of such files - and an archive
 //! is **kept whole** (D-034): it is never unpacked to disk, and nothing holds

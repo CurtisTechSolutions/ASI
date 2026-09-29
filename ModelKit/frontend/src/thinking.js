@@ -19,7 +19,7 @@ export function isSentinel(id) {
   return Number.isInteger(id) && id >= 0 && id < FIRST;
 }
 
-/** The defaults of one thought (radixnet.thinking): its length, how deep it may question itself, and how often. */
+/** The defaults of one thought (modelkit.thinking): its length, how deep it may question itself, and how often. */
 export const THINK_LENGTH = 60;
 export const THINK_DEPTH = 2;
 export const THINK_QUESTIONS = 1;
@@ -135,7 +135,7 @@ export function questionsOf(thought) {
 }
 
 /**
- * One line saying what a thought did - the frontend's copy of radixnet.thinking.summarize:
+ * One line saying what a thought did - the frontend's copy of modelkit.thinking.summarize:
  * thought “…”; questioned itself once; then backed up.
  */
 export function summarizeThought(thought) {
@@ -233,7 +233,7 @@ const SPACES = " \t\n\r";
 
 /**
  * The sentences of a text that end in a question mark, each with the index it starts at - the frontend's
- * copy of radixnet.thinking.questions_in. A sentence runs from the first character after the previous
+ * copy of modelkit.thinking.questions_in. A sentence runs from the first character after the previous
  * sentence's terminators (. ! ?) to the end of its own; a run of terminators holding a "?" makes it a
  * question. It is how the thinking an LLM wrote shows the questions it asked itself.
  */
@@ -269,7 +269,7 @@ export function questionRuns(text) {
   return runs;
 }
 
-/** Every thought a conversation had, in order: the turns' rethinks' thoughts (radixnet.thinking.thoughts_of). */
+/** Every thought a conversation had, in order: the turns' rethinks' thoughts (modelkit.thinking.thoughts_of). */
 export function thoughtsOf(turns) {
   return (Array.isArray(turns) ? turns : [])
     .map((t) => (t && t.rethink && typeof t.rethink === "object" ? t.rethink.thought : null))

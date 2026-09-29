@@ -1,5 +1,5 @@
 //! What the network remembers of what it was shown: the recall tutor for
-//! speech and images (`radixnet/recall.py`, `go/radixnet/recall.go`).
+//! speech and images (`modelkit/recall.py`, `go/kit/recall.go`).
 //!
 //! The English tutor needs an LLM because nobody knows in advance what the
 //! right sentence is.  Speech and images need none, because **the right answer

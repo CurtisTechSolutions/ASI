@@ -4,7 +4,7 @@ package kit
 // teacher - a local Ollama model or ChatGPT, whichever taught - which answers
 // with the syllabus of the lessons that follow: one point of grammar each,
 // aimed at the mistakes the marking found.  The Go twin of the Python planner
-// (radixnet/tutor.py), asking the same questions and falling back the same
+// (modelkit/tutor.py), asking the same questions and falling back the same
 // way, so both sides plan the same lessons.
 
 import (

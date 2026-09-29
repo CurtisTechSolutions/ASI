@@ -1,6 +1,6 @@
 //! Where the negative network's data comes from: the verdicts of whatever
 //! looked at an output and said it was wrong, turned into blame
-//! (`radixnet/blame.py`, `go/radixnet/blame.go`).
+//! (`modelkit/blame.py`, `go/kit/blame.go`).
 //!
 //! Nothing in the negative network is invented.  A [`Fault`] is a text, a
 //! reason (the tutor's own error type, or one picked from its words by

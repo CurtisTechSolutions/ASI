@@ -1,5 +1,5 @@
 //! Provider-independent plumbing for the large language models the teaching
-//! loops talk to (`radixnet/llm.py`, `go/radixnet/llm.go`).
+//! loops talk to (`modelkit/llm.py`, `go/kit/llm.go`).
 //!
 //! Everything that asks an LLM a question - the adversarial review, the
 //! automatic negative loop, and the tutor, chat, codegen and agent loops that
@@ -93,7 +93,7 @@ pub fn default_url(provider: &str) -> String {
 }
 
 /// An LLM that is unreachable, refused the request, or answered something
-/// unusable - `radixnet.llm.LLMError`, whichever provider raised it.
+/// unusable - `modelkit.llm.LLMError`, whichever provider raised it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LlmError {
     /// `"ollama"` or `"chatgpt"`.
@@ -295,7 +295,7 @@ pub fn seconds(value: f64) -> Option<Duration> {
 // -- reading an answer --------------------------------------------------------------------------
 
 /// JSON out of an LLM answer: tolerates a code fence and prose around the
-/// object or list (`radixnet.llm.loads_lenient`); `None` when there is none.
+/// object or list (`modelkit.llm.loads_lenient`); `None` when there is none.
 pub fn loads_lenient(raw: &str) -> Option<Json> {
     let mut text = raw.trim();
     let unfenced;
@@ -402,7 +402,7 @@ fn line_prefix_len(line: &str) -> usize {
     end(j)
 }
 
-/// An LLM answer as clean lines (`radixnet.ollama.parse_lines`): numbering,
+/// An LLM answer as clean lines (`modelkit.ollama.parse_lines`): numbering,
 /// bullets and quotes stripped; blank lines, code fences and duplicates (by
 /// their lower case) dropped; at most `limit` of them when one is given.
 pub fn parse_lines(text: &str, limit: Option<usize>) -> Vec<String> {

@@ -1,5 +1,5 @@
 //! The model in conversation with an LLM, and the LLM marking the
-//! conversation (`radixnet/chat.py`, `go/radixnet/chat.go`,
+//! conversation (`modelkit/chat.py`, `go/kit/chat.go`,
 //! `go/server/chat.go`).
 //!
 //! Every other teacher in this project talks *at* the network: the English

@@ -1,4 +1,4 @@
-//! Thinking (`radixnet/thinking.py`): the fourth sentinel at work - what
+//! Thinking (`modelkit/thinking.py`): the fourth sentinel at work - what
 //! makes the model think, what it thinks, and what happens when it stops.
 //!
 //! The graph's `THINK` sentinel faces both ways.  Its **in-edges** are where

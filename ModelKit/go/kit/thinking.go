@@ -35,7 +35,7 @@ package kit
 // Every thought is a Thought record - the trigger, the node, the text, its
 // questions, how it stopped and what it triggered - and rides on the turn's
 // Rethink as Thought when a conversation thought.  See the Python
-// implementation's radixnet.thinking.
+// implementation's modelkit.thinking.
 
 import (
 	"encoding/json"

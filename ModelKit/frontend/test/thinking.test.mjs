@@ -1,7 +1,7 @@
 /**
  * Tests for the THINK sentinel's display helpers (`src/thinking.js`) - plain `node --test`.
- * The question finder is checked against the same cases as radixnet.thinking.questions_in and
- * the Go QuestionsIn, and the summary against radixnet.thinking.summarize. Run with `npm test`.
+ * The question finder is checked against the same cases as modelkit.thinking.questions_in and
+ * the Go QuestionsIn, and the summary against modelkit.thinking.summarize. Run with `npm test`.
  */
 
 import assert from "node:assert/strict";
@@ -72,7 +72,7 @@ test("a text cut into runs marks its questions and gives the text back", () => {
   assert.deepEqual(questionRuns(""), []);
 });
 
-test("a thought is summarised the way radixnet.thinking.summarize says it", () => {
+test("a thought is summarised the way modelkit.thinking.summarize says it", () => {
   assert.equal(
     summarizeThought({ text: "", stopped: "nothing", depth: 0, then: "end", questions: [] }),
     "had nothing to think with yet; then went on",

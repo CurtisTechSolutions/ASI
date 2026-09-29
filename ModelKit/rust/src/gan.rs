@@ -1,5 +1,5 @@
 //! The self-upgrade loop: the model is the generator, a second network the
-//! discriminator (`radixnet/gan.py`, `go/radixnet/gan.go`,
+//! discriminator (`modelkit/gan.py`, `go/kit/gan.go`,
 //! `go/server/evolve.go`).
 //!
 //! Every generation:

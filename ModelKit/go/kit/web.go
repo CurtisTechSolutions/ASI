@@ -3,7 +3,7 @@ package kit
 // Browsing with the standard library: HTML reduced to readable text, and a
 // client that refuses everything which is not a plain public web page.
 //
-// The Go twin of the browsing half of the Python radixnet.tools: http / https
+// The Go twin of the browsing half of the Python modelkit.tools: http / https
 // only, no credentials in the URL, no redirect to a private address, a byte
 // cap, a timeout, the same reading of a page and the same search-result
 // extraction.  The HTML reader is the Rust port's tokenizer (rust/src/web.rs):

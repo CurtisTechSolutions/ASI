@@ -13,7 +13,7 @@ The negative network never invents failures.  They arrive from the tutor -
 the Ollama reviewer that rates and critiques the network's own output, the
 code-generation teacher / judge with its sandbox errors and verdicts, the
 evolve loop's discriminator, a thumbs-down in the frontend - and every one
-of them carries the tutor's reason (:mod:`radixnet.tutor` turns a critique
+of them carries the tutor's reason (:mod:`modelkit.tutor` turns a critique
 into a reason tag and a severity).  Training on anything else is a category
 error: :meth:`NegativeNet.train` *is* a blame pass.
 
@@ -51,7 +51,7 @@ bottom-K, the least likely ones), and :meth:`NegativeNet.judge` walks a text
 through it and reports how much of it is built out of known failure, which
 reasons those failures carried and which fragments are to blame.
 
-That judgement is the filter: :mod:`radixnet.duo` pairs this network with
+That judgement is the filter: :mod:`modelkit.duo` pairs this network with
 the positive one so that generated text is scored by the generator and vetoed
 by the critic - the GAN, at output time.
 """

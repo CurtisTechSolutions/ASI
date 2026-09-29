@@ -1,6 +1,6 @@
 //! Browsing: HTML reduced to readable text, and a client that refuses
-//! everything which is not a plain public web page (`radixnet/tools.py`
-//! `WebClient` / `html_to_text`, `go/radixnet/web.go`).
+//! everything which is not a plain public web page (`modelkit/tools.py`
+//! `WebClient` / `html_to_text`, `go/kit/web.go`).
 //!
 //! The network browses by writing `<tool>web_fetch {"url": ...}</tool>`, and
 //! what it writes is text it was never told to be careful with, so the client

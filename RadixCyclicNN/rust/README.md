@@ -4,7 +4,7 @@ A Rust port of **everything the Python package does** - every model kind, every
 teaching loop, the negative network, the LLM clients, the agent and its tools,
 code generation, images and speech, MCP, the CLI and the HTTP API the frontend
 talks to - held to Python by the cross-language suites in
-`../tests/test_rust_parity*.py`.
+`../../ModelKit/tests/test_rust_parity*.py`.
 
 It is two crates.  This one, `radixnet`, is the model: every kind, its files,
 its search and its training.  Everything around the model - the teaching loops,
@@ -105,7 +105,7 @@ is TLS: an `https://` request goes through the system's `curl`
 | `src/log.rs` | logging, written out: levels, targets, timestamps, and never a byte on stdout |
 | `src/clock.rs` | the one timestamp a model file carries |
 | `tests/*.rs`, `../../ModelKit/rust/tests/server.rs` | the model, the encodings and the words end to end here, and the HTTP API end to end in the kit |
-| `../tests/rust_harness.py`, `../tests/test_rust_parity*.py` | the contract with Python, one suite per area |
+| `../../ModelKit/tests/rust_harness.py`, `../../ModelKit/tests/test_rust_parity*.py` | the contract with Python, one suite per area |
 
 ## What is here, and what is not
 
@@ -142,7 +142,7 @@ From `..`:
 make rust-build        # cargo build --release -> ../ModelKit/rust/target/release/radixnet{,-bench}
 make rust-test         # cargo test, cargo clippy, cargo fmt --check
 make rust-train        # train the Rust model on DATA (RUST_KIND=count|word)
-make rust-serve        # serve frontend/dist from the Rust model on http://HOST:PORT
+make rust-serve        # serve ../ModelKit/frontend/dist from the Rust model on http://HOST:PORT
 make rust-parity       # the contract with Python
 make bench-compare     # both ports over one corpus -> bench/RESULTS.md
 ```
@@ -190,7 +190,7 @@ cargo run --release --manifest-path $KIT --bin radixnet -- --model model.count.j
 cargo run --release --manifest-path $KIT --bin radixnet -- --model model.backwards.json train --data ../data/sample_corpus.txt --reverse   # every text read backwards
 cargo run --release --manifest-path $KIT --bin radixnet -- --encoding word:3:1 --model model.word.json train --data ../data/sample_corpus.txt
 cargo run --release --manifest-path $KIT --bin radixnet -- --model model.word.json words --limit 20    # the alphabet its grams are made of
-cargo run --release --manifest-path $KIT --bin radixnet -- --model model.count.json serve --port 8000 --frontend-dir ../frontend/dist
+cargo run --release --manifest-path $KIT --bin radixnet -- --model model.count.json serve --port 8000 --frontend-dir ../../ModelKit/frontend/dist
 python3 -m radixnet --model rust/model.count.json info     # ... and Python reads the same file
 cargo run --release --manifest-path $KIT --bin radixnet-bench -- --chars 200000 --epochs 3
 cargo run --release --manifest-path $KIT --bin radixnet-bench -- --texts ../bench/corpus.txt \
@@ -211,14 +211,14 @@ println!("{} (worst step: {})", found.best.full_text, found.best.punish);
 
 ## The same model, checked
 
-`../tests/test_rust_parity.py` is the contract with Python, and it is the one
+`../../ModelKit/tests/test_rust_parity.py` is the contract with Python, and it is the one
 `test_go_parity.py` holds the Go port to: both train the same corpus with the
 same settings and must produce the same structure, counts, rewards, sliding
 window and RNG state, the same predictions, generated texts and scores, the same
 judged paths and node ratios — and each side must load and continue the other's
 file, gzipped or not.
 
-`../tests/test_rust_parity_methods.py` does the same for the search and training
+`../../ModelKit/tests/test_rust_parity_methods.py` does the same for the search and training
 methods on the count, sine and phase models: eight training plans - two of them
 read backwards (`--reverse`, `Plan.reverse`), in characters and in words - the
 same graph, history and `replay` block byte for byte, and the same texts from the

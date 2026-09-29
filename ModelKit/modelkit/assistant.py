@@ -38,7 +38,7 @@ does not echo it (:class:`modelkit.dialogue.Heard`), and with ``learn`` on
 (the default, as in every conversation here) what a rethink finds out is
 taught to the graph - a conversation changes the model, D-068.
 
-The same shape is served three times over: here, in ``go/radixnet/assistant.go``
+The same shape is served three times over: here, in ``go/kit/assistant.go``
 and in ``rust/src/assistant.rs``, held to this one by the parity suites.
 """
 

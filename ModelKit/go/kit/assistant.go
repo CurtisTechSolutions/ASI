@@ -2,7 +2,7 @@ package kit
 
 // The model in today's format: messages in, an assistant message out -
 // thinking, text, tool calls, streamed.  The Go twin of Python's
-// radixnet/assistant.py, and held to it by TestGoAssistantParity.
+// modelkit/assistant.py, and held to it by TestGoAssistantParity.
 //
 // Every language model is talked to the same way now: a list of {role, content}
 // messages goes in, an assistant message comes back, and while it is being

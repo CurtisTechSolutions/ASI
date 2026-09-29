@@ -1,6 +1,6 @@
 //! Speech to text, and the programs speech needs from the machine: the
 //! transcription backends, `ffmpeg` for audio that is not a WAV, and the
-//! microphone recorders (`radixnet/speech.py`'s second half).
+//! microphone recorders (`modelkit/speech.py`'s second half).
 //!
 //! Python has four transcription backends.  Two of them - `faster-whisper`
 //! and `openai-whisper` - are Python packages running a model in-process, and

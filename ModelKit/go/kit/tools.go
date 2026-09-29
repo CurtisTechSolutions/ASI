@@ -19,7 +19,7 @@ package kit
 // single-argument tool) and whatever it still cannot read is handed to an LLM
 // to repair (agent.go).
 //
-// The Go twin of the Python radixnet.tools: the same text format, the same
+// The Go twin of the Python modelkit.tools: the same text format, the same
 // tool names and schemas, the same lenient parsing and the same refusals.
 
 import (

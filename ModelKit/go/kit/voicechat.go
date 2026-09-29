@@ -1,7 +1,7 @@
 package kit
 
 // Talking with the model by voice: every utterance is heard, learned, answered
-// and spoken (D-089; Python's radixnet/voicechat.py).
+// and spoken (D-089; Python's modelkit/voicechat.py).
 //
 // The Voice tab listens all the time.  Each thing the person says reaches here
 // as one turn: the recording, and what the browser heard in it.  A turn is

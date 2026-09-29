@@ -2,7 +2,7 @@ package kit
 
 // The MCP server without any streams: Handle turns one request into one
 // response, which is the whole protocol.  The answers here are the answers
-// radixnet/mcp.py gives to the same messages - the point of the port is that a
+// modelkit/mcp.py gives to the same messages - the point of the port is that a
 // client cannot tell which implementation it is speaking to.
 
 import (

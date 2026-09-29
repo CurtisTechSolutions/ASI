@@ -24,7 +24,7 @@ package kit
 // Anything written to stdout that is not a response would corrupt the stream,
 // so nothing here prints: the log goes to stderr.
 //
-// The Go twin of the Python radixnet.mcp: the same protocol version, the same
+// The Go twin of the Python modelkit.mcp: the same protocol version, the same
 // tool names and schemas, the same error codes, and the same answers - so a
 // client cannot tell which implementation it is speaking to.
 

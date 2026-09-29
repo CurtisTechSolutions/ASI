@@ -1,5 +1,5 @@
 //! Tool use: the network browses and solves on its own, an LLM sets the bar
-//! and teaches (`radixnet/agent.py`, `go/radixnet/agent.go`,
+//! and teaches (`modelkit/agent.py`, `go/kit/agent.go`,
 //! `go/server/agent.go`).
 //!
 //! ```text

@@ -1,5 +1,5 @@
 //! Speech as text: what was said *and* the waveform that said it, both behind
-//! one unique token (`radixnet/speech.py`, `go/radixnet/speech.go`).
+//! one unique token (`modelkit/speech.py`, `go/kit/speech.go`).
 //!
 //! Teaching the network by talking to it turns one utterance into texts that
 //! all start with the **same unique token**:

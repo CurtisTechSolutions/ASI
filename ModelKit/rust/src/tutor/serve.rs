@@ -1,6 +1,6 @@
 //! The English tutor from the command line (`radixnet tutor`) and over HTTP
-//! (`/api/tutor/*`): the `cmd_tutor` of `radixnet/cli.py` and the tutor
-//! routes of `radixnet/api.py`, speaking their JSON.
+//! (`/api/tutor/*`): the `cmd_tutor` of `modelkit/cli.py` and the tutor
+//! routes of `modelkit/api.py`, speaking their JSON.
 //!
 //! Both build the same [`TutorTrainer`] and differ only in where the networks
 //! live ([`Networks`]): the command owns the model - and, with `--blame`, the

@@ -1,4 +1,4 @@
-//! The Ollama client (`radixnet/ollama.py`, `go/radixnet/ollama.go`), the
+//! The Ollama client (`modelkit/ollama.py`, `go/kit/ollama.go`), the
 //! `radixnet ollama` command and the `/api/ollama/*` routes.
 //!
 //! Ollama serves a model on this machine (or the local network) over plain

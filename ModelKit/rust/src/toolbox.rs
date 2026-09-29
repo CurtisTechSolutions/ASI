@@ -1,5 +1,5 @@
 //! The built-in tools: browsing, the calculator, the sandbox and the uploads
-//! (`radixnet/tools.py` `default_toolbox`, `go/radixnet/toolbox.go`).
+//! (`modelkit/tools.py` `default_toolbox`, `go/kit/toolbox.go`).
 //!
 //! Same names, same parameters, same descriptions and the same output text
 //! as Python's - a transcript written by one implementation is a transcript

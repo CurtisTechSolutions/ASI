@@ -1,5 +1,5 @@
-//! The model converses with itself (`radixnet/dialogue.py`,
-//! `go/radixnet/dialogue.go`).
+//! The model converses with itself (`modelkit/dialogue.py`,
+//! `go/kit/dialogue.go`).
 //!
 //! Every reply is the prediction search picking up the tail of the previous
 //! line: the tail is located in the graph and continued, the context loses a
@@ -59,7 +59,7 @@ pub const EXPLORE: usize = 3;
 pub const LONGEST_STUTTER: usize = 4;
 
 /// Where a conversation streams what it is doing, one event at a time, as it
-/// happens (Python's `radixnet.dialogue.StreamFn`).
+/// happens (Python's `modelkit.dialogue.StreamFn`).
 ///
 /// Every event carries `event` (its kind), `index` and `speaker` (whose turn
 /// it is).  The committed layer is `turn` (`turn`: the [`Turn`] as

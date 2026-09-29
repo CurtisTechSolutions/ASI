@@ -12,7 +12,7 @@ import (
 
 // Ollama integration beyond the chat client: prompt-driven training corpora,
 // the adversarial review and the copy editor's letter-level corrections.  All
-// are the Python `radixnet/ollama.py` functions, and all work with any
+// are the Python `modelkit/ollama.py` functions, and all work with any
 // LLMClient (they only ever call Generate), so ChatGPT reviews as happily as a
 // local model does.
 

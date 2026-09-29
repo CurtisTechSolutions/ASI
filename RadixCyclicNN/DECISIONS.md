@@ -98,7 +98,10 @@ D-083 the veto can keep its provenance to itself
 
 **Part XXI — Attention** · D-086 the attention band: a correction lands where the gram looks, not where it wrote
 
-**Part XXII — Structure** · D-087 the dynamic window: nodes halved down a binary ladder, and grown back at the top
+**Part XXII — Structure** · D-087 the dynamic window: nodes halved down a binary ladder, and grown back at the top ·
+D-092 a split and a merge keep what the count model hangs on its edges
+
+**Part XXIII — The model and its kit** · D-093 everything but the model is a package of its own: ModelKit
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -1370,7 +1373,7 @@ against a threat model that does not apply, at the cost of the use case.
   revisiting first. See Q-6.
 
 **Lives in** `../ModelKit/modelkit/archive.py`, `../ModelKit/modelkit/api.py`, `../ModelKit/go/server/http.go`, `../ModelKit/go/server/uploads.go`,
-`rust/src/http.rs`, `rust/src/multipart.rs`
+`../ModelKit/rust/src/http.rs`, `../ModelKit/rust/src/multipart.rs`
 
 ---
 
@@ -2343,7 +2346,7 @@ did while it did not.  One rethink per turn (D-062) keeps the window short.
 
 **Lives in** `../ModelKit/modelkit/dialogue.py` (`StreamFn`, `STREAM_EVENTS`), `../ModelKit/modelkit/api.py` (`StreamedResponse`,
 `_send_stream`, `/api/converse/stream`), `../ModelKit/modelkit/cli.py` (`ConversePrinter`), `../ModelKit/go/kit/dialogue.go`,
-`../ModelKit/go/server/http.go` (`streamResponse`, `writeStream`), `rust/src/dialogue.rs`, `rust/src/http.rs` (`Sink`,
+`../ModelKit/go/server/http.go` (`streamResponse`, `writeStream`), `../ModelKit/rust/src/dialogue.rs`, `../ModelKit/rust/src/http.rs` (`Sink`,
 `stream_route`), `../ModelKit/frontend/src/stream.js`, `../ModelKit/frontend/src/components/ConversePanel.jsx`
 
 ---
@@ -2949,8 +2952,8 @@ table for "Rust is 4x faster than Go" has been misled by it.
   index is keyed by the gram as the other two key it. That is the honest trade:
   the packing was only ever possible because the window was fixed at three
   characters, and `bench/RESULTS.md` says what giving it up cost.
-* The port serves the frontend: `rust/src/http.rs` is HTTP/1.1 written out over
-  `TcpListener` and `rust/src/service.rs` answers the same JSON contract the
+* The port serves the frontend: `../ModelKit/rust/src/http.rs` is HTTP/1.1 written out over
+  `TcpListener` and `../ModelKit/rust/src/service.rs` answers the same JSON contract the
   Python and Go servers answer, so `../ModelKit/frontend/dist` runs against
   `radixnet serve` unmodified. What a Rust server cannot fill, the frontend
   hides on `engine == "rust"`, and what it will not serve says so with a 400.
@@ -3026,7 +3029,7 @@ readable: a reader who cannot tell them apart reads every gap as neglect.
   sine-activation model and serves `radixnet schedule` and its preview.
 
 **Lives in** `../ModelKit/go/kit/mcp.go`, `../ModelKit/go/cmd/radixnet-count/mcp.go`,
-`rust/src/service.rs`, `rust/src/http.rs`, `Makefile` (`go-mcp`)
+`../ModelKit/rust/src/service.rs`, `../ModelKit/rust/src/http.rs`, `Makefile` (`go-mcp`)
 
 ---
 
@@ -3041,7 +3044,7 @@ rule". Then the port was asked for *all* of Python's functionality - the tutor,
 the chat, the critic, the agent and its browsing tool, every one of which talks
 to an LLM or a web page, and most of them over TLS.
 
-**Decision** `rust/src/fetch.rs` is the port's one HTTP client. Plain `http://`
+**Decision** `../ModelKit/rust/src/fetch.rs` is the port's one HTTP client. Plain `http://`
 - a local Ollama, a transcription server, a test's own listener - is written
 out over `TcpStream` and never leaves the process. `https://` is handed to the
 system's `curl`, run as a child process with the request body on its stdin and
@@ -3069,7 +3072,7 @@ completion.
 * Redirects are followed only when asked, because the browsing tool checks
   every hop against the private-address rule itself.
 
-**Lives in** `rust/src/fetch.rs`
+**Lives in** `../ModelKit/rust/src/fetch.rs`
 
 ---
 
@@ -3118,8 +3121,8 @@ from the server: it appears the day the route does.
 * Rust jobs end `done`, `stopped` or `error`, the words the other two servers
   use (the Predict tab waited on `done`).
 
-**Lives in** `rust/src/cli.rs`, `rust/src/service.rs` (`build`), `rust/src/duo.rs`
-(`Service::ensure_negative`), `rust/src/checkpoint.rs`, `rust/src/kinds.rs`,
+**Lives in** `../ModelKit/rust/src/cli.rs`, `../ModelKit/rust/src/service.rs` (`build`), `../ModelKit/rust/src/duo.rs`
+(`Service::ensure_negative`), `../ModelKit/rust/src/checkpoint.rs`, `rust/src/kinds.rs`,
 `../ModelKit/frontend/src/App.jsx`, `../ModelKit/tests/rust_harness.py`
 
 ---
@@ -3312,7 +3315,7 @@ teaching the network where to question.
 
 **Lives in** `../ModelKit/modelkit/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
 `../ModelKit/modelkit/dialogue.py::think_back`, `../ModelKit/modelkit/ollama.py::thoughts_from_prompt`,
-`../ModelKit/modelkit/tutor.py::TutorTrainer.teach_thinking`, `../ModelKit/go/kit/thinking.go`, `rust/src/thinking.rs`
+`../ModelKit/modelkit/tutor.py::TutorTrainer.teach_thinking`, `../ModelKit/go/kit/thinking.go`, `../ModelKit/rust/src/thinking.rs`
 
 ---
 
@@ -3361,7 +3364,7 @@ honest map of the mistake rather than of the editor's taste.
 
 **Consequences**
 * The same prompt, the same parsing and the same reason rules in all three
-  ports (`../ModelKit/modelkit/ollama.py`, `rust/src/review.rs`, `../ModelKit/go/kit/review.go`),
+  ports (`../ModelKit/modelkit/ollama.py`, `../ModelKit/rust/src/review.rs`, `../ModelKit/go/kit/review.go`),
   held to Python byte for byte by the parity suites.
 * The Automatic card and the report card grow an editor's vocabulary -
   `corrected`, `unchanged`, `uncorrected`, `edits`, `change_rate` - beside the
@@ -3372,7 +3375,7 @@ honest map of the mistake rather than of the editor's taste.
 **Lives in** `../ModelKit/modelkit/ollama.py` (`correct_texts`), `../ModelKit/modelkit/blame.py`
 (`faults_from_corrections`, `correction_reason`, `reason_from_changes`),
 `../ModelKit/modelkit/critic.py`, `../ModelKit/modelkit/cli.py`, `../ModelKit/modelkit/api.py`,
-`../ModelKit/frontend/src/components/OllamaPanel.jsx`, `rust/src/review.rs`,
+`../ModelKit/frontend/src/components/OllamaPanel.jsx`, `../ModelKit/rust/src/review.rs`,
 `../ModelKit/go/kit/review.go`
 
 ---
@@ -3419,7 +3422,7 @@ server-wide default rather than a flag the negative network carries.
 **Lives in** `../ModelKit/modelkit/duo.py` (`FilterConfig.provenance`,
 `NegativeFilter.terse` / `report`), `../ModelKit/modelkit/api.py` (`guard`,
 `_guard_report`, `negative_settings`), `../ModelKit/modelkit/cli.py` (`add_guard_flags`,
-`_guard_doc`), `../ModelKit/frontend/src/components/GuardNotice.jsx`, `rust/src/duo.rs`,
+`_guard_doc`), `../ModelKit/frontend/src/components/GuardNotice.jsx`, `../ModelKit/rust/src/duo.rs`,
 `../ModelKit/go/kit/duo.go`
 
 ---
@@ -3471,7 +3474,7 @@ every conversation here (D-068).
 
 **Lives in** `../ModelKit/modelkit/assistant.py`, `../ModelKit/modelkit/dialogue.py` (`Trace`), `../ModelKit/modelkit/api.py`, `../ModelKit/modelkit/cli.py`,
 `../ModelKit/frontend/src/components/TalkPanel.jsx`, `../ModelKit/frontend/src/sse.js`, `../ModelKit/go/kit/assistant.go`, `../ModelKit/go/server/assistant.go`,
-`../ModelKit/go/cmd/radixnet-count/talk.go`, `rust/src/assistant.rs`, `rust/src/http.rs` (`Streamed`)
+`../ModelKit/go/cmd/radixnet-count/talk.go`, `../ModelKit/rust/src/assistant.rs`, `../ModelKit/rust/src/http.rs` (`Streamed`)
 
 ---
 
@@ -3713,7 +3716,7 @@ samples - is what the CLI prints and the API returns beside the audio. `../Model
 
 **Lives in** `../ModelKit/modelkit/voice.py` (`say`, `speak_texts`, `Spoken`, `Utterance`), `../ModelKit/modelkit/cli.py` (`say`,
 `--speak`, `speech decode`), `../ModelKit/modelkit/api.py` (`/api/say`, `/api/speech/decode`), `../ModelKit/frontend/src/components/HearButton.jsx`,
-`../ModelKit/go/kit/voice.go` (`Say`), `../ModelKit/go/server/media.go`, `rust/src/voice.rs` (`say`), `rust/src/service.rs`
+`../ModelKit/go/kit/voice.go` (`Say`), `../ModelKit/go/server/media.go`, `../ModelKit/rust/src/voice.rs` (`say`), `../ModelKit/rust/src/service.rs`
 
 ---
 
@@ -3760,7 +3763,7 @@ browser needs one click before it may listen or speak, so the ear opens on a but
 the browser allows); an utterance the dictation heard no words in is not sent while *Send only what has words*
 is on (the default), the words being waited for first since a recogniser commits them a moment after the speaker
 stops; `../ModelKit/tests/test_voicechat.py`, `../ModelKit/frontend/test/voice.test.mjs`. All three servers carry the
-turn and all three CLIs have `speech talk` (`rust/src/voicechat.rs`; `../ModelKit/go/kit/voicechat.go` and
+turn and all three CLIs have `speech talk` (`../ModelKit/rust/src/voicechat.rs`; `../ModelKit/go/kit/voicechat.go` and
 `../ModelKit/go/server/voice.go`), so the tab shows on whichever server serves it; the Go build takes the words with the audio,
 as it transcribes nothing itself, and records from no microphone. `../ModelKit/tests/test_rust_parity_media.py`
 (`TestRustVoiceParity`) and `../ModelKit/tests/test_go_parity.py` hold the ports to the same turn: the same recording heard the
@@ -3768,7 +3771,7 @@ same, learned the same, the same reply found and spoken.
 
 **Lives in** `../ModelKit/modelkit/voicechat.py`, `../ModelKit/modelkit/ollama.py` (`reply_line`), `../ModelKit/modelkit/api.py` (`voice_turn`,
 `/api/voice/*`), `../ModelKit/modelkit/cli.py` (`speech talk`), `../ModelKit/frontend/src/voice.js`, `../ModelKit/frontend/src/components/VoicePanel.jsx`;
-`rust/src/voicechat.rs` and `rust/src/review.rs` (`reply_line`); `../ModelKit/go/kit/voicechat.go`, `../ModelKit/go/kit/review.go`
+`../ModelKit/rust/src/voicechat.rs` and `../ModelKit/rust/src/review.rs` (`reply_line`); `../ModelKit/go/kit/voicechat.go`, `../ModelKit/go/kit/review.go`
 (`ReplyLine`), `../ModelKit/go/server/voice.go`, `../ModelKit/go/cmd/radixnet-count/voice.go`
 
 ---
@@ -3821,8 +3824,8 @@ D-091 does.
 `spelled_turn`), `../ModelKit/modelkit/api.py`, `../ModelKit/modelkit/cli.py`, `../ModelKit/modelkit/assistant.py`, `../ModelKit/modelkit/mcp.py`,
 `../ModelKit/frontend/src/spelled.js` and the Predict, Generate, Converse and Think panels; `go/radixnet/phonetic.go`,
 `../ModelKit/go/kit/spelled.go` (the turn and the thought), `../ModelKit/go/kit/assistant.go`, `../ModelKit/go/kit/mcp.go`, `../ModelKit/go/server/http.go`, `../ModelKit/go/cmd/radixnet-count/main.go`;
-`rust/src/encoding.rs`, `rust/src/phonetic.rs`, `rust/src/service.rs`, `rust/src/dialogue.rs`,
-`rust/src/thinking.rs`, `rust/src/assistant.rs`, `rust/src/mcp.rs`, `rust/src/bin/radixnet.rs`
+`rust/src/encoding.rs`, `rust/src/phonetic.rs`, `../ModelKit/rust/src/service.rs`, `../ModelKit/rust/src/dialogue.rs`,
+`../ModelKit/rust/src/thinking.rs`, `../ModelKit/rust/src/assistant.rs`, `../ModelKit/rust/src/mcp.rs`, `../ModelKit/rust/src/bin/radixnet.rs`
 
 ---
 
@@ -3874,13 +3877,13 @@ it: sounds that spell a wrong word (*why* for *y*) are marked wrong though anoth
 right. A correction the teacher writes in words that sound alike (*there* for *their*) reads as the same sounds and
 changes nothing, so it blames nothing - which is right, the model said nothing different. The records grow a field
 only for a model of sounds. `../ModelKit/tests/test_teaching_in_words.py`, `../ModelKit/go/kit/teaching_words_test.go`,
-`rust/src/teaching_in_words.rs` - each loop's prompts checked for a sound, which none may hold.
+`../ModelKit/rust/src/teaching_in_words.rs` - each loop's prompts checked for a sound, which none may hold.
 
 **Lives in** `radixnet/encoding.py` (`spelled_completion`), `../ModelKit/modelkit/llm.py` (`reader_text`), `../ModelKit/modelkit/tutor.py`, `../ModelKit/modelkit/blame.py`,
 `../ModelKit/modelkit/ollama.py`, `../ModelKit/modelkit/critic.py`, `../ModelKit/modelkit/chat.py`, `../ModelKit/modelkit/voicechat.py`, `../ModelKit/modelkit/api.py`;
 `go/radixnet/phonetic.go`, `../ModelKit/go/kit/tutor.go`, `../ModelKit/go/kit/blame.go`, `../ModelKit/go/kit/review.go`, `../ModelKit/go/kit/critic.go`, `../ModelKit/go/kit/chat.go`, `../ModelKit/go/kit/voicechat.go`,
-`../ModelKit/go/server/critic.go`; `rust/src/phonetic.rs`, `tutor.rs`, `tutor/trainer.rs`, `review.rs`, `critic.rs`,
-`chat.rs`, `voicechat.rs`, `ollama.rs`; `../ModelKit/frontend/src/components/OllamaPanel.jsx`, `ChatPanel.jsx`
+`../ModelKit/go/server/critic.go`; `rust/src/phonetic.rs`, `../ModelKit/rust/src/tutor.rs`, `../ModelKit/rust/src/tutor/trainer.rs`, `../ModelKit/rust/src/review.rs`, `../ModelKit/rust/src/critic.rs`,
+`../ModelKit/rust/src/chat.rs`, `../ModelKit/rust/src/voicechat.rs`, `../ModelKit/rust/src/ollama.rs`; `../ModelKit/frontend/src/components/OllamaPanel.jsx`, `ChatPanel.jsx`
 
 ---
 
@@ -3969,7 +3972,7 @@ epoch, in every kind's loop, feedback passes included. All three implementations
 
 ---
 
-### D-091 — A split and a merge keep what the count model hangs on its edges: the window, the verdicts, the reward
+### D-092 — A split and a merge keep what the count model hangs on its edges: the window, the verdicts, the reward
 
 **Status** Accepted · 2026-09-28 · **Layer** structure · **Extends** D-007, D-058, D-087; **amends** SPEC-LeastPunished §3.4
 
@@ -4034,6 +4037,91 @@ merge of a node with several callers. Tests: `tests/test_countnet.py::TestSplits
 `go/radixnet/graph.go::Split / MergeChild`, `go/radixnet/paths.go`, `go/radixnet/weights.go`,
 `go/radixnet/beam.go`, `rust/src/graph.rs`, `rust/src/paths.rs`, `rust/src/weights.rs`, `rust/src/beam.rs`,
 `DESIGN.md` §19, §40.3, `SPEC-LeastPunished.md` §3.4
+
+---
+
+# Part XXIII — The model and its kit
+
+### D-093 — Everything but the model is a package of its own: ModelKit
+
+**Status** Accepted · 2026-09-29 · **Layer** packaging
+
+**Context — my reason** *"Let's break out the additional functionality into a package for use across other
+directories and repos. This functionality includes everything except the core model. Including the React
+frontend."* Over ninety decisions, everything the model is used *with* grew up inside the model's own packages:
+the command line, the HTTP API and the frontend it serves, the tutors and the critic, the LLM clients, the agent
+and its tools, the browser, the MCP server, speech, vision and voice, the conversation and the thinking loops,
+today's format, checkpoints and benchmarks. In Python that was 27 of `radixnet`'s modules; in Go most of
+`go/radixnet` beside `go/server` and the command; in Rust most of the crate beside its binaries. A project that
+wanted one LLM client, the tool box or the checkpoint layout had to take the whole model with it
+(FilterBankRadix copied `checkpoint.py`'s contract rather than do that), and nothing said whether the model itself
+needed any of it. The phonetic tokenizer had already shown the shape: a package beside the model, in the same
+ports.
+
+**Decision** Two packages, side by side at the repository root, in every port and the frontend:
+* **RadixCyclicNN is the model**: the graph and its four kinds, the encodings, training, the searches and the
+  beam, the penalties, the window, attention, the metacognitive layer and the model file - `radixnet` in Python,
+  `go/radixnet` in Go, the `radixnet` crate (`rust/`, a library now) in Rust.
+* **ModelKit is everything around it**: `modelkit` in Python; in Go a module of its own
+  (`github.com/CurtisTechSolutions/ASI/ModelKit/go`: package `kit`, the HTTP `server`, and the `radixnet-count`
+  command with its prebuilt binary); in Rust the `modelkit` crate with the `radixnet` and `radixnet-bench`
+  binaries; and `frontend/`.
+* **The kit depends on the model, never the reverse.** Go and Rust enforce it: the kit imports the model, and an
+  import cycle does not compile. Python cannot, so the tests do: the model's own run without the kit on the path,
+  and `../ModelKit/tests/test_layers.py` holds the kit's two layers to what they claim - the *model-free* layer
+  (`llm`, `ollama`, `chatgpt`, `tools`, `browser`, `mcp`, `archive`, `media`, `speech`, `vision`, `chat`,
+  `critic`, `codegen`, `recall`, `blame`) imports with `radixnet` refused, every other module is the *model
+  layer* and does need it, and `radixnet` imports `modelkit` nowhere but its `__main__`.
+* **What moved stops being the model's.** A method of the model that belonged to the kit is a function of the kit
+  that takes the model: `GraphModel.converse` is `dialogue.converse(model, ...)`; Go's `Converse`, `Reply`,
+  `Backtrack`, `TeachBack`, `ThinkBack`, `Think`, `ThinkOn`, `Place` and `SpeakWalks` are `kit.Converse(m, ...)`
+  and the rest (Go allows a method only in its type's package); Rust's `impl Model { speak_walks }` is
+  `voice::speak_walks(&mut model, ...)` (an inherent impl lives in its type's crate). Helpers only the kit used
+  went with it - `reader_text` from `encoding.py` to `llm.py`, `repair_base64` to a new `media.py`, Go's spelled
+  turn and thought records to `kit/spelled.go`, Rust's `correct`, `attention` and `window` command handlers to
+  the kit's `cli/` - and what the model did for itself came home: the count model's `invert_paths` is
+  `Model::invert_paths` in Rust, as it already was in Go and Python.
+* **The model exports what the kit reads of it, and no more.** Go: `PrefixStart`, `RequireNegative`,
+  `AcousticTokenizer` and `PhoneticText` (renamed from unexported), and two new entry points, `Search` (the
+  reward walk from `Start` or `Think`) and `PhoneticTokens`. Rust: `Model::search`, `Model::prefix_start`, the
+  epoch hook, `Correction::pairs`, and two read-only accessors, `Graph::edge_weights` and
+  `Graph::window_edge_counts`. Rust's logger stays with the model: the model logs, and the level the CLI sets
+  has to govern the one process-wide logger its lines go through.
+* **Nothing about using it changes.** `python -m radixnet` still runs the command line - `radixnet/__main__.py`
+  hands it to `modelkit.cli`, from the installed package or the checkout beside this one - and so does each
+  port's binary, under its old name. Every command's help is byte for byte what it was in all three, and so is
+  what the commands print and the files they write (timings and timestamps aside, which differ between two runs
+  of the old build too). The Makefile keeps every target and reaches into `../ModelKit`; the image builds from
+  the repository root with both packages. It is a pure refactor: the tests went with their subjects (a file that
+  tested both halves split in two) rather than being rewritten, and the parity suites hold the three ports to the
+  same bytes from the kit's side.
+
+**Alternatives rejected**
+* **A kit generic over the model** - interfaces in Go, traits in Rust. The Go server and command alone use 84 of
+  the model's methods and 181 of its fields; an interface that wide is the model's API written twice, changing
+  whenever the model does. The model layer binds to the model's concrete API; the model-free layer is the part
+  that travels without it.
+* **Moving only what needs no model.** The command line, the API, the loops and the frontend would have stayed,
+  and they are most of what "everything except the core model" names.
+* **Shims in `radixnet`** (`radixnet.api` re-exporting `modelkit.api`). Every shim is an import of the kit by the
+  model, the one direction the split exists to forbid.
+* **A Cargo workspace, or one Go module for both.** Either joins the two builds - one lock file, one module - and
+  the model could no longer be built, versioned or vendored on its own; two crates and two modules joined by path
+  dependencies and `replace` directives keep it standalone.
+* **A `.dockerignore` at the repository root.** It would govern every project's builds; BuildKit's per-Dockerfile
+  ignore file (`Dockerfile.dockerignore`) scopes it to this image.
+
+**Consequences** `radixnet` no longer exports `CheckpointManager`, `Evolver`, `EvolveConfig`, `NegativeFilter`,
+`FilterConfig`, the assistant formats or the speech names: `modelkit` does, lazily. The media extras (`images`,
+`diffusion`, `speech`, `whisper`) are the kit's; the model keeps `gpu`. The model's tests are `tests/` and need
+nothing else; the kit's are `../ModelKit/tests`, run against the model beside it, with the Go and Rust parity
+suites; `make test` runs both. The Go and Rust servers look for `frontend/dist` under the working directory, so
+run from here they need `--frontend-dir ../ModelKit/frontend/dist` (the make targets pass it). Paths in these
+documents that name a moved file point into `../ModelKit/`.
+
+**Lives in** `../ModelKit/` (its `README.md` is the map), `radixnet/__main__.py`,
+`../ModelKit/tests/test_layers.py`, `../ModelKit/go/go.mod`, `../ModelKit/rust/Cargo.toml`, `Makefile`,
+`Dockerfile`, `Dockerfile.dockerignore`, `docker-compose.yml`, `DESIGN.md` §2, `go/README.md`, `rust/README.md`
 
 ---
 

@@ -15,7 +15,7 @@ var DefaultSpeakers = []string{"A", "B"}
 const Explore = 3
 
 // A Stream is where a conversation streams what it is doing, one event at a
-// time, as it happens (Python's radixnet.dialogue.StreamFn).
+// time, as it happens (Python's modelkit.dialogue.StreamFn).
 //
 // Every event carries "event" (its kind), "index" and "speaker" (whose turn
 // it is).  The committed layer is "turn" ("turn": the *Turn) - a turn is
@@ -660,7 +660,7 @@ func pick(cands []*radixnet.PathResult, heard *Heard, avoidRepeats bool, veto fu
 // previous line.  When every candidate duplicates the conversation the best one
 // is spoken and flagged a repeat (Repeats collects those, the utterances to
 // punish); a duplicate already repeated ends the conversation instead of going
-// round in circles.  See the Python implementation's radixnet.dialogue.
+// round in circles.  See the Python implementation's modelkit.dialogue.
 func Converse(m *radixnet.Model, opening string, opts ConverseOptions) ([]*Turn, error) {
 	mode := opts.Mode
 	if mode == "" || mode == "dijkstra" {

@@ -1,6 +1,6 @@
 //! The tutoring loop: rounds of exercises, completions, grades and the
 //! learning they lead to, batch after batch (`TutorTrainer` of
-//! `radixnet/tutor.py`).
+//! `modelkit/tutor.py`).
 //!
 //! # What a mark is worth (D-050)
 //!

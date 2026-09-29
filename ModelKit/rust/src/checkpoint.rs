@@ -1,4 +1,4 @@
-//! Checkpoints in the Python `CheckpointManager` layout (`radixnet/checkpoint.py`,
+//! Checkpoints in the Python `CheckpointManager` layout (`modelkit/checkpoint.py`,
 //! `go/server/checkpoints.go`).
 //!
 //! A checkpoint is an ordinary model file, named `ckpt-<tag>-<step:06d>.json.gz`

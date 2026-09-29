@@ -1,5 +1,5 @@
 //! Request bodies that are not (only) JSON: `multipart/form-data`, raw bytes,
-//! and the JSON upload forms - the way `radixnet/api.py` reads them.
+//! and the JSON upload forms - the way `modelkit/api.py` reads them.
 //!
 //! A file reaches the server one of three ways, and the Python server takes
 //! all three on the routes that carry files (`POST /api/uploads`, the image

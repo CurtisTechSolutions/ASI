@@ -1,5 +1,5 @@
 //! The lesson plan the teacher writes from a report card (the planner of
-//! `radixnet/tutor.py`, `go/radixnet/plan.go`).
+//! `modelkit/tutor.py`, `go/kit/plan.go`).
 //!
 //! The English tutor ends a batch of lessons with a report card: how many
 //! passed, the mean marks, and how often each kind of mistake was the worst

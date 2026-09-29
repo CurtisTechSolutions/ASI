@@ -1,5 +1,5 @@
-//! The calculator tool's expression language (`radixnet/tools.py`
-//! `safe_eval`, `go/radixnet/calc.go`).
+//! The calculator tool's expression language (`modelkit/tools.py`
+//! `safe_eval`, `go/kit/calc.go`).
 //!
 //! Python evaluates an expression in three steps: `ast.parse` it, walk the
 //! tree breadth first against a whitelist of node types, and hand whatever

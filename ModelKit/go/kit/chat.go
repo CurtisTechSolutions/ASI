@@ -18,7 +18,7 @@ import (
 // against *itself* (dialogue.go, two voices of the same network), where
 // nothing can tell it that its answer did not follow on.
 //
-// This is the Go twin of the Python `radixnet/chat.py`.  One conversation is:
+// This is the Go twin of the Python `modelkit/chat.py`.  One conversation is:
 //
 //  1. the partner - a local Ollama model by default, ChatGPT when the provider
 //     says so - says a line, told to keep it short, plain and easy to carry on

@@ -2,7 +2,7 @@ package kit
 
 // The built-in tools: browsing, the calculator, the sandbox and the uploads.
 //
-// The Go twin of the tool set Python's radixnet.tools.default_toolbox builds,
+// The Go twin of the tool set Python's modelkit.tools.default_toolbox builds,
 // with the same names, the same parameters and the same descriptions - a
 // transcript written on one side is a transcript the other can read.
 
