@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 )
 
 // Settings are the numbers a prediction reads.

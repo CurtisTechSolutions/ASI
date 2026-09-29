@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 )
 
 func tinyTokenizer(t *testing.T) *tokenizer.Tokenizer {

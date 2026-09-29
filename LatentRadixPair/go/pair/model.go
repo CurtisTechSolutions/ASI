@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 )
 
 // Format names the model file format.

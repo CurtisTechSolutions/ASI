@@ -8,12 +8,13 @@ router of slices: the code's first symbol is a learned partition of contexts, an
 are the slices.
 
 [DESIGN.md](DESIGN.md) has the reasoning, the network, the address space, the fold, and what came from
-image generation. Pure Go, no dependencies.
+image generation. Two implementations, file-compatible and checked against each other: [`go/`](go/) (pure
+Go, no dependencies) and [`rust/`](rust/) (with the web frontend).
 
 ## Quick start
 
 ```sh
-cd LatentRadixPair
+cd LatentRadixPair/go
 make build test                       # bin/latentpair; the tests take about 20 s
 make demo                             # trains a small tokenizer on the repository's documents and shows the loop
 ```
@@ -67,17 +68,19 @@ in Rust. DESIGN.md section 10 has the full tables.
 
 [`rust/`](rust/) is the same model in Rust, file-compatible with the Go implementation and checked
 against it by parity tests, with a React frontend (`latentpair serve`) that predicts, folds, judges in
-outcome units, reads, scores and trains tokenizers from the browser. `cd rust && make build test serve`.
+outcome units, reads, scores and trains tokenizers from the browser. `cd rust && make serve` builds both
+sides, makes a model if there is none, and serves it.
 
 ## Layout
 
 | path | what |
 |---|---|
-| `nn/` | float32 matrices with parallel products, dense layers, SiLU, softmax cross-entropy, Adam; a finite-difference gradient test |
-| `tokenizer/` | the network, its training (masking, noise, recency, next-byte head), encode/decode, files |
-| `pair/` | the mixed-radix address space, count and reward trees, the fold, walks, feedback, the model file |
-| `cmd/latentpair/` | the command line, the demo and the benchmark |
-| `rust/` | the Rust port, its parity tests and the web frontend |
+| `go/nn/` | float32 matrices with parallel products, dense layers, SiLU, softmax cross-entropy, Adam; a finite-difference gradient test |
+| `go/tokenizer/` | the network, its training (masking, noise, recency, next-byte head), encode/decode, files |
+| `go/pair/` | the mixed-radix address space, count and reward trees, the fold, walks, feedback, the model file |
+| `go/cmd/latentpair/` | the command line, the demo and the benchmark |
+| `go/cmd/fixtures/` | writes the parity fixtures the Rust tests check against |
+| `rust/` | the Rust port, its parity tests and the React frontend |
 | `DESIGN.md` | the design |
 
 Files are JSON (`.gz` gzipped); a model file embeds its tokenizer, so one file is one model.

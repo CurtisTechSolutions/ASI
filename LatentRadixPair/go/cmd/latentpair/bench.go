@@ -6,8 +6,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/pair"
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/pair"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 )
 
 // ngram is a byte-context baseline that folds exactly like the pair (own = ctx / (ctx + alpha), no

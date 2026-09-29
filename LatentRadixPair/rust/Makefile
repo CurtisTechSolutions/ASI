@@ -54,7 +54,7 @@ serve: frontend build
 
 ## regenerate the parity fixtures from the Go implementation (needs Go)
 fixtures:
-	cd .. && go run ./cmd/fixtures
+	cd ../go && go run ./cmd/fixtures
 
 clean:
 	$(CARGO) clean

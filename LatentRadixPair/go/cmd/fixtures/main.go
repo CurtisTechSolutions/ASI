@@ -1,5 +1,5 @@
-// Command fixtures writes the parity fixtures for the Rust port (run from LatentRadixPair; the output
-// directory defaults to rust/testdata): a small tokenizer and model written by the Go implementation, with
+// Command fixtures writes the parity fixtures for the Rust port (run from LatentRadixPair/go; the output
+// directory defaults to ../rust/testdata): a small tokenizer and model written by the Go implementation, with
 // the outputs the Rust port must reproduce.
 package main
 
@@ -7,15 +7,15 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/pair"
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/pair"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 )
 
 var texts = []string{"the cat sat on the mat", "the cat sat on the log", "the dog ate the bone", "a cat and a dog",
 	"the bird sang on the wire", "a dog and a cat sat", "the mat was on the floor", "the log was on the fire"}
 
 func main() {
-	out := "rust/testdata"
+	out := "../rust/testdata"
 	if len(os.Args) > 1 {
 		out = os.Args[1]
 	}

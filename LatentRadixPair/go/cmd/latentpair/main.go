@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/pair"
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/pair"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 )
 
 const usage = `latentpair: a trained context tokenizer under a primed radix pair.

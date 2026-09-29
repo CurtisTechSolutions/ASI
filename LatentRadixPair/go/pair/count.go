@@ -1,6 +1,6 @@
 package pair
 
-import "github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+import "github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 
 // CountTree counts, under every prefix of a position's code, the outcome that followed. It is written only
 // by reading.

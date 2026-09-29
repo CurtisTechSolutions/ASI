@@ -224,8 +224,9 @@ end.
 
 ### The Rust port and the frontend
 
-`rust/` holds the same model in Rust, reading and writing the same files. Its `tests/parity.rs` loads
-a tokenizer and a model written by the Go implementation (`rust/testdata/`) and reproduces every code,
+`go/` is the Go implementation and `rust/` the same model in Rust, reading and writing the same files.
+`rust/tests/parity.rs` loads a tokenizer and a model written by the Go implementation
+(`go/cmd/fixtures` into `rust/testdata/`) and reproduces every code,
 decode, fold, prediction and score to within floating-point noise, the codes and chosen bytes exactly.
 `latentpair serve` adds a JSON API and a React frontend (`rust/web/`, built with Vite and embedded in
 the binary): a card each for predicting,
@@ -302,5 +303,6 @@ bits per byte.
 - D-4 Recency-weighted reconstruction and a next-byte head; a plain autoencoder spent its bits on the oldest
   bytes and was no better a context than raw bytes.
 - D-5 Smoothing 0 by default over 257 outcomes; the fold backs off instead.
-- D-6 Go, no dependencies: the numeric core is 300 lines and the matrices are small.
+- D-6 Go first, no dependencies: the numeric core is 300 lines and the matrices are small; the Rust port
+  came second, with the frontend, and is checked against the Go files.
 - D-7 Verdicts are in outcome units, strength / outcomes, English's 69 phones by default. Section 5.

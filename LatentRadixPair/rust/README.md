@@ -1,6 +1,6 @@
 # LatentRadixPair in Rust
 
-The Rust port of [the Go implementation](../) with a web frontend. Same model, same files: a tokenizer
+The Rust port of [the Go implementation](../go/) with a web frontend. Same model, same files: a tokenizer
 or model saved by either loads in the other, and `tests/parity.rs` checks that this port reproduces the
 Go implementation's codes, decodes, folds, predictions and scores on the fixtures in `testdata/` to
 within floating-point noise (the codes and the chosen bytes exactly).

@@ -3,7 +3,7 @@ package pair
 import (
 	"fmt"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/tokenizer"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/tokenizer"
 )
 
 // RewardTree holds, cell for cell with the count tree, what outcomes earned and what they were punished

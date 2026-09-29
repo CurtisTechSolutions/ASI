@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/nn"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/nn"
 )
 
 // TailBytes is how many of a window's newest bytes the tail accuracy checks.

@@ -5,7 +5,7 @@ import (
 	"math"
 	"math/rand"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/nn"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/nn"
 )
 
 // Tokenizer is the trained encoder and decoder.

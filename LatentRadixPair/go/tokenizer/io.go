@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/nn"
+	"github.com/CurtisTechSolutions/ASI/LatentRadixPair/go/nn"
 )
 
 // Format names the file format.
