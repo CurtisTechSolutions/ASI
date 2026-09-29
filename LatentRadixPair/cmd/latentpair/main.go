@@ -636,7 +636,7 @@ func demoCmd(args []string) error {
 		first = first[:4]
 	}
 	alt := "zzz"
-	if _, err := m.Reward([]string{alt}, 1, nil, true, ctx, 0); err != nil {
+	if _, err := m.Reward([]string{alt}, 1, nil, false, ctx, 0); err != nil {
 		return err
 	}
 	english, _ := m.Fold(ctx, "reward", "")
@@ -651,9 +651,8 @@ func demoCmd(args []string) error {
 			return err
 		}
 		pen, _ := m.Fold(ctx, "punishment", "")
-		rew, _ := m.Fold(ctx, "reward", "")
-		fmt.Printf("punished %q after the context as a two-outcome verdict: P(%q) reward traversal %.4f, punishment traversal %.4f\n",
-			first, pair.Symbol(int(first[0])), rew[first[0]], pen[first[0]])
+		fmt.Printf("punished %q after the context as a two-outcome verdict: P(%q) %.4f before, %.4f after\n",
+			first, pair.Symbol(int(first[0])), before[first[0]], pen[first[0]])
 	}
 	p2, _ := m.Predict(ctx, 12, "greedy", "punishment", 0, false, "", 0)
 	fmt.Printf("punishment traversal now continues %q -> %q\n", ctx, p2.Text)
