@@ -6,8 +6,15 @@
 //! `src/bin/radixnet.rs` keeps the model's own commands (`train`, `predict`,
 //! ...) and hands every other name to [`dispatch`]; a module that adds a
 //! command adds one row to [`COMMANDS`] and a `pub fn cli(ctx: &Ctx)`.
+//! The commands over the model's own modules that the binary does not keep -
+//! `correct`, `attention` and `window` - are the submodules here.
+
+pub mod attention;
+pub mod correct;
+pub mod window;
 
 use crate::encoding::Encoding;
+use crate::file::read_file_text;
 use crate::json::Json;
 use crate::model::Model;
 use crate::negative::{NegativeOptions, Verdict};
@@ -371,17 +378,17 @@ pub const COMMANDS: &[(&str, Command, &str)] = &[
     ),
     (
         "correct",
-        crate::correct::cli,
+        crate::cli::correct::cli,
         "teach one correction: only what changed moves",
     ),
     (
         "attention",
-        crate::attention::cli,
+        crate::cli::attention::cli,
         "the attention band: where inside a gram a correction's blame and credit land",
     ),
     (
         "window",
-        crate::window::cli,
+        crate::cli::window::cli,
         "the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up",
     ),
     (
@@ -482,16 +489,6 @@ pub fn read_named(args: &Args, flag: &str) -> Result<Vec<String>, String> {
     }
     let content = read_file_text(path)?;
     Ok(split_texts(&content, &unit, page_lines))
-}
-
-/// A text file, gunzipped when its name ends in `.gz`.
-pub fn read_file_text(path: &str) -> Result<String, String> {
-    if path.ends_with(".gz") {
-        let bytes = std::fs::read(path).map_err(|err| format!("cannot read {path}: {err}"))?;
-        String::from_utf8(crate::gzip::decompress(&bytes)?).map_err(|err| format!("{path}: {err}"))
-    } else {
-        std::fs::read_to_string(path).map_err(|err| format!("cannot read {path}: {err}"))
-    }
 }
 
 /// The negative model beside a model file: `model.count.json` ->

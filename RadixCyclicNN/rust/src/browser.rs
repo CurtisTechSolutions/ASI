@@ -757,7 +757,7 @@ impl BrowserClient {
                 ]),
             ),
         ] {
-            crate::codegen::set(&mut pairs, key, value);
+            crate::json::set(&mut pairs, key, value);
         }
         Json::Obj(pairs)
     }

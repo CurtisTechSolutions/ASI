@@ -50,7 +50,7 @@ use radixnet::report::{node_rows, path_rows, stats};
 use radixnet::search::SamplingFilter;
 use radixnet::service::Service;
 use radixnet::training::Plan;
-use radixnet::voice::{decoder_name, say, speak_texts, SayOptions, SpeakOptions, Utterance};
+use radixnet::voice::{decoder_name, say, speak_texts, speak_walks, SayOptions, SpeakOptions, Utterance};
 
 const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SPEC] [--json] [--seed N] \
      [--workers N] [--out PATH] <command>\n\
@@ -483,7 +483,7 @@ fn run() -> Result<(), String> {
                         }
                         total += chunk.len();
                     };
-                    model.speak_walks(&opts, &mut emit_pcm, &mut record)?;
+                    speak_walks(&mut model, &opts, &mut emit_pcm, &mut record)?;
                 }
                 child.wait().ok();
                 sink = player[0].clone();
@@ -496,12 +496,12 @@ fn run() -> Result<(), String> {
                     }
                     total += chunk.len();
                 };
-                model.speak_walks(&opts, &mut emit_pcm, &mut record)?;
+                speak_walks(&mut model, &opts, &mut emit_pcm, &mut record)?;
                 sink = "stdout".to_string();
             } else {
                 let mut pcm: Vec<u8> = Vec::new();
                 let mut emit_pcm = |chunk: &[u8]| pcm.extend_from_slice(chunk);
-                model.speak_walks(&opts, &mut emit_pcm, &mut record)?;
+                speak_walks(&mut model, &opts, &mut emit_pcm, &mut record)?;
                 std::fs::write(&wav_path, phonetok::synth::wav_bytes(&pcm, opts.rate))
                     .map_err(|e| format!("{wav_path}: {e}"))?;
                 total = pcm.len();

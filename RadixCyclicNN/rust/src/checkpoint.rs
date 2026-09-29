@@ -23,9 +23,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use crate::cli::{Args, Ctx};
+use crate::clock::iso_time;
 use crate::http::{Answer, ApiError, Request, Server};
 use crate::json::Json;
 use crate::model::{EpochRecord, Model};
@@ -120,19 +121,6 @@ fn parse_name(name: &str) -> Option<(String, i64)> {
         return None;
     }
     Some((tag.to_string(), step.parse().ok()?))
-}
-
-/// An ISO-8601 UTC time with `digits` fractional digits of the second
-/// (`isoformat(timespec="microseconds")` is 6, `"milliseconds"` 3).
-pub(crate) fn iso_time(time: SystemTime, digits: usize) -> String {
-    let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let whole = crate::clock::iso8601(since.as_secs() as i64);
-    let fraction = format!("{:09}", since.subsec_nanos());
-    let cut = digits.min(9);
-    match whole.strip_suffix("+00:00") {
-        Some(head) if cut > 0 => format!("{head}.{}+00:00", &fraction[..cut]),
-        _ => whole,
-    }
 }
 
 /// `json.dumps(doc, indent=2, sort_keys=True)`: every object's keys in order,
@@ -778,10 +766,6 @@ mod tests {
         assert_eq!(parse_name("ckpt--000003.json"), None);
         assert_eq!(parse_name("latest.json"), None);
         assert!(valid_tag("gen") && valid_tag("a_b-1") && !valid_tag("-x") && !valid_tag("") && !valid_tag("a b"));
-        let t = UNIX_EPOCH + std::time::Duration::new(1_000_000_000, 123_456_789);
-        assert_eq!(iso_time(t, 6), "2001-09-09T01:46:40.123456+00:00");
-        assert_eq!(iso_time(t, 3), "2001-09-09T01:46:40.123+00:00");
-        assert_eq!(iso_time(t, 0), "2001-09-09T01:46:40+00:00");
         let doc = Json::obj([("b", Json::Int(1)), ("a", Json::str("é"))]);
         assert_eq!(python_pretty(&doc), "{\n  \"a\": \"\\u00e9\",\n  \"b\": 1\n}");
     }

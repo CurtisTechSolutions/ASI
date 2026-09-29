@@ -1323,7 +1323,7 @@ impl Model {
     }
 
     /// [`Model::resonant_train`] from either origin sentinel: `THINK` trains
-    /// the texts as thoughts ([`crate::thinking`]).
+    /// the texts as thoughts (the `thinking` module).
     #[allow(clippy::too_many_arguments)]
     pub fn resonant_train_from(
         &mut self,

@@ -176,36 +176,53 @@ impl Speaker {
     }
 }
 
-impl Model {
-    /// Walks the model `count` times from `prefix` and speaks each walk as it
-    /// goes: `emit` gets every chunk of PCM the moment it is made, `said` is
-    /// told what each walk said once it has ended - the text in the model's
-    /// units and the words it spells.
-    pub fn speak_walks(
-        &mut self,
-        o: &SpeakOptions,
-        emit: &mut dyn FnMut(&[u8]),
-        said: &mut dyn FnMut(usize, &str, &str),
-    ) -> Result<(), String> {
-        let enc = self.g.enc;
-        let mut rng = o.seed.map(Mt19937::new);
-        for i in 0..o.count {
-            let mut speaker = Speaker::new(enc, o.rate, o.pitch, o.tempo, o.gain)?;
-            let mut parts: Vec<String> = Vec::new();
-            let (node, offset, lead) = self.prefix_start(&o.prefix);
-            let mut opening: Vec<String> = Vec::new();
-            if !o.prefix.is_empty() {
-                opening.push(o.prefix.clone());
+/// Walks the model `count` times from `prefix` and speaks each walk as it
+/// goes: `emit` gets every chunk of PCM the moment it is made, `said` is
+/// told what each walk said once it has ended - the text in the model's
+/// units and the words it spells.
+pub fn speak_walks(
+    model: &mut Model,
+    o: &SpeakOptions,
+    emit: &mut dyn FnMut(&[u8]),
+    said: &mut dyn FnMut(usize, &str, &str),
+) -> Result<(), String> {
+    let enc = model.g.enc;
+    let mut rng = o.seed.map(Mt19937::new);
+    for i in 0..o.count {
+        let mut speaker = Speaker::new(enc, o.rate, o.pitch, o.tempo, o.gain)?;
+        let mut parts: Vec<String> = Vec::new();
+        let (node, offset, lead) = model.prefix_start(&o.prefix);
+        let mut opening: Vec<String> = Vec::new();
+        if !o.prefix.is_empty() {
+            opening.push(o.prefix.clone());
+        }
+        if !lead.is_empty() {
+            opening.push(lead);
+        }
+        if node >= FIRST {
+            // a compressed node's label runs on past the located gram: the walk's first emission
+            let label = model.g.label(node).to_string();
+            opening.push(enc.slice(&label, offset + enc.n, usize::MAX));
+        }
+        for piece in opening {
+            if !piece.is_empty() {
+                parts.push(piece.clone());
+                let chunk = speaker.feed(&piece);
+                if !chunk.is_empty() {
+                    emit(&chunk);
+                }
             }
-            if !lead.is_empty() {
-                opening.push(lead);
-            }
-            if node >= FIRST {
-                // a compressed node's label runs on past the located gram: the walk's first emission
-                let label = self.g.label(node).to_string();
-                opening.push(enc.slice(&label, offset + enc.n, usize::MAX));
-            }
-            for piece in opening {
+        }
+        // from START nothing precedes the first node stepped onto, so it is said whole;
+        // every node after it - and every node after a located prefix - adds what lies
+        // past the overlap (the rule `decode_path` decodes a path by)
+        let overlap = enc.overlap();
+        let mut whole_first = node < FIRST;
+        let mut listener = |c: usize, label: &str| {
+            if c >= FIRST {
+                let cut = if whole_first { 0 } else { overlap };
+                whole_first = false;
+                let piece = enc.slice(label, cut, usize::MAX);
                 if !piece.is_empty() {
                     parts.push(piece.clone());
                     let chunk = speaker.feed(&piece);
@@ -213,57 +230,38 @@ impl Model {
                         emit(&chunk);
                     }
                 }
-            }
-            // from START nothing precedes the first node stepped onto, so it is said whole;
-            // every node after it - and every node after a located prefix - adds what lies
-            // past the overlap (the rule `decode_path` decodes a path by)
-            let overlap = enc.overlap();
-            let mut whole_first = node < FIRST;
-            let mut listener = |c: usize, label: &str| {
-                if c >= FIRST {
-                    let cut = if whole_first { 0 } else { overlap };
-                    whole_first = false;
-                    let piece = enc.slice(label, cut, usize::MAX);
-                    if !piece.is_empty() {
-                        parts.push(piece.clone());
-                        let chunk = speaker.feed(&piece);
-                        if !chunk.is_empty() {
-                            emit(&chunk);
-                        }
-                    }
-                } else if c == END {
-                    let chunk = speaker.end();
-                    if !chunk.is_empty() {
-                        emit(&chunk);
-                    }
-                }
-            };
-            let walk = self.g.sample_walk_listening(
-                node,
-                offset,
-                o.max_length,
-                o.temperature,
-                rng.as_mut(),
-                None,
-                None,
-                Traversal::Reward,
-                SamplingFilter::default(),
-                Some(&mut listener),
-            )?;
-            if !walk.reached_end {
-                // cut off by the length: the sentinel is ours to send
+            } else if c == END {
                 let chunk = speaker.end();
                 if !chunk.is_empty() {
                     emit(&chunk);
                 }
             }
-            let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
-            let text = enc.join(&refs);
-            let spelled = enc.spell(&text);
-            said(i, &text, &spelled);
+        };
+        let walk = model.g.sample_walk_listening(
+            node,
+            offset,
+            o.max_length,
+            o.temperature,
+            rng.as_mut(),
+            None,
+            None,
+            Traversal::Reward,
+            SamplingFilter::default(),
+            Some(&mut listener),
+        )?;
+        if !walk.reached_end {
+            // cut off by the length: the sentinel is ours to send
+            let chunk = speaker.end();
+            if !chunk.is_empty() {
+                emit(&chunk);
+            }
         }
-        Ok(())
+        let refs: Vec<&str> = parts.iter().map(|s| s.as_str()).collect();
+        let text = enc.join(&refs);
+        let spelled = enc.spell(&text);
+        said(i, &text, &spelled);
     }
+    Ok(())
 }
 
 // -- the output decoder --------------------------------------------------------------
@@ -438,7 +436,7 @@ pub fn speak_texts(
 }
 
 /// The output decoder: texts in a model's units become speech, one utterance
-/// each, through the same voice [`Model::speak_walks`] walks with and closed by
+/// each, through the same voice [`speak_walks`] walks with and closed by
 /// the same rule, the END sentinel.  `o.polish` applies to acoustic units only:
 /// that many Griffin-Lim iterations over each whole utterance once it is
 /// known, which the streaming vocoder cannot do.
@@ -593,16 +591,16 @@ mod tests {
         };
         let mut said = Vec::new();
         let mut pcm = 0usize;
-        model
-            .speak_walks(
-                &opts,
-                &mut |chunk: &[u8]| pcm += chunk.len(),
-                &mut |_, text, spelled| {
-                    assert_eq!(text, spelled);
-                    said.push(text.to_string())
-                },
-            )
-            .unwrap();
+        speak_walks(
+            &mut model,
+            &opts,
+            &mut |chunk: &[u8]| pcm += chunk.len(),
+            &mut |_, text, spelled| {
+                assert_eq!(text, spelled);
+                said.push(text.to_string())
+            },
+        )
+        .unwrap();
         assert_eq!(said.len(), 2);
         assert!(pcm > 16000, "{pcm} bytes");
         assert!(said[0].split_whitespace().all(|u| u.starts_with('q')), "{}", said[0]);
@@ -636,13 +634,13 @@ mod tests {
             };
             let mut said: Vec<String> = Vec::new();
             let mut live: Vec<u8> = Vec::new();
-            model
-                .speak_walks(
-                    &opts,
-                    &mut |chunk: &[u8]| live.extend_from_slice(chunk),
-                    &mut |_, text, _| said.push(text.to_string()),
-                )
-                .unwrap();
+            speak_walks(
+                &mut model,
+                &opts,
+                &mut |chunk: &[u8]| live.extend_from_slice(chunk),
+                &mut |_, text, _| said.push(text.to_string()),
+            )
+            .unwrap();
             let spoken = say(enc, &said, &SayOptions::default()).unwrap();
             assert_eq!(spoken.pcm, live, "{spec}");
             assert_eq!(
@@ -723,11 +721,13 @@ mod tests {
                     };
                     let mut said: Vec<String> = Vec::new();
                     let mut pcm = 0usize;
-                    model
-                        .speak_walks(&opts, &mut |chunk: &[u8]| pcm += chunk.len(), &mut |_, text, _| {
-                            said.push(text.to_string())
-                        })
-                        .unwrap();
+                    speak_walks(
+                        &mut model,
+                        &opts,
+                        &mut |chunk: &[u8]| pcm += chunk.len(),
+                        &mut |_, text, _| said.push(text.to_string()),
+                    )
+                    .unwrap();
                     let walks = model
                         .generate(&GenerateOptions {
                             max_length: 40,

@@ -22,7 +22,7 @@ use crate::weights::ChildCost;
 /// `THINK` faces both ways: its in-edges are where the graph learned to stop
 /// and think (taught by experience, like `BACK`'s), its out-edges how thoughts
 /// begin - a thought is a text whose walk starts at `THINK` instead of `START`
-/// ([`crate::thinking`]).  `FIRST` is the first node id that is not a sentinel.
+/// (the `thinking` module).  `FIRST` is the first node id that is not a sentinel.
 pub const START: usize = 0;
 pub const END: usize = 1;
 pub const BACK: usize = 2;
@@ -830,7 +830,7 @@ impl Graph {
     /// THINK` is created on first use and counted like any traversal, rewarded
     /// by `amount` (the sine model nudges its weight instead), and competes
     /// with `p`'s real children for probability.  Nothing is taught about what
-    /// to do instead - that is the thought's business ([`crate::thinking`]).
+    /// to do instead - that is the thought's business (the `thinking` module).
     /// Returns the `THINK` edge.
     pub fn observe_think(&mut self, p: usize, amount: f64) -> Result<usize, String> {
         if self.radix.is_some() {

@@ -346,7 +346,7 @@ pub struct TrainOptions {
     /// training reads it; the feedback passes walk every text in corpus order.
     pub plan: crate::training::Plan,
     /// The sentinel every text's walk begins at: `START`, or `THINK` to train
-    /// the texts as *thoughts* ([`crate::thinking`]).
+    /// the texts as *thoughts* (the `thinking` module).
     pub origin: usize,
 }
 
@@ -387,7 +387,7 @@ pub struct Model {
     pub workers: usize,
     /// Called at the end of every training epoch with the model as the epoch
     /// left it - what writes a checkpoint mid-run, as Python's training loops
-    /// do (`crate::checkpoint::train`).  `None` outside such a run.
+    /// do (the `checkpoint` module's `train`).  `None` outside such a run.
     pub(crate) epoch_hook: Option<EpochHook>,
     /// The replay buffer: a uniform sample of every text this model was
     /// trained on, rehearsed by a run with `replay > 0` - or `None`, and then
@@ -650,6 +650,76 @@ impl Model {
             return;
         }
         self.g.invert();
+    }
+
+    /// The count model's inversion of failed paths: there is no activation to
+    /// flip, so every edge of a text's path loses `strength * 2 * amount` reward
+    /// (an edge on several paths takes the largest).  A text the structure cannot
+    /// walk yet is registered first.  [`crate::kinds::invert_paths`] answers it
+    /// on every kind.
+    pub fn invert_paths(&mut self, texts: &[String], amounts: &[f64], strength: f64) -> Result<InvertOutcome, String> {
+        let enc = self.encoding();
+        let texts: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
+        if amounts.len() != texts.len() {
+            return Err(format!(
+                "amounts has {} entries for {} texts",
+                amounts.len(),
+                texts.len()
+            ));
+        }
+        if let Some(bad) = amounts.iter().find(|a| !(0.0..=1.0).contains(*a)) {
+            return Err(format!("amounts must lie in [0, 1], got {bad}"));
+        }
+        let mut paths: Vec<Vec<usize>> = Vec::new();
+        for text in &texts {
+            let grams = enc.encode(text);
+            if grams.is_empty() {
+                continue;
+            }
+            let path = match self.g.node_path(&grams) {
+                Some(path) => Some(path),
+                None => {
+                    self.g.observe(&grams, false)?;
+                    self.g.node_path(&grams)
+                }
+            };
+            if let Some(path) = path.filter(|p| !p.is_empty()) {
+                paths.push(path);
+            }
+        }
+        let mut penalties: Vec<(usize, f64)> = Vec::new();
+        for (path, &amount) in paths.iter().zip(amounts) {
+            let penalty = strength.abs() * 2.0 * amount;
+            if penalty <= 0.0 {
+                continue;
+            }
+            for pair in path.windows(2) {
+                if let Some(e) = self.g.edge(pair[0], pair[1]) {
+                    match penalties.iter_mut().find(|(edge, _)| *edge == e) {
+                        Some((_, most)) => *most = most.max(penalty),
+                        None => penalties.push((e, penalty)),
+                    }
+                }
+            }
+        }
+        let mut touched = 0usize;
+        for (e, penalty) in &penalties {
+            touched += self.g.add_reward(&[*e], -penalty);
+            self.meta.penalties_total += penalty;
+        }
+        if touched > 0 {
+            self.meta.feedback_passes.add(1);
+        }
+        let applied: Vec<f64> = amounts.iter().copied().filter(|&a| a > 0.0).collect();
+        Ok(InvertOutcome {
+            texts: texts.len(),
+            flipped: touched,
+            amount_mean: if applied.is_empty() {
+                0.0
+            } else {
+                applied.iter().sum::<f64>() / applied.len() as f64
+            },
+        })
     }
 
     /// The steps of a traced text that wrote a unit inside one of `spans`, as
@@ -1082,7 +1152,7 @@ impl Model {
     }
 
     /// Where a walk begins: at the end of `prefix`, or - with no prefix - at
-    /// the `origin` sentinel.  `THINK` is a thought ([`crate::thinking`]): the
+    /// the `origin` sentinel.  `THINK` is a thought (the `thinking` module): the
     /// same search from the other sentinel, through the openings the model
     /// learned for its thoughts rather than for its texts.  A prefix wins over
     /// the origin, because a located prefix already says where the walk stands.
@@ -1477,6 +1547,28 @@ impl Model {
     }
 }
 
+/// What [`Model::invert_paths`] did.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvertOutcome {
+    pub texts: usize,
+    /// Edges penalised.
+    pub flipped: usize,
+    pub amount_mean: f64,
+}
+
+impl InvertOutcome {
+    /// `{"texts", "flipped", "unit": "edges", "mode": "penalty", "amount_mean"}`.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("texts", Json::Int(self.texts as i64)),
+            ("flipped", Json::Int(self.flipped as i64)),
+            ("unit", Json::str("edges")),
+            ("mode", Json::str("penalty")),
+            ("amount_mean", Json::Num(self.amount_mean)),
+        ])
+    }
+}
+
 /// The log-probability of a text under the model.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Score {
@@ -1518,7 +1610,7 @@ pub struct PredictOptions {
     /// How far the beam's K are spread apart (section 2; 0 = off).
     pub diversity: f64,
     /// The sentinel an empty prefix starts the walk at: `START` (the default),
-    /// or `THINK` for a *thought* ([`crate::thinking`]).
+    /// or `THINK` for a *thought* (the `thinking` module).
     pub origin: usize,
 }
 

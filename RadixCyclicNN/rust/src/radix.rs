@@ -558,7 +558,7 @@ pub struct TrainConfig {
     /// early stop ([`crate::training`], `../../SPEC-SearchAndTraining.md`).
     pub plan: crate::training::Plan,
     /// The sentinel every text's walk begins at: `START`, or `THINK` to train
-    /// the texts as *thoughts* ([`crate::thinking`]).
+    /// the texts as *thoughts* (the `thinking` module).
     pub origin: usize,
 }
 

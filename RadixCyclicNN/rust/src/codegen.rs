@@ -53,7 +53,7 @@ use crate::blame::{classify, severity_of, teach, Fault, TeachOptions, TeachRepor
 use crate::checkpoint::{Checkpoints, Schedule};
 use crate::cli::{negative_stats, Ctx};
 use crate::http::{accepted, Answer, ApiError, Request, Server};
-use crate::json::Json;
+use crate::json::{set, Json};
 use crate::kinds;
 use crate::llm::fields::{py_str_of, truthy, Fields};
 use crate::llm::{
@@ -1173,15 +1173,6 @@ impl From<LoopError> for ApiError {
             LoopError::Llm(err) => err.into(),
             LoopError::Other(message) => ApiError::bad_request(message),
         }
-    }
-}
-
-/// Sets `key` in a record: replaced where it already is, else added at the
-/// end - `dict.update`, which keeps an existing key's place.
-pub(crate) fn set(record: &mut Vec<(String, Json)>, key: &str, value: Json) {
-    match record.iter_mut().find(|(k, _)| k == key) {
-        Some(slot) => slot.1 = value,
-        None => record.push((key.to_string(), value)),
     }
 }
 

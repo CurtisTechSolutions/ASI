@@ -302,104 +302,6 @@ fn median(values: &[f64]) -> f64 {
     }
 }
 
-// -- the count model's local inversion ---------------------------------------------------------------
-
-/// What [`invert_paths`] did.
-#[derive(Clone, Debug, PartialEq)]
-pub struct InvertOutcome {
-    pub texts: usize,
-    /// Edges penalised.
-    pub flipped: usize,
-    pub amount_mean: f64,
-}
-
-impl InvertOutcome {
-    /// `{"texts", "flipped", "unit": "edges", "mode": "penalty", "amount_mean"}`.
-    pub fn to_json(&self) -> Json {
-        Json::obj([
-            ("texts", Json::Int(self.texts as i64)),
-            ("flipped", Json::Int(self.flipped as i64)),
-            ("unit", Json::str("edges")),
-            ("mode", Json::str("penalty")),
-            ("amount_mean", Json::Num(self.amount_mean)),
-        ])
-    }
-}
-
-/// The count model's inversion of failed paths: there is no activation to
-/// flip, so every edge of a text's path loses `strength * 2 * amount` reward
-/// (an edge on several paths takes the largest).  A text the structure cannot
-/// walk yet is registered first.
-pub fn invert_paths(
-    model: &mut Model,
-    texts: &[String],
-    amounts: &[f64],
-    strength: f64,
-) -> Result<InvertOutcome, String> {
-    let enc = model.encoding();
-    let texts: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
-    if amounts.len() != texts.len() {
-        return Err(format!(
-            "amounts has {} entries for {} texts",
-            amounts.len(),
-            texts.len()
-        ));
-    }
-    if let Some(bad) = amounts.iter().find(|a| !(0.0..=1.0).contains(*a)) {
-        return Err(format!("amounts must lie in [0, 1], got {bad}"));
-    }
-    let mut paths: Vec<Vec<usize>> = Vec::new();
-    for text in &texts {
-        let grams = enc.encode(text);
-        if grams.is_empty() {
-            continue;
-        }
-        let path = match model.g.node_path(&grams) {
-            Some(path) => Some(path),
-            None => {
-                model.g.observe(&grams, false)?;
-                model.g.node_path(&grams)
-            }
-        };
-        if let Some(path) = path.filter(|p| !p.is_empty()) {
-            paths.push(path);
-        }
-    }
-    let mut penalties: Vec<(usize, f64)> = Vec::new();
-    for (path, &amount) in paths.iter().zip(amounts) {
-        let penalty = strength.abs() * 2.0 * amount;
-        if penalty <= 0.0 {
-            continue;
-        }
-        for pair in path.windows(2) {
-            if let Some(e) = model.g.edge(pair[0], pair[1]) {
-                match penalties.iter_mut().find(|(edge, _)| *edge == e) {
-                    Some((_, most)) => *most = most.max(penalty),
-                    None => penalties.push((e, penalty)),
-                }
-            }
-        }
-    }
-    let mut touched = 0usize;
-    for (e, penalty) in &penalties {
-        touched += model.g.add_reward(&[*e], -penalty);
-        model.meta.penalties_total += penalty;
-    }
-    if touched > 0 {
-        model.meta.feedback_passes.add(1);
-    }
-    let applied: Vec<f64> = amounts.iter().copied().filter(|&a| a > 0.0).collect();
-    Ok(InvertOutcome {
-        texts: texts.len(),
-        flipped: touched,
-        amount_mean: if applied.is_empty() {
-            0.0
-        } else {
-            applied.iter().sum::<f64>() / applied.len() as f64
-        },
-    })
-}
-
 // -- the loop ----------------------------------------------------------------------------------------
 
 /// The loop: a corpus of real texts, the discriminator, and every generation's record.
@@ -1444,13 +1346,13 @@ mod tests {
         let mut g = generator();
         let texts = vec!["the cat sat on the mat".to_string(), "never seen before".to_string()];
         let before = g.g.total_reward().1;
-        let outcome = invert_paths(&mut g, &texts, &[1.0, 0.5], 2.0).unwrap();
+        let outcome = g.invert_paths(&texts, &[1.0, 0.5], 2.0).unwrap();
         assert_eq!(outcome.texts, 2);
         assert!(outcome.flipped > 0);
         assert!(g.g.total_reward().1 < before);
         assert_eq!(outcome.amount_mean, 0.75);
-        assert!(invert_paths(&mut g, &texts, &[1.0], 2.0).is_err());
-        assert!(invert_paths(&mut g, &texts, &[1.5, 0.0], 2.0).is_err());
+        assert!(g.invert_paths(&texts, &[1.0], 2.0).is_err());
+        assert!(g.invert_paths(&texts, &[1.5, 0.0], 2.0).is_err());
     }
 
     #[test]

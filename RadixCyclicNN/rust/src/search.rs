@@ -84,7 +84,7 @@ pub const PUNISH_TOLERANCE: f64 = 1e-12;
 ///
 /// `THINK` is not a continuation either, and the walk never takes it: stopping
 /// to think is not stopping, so it is dropped from the options and the real
-/// children stay on offer ([`crate::thinking`]).
+/// children stay on offer (the `thinking` module).
 pub fn onward(costs: &mut Vec<ChildCost>) {
     let mut back = f64::INFINITY;
     let mut has_back = false;

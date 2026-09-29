@@ -60,10 +60,10 @@ use crate::checkpoint::Schedule;
 use crate::cli::Ctx;
 use crate::codegen::{
     as_dict, choice, clamp_score, extension, feedback, get_either, head, last_loss, number_at_least, origin_json,
-    py_float, py_type_name, save_negative, set, set_solved, solutions_json, unique, Hooks, LoopError, Nets,
+    py_float, py_type_name, save_negative, set_solved, solutions_json, unique, Hooks, LoopError, Nets,
 };
 use crate::http::{accepted, Answer, ApiError, Request, Server};
-use crate::json::Json;
+use crate::json::{set, Json};
 use crate::kinds;
 use crate::llm::fields::{py_str_of, truthy, Fields};
 use crate::llm::{loads_lenient, message, parse_lines, LlmClient, LlmError, LlmOptions};
