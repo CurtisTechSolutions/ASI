@@ -15,6 +15,18 @@ It ships as a Python package (`radixnet`), a CLI, a JSON HTTP API, a React
 frontend, a Makefile and a Docker Compose stack. Checkpointing, save/load,
 and an optional GPU backend (torch) are built in.
 
+**Where the code lives.** This directory is the **model**: the graph, its four
+kinds, the encodings, training, the searches and the model file, in Python
+(`radixnet/`), Go (`go/radixnet`) and Rust (`rust/`). Everything built around
+it - the command line, the HTTP API and the React frontend, the teaching loops,
+the LLM clients, the agent and its tools, speech, images and voice, MCP,
+checkpoints, and the Go and Rust servers and CLIs - is
+[ModelKit](../ModelKit), a package of its own beside this one so other
+directories and repositories can use it. The model never imports the kit; the
+kit is built on the model. Every command below works as it always did:
+`python -m radixnet` hands over to the kit's command line, and the Makefile
+runs the kit from `../ModelKit` (D-093).
+
 ## The ideas, in one table
 
 | Requirement | Implementation |
@@ -67,7 +79,7 @@ and an optional GPU backend (torch) are built in.
 | The pair as a GAN at output time | `NegativeFilter` (`negative filter`, `POST /api/negative/filter`): the positive model over-samples candidates and the negative one vetoes them - by blame (`risk` over the threshold), by the likelihood ratio `log P_negative - log P_positive` per character (the discriminator logit of the two networks), or by `peak`, the blame on a single fragment, which is how one corrected word vetoes an otherwise clean sentence. What survives comes back ranked; what does not comes back with the reason, the blamed fragment and who said so. |
 | Both networks on every answer | The pair is not something you have to ask for: `generate`, `predict` and `converse` run it by default, so nothing the tutor has already corrected goes out again. The model over-samples and the negative network vetoes; a vetoed continuation is dropped from `top`, a vetoed reply is left unsaid and the voice looks for another one. Every answer carries what was stopped and why, and `--no-guard` / `{"guard": false}` hands out what the positive model wrote. With no negative network, or one that has never been taught a failure, nothing is filtered and nothing is paid. |
 | 2NRL | `two_nrl(bad, good)`: (1) train on bad/garbage data, (2) **invert** the network (every edge weight, and every node's activation - amplitude `a` and offset `k` together - flips sign, so what was likely becomes unlikely), (3) fine-tune on correct data with a smaller learning rate (activation parameters use a tenth of it). |
-| CLI, API, React frontend | `python -m radixnet ...`, `python -m radixnet serve` (stdlib `http.server`), `frontend/` (Vite + React, prebuilt `dist` is served by the API). |
+| CLI, API, React frontend | `python -m radixnet ...`, `python -m radixnet serve` (stdlib `http.server`), `../ModelKit/frontend/` (Vite + React, prebuilt `dist` is served by the API). |
 | Checkpointing, saving, loading | JSON model files (gzip with `.gz`), `CheckpointManager` with rotation, `latest` pointer, restore and resume. |
 | GPU acceleration, performance | `--backend auto` uses torch on CUDA / Apple MPS when installed, else the optimised pure-Python backend (flat CSR arrays, cached costs, ~150k transitions/s on a 4-core CPU). Both backends compute identical numbers. |
 | Counters that never overflow | Every growing integer (traversals, visit counts, epochs, trained characters, version stamps) is a **cyclic counter**: at `10^15` it goes back to 0 and the reset is counted, so the exact total is `resets × 10^15 + value` and nothing ever outgrows a 64-bit integer or a JSON number. The weights are computed from the exact totals, so a wrapped model behaves exactly as one that counted forever. |
@@ -104,7 +116,9 @@ it exists. Small corpora only learn visibly with small batches and a large
 learning rate (`--batch-size 1..8`, `--lr 0.5..1.0`); those are the Makefile
 defaults.
 
-`pip install -e .` adds a `radixnet` console script (same commands).
+`pip install -e . -e ../ModelKit` (or `make install`) adds a `radixnet`
+console script (same commands). Without installing anything, `python -m
+radixnet` finds the ModelKit checkout beside this one.
 
 ## Makefile
 
@@ -140,7 +154,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-blame` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + blame the negative network, review + 2NRL |
 | `make speech-info` / `speech-teach AUDIO=clip.wav TRANSCRIPT="..."` / `speech-listen SECONDS=5` / `speech-decode TEXT="aud:…" AUDIO=out.wav` | speech: available backends, teach an audio file, record from the microphone and teach that, play a waveform text back |
 | `make tools` / `agent TASKS=data/sample_tasks.txt` / `explore STEPS=10` / `explore-forever` | tool use: list the tools, solve a task list with Ollama writing the criteria, judging and teaching, or let the network choose its own tasks and browse |
-| `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `frontend/dist` / Vite dev server with hot reload |
+| `make frontend-install` / `frontend-build` / `frontend-dev` | npm install / rebuild `../ModelKit/frontend/dist` / Vite dev server with hot reload |
 | `make up` / `up-auto` / `up-dev` / `up-gpu` / `down` | Docker Compose stack (see below) |
 | `make docker-train` / `docker-evolve` / `docker-test` / `docker-bench` | one-shot jobs inside the image |
 | `make docker-reload` / `docker-export` / `docker-clean` | reload `/data/model.json` into the running API / copy the model out / remove containers and the volume |
@@ -343,7 +357,7 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/history` | training history |
 | `GET /api/paths?limit=50` | count model: the judged paths, most walked first - `prev` / `parent` / `child`, `correct`, `incorrect`, `seen`, `seen_ratio`, `correct_ratio`, and the totals over the whole graph |
 | `GET /api/nodes?limit=20` | count model: each node against the nodes around it (`?node=LABEL` for one) - `{nodes: [{node, label, visits, from: [...], to: [...], in_totals, out_totals}]}`, a row per previous and per next node with `seen_ratio`, `reward_ratio`, `path_ratio` and `correct_ratio` |
-| `GET /` | the built frontend (`frontend/dist`), or a small page explaining how to build it |
+| `GET /` | the built frontend (`../ModelKit/frontend/dist`), or a small page explaining how to build it |
 
 ```bash
 curl -X POST localhost:8000/api/train -H 'Content-Type: application/json' \
@@ -384,9 +398,9 @@ B: then the cat sat
 
 ## Frontend
 
-`frontend/` is a Vite + React app (React, ReactDOM, Vite only). The prebuilt
-`frontend/dist` is committed and served by the API, so nothing needs npm to use
-it. Two tabs hold the settings. **Settings** keeps the ones of this browser -
+`../ModelKit/frontend/` is a Vite + React app (React, ReactDOM, Vite only). The
+prebuilt `../ModelKit/frontend/dist` is committed and served by the API, so
+nothing needs npm to use it. Two tabs hold the settings. **Settings** keeps the ones of this browser -
 what every search and every run starts from, whichever model is loaded: the
 **traversal** (follow the rewards, or avoid the punishments), the **sampling
 filters** (top-K, top-p, min-p) and the beam's **diversity**, and **how a run
@@ -1195,7 +1209,7 @@ down to the error text, so a client cannot tell which one it is connected to.
 It offers `radixnet_solve` only when an LLM is reachable, and `radixnet_judge`
 only when the negative network is there — the same rule the Python server
 follows. **So does the Rust port** (`rust/src/mcp.rs`, `radixnet mcp`), held to
-Python line for line over one message stream (`tests/test_rust_parity_agent.py`).
+Python line for line over one message stream (`../ModelKit/tests/test_rust_parity_agent.py`).
 
 Point a client at either the usual way:
 
@@ -1528,7 +1542,7 @@ More ways to search, and more ways to train - every one of them **off by
 default**, and a search or a run with all of them off is exactly the one it
 always was, draw for draw and byte for byte. `SPEC-SearchAndTraining.md` is the
 contract; the Python, Go and Rust implementations keep it number for number,
-and `tests/test_go_parity.py` / `tests/test_rust_parity_methods.py` hold them to
+and `../ModelKit/tests/test_go_parity.py` / `../ModelKit/tests/test_rust_parity_methods.py` hold them to
 the same graph, history and file.
 
 **Sampling filters** narrow what a sampled step (`--mode sample`) draws from:
@@ -1721,7 +1735,7 @@ without touching the model, and the last card plays any `aud:` text back.
 
 **Talking with it** (the Voice tab): press *Start listening* once and just
 talk. The microphone stays on: an endpointer cuts what you say into utterances
-(`frontend/src/voice.js`), the browser's dictation writes the words down beside
+(`../ModelKit/frontend/src/voice.js`), the browser's dictation writes the words down beside
 it, and every utterance is one turn of `POST /api/voice/turn/stream` - heard,
 trained on at once, answered (by the model, or by Ollama on its behalf when the
 model has nothing to say yet), spoken through the model's voice - whose audio
@@ -1752,8 +1766,8 @@ Speech to text uses the first backend that is available:
 | backend | what it is |
 |---|---|
 | `given` | the transcript comes from the browser's Web Speech API, `--text`, or the API's `transcript` field - always available, and why the feature needs nothing installed |
-| `faster-whisper` | `pip install radixnet[speech]` (CTranslate2 Whisper, fast on the CPU) |
-| `whisper` | `pip install radixnet[whisper]` (openai-whisper) |
+| `faster-whisper` | `pip install modelkit[speech]` (CTranslate2 Whisper, fast on the CPU) |
+| `whisper` | `pip install modelkit[whisper]` (openai-whisper) |
 | `server` | any OpenAI-compatible `/v1/audio/transcriptions` endpoint (whisper.cpp's server, Speaches, ...) - set `RADIXNET_ASR_URL` |
 
 `RADIXNET_WHISPER_MODEL` (default `base`), `RADIXNET_ASR_URL`,
@@ -1825,7 +1839,7 @@ bad_weights=[...])` and `model.invert_paths(texts, mode, amounts)`.
 `converse` has the model talk to itself, which is a good way to see what it
 knows and a useless way to find out whether it *answers* anything: neither
 voice can tell the other that its reply did not follow on.  `chat`
-(`radixnet/chat.py`, the **Chat** tab) puts a real language model on the other
+(`../ModelKit/modelkit/chat.py`, the **Chat** tab) puts a real language model on the other
 side of the line.
 
 ```bash
@@ -1982,7 +1996,7 @@ nothing here (`top_p`, `logprobs`, `user`, `response_format`, ...) are accepted
 and ignored.  Errors come back in each dialect's own envelope.  The Rust and Go
 servers answer the same routes with the same documents (`radixnet talk` and
 `radixnet-count talk` are the same command), and
-`tests/test_rust_parity_assistant.py` and `TestGoAssistantParity` hold them to
+`../ModelKit/tests/test_rust_parity_assistant.py` and `TestGoAssistantParity` hold them to
 Python's thinking and text.
 
 ## The negative network: what went wrong, and why
@@ -2025,7 +2039,7 @@ bottom-K) - a warning, not a suggestion.
 ### The negatives come from the tutor
 
 Nothing is invented.  Every failure arrives from something outside the network
-that looked at an output and said it was wrong, and why (`radixnet/blame.py`
+that looked at an output and said it was wrong, and why (`../ModelKit/modelkit/blame.py`
 turns each verdict into a **fault**: a reason tag, a severity, the tutor's own
 sentence for the journal and, where there is one, the correction to diff
 against):
@@ -2146,7 +2160,7 @@ at     fragment   blame  fails  reason
 
 ### The pair: a GAN at output time
 
-`radixnet/duo.py` puts the two networks on one output path.  In the evolve
+`../ModelKit/modelkit/duo.py` puts the two networks on one output path.  In the evolve
 loop the generator and the discriminator take turns improving each other; here
 the finished pair works together on every answer: the positive model
 over-samples candidates (it is the only one that can write), the negative one
@@ -2488,8 +2502,8 @@ button - the prediction and its top / bottom rows, every generated sample,
 every turn of a conversation - and the Speech tab's *Listen to an output* card
 takes any text. `speech decode` on the command line does the same for a
 text that is not a waveform. The Go and Rust ports carry all of it (`say`,
-`--speak`, `/api/say`), and `tests/test_go_parity.py::test_the_same_say` /
-`tests/test_rust_parity.py::test_the_same_say` hold the three to the same
+`--speak`, `/api/say`), and `../ModelKit/tests/test_go_parity.py::test_the_same_say` /
+`../ModelKit/tests/test_rust_parity.py::test_the_same_say` hold the three to the same
 samples.
 
 The four Python model kinds all take it (`--kind radix | count | negative |
@@ -2515,7 +2529,7 @@ The encoding is fixed for the model's life - every label in the graph is
 written in it - so the flags apply to a **new** model, and both CLIs refuse
 them (rather than ignoring them) when they disagree with the model they loaded.
 A model that is not `char:3:1` writes an `encoding` block into its file, and
-**both implementations read it**: `tests/test_go_parity.py::TestGoEncodingParity`
+**both implementations read it**: `../ModelKit/tests/test_go_parity.py::TestGoEncodingParity`
 trains the same corpus on both sides under nine encodings and holds them to the
 same graph, the same file and the same predictions.
 
@@ -2654,7 +2668,7 @@ a CLI (`go/cmd/radixnet-count`); the Python implementation stays as it is.
 Model files are interchangeable: both sides read and write the
 `radixnet-count` and `radixnet-negative` JSON formats, including the Mersenne
 Twister state, so a model trained on one side continues on the other with
-identical numbers, in every encoding (`tests/test_go_parity.py` trains the same corpus on both,
+identical numbers, in every encoding (`../ModelKit/tests/test_go_parity.py` trains the same corpus on both,
 compares structure, counts, rewards, window, RNG state, predictions, generated
 texts, scores and conversations, blames the same failures and corrections and
 compares the verdicts character for character, and lets each side read the
@@ -2817,7 +2831,7 @@ prebuilt frontend:
 
 ```bash
 make go-serve PORT=8001           # go/bin/radixnet-count --model model.count.json serve --port 8001 \
-                                  #   --frontend-dir frontend/dist --upload-dir uploads --checkpoint-dir checkpoints
+                                  #   --frontend-dir ../ModelKit/frontend/dist --upload-dir uploads --checkpoint-dir checkpoints
 open http://localhost:8001        # the React app, now backed by the Go model
 ```
 
@@ -2857,7 +2871,7 @@ with the audio - which is what the page dictates anyway.
 | `POST /api/chat/start`, `GET /api/chat/history` | an LLM converses with the model and marks every reply: the partner says a short line, the network replies by continuing it, the judge marks each reply against the line it answered and the conversation as a whole, the failures blame the negative network, the passes clear it, and 2NRL trains the model on both. Same bodies and records as the Python server; the count model pushes by `strength` rather than `neg_lr` / `pos_lr` / `batch_size` |
 | `/api/schedule/preview` | 404 with a message naming the Python server - the only endpoint that is still Python-only |
 
-`tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
+`../ModelKit/tests/test_go_parity.py::TestGoTutorParity` points both tutors at one fake
 Ollama and asserts that they send the teacher the same prompts, get the same
 marks and leave the model in the same state, so the two implementations of the
 lessons cannot drift apart.  `TestGoCodeGenParity` does the same for code
@@ -2871,7 +2885,7 @@ transcript written on one side has to be one the other can read.
 same lines are said, the same replies come back, the same marks are given and
 the same two networks are on disk afterwards.
 
-`tests/test_go_parity.py` also starts the Go server and checks its answers
+`../ModelKit/tests/test_go_parity.py` also starts the Go server and checks its answers
 against the key sets the Python API tests assert on, loads the model it saves
 in Python, trains from a ZIP upload with `split: paragraphs`, and reads its
 checkpoints with the Python `CheckpointManager`.
@@ -2886,7 +2900,7 @@ the negative network, every teaching loop, the LLM clients, the tools, code
 generation and the agent, images and speech, MCP and the WebDriver browser.
 It reads and writes every model file byte
 for byte as Python does, and `radixnet serve` answers the same JSON API the
-Python and Go servers answer, so `frontend/dist` runs against it unmodified -
+Python and Go servers answer, so `../ModelKit/frontend/dist` runs against it unmodified -
 a tab appears when the route it needs is in `/api/status`.  Its
 `POST /api/uploads` streams as the Go server's does: a multipart or raw upload
 of any size goes straight to the upload directory and is validated from there,
@@ -2899,7 +2913,7 @@ backend, the Stable Diffusion encoder, local Whisper).
 ```bash
 make rust-build        # -> rust/target/release/radixnet{,-bench} (needs Rust 1.82+)
 make rust-test         # cargo test, clippy, fmt --check
-make rust-serve        # frontend/dist against the Rust model on http://HOST:PORT
+make rust-serve        # ../ModelKit/frontend/dist against the Rust model on http://HOST:PORT
 make bench-compare     # both ports over one corpus -> bench/RESULTS.md
 ```
 
@@ -2940,7 +2954,8 @@ result, not a quality result; which answers are better is the tutor's question.
 ## Python API
 
 ```python
-from radixnet import RadixNet, Evolver
+from radixnet import RadixNet
+from modelkit import Evolver                  # the evolve loop is the kit's
 
 net = RadixNet(seed=0, backend="python")
 net.train(["the cat sat on the mat", "the dog runs in the park"], epochs=10, lr=0.5, batch_size=4)
@@ -2971,7 +2986,8 @@ print(net.graph.child_evidence(8))    # [(child, edge, merit, penalty), ...] - t
 The negative half, and the two of them as one output path:
 
 ```python
-from radixnet import NegativeFilter, NegativeNet, RadixNet, blame
+from radixnet import NegativeNet, RadixNet
+from modelkit import NegativeFilter, blame    # the pair and the blame loops are the kit's
 
 negative = NegativeNet(seed=1)
 negative.blame(["the the the the cat"], reason="repetition", source="review", note="it repeats the same word")
@@ -2988,7 +3004,7 @@ print(out["texts"], [(v["text"], v["why"]) for v in out["rejected"]])
 ```
 
 ```python
-from radixnet import teach_by_speech          # one utterance -> the words and the waveform
+from modelkit import teach_by_speech          # one utterance -> the words and the waveform
 
 spoken = teach_by_speech(open("clip.wav", "rb").read(), transcript="the cat sat on the mat")
 print(spoken["token"], spoken["texts"][0])     # <speech:9f2a1c7d> <speech:9f2a1c7d> the cat sat on the mat
@@ -2996,7 +3012,7 @@ net.train(spoken["texts"], epochs=3, lr=0.5, batch_size=8)
 ```
 
 ```python
-from radixnet import blame, recall            # does it remember what it was taught?
+from modelkit import blame, recall            # does it remember what it was taught?
 
 waveform = [t for t in spoken["texts"] if "aud:" in t]
 lessons = recall.quiz(net, waveform, length=400)          # the exercise is the token and the header
@@ -3007,27 +3023,22 @@ blame.teach_recall(negative, lessons, source="speech")    # the original is the 
 ## Tests
 
 ```bash
-make test           # python -m unittest discover -s tests -v (includes the Go parity test when `go` is on PATH)
-make go-test        # cd go && go test -race ./...
-make frontend-test  # cd frontend && npm test (node --test over the settings store; no dependencies)
+make test           # the model's tests (tests/), then the kit's (../ModelKit/tests, with the Go and Rust parity suites when go / cargo are on PATH)
+make test-core      # the model's tests alone: they pass with the kit refused at import
+make go-test        # go test -race ./... in go/ (the model) and ../ModelKit/go (the kit)
+make frontend-test  # cd ../ModelKit/frontend && npm test (node --test over the settings store; no dependencies)
 ```
 
 ## Layout
 
 ```
-RadixCyclicNN/
-  radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, phasesearch, penalty, model,
-                      countnet, negative, resonance, metacog, blame, duo, diff, schedule, gan, checkpoint, bench,
-                      cli, api, llm, ollama, chatgpt, tutor, recall, critic, codegen, tools, agent, browser, mcp,
-                      vision, speech, dialogue, chat, assistant (today's format: messages in, thinking and a
-                      streamed reply out)
-  tests/              unittest suite
-  frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
-                      the panels' settings in localStorage, test/ holds its node --test suite)
-  go/                 Go port of the count / reward model and the negative network: radixnet/ (library), cmd/radixnet-count (CLI)
-  rust/               Rust port of the whole package: src/ (crate, HTTP server and every area included), src/bin
-                      (the CLI and the benchmark), tests/ (the model, the encodings, the word alphabet and the
-                      server end to end)
+RadixCyclicNN/        the model
+  radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, phasesearch, penalty,
+                      model, countnet, negative, resonance, metacog, diff, schedule, training, attention, window;
+                      __main__ hands `python -m radixnet` to the kit's command line
+  tests/              unittest suite of the model (needs nothing from the kit)
+  go/                 Go port of the model: radixnet/ (library)
+  rust/               Rust port of the model: the `radixnet` crate (library)
   bench/              the two ports over one corpus: make_corpus.py, compare.py, RESULTS.md
   data/               sample_corpus.txt (correct data), sample_garbage.txt (bad data),
                       sample_problems.* (codegen), sample_tasks.* (agent / explore)
@@ -3038,6 +3049,17 @@ RadixCyclicNN/
   SPEC-AttentionBand.md   where inside a gram a correction lands (built)
   SPEC-DynamicWindow.md   the ladder of node sizes, halving from 32 to 4 and back up (built)
   SPEC-EdgeDecay.md   a node's edges fading on the graph's own clock (proposed)
+
+ModelKit/             everything around the model (../ModelKit/README.md)
+  modelkit/           cli, api, tutor, recall, critic, codegen, agent, gan, chat, dialogue, thinking, assistant
+                      (today's format), duo, blame, voice, voicechat, checkpoint, bench, llm, ollama, chatgpt,
+                      tools, browser, mcp, archive, speech, vision, media
+  tests/              unittest suite of the kit, run against this model; the Go and Rust parity suites
+  frontend/           Vite + React app (dist/ is prebuilt and served by the API; src/storage.js remembers
+                      the panels' settings in localStorage, test/ holds its node --test suite)
+  go/                 Go: kit/ (library), server/ (the HTTP API), cmd/radixnet-count (CLI)
+  rust/               Rust: the `modelkit` crate, src/bin (the `radixnet` CLI and the benchmark), tests/ (the
+                      server end to end)
 ```
 
 ## Design decisions

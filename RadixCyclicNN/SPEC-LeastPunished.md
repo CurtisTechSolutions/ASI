@@ -229,7 +229,7 @@ can be walked either way, and a model walked this way is not changed by it.
 ## 6. Parity
 
 All three implementations have it, and each is held to the reference one:
-`tests/test_go_parity.py` and `tests/test_rust_parity.py` punish the same texts
+`../ModelKit/tests/test_go_parity.py` and `../ModelKit/tests/test_rust_parity.py` punish the same texts
 in Python and in the port, then predict the same prefixes under the traversal
 and require the same continuation, the same cost, the same ranking **and the
 same punishment on every path** — and require that the punished model answers

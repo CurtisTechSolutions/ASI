@@ -273,7 +273,7 @@ they are ported. Two rules that decide whether parity holds:
 * the swept set is iterated in **ascending node id**, not in map order, so the
   floating-point result does not depend on Go's randomised map iteration.
 
-`tests/test_go_parity.py` gains: the same weights after the same sweep
+`../ModelKit/tests/test_go_parity.py` gains: the same weights after the same sweep
 (`places=9`, the tolerance the file already uses), the same edges dropped, and
 the same `decay` dict.
 

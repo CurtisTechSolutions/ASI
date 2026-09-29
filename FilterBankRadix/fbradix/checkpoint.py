@@ -7,7 +7,7 @@ points at the most recently written one and ``index.json`` keeps the records
 file. The index is reconciled with the directory on every listing, so files
 removed or added by hand are handled.
 
-This is ``RadixCyclicNN/radixnet/checkpoint.py``'s contract, deliberately: a
+This is ``ModelKit/modelkit/checkpoint.py``'s contract, deliberately: a
 checkpoint layout is a thing you lose work by inventing twice, and a reader who
 knows one of these directories knows the other.
 

@@ -242,7 +242,7 @@ Four ways a tape can be wrong, told apart:
 | `illegal` | it names an action this position does not allow |
 | `phi` | every move was legal and the state token disagrees with the replay — the tape's own checksum caught the model writing down a position it is not in |
 
-`radixnet.vision` needs `repair_base64` to survive a garbled prediction. Here
+`modelkit.vision` needs `repair_base64` to survive a garbled prediction. Here
 the repair is `trim_to_tokens` plus the replay: cut to the grid, then let the
 rules cut the rest.
 

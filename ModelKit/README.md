@@ -115,5 +115,5 @@ RadixCyclicNN's own `Makefile` keeps every command it had (`make serve`,
 
 The design documents stay with the model, because they describe one system:
 `../RadixCyclicNN/README.md` (the manual), `DESIGN.md` (the specification),
-`DECISIONS.md` (why; D-092 is this split) and the `SPEC-*.md` files.
+`DECISIONS.md` (why; D-093 is this split) and the `SPEC-*.md` files.
 `tests/README.md` says what each test covers.

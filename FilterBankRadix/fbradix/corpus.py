@@ -41,7 +41,7 @@ SOURCES: dict[str, tuple[str, ...]] = {
         "RadixCyclicNN/radixnet/countnet.py",
         "RadixCyclicNN/radixnet/resonance.py",
         "RadixCyclicNN/radixnet/negative.py",
-        "RadixCyclicNN/radixnet/blame.py",
+        "ModelKit/modelkit/blame.py",
     ),
     "go": (
         "RadixCyclicNN/go/radixnet/nodes.go",

@@ -495,7 +495,7 @@ currently listens to them for this purpose.
 **Why this is recorded rather than built** It is a genuine feature, not a
 documentation fix. Recorded so the gap stays visible rather than being lost.
 
-**Would live in** `radixnet/schedule.py`, `radixnet/gan.py`, `radixnet/tutor.py`
+**Would live in** `radixnet/schedule.py`, `../ModelKit/modelkit/gan.py`, `../ModelKit/modelkit/tutor.py`
 
 ---
 
@@ -573,7 +573,7 @@ indefinitely — `generations=None` until a stop event.
   Nothing in the system currently detects the generator getting worse in a way
   its own discriminator likes. See Q-4.
 
-**Lives in** `radixnet/gan.py`
+**Lives in** `../ModelKit/modelkit/gan.py`
 
 ---
 
@@ -712,7 +712,7 @@ what is, in the end, a route table.
 * Tests start the real server on port 0 in a thread and talk to it over
   `urllib` — no test client to diverge from production behaviour.
 
-**Lives in** `radixnet/api.py`
+**Lives in** `../ModelKit/modelkit/api.py`
 
 ---
 
@@ -741,7 +741,7 @@ behind queueing.
 * The Go server reproduces this design, including the 409 and the mid-job
   release (D-044).
 
-**Lives in** `radixnet/api.py::ModelService`, `go/server/service.go`
+**Lives in** `../ModelKit/modelkit/api.py::ModelService`, `go/server/service.go`
 
 ---
 
@@ -751,7 +751,7 @@ behind queueing.
 
 **Decision** The frontend depends on `react`, `react-dom`, `vite` and
 `@vitejs/plugin-react` and nothing else — no UI kit, no chart library, no state
-manager, no TypeScript. The built `frontend/dist` is committed and served by the
+manager, no TypeScript. The built `../ModelKit/frontend/dist` is committed and served by the
 API.
 
 **Consequences**
@@ -764,7 +764,7 @@ API.
 * The panels only ever speak the JSON contract, never model internals. That is
   what let the Go engine reuse the entire frontend unchanged (D-044).
 
-**Lives in** `frontend/`
+**Lives in** `../ModelKit/frontend/`
 
 ---
 
@@ -1026,8 +1026,8 @@ model: a traversal plus reward / a penalty without one).
 * The frontend enforces one rating per distinct text and cannot reward the same
   text twice (`useRatings`), so the magnitude stays meaningful.
 
-**Lives in** `radixnet/model.py`, `radixnet/api.py`,
-`frontend/src/components/RatingsCard.jsx`
+**Lives in** `radixnet/model.py`, `../ModelKit/modelkit/api.py`,
+`../ModelKit/frontend/src/components/RatingsCard.jsx`
 
 ---
 
@@ -1060,7 +1060,7 @@ the inversion turns all of it around.
 * The count model scales its penalties by the same weights, so the mode means
   the same thing on both kinds.
 
-**Lives in** `radixnet/gan.py`, `radixnet/model.py::RadixNet.two_nrl`
+**Lives in** `../ModelKit/modelkit/gan.py`, `radixnet/model.py::RadixNet.two_nrl`
 
 ---
 
@@ -1146,7 +1146,7 @@ set — an *external* discriminator).
   primitives as everything else (D-026) — it is a *source of ratings*, not a
   special case.
 
-**Lives in** `radixnet/ollama.py`
+**Lives in** `../ModelKit/modelkit/ollama.py`
 
 ---
 
@@ -1188,7 +1188,7 @@ decided — `sandbox | tests | ollama | none`.
 * The LLM judge is optional (`use_judge`); with it off, the sandbox and the
   style checker still decide.
 
-**Lives in** `radixnet/codegen.py`
+**Lives in** `../ModelKit/modelkit/codegen.py`
 
 ---
 
@@ -1222,7 +1222,7 @@ bytes that happen to parse.
 * Because the sandbox never raises, the trainer's control flow is
   straight-line: every attempt produces a verdict.
 
-**Lives in** `radixnet/codegen.py::Sandbox`
+**Lives in** `../ModelKit/modelkit/codegen.py::Sandbox`
 
 ---
 
@@ -1260,7 +1260,7 @@ all to say **ends the conversation**.
   and its flags (`given`, `fresh`, `repeat`) — so a transcript is inspectable,
   not just readable. Turns are rated with the same thumbs as samples (D-026).
 
-**Lives in** `radixnet/dialogue.py`, `go/radixnet/dialogue.go`
+**Lives in** `../ModelKit/modelkit/dialogue.py`, `go/radixnet/dialogue.go`
 
 ---
 
@@ -1333,7 +1333,7 @@ cache keyed by size and mtime.
 * `is_zip` decides by **magic bytes alone**, so a `.zip` that is really text is
   stored as text and a ZIP under any name is unpacked.
 
-**Lives in** `radixnet/archive.py`, `radixnet/api.py`
+**Lives in** `../ModelKit/modelkit/archive.py`, `../ModelKit/modelkit/api.py`
 
 ---
 
@@ -1369,7 +1369,7 @@ against a threat model that does not apply, at the cost of the use case.
 * If this were ever exposed beyond localhost, this decision would need
   revisiting first. See Q-6.
 
-**Lives in** `radixnet/archive.py`, `radixnet/api.py`, `go/server/http.go`, `go/server/uploads.go`,
+**Lives in** `../ModelKit/modelkit/archive.py`, `../ModelKit/modelkit/api.py`, `go/server/http.go`, `go/server/uploads.go`,
 `rust/src/http.rs`, `rust/src/multipart.rs`
 
 ---
@@ -1404,7 +1404,7 @@ Each number is quantised to one signed byte, and the bytes are base64-encoded as
 * Optional extras `[images]` / `[diffusion]`; the core stays dependency-free
   (D-012).
 
-**Lives in** `radixnet/vision.py`
+**Lives in** `../ModelKit/modelkit/vision.py`
 
 ---
 
@@ -1478,7 +1478,7 @@ side continues on the other with *identical numbers*" is not.
 over epochs, and a tolerance would have hidden real divergence in the structure.
 
 **Consequences**
-* `tests/test_go_parity.py` can assert **equality**, not approximation: labels,
+* `../ModelKit/tests/test_go_parity.py` can assert **equality**, not approximation: labels,
   counts, edges, rewards, window events, RNG state, weights (1e-12),
   predictions, generated texts, scores and conversation transcripts, with each
   side loading and continuing the other's file. That is a far stronger contract
@@ -1489,7 +1489,7 @@ over epochs, and a tolerance would have hidden real divergence in the structure.
   maintained explicitly — a real cost, accepted for reproducibility.
 
 **Lives in** `go/radixnet/mt19937.go`, `go/radixnet/fsum.go`,
-`go/radixnet/graph.go`, `tests/test_go_parity.py`
+`go/radixnet/graph.go`, `../ModelKit/tests/test_go_parity.py`
 
 ---
 
@@ -1639,7 +1639,7 @@ live goroutines.
 * A 404 that names the other server is a better failure than a hidden button:
   the capability difference is discoverable rather than invisible.
 * The contract is tested from both sides: `go/server/server_test.go` (httptest,
-  every endpoint, error shapes) and `tests/test_go_parity.py::TestGoServer` (a
+  every endpoint, error shapes) and `../ModelKit/tests/test_go_parity.py::TestGoServer` (a
   live `serve` process checked against the Python API tests' key sets, its saved
   model loaded in Python, and its checkpoints read by the Python
   `CheckpointManager`).
@@ -1647,7 +1647,7 @@ live goroutines.
   the goroutines fan out over (D-040) — which the Train tab surfaces as
   "Texts are: lines | paragraphs | pages".
 
-**Lives in** `go/server/`, `frontend/src/App.jsx::engineOf`
+**Lives in** `go/server/`, `../ModelKit/frontend/src/App.jsx::engineOf`
 
 ---
 
@@ -1774,7 +1774,7 @@ for byte what it was before, and a null `guard` in the payload says so.
   vetoed candidate may not even be the fallback.
 * Every answer carries what was stopped and why, so a veto is inspectable.
 
-**Lives in** `radixnet/duo.py`, `radixnet/negative.py`
+**Lives in** `../ModelKit/modelkit/duo.py`, `radixnet/negative.py`
 
 ---
 
@@ -1795,7 +1795,7 @@ answers, unguarded for teaching — which is a real asymmetry to keep in mind wh
 adding a new loop. The rule is: if the output goes to a person, guard it; if it
 goes to a judge, do not.
 
-**Lives in** `radixnet/critic.py`, `radixnet/tutor.py`, `radixnet/gan.py`
+**Lives in** `../ModelKit/modelkit/critic.py`, `../ModelKit/modelkit/tutor.py`, `../ModelKit/modelkit/gan.py`
 
 ---
 
@@ -1824,7 +1824,7 @@ list**, one line of teaching, and the sentence written out correctly.
 * The teacher's own corrected English enters the positive phase at full weight:
   it is, at that moment, exactly what a good answer would have looked like.
 
-**Lives in** `radixnet/tutor.py`, `go/radixnet/tutor.go`
+**Lives in** `../ModelKit/modelkit/tutor.py`, `go/radixnet/tutor.go`
 
 ---
 
@@ -1846,7 +1846,7 @@ twice: the resonant and negative models let `weights` / `progress` /
 Ratings card always sends marks, selecting either kind failed every feedback
 job with `unknown train option(s)`. The four kinds are interchangeable by
 design, so the whole feedback call is one interface and
-`tests/test_feedback.py::KindParityTests` holds every kind to it.
+`../ModelKit/tests/test_feedback.py::KindParityTests` holds every kind to it.
 
 **Rationale** A binary thumb throws away most of what a grader knows. It also
 makes the boost mechanism of D-027 available on the *positive* side — see Q-13,
@@ -1894,7 +1894,7 @@ model supplies language, a deterministic rule supplies the decision, and the
 record says which. Compare D-030 (the judge is given the objective style report)
 and D-057 (blame granularity is computed, not asked for).
 
-**Lives in** `radixnet/tutor.py::upgrade_from_card / plan_from_card`, `go/radixnet/plan.go`
+**Lives in** `../ModelKit/modelkit/tutor.py::upgrade_from_card / plan_from_card`, `go/radixnet/plan.go`
 
 ---
 
@@ -1916,7 +1916,7 @@ literally the next batch's prompt. `--batches 0` runs until stopped.
 * This and the critic loop (D-053) are the two places the system genuinely runs
   unattended for long periods.
 
-**Lives in** `radixnet/tutor.py::apply_plan`
+**Lives in** `../ModelKit/modelkit/tutor.py::apply_plan`
 
 ---
 
@@ -1944,7 +1944,7 @@ invariants rather than as properties:
 `--context` is the reviewer's yardstick and matters, because "is this good?"
 means little without one.
 
-**Lives in** `radixnet/critic.py`, `go/radixnet/critic.go`
+**Lives in** `../ModelKit/modelkit/critic.py`, `go/radixnet/critic.go`
 
 ---
 
@@ -1974,7 +1974,7 @@ mishearing, distortion/drift*.
 * The original text is the correction, so D-046's character-level blame applies
   directly.
 
-**Lives in** `radixnet/recall.py`, `go/radixnet/recall.go`
+**Lives in** `../ModelKit/modelkit/recall.py`, `go/radixnet/recall.go`
 
 ---
 
@@ -2006,7 +2006,7 @@ conversation as a whole a verdict, in one call rather than one per line.
   free, and it is contextual.
 * Unlike the critic (D-053) this loop *does* train the positive model.
 
-**Lives in** `radixnet/chat.py`, `go/radixnet/chat.go`
+**Lives in** `../ModelKit/modelkit/chat.py`, `go/radixnet/chat.go`
 
 ---
 
@@ -2042,7 +2042,7 @@ a unit.
   call. Candidates that closed their tag are preferred, and the first usable one
   is the network's own move, tracked as `autonomy`.
 
-**Lives in** `radixnet/tools.py`, `radixnet/agent.py`
+**Lives in** `../ModelKit/modelkit/tools.py`, `../ModelKit/modelkit/agent.py`
 
 ---
 
@@ -2072,7 +2072,7 @@ little of the work as possible:
   browsing can settle, and links found along the way become the frontier, so it
   compounds.
 
-**Lives in** `radixnet/agent.py`
+**Lives in** `../ModelKit/modelkit/agent.py`
 
 ---
 
@@ -2100,7 +2100,7 @@ The reason comes from how far the attempt got (`no-call`, `bad-call`,
   wrong — and it is the single most error-prone area in the system, because each
   of the three cases is plausible-looking and wrong in a different way.
 
-**Lives in** `radixnet/agent.py`, `radixnet/blame.py`
+**Lives in** `../ModelKit/modelkit/agent.py`, `../ModelKit/modelkit/blame.py`
 
 ---
 
@@ -2125,7 +2125,7 @@ rather than failing.
 answer that cannot be read is an `LLMError` rather than a provider-specific one,
 *because it says nothing about the transport*.
 
-**Lives in** `radixnet/llm.py`, `radixnet/chatgpt.py`, `go/radixnet/llm.go`
+**Lives in** `../ModelKit/modelkit/llm.py`, `../ModelKit/modelkit/chatgpt.py`, `go/radixnet/llm.go`
 
 ---
 
@@ -2152,7 +2152,7 @@ judge against the negative network, and solve a task through the whole agent loo
 * The address guards (no credentials, no private / loopback / link-local, every
   redirect hop re-checked, byte and time caps) run first, on every path.
 
-**Lives in** `radixnet/browser.py`, `radixnet/mcp.py`, `radixnet/tools.py`
+**Lives in** `../ModelKit/modelkit/browser.py`, `../ModelKit/modelkit/mcp.py`, `../ModelKit/modelkit/tools.py`
 
 ---
 
@@ -2184,7 +2184,7 @@ somewhere emits exactly this shape. The detector is derived from D-001.
   what happened either way* — switched off, the repetition is neither skipped nor
   punished, but the information survives.
 
-**Lives in** `radixnet/dialogue.py::stutter`, `go/radixnet/dialogue.go`
+**Lives in** `../ModelKit/modelkit/dialogue.py::stutter`, `go/radixnet/dialogue.go`
 
 ---
 
@@ -2228,7 +2228,7 @@ inside those words is recorded and left alone.
 * **One rethink per turn**, so a conversation cannot spend itself thinking.
 * It costs nothing when nothing loops. `explore=0` turns it off.
 
-**Lives in** `radixnet/dialogue.py::backtrack`, `go/radixnet/dialogue.go`
+**Lives in** `../ModelKit/modelkit/dialogue.py::backtrack`, `go/radixnet/dialogue.go`
 
 ---
 
@@ -2289,7 +2289,7 @@ property of the graph.
   them yet, so a node taught in error stays taught until something retrains it.
 
 **Lives in** `radixnet/graph.py::observe_back`, `radixnet/search.py::onward`,
-`radixnet/dialogue.py::teach_back`, `go/radixnet/graph.go`, `go/radixnet/search.go`
+`../ModelKit/modelkit/dialogue.py::teach_back`, `go/radixnet/graph.go`, `go/radixnet/search.go`
 
 ---
 
@@ -2341,10 +2341,10 @@ draft with what it backed out of struck through and the way on underlined, then 
 wants to see the model think reads the window.  The conversation holds the model lock while it streams, as it
 did while it did not.  One rethink per turn (D-062) keeps the window short.
 
-**Lives in** `radixnet/dialogue.py` (`StreamFn`, `STREAM_EVENTS`), `radixnet/api.py` (`StreamedResponse`,
-`_send_stream`, `/api/converse/stream`), `radixnet/cli.py` (`ConversePrinter`), `go/radixnet/dialogue.go`,
+**Lives in** `../ModelKit/modelkit/dialogue.py` (`StreamFn`, `STREAM_EVENTS`), `../ModelKit/modelkit/api.py` (`StreamedResponse`,
+`_send_stream`, `/api/converse/stream`), `../ModelKit/modelkit/cli.py` (`ConversePrinter`), `go/radixnet/dialogue.go`,
 `go/server/http.go` (`streamResponse`, `writeStream`), `rust/src/dialogue.rs`, `rust/src/http.rs` (`Sink`,
-`stream_route`), `frontend/src/stream.js`, `frontend/src/components/ConversePanel.jsx`
+`stream_route`), `../ModelKit/frontend/src/stream.js`, `../ModelKit/frontend/src/components/ConversePanel.jsx`
 
 ---
 
@@ -2366,7 +2366,7 @@ is unfalsifiable.
 transcript **and the same records**, exploring and not — so the reflection is part
 of the cross-language contract, not a presentation detail.
 
-**Lives in** `radixnet/dialogue.py::Rethink`
+**Lives in** `../ModelKit/modelkit/dialogue.py::Rethink`
 
 ---
 
@@ -2639,8 +2639,8 @@ model or remembered in the browser) and what one run *asks for* (the action
 tabs). The traversal is the first setting to be shared rather than copied, and
 `useNetworkSettings` is the pattern for the next one.
 
-**Lives in** `frontend/src/components/NetworkSettingsPanel.jsx`,
-`frontend/src/hooks/useNetworkSettings.jsx`, `radixnet/api.py`, `go/server/`
+**Lives in** `../ModelKit/frontend/src/components/NetworkSettingsPanel.jsx`,
+`../ModelKit/frontend/src/hooks/useNetworkSettings.jsx`, `../ModelKit/modelkit/api.py`, `go/server/`
 ### D-075 — A walk can be ranked by what went **wrong** on it, and blame is not for sale
 
 **Status** Accepted · 2026-09-20 · **Layer** search · **Extends** D-008, D-058 ·
@@ -2741,7 +2741,7 @@ Everything the graph measures is now measured in **units**, not characters: a
 node's label length, the offset of a gram inside a label, the length of a
 prediction, the spans of the correction diff. Under the default encoding a unit
 *is* a character, so every one of those quantities is what it always was - which
-is why the parity tests (`tests/test_go_parity.py`) still pass unchanged.
+is why the parity tests (`../ModelKit/tests/test_go_parity.py`) still pass unchanged.
 
 **Alternatives rejected**
 * **A package-level variable instead of a field.** One process, one encoding -
@@ -2930,11 +2930,11 @@ table for "Rust is 4x faster than Go" has been misled by it.
 
 **Consequences**
 * Three implementations to keep in step, not two. The benchmark is the check for
-  the third; `tests/test_go_parity.py` remains the check for the second.
+  the third; `../ModelKit/tests/test_go_parity.py` remains the check for the second.
 * Go's `--workers 1` now runs the two beams of a prediction in turn rather than
   on two goroutines, so a one-worker row means the same thing on both sides.
 * The Rust port reads and writes the `radixnet-count` model file, gzipped or
-  not, and `tests/test_rust_parity.py` holds it to Python's: the same structure,
+  not, and `../ModelKit/tests/test_rust_parity.py` holds it to Python's: the same structure,
   counts, rewards, window, RNG state, judged paths and node ratios, the same
   predictions, generated texts and scores, and each side continuing the other's
   file. Its graph document is Python's **byte for byte** but for the `version`
@@ -2951,7 +2951,7 @@ table for "Rust is 4x faster than Go" has been misled by it.
   characters, and `bench/RESULTS.md` says what giving it up cost.
 * The port serves the frontend: `rust/src/http.rs` is HTTP/1.1 written out over
   `TcpListener` and `rust/src/service.rs` answers the same JSON contract the
-  Python and Go servers answer, so `frontend/dist` runs against
+  Python and Go servers answer, so `../ModelKit/frontend/dist` runs against
   `radixnet serve` unmodified. What a Rust server cannot fill, the frontend
   hides on `engine == "rust"`, and what it will not serve says so with a 400.
 * What the port still does **not** have: the negative network, the tutors and
@@ -3009,7 +3009,7 @@ readable: a reader who cannot tell them apart reads every gap as neglect.
 
 **Consequences**
 * Go speaks MCP (`go/radixnet/mcp.go`, `radixnet-count mcp`): the same protocol
-  revision, tool names and schemas as `radixnet/mcp.py`, and the same answers
+  revision, tool names and schemas as `../ModelKit/modelkit/mcp.py`, and the same answers
   down to the error text — asserted by running both over one message stream.
   `/api/speech/transcribe` stays Python's, because local Whisper is not a thing
   a Go binary carries.
@@ -3089,7 +3089,7 @@ line in the library, with a table sending each command to the module that
 answers it; every area is a module that owns its commands (`cli(ctx)`), its
 routes (`routes(server)`) and its server state, wired into the service once.
 Each area has its own parity suite (`tests/test_rust_parity_<area>.py`, on
-`tests/rust_harness.py`). The areas were then ported in parallel and merged,
+`../ModelKit/tests/rust_harness.py`). The areas were then ported in parallel and merged,
 and what only showed at the seams was fixed there:
 
 * **One loader for the server's negative network**, which takes the model's lock
@@ -3120,7 +3120,7 @@ from the server: it appears the day the route does.
 
 **Lives in** `rust/src/cli.rs`, `rust/src/service.rs` (`build`), `rust/src/duo.rs`
 (`Service::ensure_negative`), `rust/src/checkpoint.rs`, `rust/src/kinds.rs`,
-`frontend/src/App.jsx`, `tests/rust_harness.py`
+`../ModelKit/frontend/src/App.jsx`, `../ModelKit/tests/rust_harness.py`
 
 ---
 
@@ -3206,8 +3206,8 @@ are pure functions in `src/settings.js` with their own tests.
 (`{size, texts, seen}` or null) on all three servers so the model's tab can show it, and D-070's paragraph on the
 encoder card being read-only is history: the encoding is chosen on the New model card instead.
 
-**Lives in** `frontend/src/components/SettingsPanel.jsx`, `frontend/src/components/ModelSettingsPanel.jsx`,
-`frontend/src/hooks/useSiteSettings.jsx`, `frontend/src/settings.js`
+**Lives in** `../ModelKit/frontend/src/components/SettingsPanel.jsx`, `../ModelKit/frontend/src/components/ModelSettingsPanel.jsx`,
+`../ModelKit/frontend/src/hooks/useSiteSettings.jsx`, `../ModelKit/frontend/src/settings.js`
 
 ### D-084 — A model is taught backwards by its training run, and asked backwards by its caller
 
@@ -3224,7 +3224,7 @@ of D-078 (`TrainConfig.reverse`, Go `Plan.Reverse`, Rust `Plan.reverse`, `revers
 words - as the first thing the training call does, so a reversed run is exactly a run over the reversed texts: the
 same graph, history, counters and replay block in all three ports, byte for byte, on every kind, the negative
 network included. **Asking**: the servers do not change; the caller turns the query around and the answer back.
-The frontend does it (`frontend/src/backwards.js`) with a *Query backwards* setting the browser keeps (D-079),
+The frontend does it (`../ModelKit/frontend/src/backwards.js`) with a *Query backwards* setting the browser keeps (D-079),
 shared by Predict and Generate; a thumbs up or down sends the model's own text, the backwards one, because that is
 what feedback trains on. The spec's §9 is the contract.
 
@@ -3252,7 +3252,7 @@ is then among the others the beam returns.
 
 **Lives in** `radixnet/encoding.py` (`Encoding.reverse`), `radixnet/model.py` (`TrainConfig.reverse`,
 `GraphModel._read`), `go/radixnet/training.go` (`Plan.Reverse`, `ReversedSource`), `rust/src/training.rs`
-(`Plan.reverse`, `read`), `frontend/src/backwards.js`, `frontend/src/components/BackwardsField.jsx`,
+(`Plan.reverse`, `read`), `../ModelKit/frontend/src/backwards.js`, `../ModelKit/frontend/src/components/BackwardsField.jsx`,
 `SPEC-SearchAndTraining.md` §9
 
 ---
@@ -3310,9 +3310,9 @@ teaching the network where to question.
   taught), because thinking costs it time; ChatGPT keeps its reasoning to itself, and a tutor run that would
   teach the negative network to think is refused before a lesson is set.
 
-**Lives in** `radixnet/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
-`radixnet/dialogue.py::think_back`, `radixnet/ollama.py::thoughts_from_prompt`,
-`radixnet/tutor.py::TutorTrainer.teach_thinking`, `go/radixnet/thinking.go`, `rust/src/thinking.rs`
+**Lives in** `../ModelKit/modelkit/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
+`../ModelKit/modelkit/dialogue.py::think_back`, `../ModelKit/modelkit/ollama.py::thoughts_from_prompt`,
+`../ModelKit/modelkit/tutor.py::TutorTrainer.teach_thinking`, `go/radixnet/thinking.go`, `rust/src/thinking.rs`
 
 ---
 
@@ -3361,7 +3361,7 @@ honest map of the mistake rather than of the editor's taste.
 
 **Consequences**
 * The same prompt, the same parsing and the same reason rules in all three
-  ports (`radixnet/ollama.py`, `rust/src/review.rs`, `go/radixnet/review.go`),
+  ports (`../ModelKit/modelkit/ollama.py`, `rust/src/review.rs`, `go/radixnet/review.go`),
   held to Python byte for byte by the parity suites.
 * The Automatic card and the report card grow an editor's vocabulary -
   `corrected`, `unchanged`, `uncorrected`, `edits`, `change_rate` - beside the
@@ -3369,10 +3369,10 @@ honest map of the mistake rather than of the editor's taste.
 * An LLM that rewrites freely produces a wide diff and a wide lesson; the
   prompt forbids it, and the `changes` on every entry show what it did.
 
-**Lives in** `radixnet/ollama.py` (`correct_texts`), `radixnet/blame.py`
+**Lives in** `../ModelKit/modelkit/ollama.py` (`correct_texts`), `../ModelKit/modelkit/blame.py`
 (`faults_from_corrections`, `correction_reason`, `reason_from_changes`),
-`radixnet/critic.py`, `radixnet/cli.py`, `radixnet/api.py`,
-`frontend/src/components/OllamaPanel.jsx`, `rust/src/review.rs`,
+`../ModelKit/modelkit/critic.py`, `../ModelKit/modelkit/cli.py`, `../ModelKit/modelkit/api.py`,
+`../ModelKit/frontend/src/components/OllamaPanel.jsx`, `rust/src/review.rs`,
 `go/radixnet/review.go`
 
 ---
@@ -3414,12 +3414,12 @@ server-wide default rather than a flag the negative network carries.
   presence of `judged`; the frontend's guard notice shows a count-only report
   without a *why* to open, and its verdict card renders a terse verdict.
 * The same setting in all three ports, held to Python by the parity suites
-  (`tests/test_rust_parity_negative.py`, `tests/test_go_parity.py`).
+  (`../ModelKit/tests/test_rust_parity_negative.py`, `../ModelKit/tests/test_go_parity.py`).
 
-**Lives in** `radixnet/duo.py` (`FilterConfig.provenance`,
-`NegativeFilter.terse` / `report`), `radixnet/api.py` (`guard`,
-`_guard_report`, `negative_settings`), `radixnet/cli.py` (`add_guard_flags`,
-`_guard_doc`), `frontend/src/components/GuardNotice.jsx`, `rust/src/duo.rs`,
+**Lives in** `../ModelKit/modelkit/duo.py` (`FilterConfig.provenance`,
+`NegativeFilter.terse` / `report`), `../ModelKit/modelkit/api.py` (`guard`,
+`_guard_report`, `negative_settings`), `../ModelKit/modelkit/cli.py` (`add_guard_flags`,
+`_guard_doc`), `../ModelKit/frontend/src/components/GuardNotice.jsx`, `rust/src/duo.rs`,
 `go/radixnet/duo.go`
 
 ---
@@ -3469,8 +3469,8 @@ every conversation here (D-068).
 * `talk` in every CLI, the Talk tab, and two parity suites that hold the ports to Python's thinking and text.
 * The thinking's lines are a contract (DESIGN §37.3): a change to one is a change to three ports and two suites.
 
-**Lives in** `radixnet/assistant.py`, `radixnet/dialogue.py` (`Trace`), `radixnet/api.py`, `radixnet/cli.py`,
-`frontend/src/components/TalkPanel.jsx`, `frontend/src/sse.js`, `go/radixnet/assistant.go`, `go/server/assistant.go`,
+**Lives in** `../ModelKit/modelkit/assistant.py`, `../ModelKit/modelkit/dialogue.py` (`Trace`), `../ModelKit/modelkit/api.py`, `../ModelKit/modelkit/cli.py`,
+`../ModelKit/frontend/src/components/TalkPanel.jsx`, `../ModelKit/frontend/src/sse.js`, `go/radixnet/assistant.go`, `go/server/assistant.go`,
 `go/cmd/radixnet-count/talk.go`, `rust/src/assistant.rs`, `rust/src/http.rs` (`Streamed`)
 
 ---
@@ -3548,7 +3548,7 @@ for a correction the user types, where both rules would put the blame. All three
 
 **Lives in** `radixnet/attention.py`, `radixnet/model.py::_charged_steps`, `radixnet/countnet.py::correct`,
 `radixnet/negative.py::correct`, `go/radixnet/attention.go`, `rust/src/attention.rs`,
-`frontend/src/components/AttentionBandCard.jsx`, `SPEC-AttentionBand.md`
+`../ModelKit/frontend/src/components/AttentionBandCard.jsx`, `SPEC-AttentionBand.md`
 
 ---
 
@@ -3620,10 +3620,10 @@ closed the same way, by the caller.
   END, which is what END has meant since D-006.
 
 **Consequences** `radixnet speak` (a WAV, a player, or raw PCM on stdout, as the walk goes); a model of letters or
-words is read through the tokenizer word by word, so every model can be heard; `tests/test_voice.py`.
+words is read through the tokenizer word by word, so every model can be heard; `../ModelKit/tests/test_voice.py`.
 
 **Lives in** `../PhoneticTokenizer/phonetok/synth.py` (and `go/phonetok/synth.go`, `rust/src/synth.rs`),
-`radixnet/voice.py`, `radixnet/search.py` (`on_step`), `radixnet/cli.py` (`speak`)
+`../ModelKit/modelkit/voice.py`, `radixnet/search.py` (`on_step`), `../ModelKit/modelkit/cli.py` (`speak`)
 
 ---
 
@@ -3668,8 +3668,8 @@ real speech (`phonetok learn`). A model's units mean nothing without the codeboo
 (`PHONETOK_CODEBOOK` names one other than the bundled); `tests/test_acoustic_units.py`.
 
 **Lives in** `../PhoneticTokenizer/phonetok/acoustic.py` (and `go/phonetok/acoustic.go`, `rust/src/acoustic.rs`),
-`../PhoneticTokenizer/DESIGN.md` §5, `radixnet/encoding.py` (`ACOUSTIC`, `hear_audio`), `radixnet/voice.py`,
-`radixnet/cli.py` (`read_texts`, `speak`)
+`../PhoneticTokenizer/DESIGN.md` §5, `radixnet/encoding.py` (`ACOUSTIC`, `hear_audio`), `../ModelKit/modelkit/voice.py`,
+`../ModelKit/modelkit/cli.py` (`read_texts`, `speak`)
 
 ---
 
@@ -3684,7 +3684,7 @@ sound, and for a model of sounds or of acoustic units that text is unreadable to
 D-036's speech-as-text have a decoder (`speech decode`, `POST /api/speech/decode`); the outputs of D-080 and
 D-082 did not.
 
-**Decision** One **output decoder** for every unit, `radixnet.voice.say`: a text is fed whole to the `Speaker`
+**Decision** One **output decoder** for every unit, `modelkit.voice.say`: a text is fed whole to the `Speaker`
 of D-081 for the model's encoding and closed by the END sentinel, exactly as a walk is - sounds are spoken as
 they are (plain words read through the tokenizer first), syllables the same, acoustic units through the
 codebook's vocoder (D-082; `polish` runs Griffin-Lim over the whole utterance, which the stream cannot), words
@@ -3708,11 +3708,11 @@ how it is read - so the decoder works before a model exists and beside any model
 **Consequences** A token that is not a unit of the acoustic codebook is refused (the `Speaker` skips such a
 token on a walk, which a model over its units never emits; a text from outside can hold anything); the record
 of an utterance - the text, what it spells, the tokens that reached the voice with the sentinel last, the
-samples - is what the CLI prints and the API returns beside the audio. `tests/test_voice.py`,
-`tests/test_acoustic_units.py`, `tests/test_api.py`, `test_the_same_say` in the Go and Rust parity suites.
+samples - is what the CLI prints and the API returns beside the audio. `../ModelKit/tests/test_voice.py`,
+`tests/test_acoustic_units.py`, `../ModelKit/tests/test_api.py`, `test_the_same_say` in the Go and Rust parity suites.
 
-**Lives in** `radixnet/voice.py` (`say`, `speak_texts`, `Spoken`, `Utterance`), `radixnet/cli.py` (`say`,
-`--speak`, `speech decode`), `radixnet/api.py` (`/api/say`, `/api/speech/decode`), `frontend/src/components/HearButton.jsx`,
+**Lives in** `../ModelKit/modelkit/voice.py` (`say`, `speak_texts`, `Spoken`, `Utterance`), `../ModelKit/modelkit/cli.py` (`say`,
+`--speak`, `speech decode`), `../ModelKit/modelkit/api.py` (`/api/say`, `/api/speech/decode`), `../ModelKit/frontend/src/components/HearButton.jsx`,
 `go/radixnet/voice.go` (`Say`), `go/server/media.go`, `rust/src/voice.rs` (`say`), `rust/src/service.rs`
 
 ---
@@ -3755,19 +3755,19 @@ ear is closed** and reopened afterwards: the model never hears itself as the per
   decoder streams, so the reply streams.
 
 **Consequences** `POST /api/voice/turn` and `/stream`, `GET /api/voice`, `speech talk` on the command line, the
-Voice tab (`frontend/src/voice.js`, `VoicePanel.jsx`); a turn that trains refuses while a job runs (409); a
+Voice tab (`../ModelKit/frontend/src/voice.js`, `VoicePanel.jsx`); a turn that trains refuses while a job runs (409); a
 browser needs one click before it may listen or speak, so the ear opens on a button (and by itself next time where
 the browser allows); an utterance the dictation heard no words in is not sent while *Send only what has words*
 is on (the default), the words being waited for first since a recogniser commits them a moment after the speaker
-stops; `tests/test_voicechat.py`, `frontend/test/voice.test.mjs`. All three servers carry the
+stops; `../ModelKit/tests/test_voicechat.py`, `../ModelKit/frontend/test/voice.test.mjs`. All three servers carry the
 turn and all three CLIs have `speech talk` (`rust/src/voicechat.rs`; `go/radixnet/voicechat.go` and
 `go/server/voice.go`), so the tab shows on whichever server serves it; the Go build takes the words with the audio,
-as it transcribes nothing itself, and records from no microphone. `tests/test_rust_parity_media.py`
-(`TestRustVoiceParity`) and `tests/test_go_parity.py` hold the ports to the same turn: the same recording heard the
+as it transcribes nothing itself, and records from no microphone. `../ModelKit/tests/test_rust_parity_media.py`
+(`TestRustVoiceParity`) and `../ModelKit/tests/test_go_parity.py` hold the ports to the same turn: the same recording heard the
 same, learned the same, the same reply found and spoken.
 
-**Lives in** `radixnet/voicechat.py`, `radixnet/ollama.py` (`reply_line`), `radixnet/api.py` (`voice_turn`,
-`/api/voice/*`), `radixnet/cli.py` (`speech talk`), `frontend/src/voice.js`, `frontend/src/components/VoicePanel.jsx`;
+**Lives in** `../ModelKit/modelkit/voicechat.py`, `../ModelKit/modelkit/ollama.py` (`reply_line`), `../ModelKit/modelkit/api.py` (`voice_turn`,
+`/api/voice/*`), `../ModelKit/modelkit/cli.py` (`speech talk`), `../ModelKit/frontend/src/voice.js`, `../ModelKit/frontend/src/components/VoicePanel.jsx`;
 `rust/src/voicechat.rs` and `rust/src/review.rs` (`reply_line`); `go/radixnet/voicechat.go`, `go/radixnet/review.go`
 (`ReplyLine`), `go/server/voice.go`, `go/cmd/radixnet-count/voice.go`
 
@@ -3812,13 +3812,13 @@ server's words can change as it reads more - the same rule as D-080's, and the t
 The chat-format stream of a model of sounds delivers its text as one chunk, once the walk is spelled. The English
 the teaching loops show an LLM (tutor, chat, review) is not changed here: they still hand it the model's units -
 D-091 does.
-`tests/test_phonetic.py`, `tests/test_api.py` (`TestAModelOfSoundsAnswersInWords`), `frontend/test/spelled.test.mjs`,
+`tests/test_phonetic.py`, `../ModelKit/tests/test_api.py` (`TestAModelOfSoundsAnswersInWords`), `../ModelKit/frontend/test/spelled.test.mjs`,
 `go/radixnet/phonetic_test.go`, `go/server/server_test.go`, the `phonetic` tests of `rust/src/phonetic.rs`, and
 `test_the_same_words_the_sounds_spell` in the Go and Rust parity suites.
 
 **Lives in** `radixnet/encoding.py` (`spell`, `spell_tail`, `spelled_prediction`, `spelled_thought`,
-`spelled_turn`), `radixnet/api.py`, `radixnet/cli.py`, `radixnet/assistant.py`, `radixnet/mcp.py`,
-`frontend/src/spelled.js` and the Predict, Generate, Converse and Think panels; `go/radixnet/phonetic.go`,
+`spelled_turn`), `../ModelKit/modelkit/api.py`, `../ModelKit/modelkit/cli.py`, `../ModelKit/modelkit/assistant.py`, `../ModelKit/modelkit/mcp.py`,
+`../ModelKit/frontend/src/spelled.js` and the Predict, Generate, Converse and Think panels; `go/radixnet/phonetic.go`,
 `go/radixnet/assistant.go`, `go/radixnet/mcp.go`, `go/server/http.go`, `go/cmd/radixnet-count/main.go`;
 `rust/src/encoding.rs`, `rust/src/phonetic.rs`, `rust/src/service.rs`, `rust/src/dialogue.rs`,
 `rust/src/thinking.rs`, `rust/src/assistant.rs`, `rust/src/mcp.rs`, `rust/src/bin/radixnet.rs`
@@ -3872,14 +3872,14 @@ letters, words or acoustic units reads as it writes, and none of the new fields 
 it: sounds that spell a wrong word (*why* for *y*) are marked wrong though another reader might have heard them
 right. A correction the teacher writes in words that sound alike (*there* for *their*) reads as the same sounds and
 changes nothing, so it blames nothing - which is right, the model said nothing different. The records grow a field
-only for a model of sounds. `tests/test_teaching_in_words.py`, `go/radixnet/teaching_words_test.go`,
+only for a model of sounds. `../ModelKit/tests/test_teaching_in_words.py`, `go/radixnet/teaching_words_test.go`,
 `rust/src/teaching_in_words.rs` - each loop's prompts checked for a sound, which none may hold.
 
-**Lives in** `radixnet/encoding.py` (`reader_text`, `spelled_completion`), `radixnet/tutor.py`, `radixnet/blame.py`,
-`radixnet/ollama.py`, `radixnet/critic.py`, `radixnet/chat.py`, `radixnet/voicechat.py`, `radixnet/api.py`;
+**Lives in** `radixnet/encoding.py` (`spelled_completion`), `../ModelKit/modelkit/llm.py` (`reader_text`), `../ModelKit/modelkit/tutor.py`, `../ModelKit/modelkit/blame.py`,
+`../ModelKit/modelkit/ollama.py`, `../ModelKit/modelkit/critic.py`, `../ModelKit/modelkit/chat.py`, `../ModelKit/modelkit/voicechat.py`, `../ModelKit/modelkit/api.py`;
 `go/radixnet/phonetic.go`, `tutor.go`, `blame.go`, `review.go`, `critic.go`, `chat.go`, `voicechat.go`,
 `go/server/critic.go`; `rust/src/phonetic.rs`, `tutor.rs`, `tutor/trainer.rs`, `review.rs`, `critic.rs`,
-`chat.rs`, `voicechat.rs`, `ollama.rs`; `frontend/src/components/OllamaPanel.jsx`, `ChatPanel.jsx`
+`chat.rs`, `voicechat.rs`, `ollama.rs`; `../ModelKit/frontend/src/components/OllamaPanel.jsx`, `ChatPanel.jsx`
 
 ---
 
@@ -3964,7 +3964,7 @@ epoch, in every kind's loop, feedback passes included. All three implementations
 
 **Lives in** `radixnet/window.py`, `radixnet/graph.py::split_window / merge_child`,
 `radixnet/model.py::window_config / configure_window / window_step / _window_epoch`, `go/radixnet/window.go`,
-`rust/src/window.rs`, `frontend/src/components/DynamicWindowCard.jsx`, `SPEC-DynamicWindow.md`
+`rust/src/window.rs`, `../ModelKit/frontend/src/components/DynamicWindowCard.jsx`, `SPEC-DynamicWindow.md`
 
 ---
 

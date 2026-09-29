@@ -1580,7 +1580,7 @@ a low ratio means reasons are being wasted, which usually means the taxonomy
 
 ## 24. `checkpoint.py`, `bench.py`
 
-`CheckpointManager` is the same contract as `RadixCyclicNN/radixnet/checkpoint.py`
+`CheckpointManager` is the same contract as `ModelKit/modelkit/checkpoint.py`
 (rotation, `latest` pointer, atomic `os.replace` writes, resume). It checkpoints
 the corpus, the forest and the in-flight `Evidence`, so a 10 000-probe run against
 a slow oracle survives a restart without re-probing.
@@ -1619,7 +1619,7 @@ any of this works.
 
 ## 26. `api.py`
 
-Same shape as `RadixCyclicNN/radixnet/api.py` and `GTMNN/gtmnn/api.py`:
+Same shape as `ModelKit/modelkit/api.py` and `GTMNN/gtmnn/api.py`:
 `ThreadingHTTPServer`, JSON, CORS, one background job at a time, 409 while busy,
 `{"id","type","state","progress","history","error"}` job records so `useJob` is
 portable across all three frontends unchanged.

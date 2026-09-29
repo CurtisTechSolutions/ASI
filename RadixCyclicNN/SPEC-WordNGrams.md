@@ -172,7 +172,7 @@ load checks that every symbol every label carries is a word the vocabulary
 holds - a truncated vocabulary is an error, not a decoding surprise later.
 
 Interchange is the same contract the count model has: Python, Go and Rust read
-and write this file, `tests/test_go_parity.py` and `tests/test_rust_parity.py`
+and write this file, `../ModelKit/tests/test_go_parity.py` and `../ModelKit/tests/test_rust_parity.py`
 train a word model on both sides of each pair and require the same structure,
 the same counts, the same vocabulary **in the same order**, and the same
 predictions.

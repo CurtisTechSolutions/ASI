@@ -40,8 +40,8 @@ it. Read any one first; each says where it depends on the others.
 | the dynamic window: nodes halved down a binary ladder and grown back at the top | `RadixCyclicNN/radixnet/window.py`, `graph.py` (`split_window`) |
 | shortest-path prediction over the unrolled graph | `RadixCyclicNN/radixnet/search.py` |
 | the sine activation and its partial derivatives | `RadixCyclicNN/radixnet/activation.py` |
-| conversing with itself; stutter detection and backtracking | `RadixCyclicNN/radixnet/dialogue.py` |
-| 2NRL, inversion, the self-upgrade loop | `RadixCyclicNN/radixnet/gan.py`, `model.py` |
+| conversing with itself; stutter detection and backtracking | `ModelKit/modelkit/dialogue.py` |
+| 2NRL, inversion, the self-upgrade loop | `ModelKit/modelkit/gan.py`, `RadixCyclicNN/radixnet/model.py` |
 | the activation comparison on CartPole | `Experiments/ActivationFunctionTest/` |
 | depth-counted gradient normalisation | `Experiments/DepthCountedNormalisation/depth_counted_normalisation.py` |
 | a learnable activation inside a conventional RNN | `Experiments/SBNN_RNN_ActivationFunction/main.py` |
