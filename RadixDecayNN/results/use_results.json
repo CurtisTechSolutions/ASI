@@ -1,0 +1,70 @@
+{
+ "experiment": "use",
+ "used": "the quick brown fox jumps over the lazy dog",
+ "prefix_units": 8,
+ "settings": {
+  "seed": 1,
+  "life": 10000,
+  "decay": "half-life",
+  "min_seen": 0.5,
+  "depth": null,
+  "encoding": "char:3:1"
+ },
+ "arms": {
+  "said": {
+   "rounds": 20,
+   "gap": 1000,
+   "elapsed_lives": 2.0,
+   "traversals_said": 40,
+   "used_recited": true,
+   "says": "the quick brown fox jumps over the lazy dog",
+   "clock": 26885,
+   "remembered": 284,
+   "remembered_fraction": 0.12769784172661872,
+   "recited": 1,
+   "texts": 60,
+   "recited_fraction": 0.016666666666666666,
+   "bits_per_unit": 4.5782309244951165,
+   "miss_rate": 0.026817219477769938,
+   "total_seen": 1506.1327177474052
+  },
+  "quiet": {
+   "rounds": 20,
+   "gap": 1000,
+   "elapsed_lives": 2.0,
+   "traversals_said": 0,
+   "used_recited": false,
+   "says": "the quicthe be",
+   "clock": 26845,
+   "remembered": 283,
+   "remembered_fraction": 0.12724820143884893,
+   "recited": 0,
+   "texts": 60,
+   "recited_fraction": 0.0,
+   "bits_per_unit": 4.707112804134992,
+   "miss_rate": 0.02611683848797251,
+   "total_seen": 1487.8780597597097
+  },
+  "silent": {
+   "rounds": 20,
+   "gap": 1000,
+   "elapsed_lives": 2.0,
+   "traversals_said": 0,
+   "used_recited": false,
+   "says": "the quicthe be",
+   "clock": 26845,
+   "remembered": 283,
+   "remembered_fraction": 0.12724820143884893,
+   "recited": 0,
+   "texts": 60,
+   "recited_fraction": 0.0,
+   "bits_per_unit": 4.707112804134992,
+   "miss_rate": 0.02611683848797251,
+   "total_seen": 1487.8780597597097
+  }
+ },
+ "corpus": {
+  "texts": 60,
+  "units": 1800
+ }
+}
