@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 
 from .encoding import Encoding
 from .search import PathResult, cheapest_path
-from .tree import LIFE, MIN_SEEN, ROOT, START, DecayTree
+from .tree import LIFE, MIN_SEEN, ROOT, START, DecayTree, Walks
 
 __all__ = ["MAX_LEGS", "MAX_SLIDE", "MODEL_FORMAT", "MODEL_FORMAT_VERSION", "UNKNOWN_PROB", "DecayNet", "load_model"]
 
@@ -296,22 +296,24 @@ class DecayNet:
         traversals = 0
         reached_end = False
         grams = enc.encode(prefix)
+        walks = Walks(tree, grams, window)  # every suffix of what has been said, walked once, moved per token
         if grams:
-            loc = self.context(grams, window)
-            cut = n - 1 if loc is not None else 0
-            if loc is None:
+            found = walks.deepest()
+            cut = n - 1 if found is not None else 0
+            if found is None:
                 loc = (START, -1)
-                grams = []
+                walks = Walks(tree, window=window)  # nothing known: the walk begins a text
+            else:
+                loc = (found[0], found[1])
         else:
             node, offset, cut = self._start(prefix)
             loc = (node, offset)
-            grams = []
             if tree.is_real(node):
                 gram = tree.first_gram(node)
                 piece = enc.piece_of(gram, cut)
                 emitted = enc.join_units(emitted, piece)
                 n_emitted += len(enc.view(piece))
-                grams.append(gram)
+                walks.push(gram)
                 labels.append(tree.labels[node])
                 node_ids.append(node)
                 step_costs.append(0.0)
@@ -351,10 +353,11 @@ class DecayNet:
                 units = max_length - n_emitted
             emitted = enc.join_units(emitted, piece)
             n_emitted += units
-            grams.append(gram)
-            loc = self.context(grams, window)
-            if loc is None:
+            walks.push(gram)
+            found = walks.deepest()
+            if found is None:
                 break
+            loc = (found[0], found[1])
             if loc[0] != current:
                 current = loc[0]
                 if not quiet:
@@ -572,9 +575,13 @@ class DecayNet:
             grams = enc.encode(text)
             if not grams:
                 continue
-            history: list[str] = []
+            walks = Walks(tree, window=window)
             for actual in grams + [None]:
-                loc = self.context(history, window) if history else ((START, -1) if tree.usable(START, -1) else None)
+                if walks.history:
+                    found = walks.deepest()
+                    loc = None if found is None else (found[0], found[1])
+                else:
+                    loc = (START, -1) if tree.usable(START, -1) else None
                 total += 1
                 if loc is not None:
                     node, offset = loc
@@ -588,7 +595,7 @@ class DecayNet:
                         c = tree.children[node].get(actual)
                         known += c is not None and tree.seen(c) > 0.0
                 if actual is not None:
-                    history.append(actual)
+                    walks.push(actual)
         return {"window": window, "tokens": total, "accuracy": correct / total if total else 0.0,
                 "known": known / total if total else 0.0}
 

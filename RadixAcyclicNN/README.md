@@ -374,6 +374,7 @@ Makefile's targets.
 |---|---|---|
 | `RadixCyclicNN/` | a gram; repeats become cycles | the model, built out |
 | `RadixAcyclicNN/` (this) | a context; no cycles | the same model as a tree, and what that measures |
+| `RadixDecayNN/` | a context; no cycles; no parameters | this tree with `seen` as its only memory — every traversal adds one, saying included, and it fades on the model's own clock |
 | `FilterBankRadix/fbradix/tree.py` | a character context, depth 5 | one expert behind an activation filter; interpolated, not a stand-alone model |
 | `GREN/gren/radix.py` | a run of signature tokens | a radix tree with trie mechanics over games, not text |
 | `RadixTreeLLM/`, `RadixTreeRNN/`, `RadixTrieLLM_RNN/` | a trie edge with a transformer | where the idea started |

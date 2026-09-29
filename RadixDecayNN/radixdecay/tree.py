@@ -41,7 +41,7 @@ from .encoding import END_LABEL, START_LABEL, Encoding, _piece
 
 __all__ = [
     "DECAYS", "FIRST", "KIND_END", "KIND_REAL", "KIND_ROOT", "KIND_START", "LIFE", "MIN_SEEN", "ROOT", "START",
-    "DecayTree",
+    "DecayTree", "Walks",
 ]
 
 ROOT, START = 0, 1
@@ -493,6 +493,16 @@ class DecayTree:
     def at_end(self, node: int, offset: int) -> bool:
         return offset == self.held(node) - 1
 
+    def step(self, node: int, offset: int, gram: str) -> tuple[int, int] | None:
+        """One gram on from ``(node, offset)``: along the run, or into the child that begins with it; ``None``
+        when the tree does not continue that way.  :meth:`walk` is this, gram by gram."""
+        if self.kind[node] == KIND_REAL and offset < self.held(node) - 1:
+            if self._view(self.labels[node])[offset + 1 + self._ov] == self._last(gram):
+                return node, offset + 1
+            return None
+        c = self.children[node].get(gram)
+        return (c, 0) if c is not None else None
+
     def node_path(self, grams: Sequence[str], origin: int = START) -> list[int] | None:
         """Node ids ``[START, ..., END leaf]`` a whole text visits, or ``None`` when it is not a root path."""
         node = origin
@@ -735,3 +745,70 @@ class DecayTree:
             f"DecayTree(depth={self.depth}, decay={self.decay!r}, life={self.life:g}, nodes={self.num_nodes()}, "
             f"ends={self.num_ends()}, grams={self.num_grams()}, traversals={self.traversals})"
         )
+
+
+class Walks:
+    """Every suffix of a growing history walked from the root, and the whole of it from START, kept as cursors
+    and moved one gram at a time.
+
+    :meth:`deepest` answers what :meth:`DecayTree.locate` answers for the
+    history (over its last ``window`` grams, matched from START only when
+    the window holds the whole of it) - the same context, found in
+    ``O(history)`` per token instead of a fresh walk of every suffix.  A
+    walk that fails never succeeds again (a string that is not a root path
+    has no extension that is), so it is dropped.  Nothing here moves
+    ``seen``: it is the token-by-token walk's eyes.
+    """
+
+    __slots__ = ("tree", "window", "history", "start", "suffixes")
+
+    def __init__(self, tree: DecayTree, grams: Sequence[str] = (), window: int | None = None) -> None:
+        if window is not None and window < 1:
+            raise ValueError(f"window must be >= 1 grams or None, got {window}")
+        self.tree = tree
+        self.window = window
+        self.history: list[str] = []
+        self.start: tuple[int, int] | None = (START, -1)
+        self.suffixes: list[tuple[int, int, int]] = []
+        """``(position, node, offset)`` of every live walk from the root, by position: the longest suffix first."""
+        for g in grams:
+            self.push(g)
+
+    def push(self, gram: str) -> None:
+        """One more gram of history: every cursor moves, the ones that cannot are dropped, a new one starts."""
+        step = self.tree.step
+        if self.start is not None:
+            self.start = step(self.start[0], self.start[1], gram)
+        alive: list[tuple[int, int, int]] = []
+        for pos, node, offset in self.suffixes:
+            nxt = step(node, offset, gram)
+            if nxt is not None:
+                alive.append((pos, nxt[0], nxt[1]))
+        nxt = step(ROOT, -1, gram)
+        if nxt is not None:
+            alive.append((len(self.history), nxt[0], nxt[1]))
+        self.history.append(gram)
+        if self.window is not None:
+            first = len(self.history) - self.window
+            alive = [w for w in alive if w[0] >= first]
+        self.suffixes = alive
+
+    def deepest(self, ending: bool = False) -> tuple[int, int, int] | None:
+        """The deepest usable context of the history: ``(node, offset, symbols)``, as :meth:`DecayTree.locate`."""
+        tree = self.tree
+        total = len(self.history)
+        if total == 0:
+            return None
+        depth = tree.depth
+        room = None if depth is None else (depth if ending else depth - 1)
+        cut = self.window is not None and total > self.window
+        start = self.start
+        if not cut and start is not None and (room is None or total + 1 <= room) and tree.usable(start[0], start[1]):
+            return (start[0], start[1], total + 1)
+        for pos, node, offset in self.suffixes:
+            length = total - pos
+            if room is not None and length > room:
+                continue
+            if tree.usable(node, offset):
+                return (node, offset, length)
+        return None

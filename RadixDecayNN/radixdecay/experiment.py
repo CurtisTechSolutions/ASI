@@ -181,8 +181,12 @@ def use(
     seed: int = 1, **settings,
 ) -> dict:
     """After reading, ``rounds`` silences of ``gap`` traversals (a tenth of a life by default), each broken by
-    saying one text from its first ``prefix_units`` units: said, said quietly, or not at all."""
-    used_text = used if used is not None else texts[0]
+    saying one text from its first ``prefix_units`` units: said, said quietly, or not at all.  The text is the
+    first one the model recites right after reading (use keeps alive what is alive), unless ``used`` is given."""
+    if used is None:
+        probe = new_model(texts, seed=seed, **settings)
+        used = next((t for t in texts if probe.recites([t], prefix_units=prefix_units)["recited"]), texts[0])
+    used_text = used
     arms = {}
     for name in ("said", "quiet", "silent"):
         model = new_model(texts, seed=seed, **settings)

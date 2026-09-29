@@ -17,10 +17,10 @@ __version__ = "0.1.0"
 from .encoding import CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, WINDOW, Encoding
 from .model import MAX_LEGS, MAX_SLIDE, UNKNOWN_PROB, DecayNet, load_model
 from .search import PathResult, cheapest_path
-from .tree import DECAYS, FIRST, LIFE, MIN_SEEN, ROOT, START, DecayTree
+from .tree import DECAYS, FIRST, LIFE, MIN_SEEN, ROOT, START, DecayTree, Walks
 
 __all__ = [
-    "__version__", "DecayNet", "DecayTree", "Encoding", "PathResult", "cheapest_path", "load_model",
+    "__version__", "DecayNet", "DecayTree", "Encoding", "PathResult", "Walks", "cheapest_path", "load_model",
     "ROOT", "START", "FIRST", "LIFE", "MIN_SEEN", "DECAYS", "MAX_SLIDE", "MAX_LEGS", "UNKNOWN_PROB",
     "CHARS", "PHONES", "SYLLABLES", "WINDOW", "START_LABEL", "END_LABEL",
 ]

@@ -1,0 +1,66 @@
+### habit - saying 'the' over and over
+
+| arm | says | probability at first | at last | distinct texts | top share at the branch, before → after | entropy before → after |
+|---|---|---|---|---|---|---|
+| said (10×) | 'the comparison cannot be won by simply taking bigger steps. Counting beats plain' | 0.067 | 0.467 | 1 | 0.85 → 0.92 | 0.81 → 0.52 bits |
+| asked quietly (10×) | 'the comparison cannot be won by simply taking bigger steps. Counting beats plain' | 0.067 | 0.067 | 1 | 0.85 → 0.85 | 0.81 → 0.81 bits |
+| sampled at T=1 (30×) | 'the picture". That works, and I still think it is right for that architecture.' | 0.071 | 0.093 | 11 | 0.85 → 0.84 | 0.81 → 0.83 bits |
+
+the branch before: 'he ' 0.85, 'here' 0.07, 'heory predic' 0.07, 'hey can be t' 0.01
+after saying: 'he ' 0.92, 'here' 0.04, 'heory predic' 0.04, 'hey can be t' 0.01
+
+### forgetting - read once, then time passes
+
+`half-life` (the reading itself took 298146 traversals, 2.98 lives)
+
+| lives since | remembered | recited | bits/unit | misses |
+|---|---|---|---|---|
+| 0 | 38920/76311 (51%) | 232/800 | 1.07 | 0% |
+| 0.25 | 33430/76311 (44%) | 177/800 | 1.23 | 0% |
+| 0.5 | 27901/76311 (37%) | 118/800 | 1.40 | 0% |
+| 1 | 16425/76311 (22%) | 0/800 | 1.77 | 0% |
+| 2 | 7716/76311 (10%) | 0/800 | 2.57 | 0% |
+| 4 | 1484/76311 (2%) | 0/800 | 4.93 | 1% |
+| 8 | 11/76311 (0%) | 0/800 | 9.88 | 1% |
+
+`linear` (the reading itself took 298146 traversals, 2.98 lives)
+
+| lives since | remembered | recited | bits/unit | misses |
+|---|---|---|---|---|
+| 0 | 26210/76311 (34%) | 118/800 | 4.22 | 30% |
+| 0.25 | 20274/76311 (27%) | 57/800 | 4.73 | 31% |
+| 0.5 | 14395/76311 (19%) | 0/800 | 5.14 | 30% |
+| 1 | 11298/76311 (15%) | 0/800 | 5.70 | 31% |
+| 2 | 7985/76311 (10%) | 0/800 | 6.31 | 32% |
+| 4 | 5214/76311 (7%) | 0/800 | 7.33 | 34% |
+| 8 | 2986/76311 (4%) | 0/800 | 8.56 | 37% |
+
+`none` (the reading itself took 298146 traversals, 2.98 lives)
+
+| lives since | remembered | recited | bits/unit | misses |
+|---|---|---|---|---|
+| 0 | 76311/76311 (100%) | 705/800 | 0.14 | 0% |
+| 0.25 | 76311/76311 (100%) | 705/800 | 0.14 | 0% |
+| 0.5 | 76311/76311 (100%) | 705/800 | 0.14 | 0% |
+| 1 | 76311/76311 (100%) | 705/800 | 0.14 | 0% |
+| 2 | 76311/76311 (100%) | 705/800 | 0.14 | 0% |
+| 4 | 76311/76311 (100%) | 705/800 | 0.14 | 0% |
+| 8 | 76311/76311 (100%) | 705/800 | 0.14 | 0% |
+
+### use - a silence broken only by saying 'forever. There is no x beyond which the unit stops responding. The vanishing'
+
+| arm | lives elapsed | traversals said | the used text recited | recited | remembered | bits/unit |
+|---|---|---|---|---|---|---|
+| said | 2.0 | 80 | yes | 1/800 | 10% | 2.57 |
+| quiet | 2.0 | 0 | no | 0/800 | 10% | 2.57 |
+| silent | 2.0 | 0 | no | 0/800 | 10% | 2.57 |
+
+### recovery - fade 4 lives, re-read every 3th text, then all
+
+| stage | remembered | recited | of the re-read | of the others | bits/unit | misses |
+|---|---|---|---|---|---|---|
+| read once | 51% | 232/800 | 80/266 | 152/534 | 1.07 | 0% |
+| 4 lives later | 2% | 0/800 | 0/266 | 0/534 | 4.93 | 1% |
+| every 3th text re-read | 44% | 232/800 | 232/266 | 0/534 | 2.33 | 0% |
+| all re-read | 52% | 246/800 | 96/266 | 150/534 | 1.08 | 0% |
+

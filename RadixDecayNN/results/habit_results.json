@@ -3,7 +3,7 @@
  "prefix": "the",
  "settings": {
   "seed": 1,
-  "life": 10000,
+  "life": 10000.0,
   "decay": "half-life",
   "min_seen": 0.5,
   "depth": null,

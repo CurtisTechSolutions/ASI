@@ -1,0 +1,586 @@
+{
+ "experiment": "habit",
+ "prefix": "the",
+ "settings": {
+  "seed": 1,
+  "life": 100000.0,
+  "decay": "half-life",
+  "min_seen": 0.5,
+  "depth": null,
+  "encoding": "char:3:1"
+ },
+ "arms": {
+  "said": {
+   "quiet": false,
+   "temperature": 0.0,
+   "times": 10,
+   "rows": [
+    {
+     "repeat": 1,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.0667996996727606,
+     "cost": 2.706056694366401,
+     "traversals": 6,
+     "clock": 298152
+    },
+    {
+     "repeat": 2,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.13854910346399554,
+     "cost": 1.976530478542187,
+     "traversals": 6,
+     "clock": 298158
+    },
+    {
+     "repeat": 3,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.20005558961965986,
+     "cost": 1.6091600029562176,
+     "traversals": 6,
+     "clock": 298164
+    },
+    {
+     "repeat": 4,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.2533664633302553,
+     "cost": 1.372918366616706,
+     "traversals": 6,
+     "clock": 298170
+    },
+    {
+     "repeat": 5,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.3000174865354777,
+     "cost": 1.2039145175730495,
+     "traversals": 6,
+     "clock": 298176
+    },
+    {
+     "repeat": 6,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.3411832642395506,
+     "cost": 1.0753355142758232,
+     "traversals": 6,
+     "clock": 298182
+    },
+    {
+     "repeat": 7,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.3777775159014898,
+     "cost": 0.9734498389162828,
+     "traversals": 6,
+     "clock": 298188
+    },
+    {
+     "repeat": 8,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.41052169581072895,
+     "cost": 0.890326499328597,
+     "traversals": 6,
+     "clock": 298194
+    },
+    {
+     "repeat": 9,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.43999303661496,
+     "cost": 0.8209963780701517,
+     "traversals": 6,
+     "clock": 298200
+    },
+    {
+     "repeat": 10,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.46665887220783464,
+     "cost": 0.7621567545981665,
+     "traversals": 6,
+     "clock": 298206
+    }
+   ],
+   "distinct": 1,
+   "before": [
+    {
+     "option": "he ",
+     "share": 0.8491283738326173,
+     "seen": 10.195055805266392
+    },
+    {
+     "option": "here",
+     "share": 0.07205236771615221,
+     "seen": 0.8650964122799982
+    },
+    {
+     "option": "heory predic",
+     "share": 0.06621201376564151,
+     "seen": 0.7949742301896587
+    },
+    {
+     "option": "hey can be t",
+     "share": 0.012607244685588938,
+     "seen": 0.15136882370340377
+    }
+   ],
+   "after": [
+    {
+     "option": "he ",
+     "share": 0.91769340456901,
+     "seen": 20.1885989286435
+    },
+    {
+     "option": "here",
+     "share": 0.03930749094517528,
+     "seen": 0.8647367036010493
+    },
+    {
+     "option": "heory predic",
+     "share": 0.036121340825435985,
+     "seen": 0.7946436784429622
+    },
+    {
+     "option": "hey can be t",
+     "share": 0.00687776366037872,
+     "seen": 0.1513058842681738
+    }
+   ],
+   "entropy_before": 0.8126565048999516,
+   "entropy_after": 0.5197117809253408,
+   "top_share_before": 0.8491283738326173,
+   "top_share_after": 0.91769340456901
+  },
+  "quiet": {
+   "quiet": true,
+   "temperature": 0.0,
+   "times": 10,
+   "rows": [
+    {
+     "repeat": 1,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 2,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 3,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 4,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 5,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 6,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 7,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 8,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 9,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    },
+    {
+     "repeat": 10,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.06679969967276064,
+     "cost": 2.7060566943664006,
+     "traversals": 0,
+     "clock": 298146
+    }
+   ],
+   "distinct": 1,
+   "before": [
+    {
+     "option": "he ",
+     "share": 0.8491283738326173,
+     "seen": 10.195055805266392
+    },
+    {
+     "option": "here",
+     "share": 0.07205236771615221,
+     "seen": 0.8650964122799982
+    },
+    {
+     "option": "heory predic",
+     "share": 0.06621201376564151,
+     "seen": 0.7949742301896587
+    },
+    {
+     "option": "hey can be t",
+     "share": 0.012607244685588938,
+     "seen": 0.15136882370340377
+    }
+   ],
+   "after": [
+    {
+     "option": "he ",
+     "share": 0.8491283738326173,
+     "seen": 10.195055805266392
+    },
+    {
+     "option": "here",
+     "share": 0.07205236771615221,
+     "seen": 0.8650964122799982
+    },
+    {
+     "option": "heory predic",
+     "share": 0.06621201376564151,
+     "seen": 0.7949742301896587
+    },
+    {
+     "option": "hey can be t",
+     "share": 0.012607244685588938,
+     "seen": 0.15136882370340377
+    }
+   ],
+   "entropy_before": 0.8126565048999516,
+   "entropy_after": 0.8126565048999516,
+   "top_share_before": 0.8491283738326173,
+   "top_share_after": 0.8491283738326173
+  },
+  "sampled": {
+   "quiet": false,
+   "temperature": 1.0,
+   "times": 30,
+   "rows": [
+    {
+     "repeat": 1,
+     "says": "the picture\". That works, and I still think it is right for that architecture.",
+     "probability": 0.07123633344666926,
+     "cost": 2.64175228950633,
+     "traversals": 4,
+     "clock": 298150
+    },
+    {
+     "repeat": 2,
+     "says": "theory predicts). I then test whether dividing the decay back out actually helps,",
+     "probability": 0.0611212928569105,
+     "cost": 2.7948949815840005,
+     "traversals": 3,
+     "clock": 298153
+    },
+    {
+     "repeat": 3,
+     "says": "the distance from the unit's operating point. Frequency is learned from the",
+     "probability": 0.040532468325055936,
+     "cost": 3.2056519390106337,
+     "traversals": 4,
+     "clock": 298157
+    },
+    {
+     "repeat": 4,
+     "says": "the largest rotation that keeps a sine wave a function. The fit of a logistic",
+     "probability": 0.048066575118232174,
+     "cost": 3.035168247414967,
+     "traversals": 5,
+     "clock": 298162
+    },
+    {
+     "repeat": 5,
+     "says": "the amplitude \u2014 a \u2192 \u2212a alone is \u2212f + 2k, which is the negation only while",
+     "probability": 0.04642766072906415,
+     "cost": 3.0698598609664014,
+     "traversals": 4,
+     "clock": 298166
+    },
+    {
+     "repeat": 6,
+     "says": "the picture\". That works, and I still think it is right for that architecture.",
+     "probability": 0.1090920362948044,
+     "cost": 2.2155633833554242,
+     "traversals": 4,
+     "clock": 298170
+    },
+    {
+     "repeat": 7,
+     "says": "the largest rotation that keeps a sine wave a function. The fit of a logistic",
+     "probability": 0.09559642153856718,
+     "cost": 2.3476198912303072,
+     "traversals": 5,
+     "clock": 298175
+    },
+    {
+     "repeat": 8,
+     "says": "the one here: if the problem is that n is large, what happens if you just",
+     "probability": 0.04529019959539223,
+     "cost": 3.0946646143715677,
+     "traversals": 4,
+     "clock": 298179
+    },
+    {
+     "repeat": 9,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.040086838907937114,
+     "cost": 3.2167072053258585,
+     "traversals": 6,
+     "clock": 298185
+    },
+    {
+     "repeat": 10,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.08579141171404021,
+     "cost": 2.4558363740711746,
+     "traversals": 6,
+     "clock": 298191
+    },
+    {
+     "repeat": 11,
+     "says": "the distance from the unit's operating point. Frequency is learned from the",
+     "probability": 0.07123713671411956,
+     "cost": 2.641741013477896,
+     "traversals": 4,
+     "clock": 298195
+    },
+    {
+     "repeat": 12,
+     "says": "the two should be removed.",
+     "probability": 0.03120253204267496,
+     "cost": 3.4672560322456656,
+     "traversals": 4,
+     "clock": 298199
+    },
+    {
+     "repeat": 13,
+     "says": "the two should be removed.",
+     "probability": 0.07156879480846344,
+     "cost": 2.6370961267130335,
+     "traversals": 4,
+     "clock": 298203
+    },
+    {
+     "repeat": 14,
+     "says": "the two should be removed.",
+     "probability": 0.10870676791936017,
+     "cost": 2.2191012244255752,
+     "traversals": 4,
+     "clock": 298207
+    },
+    {
+     "repeat": 15,
+     "says": "theory predicts). I then test whether dividing the decay back out actually helps,",
+     "probability": 0.06901418343135117,
+     "cost": 2.6734432385327143,
+     "traversals": 3,
+     "clock": 298210
+    },
+    {
+     "repeat": 16,
+     "says": "the distance from the unit's operating point. Frequency is learned from the",
+     "probability": 0.09508041530897071,
+     "cost": 2.353032268504619,
+     "traversals": 4,
+     "clock": 298214
+    },
+    {
+     "repeat": 17,
+     "says": "the picture\". That works, and I still think it is right for that architecture.",
+     "probability": 0.10194342717664642,
+     "cost": 2.283337255088118,
+     "traversals": 4,
+     "clock": 298218
+    },
+    {
+     "repeat": 18,
+     "says": "the two should be removed.",
+     "probability": 0.12819560941224212,
+     "cost": 2.0541979830364716,
+     "traversals": 4,
+     "clock": 298222
+    },
+    {
+     "repeat": 19,
+     "says": "the picture\". That works, and I still think it is right for that architecture.",
+     "probability": 0.128483279196826,
+     "cost": 2.051956506095491,
+     "traversals": 4,
+     "clock": 298226
+    },
+    {
+     "repeat": 20,
+     "says": "they can be trained at all.",
+     "probability": 0.00488102717292673,
+     "cost": 5.322399595010728,
+     "traversals": 3,
+     "clock": 298229
+    },
+    {
+     "repeat": 21,
+     "says": "the amplitude \u2014 a \u2192 \u2212a alone is \u2212f + 2k, which is the negation only while",
+     "probability": 0.054456376430780495,
+     "cost": 2.910355330292792,
+     "traversals": 4,
+     "clock": 298233
+    },
+    {
+     "repeat": 22,
+     "says": "theory predicts). I then test whether dividing the decay back out actually helps,",
+     "probability": 0.08467737368092264,
+     "cost": 2.468906847828904,
+     "traversals": 3,
+     "clock": 298236
+    },
+    {
+     "repeat": 23,
+     "says": "theory predicts). I then test whether dividing the decay back out actually helps,",
+     "probability": 0.11160441877407812,
+     "cost": 2.192794635068974,
+     "traversals": 3,
+     "clock": 298239
+    },
+    {
+     "repeat": 24,
+     "says": "the picture\". That works, and I still think it is right for that architecture.",
+     "probability": 0.13870038854414984,
+     "cost": 1.9754391503375903,
+     "traversals": 4,
+     "clock": 298243
+    },
+    {
+     "repeat": 25,
+     "says": "the picture\". That works, and I still think it is right for that architecture.",
+     "probability": 0.1626311937397671,
+     "cost": 1.8162702568500204,
+     "traversals": 4,
+     "clock": 298247
+    },
+    {
+     "repeat": 26,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.07571299465226358,
+     "cost": 2.5808054733992223,
+     "traversals": 6,
+     "clock": 298253
+    },
+    {
+     "repeat": 27,
+     "says": "the amplitude \u2014 a \u2192 \u2212a alone is \u2212f + 2k, which is the negation only while",
+     "probability": 0.07217607736654846,
+     "cost": 2.628646626401513,
+     "traversals": 4,
+     "clock": 298257
+    },
+    {
+     "repeat": 28,
+     "says": "the budget, or on the monitor \u2014 never on exhaustion.",
+     "probability": 0.0071832617552705855,
+     "cost": 4.936001715613627,
+     "traversals": 4,
+     "clock": 298261
+    },
+    {
+     "repeat": 29,
+     "says": "the input are the same operation, so h is doing the job that a bias term",
+     "probability": 0.011683825275120229,
+     "cost": 4.449549848769054,
+     "traversals": 4,
+     "clock": 298265
+    },
+    {
+     "repeat": 30,
+     "says": "the comparison cannot be won by simply taking bigger steps. Counting beats plain",
+     "probability": 0.09272061630729574,
+     "cost": 2.378164433000172,
+     "traversals": 6,
+     "clock": 298271
+    }
+   ],
+   "distinct": 11,
+   "before": [
+    {
+     "option": "he ",
+     "share": 0.8491283738326173,
+     "seen": 10.195055805266392
+    },
+    {
+     "option": "here",
+     "share": 0.07205236771615221,
+     "seen": 0.8650964122799982
+    },
+    {
+     "option": "heory predic",
+     "share": 0.06621201376564151,
+     "seen": 0.7949742301896587
+    },
+    {
+     "option": "hey can be t",
+     "share": 0.012607244685588938,
+     "seen": 0.15136882370340377
+    }
+   ],
+   "after": [
+    {
+     "option": "he ",
+     "share": 0.8378432476858579,
+     "seen": 35.17506296425279
+    },
+    {
+     "option": "heory predic",
+     "share": 0.11415431591676672,
+     "seen": 4.792525643793226
+    },
+    {
+     "option": "hey can be t",
+     "share": 0.027414343752281068,
+     "seen": 1.150932791155838
+    },
+    {
+     "option": "here",
+     "share": 0.020588092645094175,
+     "seen": 0.864347187979708
+    }
+   ],
+   "entropy_before": 0.8126565048999516,
+   "entropy_after": 0.8288546390356408,
+   "top_share_before": 0.8491283738326173,
+   "top_share_after": 0.8378432476858579
+  }
+ },
+ "corpus": {
+  "texts": 800,
+  "units": 55232
+ }
+}
