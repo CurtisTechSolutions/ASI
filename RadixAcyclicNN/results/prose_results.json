@@ -1,0 +1,324 @@
+{
+ "corpus": {
+  "path": "data/corpus.txt",
+  "train_texts": 640,
+  "train_chars": 44335,
+  "test_texts": 160,
+  "test_chars": 10897,
+  "digest": "31ea49d2800ca3ac37040a87a31dcfa498c08e3e400ca5b2f2e68329af3dd92b"
+ },
+ "settings": {
+  "seed": 1,
+  "epochs": 10,
+  "lr": 0.5,
+  "act_lr": 0.05,
+  "batch_size": 32,
+  "depth": null,
+  "min_count": 1
+ },
+ "models": {
+  "tree": {
+   "available": true,
+   "kind": "radix-tree",
+   "stats": {
+    "nodes": 61213,
+    "ends": 42824,
+    "edges": 104037,
+    "grams": 4228,
+    "label_chars": 1510919,
+    "branches": 21249,
+    "max_depth": 14,
+    "compression_ratio": 0.06907029552546028
+   },
+   "train_seconds": 870.8496278919997,
+   "epoch_loss": [
+    2.5027624698375837,
+    2.440773947022795,
+    2.370629764716022,
+    2.3273853656557013,
+    2.2927132823653773,
+    2.2692888582431703,
+    2.2517922925023712,
+    2.2383355914248013,
+    2.2274984114752163,
+    2.218256159974504
+   ],
+   "transitions_per_epoch": 219953,
+   "train_bits": {
+    "bits_per_char": 0.14521249554051474,
+    "chars": 44335,
+    "transitions": 2003,
+    "unknown_transitions": 0,
+    "miss_rate": 0.0
+   },
+   "test_bits": {
+    "bits_per_char": 6.514299989265452,
+    "chars": 10897,
+    "transitions": 5887,
+    "unknown_transitions": 3195,
+    "miss_rate": 0.5427212502123323
+   },
+   "recall": {
+    "texts": 640,
+    "recited": 572,
+    "fraction": 0.89375
+   },
+   "predictions": [
+    {
+     "prefix": "the quick",
+     "text": " 45 because it sounded round. It is the largest rotation a sine",
+     "cost": 0.8523659443480862,
+     "expanded": 4,
+     "reached_end": true,
+     "seconds": 5.360100021789549e-05
+    },
+    {
+     "prefix": "the cat",
+     "text": "ches the loop directly:",
+     "cost": 1.0204392524433787,
+     "expanded": 3,
+     "reached_end": true,
+     "seconds": 5.38159993084264e-05
+    },
+    {
+     "prefix": "knowledge",
+     "text": "\". It is not sloppiness. It is the only thing that can be said in a graph",
+     "cost": 1.8269270470867394,
+     "expanded": 5,
+     "reached_end": true,
+     "seconds": 6.435300019802526e-05
+    },
+    {
+     "prefix": "two plus",
+     "text": " a monotone",
+     "cost": 0.3304413626468953,
+     "expanded": 3,
+     "reached_end": true,
+     "seconds": 3.193199972884031e-05
+    },
+    {
+     "prefix": "the moon",
+     "text": ". Or the fact that you kept ruminating can change what is",
+     "cost": 0.0,
+     "expanded": 2,
+     "reached_end": true,
+     "seconds": 2.517400025681127e-05
+    },
+    {
+     "prefix": "th",
+     "text": "eory predicts). I then test whether dividing the decay back out actually helps,",
+     "cost": 1.2045815657102834,
+     "expanded": 4,
+     "reached_end": true,
+     "seconds": 6.474100064224331e-05
+    },
+    {
+     "prefix": "zzzq",
+     "text": "handling. Every mainstream network architecture is a DAG for exactly these",
+     "cost": 5.428857253989044,
+     "expanded": 5,
+     "reached_end": true,
+     "seconds": 0.00022000599983584834
+    }
+   ]
+  },
+  "cyclic": {
+   "available": true,
+   "kind": "radix",
+   "stats": {
+    "nodes": 3516,
+    "edges": 9699,
+    "grams": 4228,
+    "label_chars": 11260,
+    "compression_ratio": 1.2025028441410694
+   },
+   "train_seconds": 9.039119984000536,
+   "epoch_loss": [
+    1.6816631312368508,
+    1.582312973043588,
+    1.5306329493053745,
+    1.4999164941070524,
+    1.4760136993807187,
+    1.4535787427466542,
+    1.4372945881873274,
+    1.424800787604005,
+    1.4145998299932285,
+    1.4053492332116313
+   ],
+   "transitions_per_epoch": 42310,
+   "train_bits": {
+    "bits_per_char": 1.9235511938745053,
+    "chars": 44335,
+    "transitions": 42310,
+    "unknown_transitions": 0,
+    "miss_rate": 0.0
+   },
+   "test_bits": {
+    "bits_per_char": 4.056868957608318,
+    "chars": 10897,
+    "transitions": 10539,
+    "unknown_transitions": 1285,
+    "miss_rate": 0.12192807666761553
+   },
+   "recall": {
+    "texts": 640,
+    "recited": 0,
+    "fraction": 0.0
+   },
+   "predictions": [
+    {
+     "prefix": "the quick",
+     "text": "ets,",
+     "cost": 2.9854812400652797,
+     "expanded": 12,
+     "reached_end": true,
+     "seconds": 7.812900003045797e-05
+    },
+    {
+     "prefix": "the cat",
+     "text": "e.",
+     "cost": 3.9401594399927697,
+     "expanded": 36,
+     "reached_end": true,
+     "seconds": 0.0002470780000294326
+    },
+    {
+     "prefix": "knowledge",
+     "text": "t",
+     "cost": 3.5462606576290407,
+     "expanded": 26,
+     "reached_end": true,
+     "seconds": 0.0001557099994897726
+    },
+    {
+     "prefix": "two plus",
+     "text": " up:",
+     "cost": 4.574471016737244,
+     "expanded": 73,
+     "reached_end": true,
+     "seconds": 0.0004100360001757508
+    },
+    {
+     "prefix": "the moon",
+     "text": ".",
+     "cost": 1.63309883856071,
+     "expanded": 4,
+     "reached_end": true,
+     "seconds": 2.945300002465956e-05
+    },
+    {
+     "prefix": "th",
+     "text": "e",
+     "cost": 3.302722829937882,
+     "expanded": 12,
+     "reached_end": true,
+     "seconds": 0.0009310300001743599
+    },
+    {
+     "prefix": "zzzq",
+     "text": "uest",
+     "cost": 3.4723439926980086,
+     "expanded": 23,
+     "reached_end": true,
+     "seconds": 0.0021527700000660843
+    }
+   ]
+  }
+ },
+ "repetition": [
+  {
+   "motif": "a",
+   "times": 4,
+   "chars": 4,
+   "tree_nodes": 3,
+   "tree_label_chars": 10,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "a",
+   "times": 10,
+   "chars": 10,
+   "tree_nodes": 9,
+   "tree_label_chars": 34,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "a",
+   "times": 100,
+   "chars": 100,
+   "tree_nodes": 99,
+   "tree_label_chars": 394,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "a",
+   "times": 1000,
+   "chars": 1000,
+   "tree_nodes": 999,
+   "tree_label_chars": 3994,
+   "cyclic_nodes": 1,
+   "cyclic_label_chars": 3
+  },
+  {
+   "motif": "abc",
+   "times": 2,
+   "chars": 6,
+   "tree_nodes": 5,
+   "tree_label_chars": 23,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  },
+  {
+   "motif": "abc",
+   "times": 5,
+   "chars": 15,
+   "tree_nodes": 14,
+   "tree_label_chars": 77,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  },
+  {
+   "motif": "abc",
+   "times": 50,
+   "chars": 150,
+   "tree_nodes": 149,
+   "tree_label_chars": 887,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  },
+  {
+   "motif": "abc",
+   "times": 500,
+   "chars": 1500,
+   "tree_nodes": 1499,
+   "tree_label_chars": 8987,
+   "cyclic_nodes": 2,
+   "cyclic_label_chars": 7
+  }
+ ],
+ "generalisation": {
+  "trained_on": "aaaa",
+  "scored": "aaaaaaa",
+  "tree": {
+   "log_prob": -41.44653167389282,
+   "per_char": -5.920933096270403,
+   "chars": 7,
+   "transitions": 5,
+   "unknown_transitions": 3
+  },
+  "tree_representable": false,
+  "cyclic": {
+   "log_prob": -3.588020778134727,
+   "per_char": -0.5125743968763896,
+   "chars": 7,
+   "transitions": 6,
+   "unknown_transitions": 0,
+   "units": "chars"
+  },
+  "cyclic_representable": true
+ },
+ "seconds": 881.2044336909998
+}

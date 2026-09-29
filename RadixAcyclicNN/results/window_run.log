@@ -1,0 +1,16 @@
+python3 -m radixtree accuracy --data data/corpus.txt --heldout-every 5 --epochs 10 --lr 0.5 --act-lr 0.05 \
+	--batch-size 32 --seed 1 --windows 1,2,3,4,6,8,all --out results/window_results.json
+  window   tokens  accuracy   known
+       1    10737     0.461   0.879
+       2    10737     0.517   0.808
+       3    10737     0.544   0.761
+       4    10737     0.546   0.731
+       6    10737     0.552   0.697
+       8    10737     0.555   0.687
+     all    10737     0.558   0.681
+wrote results/window_results.json
+
+real	14m51.611s
+user	14m42.055s
+sys	0m0.221s
+exit 0

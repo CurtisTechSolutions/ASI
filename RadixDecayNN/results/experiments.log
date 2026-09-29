@@ -1,0 +1,66 @@
+### habit - saying 'the' over and over
+
+| arm | says | probability at first | at last | distinct texts | top share at the branch, before → after | entropy before → after |
+|---|---|---|---|---|---|---|
+| said (10×) | 'the bear sleeps through the winter' | 0.027 | 0.224 | 1 | 0.15 → 0.34 | 3.76 → 3.38 bits |
+| asked quietly (10×) | 'the bear sleeps through the winter' | 0.027 | 0.027 | 1 | 0.15 → 0.15 | 3.76 → 3.76 bits |
+| sampled at T=1 (30×) | 'the doctor heals the sick' | 0.025 | 0.043 | 15 | 0.15 → 0.17 | 3.76 → 3.68 bits |
+
+the branch before: 'e b' 0.15, 'e c' 0.11, 'e f' 0.10, 'e do' 0.09 ...
+after saying: 'e b' 0.34, 'e c' 0.09, 'e f' 0.08, 'e do' 0.07 ...
+
+### forgetting - read once, then time passes
+
+`half-life` (the reading itself took 6845 traversals, 0.68 lives)
+
+| lives since | remembered | recited | bits/unit | misses |
+|---|---|---|---|---|
+| 0 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 0.25 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 0.5 | 1722/2224 (77%) | 42/60 | 1.17 | 1% |
+| 1 | 645/2224 (29%) | 0/60 | 2.98 | 2% |
+| 2 | 283/2224 (13%) | 0/60 | 4.71 | 3% |
+| 4 | 27/2224 (1%) | 0/60 | 7.49 | 4% |
+| 8 | 0/2224 (0%) | 0/60 | 8.67 | 3% |
+
+`linear` (the reading itself took 6845 traversals, 0.68 lives)
+
+| lives since | remembered | recited | bits/unit | misses |
+|---|---|---|---|---|
+| 0 | 1722/2224 (77%) | 42/60 | 1.23 | 1% |
+| 0.25 | 1170/2224 (53%) | 21/60 | 2.28 | 2% |
+| 0.5 | 645/2224 (29%) | 0/60 | 5.04 | 20% |
+| 1 | 480/2224 (22%) | 0/60 | 8.20 | 43% |
+| 2 | 210/2224 (9%) | 0/60 | 11.24 | 57% |
+| 4 | 60/2224 (3%) | 0/60 | 14.27 | 75% |
+| 8 | 31/2224 (1%) | 0/60 | 15.13 | 81% |
+
+`none` (the reading itself took 6845 traversals, 0.68 lives)
+
+| lives since | remembered | recited | bits/unit | misses |
+|---|---|---|---|---|
+| 0 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 0.25 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 0.5 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 1 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 2 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 4 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+| 8 | 2224/2224 (100%) | 57/60 | 0.20 | 0% |
+
+### use - a silence broken only by saying 'the quick brown fox jumps over the lazy dog'
+
+| arm | lives elapsed | traversals said | the used text recited | recited | remembered | bits/unit |
+|---|---|---|---|---|---|---|
+| said | 2.0 | 40 | yes | 1/60 | 13% | 4.58 |
+| quiet | 2.0 | 0 | no | 0/60 | 13% | 4.71 |
+| silent | 2.0 | 0 | no | 0/60 | 13% | 4.71 |
+
+### recovery - fade 4 lives, re-read every 3th text, then all
+
+| stage | remembered | recited | of the re-read | of the others | bits/unit | misses |
+|---|---|---|---|---|---|---|
+| read once | 100% | 57/60 | 18/20 | 39/40 | 0.20 | 0% |
+| 4 lives later | 1% | 0/60 | 0/20 | 0/40 | 7.49 | 4% |
+| every 3th text re-read | 40% | 19/60 | 19/20 | 0/40 | 4.41 | 2% |
+| all re-read | 100% | 57/60 | 19/20 | 38/40 | 0.20 | 0% |
+

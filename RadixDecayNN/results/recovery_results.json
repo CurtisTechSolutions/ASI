@@ -1,0 +1,83 @@
+{
+ "experiment": "recovery",
+ "fade_lives": 4.0,
+ "every": 3,
+ "settings": {
+  "seed": 1,
+  "life": 10000.0,
+  "decay": "half-life",
+  "min_seen": 0.5,
+  "depth": null,
+  "encoding": "char:3:1"
+ },
+ "rows": [
+  {
+   "stage": "read once",
+   "clock": 6845,
+   "remembered": 2224,
+   "remembered_fraction": 1.0,
+   "recited": 57,
+   "texts": 60,
+   "recited_fraction": 0.95,
+   "bits_per_unit": 0.1973452297427056,
+   "miss_rate": 0.0,
+   "total_seen": 5951.512239038839,
+   "re_read_recited": 18,
+   "re_read_texts": 20,
+   "others_recited": 39,
+   "others_texts": 40
+  },
+  {
+   "stage": "4 lives later",
+   "clock": 46845,
+   "remembered": 27,
+   "remembered_fraction": 0.012140287769784174,
+   "recited": 0,
+   "texts": 60,
+   "recited_fraction": 0.0,
+   "bits_per_unit": 7.491650949758934,
+   "miss_rate": 0.03683241252302026,
+   "total_seen": 371.9695149399274,
+   "re_read_recited": 0,
+   "re_read_texts": 20,
+   "others_recited": 0,
+   "others_texts": 40
+  },
+  {
+   "stage": "every 3th text re-read",
+   "clock": 49244,
+   "remembered": 900,
+   "remembered_fraction": 0.40467625899280574,
+   "recited": 19,
+   "texts": 60,
+   "recited_fraction": 0.31666666666666665,
+   "bits_per_unit": 4.411950481287232,
+   "miss_rate": 0.02021174205967276,
+   "total_seen": 2525.059682180788,
+   "re_read_recited": 19,
+   "re_read_texts": 20,
+   "others_recited": 0,
+   "others_texts": 40
+  },
+  {
+   "stage": "all re-read",
+   "clock": 56794,
+   "remembered": 2224,
+   "remembered_fraction": 1.0,
+   "recited": 57,
+   "texts": 60,
+   "recited_fraction": 0.95,
+   "bits_per_unit": 0.1989030343199889,
+   "miss_rate": 0.0,
+   "total_seen": 7374.324354056224,
+   "re_read_recited": 19,
+   "re_read_texts": 20,
+   "others_recited": 38,
+   "others_texts": 40
+  }
+ ],
+ "corpus": {
+  "texts": 60,
+  "units": 1800
+ }
+}

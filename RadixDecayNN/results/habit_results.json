@@ -1,0 +1,946 @@
+{
+ "experiment": "habit",
+ "prefix": "the",
+ "settings": {
+  "seed": 1,
+  "life": 10000.0,
+  "decay": "half-life",
+  "min_seen": 0.5,
+  "depth": null,
+  "encoding": "char:3:1"
+ },
+ "arms": {
+  "said": {
+   "quiet": false,
+   "temperature": 0.0,
+   "times": 10,
+   "rows": [
+    {
+     "repeat": 1,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295108,
+     "cost": 3.613122388973711,
+     "traversals": 5,
+     "clock": 6850
+    },
+    {
+     "repeat": 2,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.05365790084056137,
+     "cost": 2.9251265543815816,
+     "traversals": 5,
+     "clock": 6855
+    },
+    {
+     "repeat": 3,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.07893150330985353,
+     "cost": 2.539174849328244,
+     "traversals": 5,
+     "clock": 6860
+    },
+    {
+     "repeat": 4,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.10289829644845207,
+     "cost": 2.2740141916878045,
+     "traversals": 5,
+     "clock": 6865
+    },
+    {
+     "repeat": 5,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.12565710897791255,
+     "cost": 2.074198438973311,
+     "traversals": 5,
+     "clock": 6870
+    },
+    {
+     "repeat": 6,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.14729703475183906,
+     "cost": 1.9153040863893676,
+     "traversals": 5,
+     "clock": 6875
+    },
+    {
+     "repeat": 7,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.1678986109349714,
+     "cost": 1.7843949881015877,
+     "traversals": 5,
+     "clock": 6880
+    },
+    {
+     "repeat": 8,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.18753482390915482,
+     "cost": 1.6737907233013989,
+     "traversals": 5,
+     "clock": 6885
+    },
+    {
+     "repeat": 9,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.2062719750209164,
+     "cost": 1.578559713886963,
+     "traversals": 5,
+     "clock": 6890
+    },
+    {
+     "repeat": 10,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.22417042933555445,
+     "cost": 1.4953486711751016,
+     "traversals": 5,
+     "clock": 6895
+    }
+   ],
+   "distinct": 1,
+   "before": [
+    {
+     "option": "e b",
+     "share": 0.14782957256660914,
+     "seen": 5.241942779900634
+    },
+    {
+     "option": "e c",
+     "share": 0.11297170579924135,
+     "seen": 4.00590495707861
+    },
+    {
+     "option": "e f",
+     "share": 0.09868287217254705,
+     "seen": 3.4992319892669603
+    },
+    {
+     "option": "e do",
+     "share": 0.09378363514496961,
+     "seen": 3.3255081550039622
+    },
+    {
+     "option": "e s",
+     "share": 0.09377957914872348,
+     "seen": 3.3253643319523998
+    },
+    {
+     "option": "e w",
+     "share": 0.07490441408554187,
+     "seen": 2.65606296346068
+    },
+    {
+     "option": "e r",
+     "share": 0.06866972197195718,
+     "seen": 2.434984739785354
+    },
+    {
+     "option": "e h",
+     "share": 0.05051416709829169,
+     "seen": 1.7912002917026224
+    },
+    {
+     "option": "e mo",
+     "share": 0.04355849332373497,
+     "seen": 1.5445565161112869
+    },
+    {
+     "option": "e t",
+     "share": 0.04291049802120469,
+     "seen": 1.5215790141234649
+    },
+    {
+     "option": "e p",
+     "share": 0.040069012651054184,
+     "seen": 1.4208217470783857
+    },
+    {
+     "option": "e ear",
+     "share": 0.038072802685641796,
+     "seen": 1.3500374091838534
+    },
+    {
+     "option": "e goat climb",
+     "share": 0.0279696343147791,
+     "seen": 0.9917854736862972
+    },
+    {
+     "option": "e owl hunts ",
+     "share": 0.0266043359062271,
+     "seen": 0.9433728590053324
+    },
+    {
+     "option": "e leaves fal",
+     "share": 0.022130888786924256,
+     "seen": 0.7847472645375482
+    },
+    {
+     "option": "e quick brow",
+     "share": 0.017548666322552555,
+     "seen": 0.622264565399736
+    }
+   ],
+   "after": [
+    {
+     "option": "e b",
+     "share": 0.3355255506811053,
+     "seen": 15.205460440487911
+    },
+    {
+     "option": "e c",
+     "share": 0.08808896622434673,
+     "seen": 3.9920455787905764
+    },
+    {
+     "option": "e f",
+     "share": 0.07694733944423984,
+     "seen": 3.4871255662797793
+    },
+    {
+     "option": "e do",
+     "share": 0.07312719065570808,
+     "seen": 3.314002770823866
+    },
+    {
+     "option": "e s",
+     "share": 0.07312402801853443,
+     "seen": 3.3138594453622616
+    },
+    {
+     "option": "e w",
+     "share": 0.05840623858651242,
+     "seen": 2.6468736836944715
+    },
+    {
+     "option": "e r",
+     "share": 0.053544777222117854,
+     "seen": 2.426560332567544
+    },
+    {
+     "option": "e h",
+     "share": 0.0393880992403525,
+     "seen": 1.7850032094706847
+    },
+    {
+     "option": "e mo",
+     "share": 0.03396445702959094,
+     "seen": 1.5392127565180374
+    },
+    {
+     "option": "e t",
+     "share": 0.03345918683016984,
+     "seen": 1.5163147506479657
+    },
+    {
+     "option": "e p",
+     "share": 0.031243556756893165,
+     "seen": 1.415906077265045
+    },
+    {
+     "option": "e ear",
+     "share": 0.029687024783016415,
+     "seen": 1.3453666345755309
+    },
+    {
+     "option": "e goat climb",
+     "share": 0.02180914375888313,
+     "seen": 0.9883541566162041
+    },
+    {
+     "option": "e owl hunts ",
+     "share": 0.020744561042828406,
+     "seen": 0.9401090368578511
+    },
+    {
+     "option": "e leaves fal",
+     "share": 0.01725641921642327,
+     "seen": 0.7820322452556985
+    },
+    {
+     "option": "e quick brow",
+     "share": 0.01368346050927775,
+     "seen": 0.6201116935519219
+    }
+   ],
+   "entropy_before": 3.761129289443582,
+   "entropy_after": 3.3819259704540428,
+   "top_share_before": 0.14782957256660914,
+   "top_share_after": 0.3355255506811053
+  },
+  "quiet": {
+   "quiet": true,
+   "temperature": 0.0,
+   "times": 10,
+   "rows": [
+    {
+     "repeat": 1,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 2,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 3,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 4,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 5,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 6,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 7,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 8,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 9,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    },
+    {
+     "repeat": 10,
+     "says": "the bear sleeps through the winter",
+     "probability": 0.026967512209295122,
+     "cost": 3.6131223889737107,
+     "traversals": 0,
+     "clock": 6845
+    }
+   ],
+   "distinct": 1,
+   "before": [
+    {
+     "option": "e b",
+     "share": 0.14782957256660914,
+     "seen": 5.241942779900634
+    },
+    {
+     "option": "e c",
+     "share": 0.11297170579924135,
+     "seen": 4.00590495707861
+    },
+    {
+     "option": "e f",
+     "share": 0.09868287217254705,
+     "seen": 3.4992319892669603
+    },
+    {
+     "option": "e do",
+     "share": 0.09378363514496961,
+     "seen": 3.3255081550039622
+    },
+    {
+     "option": "e s",
+     "share": 0.09377957914872348,
+     "seen": 3.3253643319523998
+    },
+    {
+     "option": "e w",
+     "share": 0.07490441408554187,
+     "seen": 2.65606296346068
+    },
+    {
+     "option": "e r",
+     "share": 0.06866972197195718,
+     "seen": 2.434984739785354
+    },
+    {
+     "option": "e h",
+     "share": 0.05051416709829169,
+     "seen": 1.7912002917026224
+    },
+    {
+     "option": "e mo",
+     "share": 0.04355849332373497,
+     "seen": 1.5445565161112869
+    },
+    {
+     "option": "e t",
+     "share": 0.04291049802120469,
+     "seen": 1.5215790141234649
+    },
+    {
+     "option": "e p",
+     "share": 0.040069012651054184,
+     "seen": 1.4208217470783857
+    },
+    {
+     "option": "e ear",
+     "share": 0.038072802685641796,
+     "seen": 1.3500374091838534
+    },
+    {
+     "option": "e goat climb",
+     "share": 0.0279696343147791,
+     "seen": 0.9917854736862972
+    },
+    {
+     "option": "e owl hunts ",
+     "share": 0.0266043359062271,
+     "seen": 0.9433728590053324
+    },
+    {
+     "option": "e leaves fal",
+     "share": 0.022130888786924256,
+     "seen": 0.7847472645375482
+    },
+    {
+     "option": "e quick brow",
+     "share": 0.017548666322552555,
+     "seen": 0.622264565399736
+    }
+   ],
+   "after": [
+    {
+     "option": "e b",
+     "share": 0.14782957256660914,
+     "seen": 5.241942779900634
+    },
+    {
+     "option": "e c",
+     "share": 0.11297170579924135,
+     "seen": 4.00590495707861
+    },
+    {
+     "option": "e f",
+     "share": 0.09868287217254705,
+     "seen": 3.4992319892669603
+    },
+    {
+     "option": "e do",
+     "share": 0.09378363514496961,
+     "seen": 3.3255081550039622
+    },
+    {
+     "option": "e s",
+     "share": 0.09377957914872348,
+     "seen": 3.3253643319523998
+    },
+    {
+     "option": "e w",
+     "share": 0.07490441408554187,
+     "seen": 2.65606296346068
+    },
+    {
+     "option": "e r",
+     "share": 0.06866972197195718,
+     "seen": 2.434984739785354
+    },
+    {
+     "option": "e h",
+     "share": 0.05051416709829169,
+     "seen": 1.7912002917026224
+    },
+    {
+     "option": "e mo",
+     "share": 0.04355849332373497,
+     "seen": 1.5445565161112869
+    },
+    {
+     "option": "e t",
+     "share": 0.04291049802120469,
+     "seen": 1.5215790141234649
+    },
+    {
+     "option": "e p",
+     "share": 0.040069012651054184,
+     "seen": 1.4208217470783857
+    },
+    {
+     "option": "e ear",
+     "share": 0.038072802685641796,
+     "seen": 1.3500374091838534
+    },
+    {
+     "option": "e goat climb",
+     "share": 0.0279696343147791,
+     "seen": 0.9917854736862972
+    },
+    {
+     "option": "e owl hunts ",
+     "share": 0.0266043359062271,
+     "seen": 0.9433728590053324
+    },
+    {
+     "option": "e leaves fal",
+     "share": 0.022130888786924256,
+     "seen": 0.7847472645375482
+    },
+    {
+     "option": "e quick brow",
+     "share": 0.017548666322552555,
+     "seen": 0.622264565399736
+    }
+   ],
+   "entropy_before": 3.761129289443582,
+   "entropy_after": 3.761129289443582,
+   "top_share_before": 0.14782957256660914,
+   "top_share_after": 0.14782957256660914
+  },
+  "sampled": {
+   "quiet": false,
+   "temperature": 1.0,
+   "times": 30,
+   "rows": [
+    {
+     "repeat": 1,
+     "says": "the doctor heals the sick",
+     "probability": 0.025314787306287143,
+     "cost": 3.6763665754803267,
+     "traversals": 4,
+     "clock": 6849
+    },
+    {
+     "repeat": 2,
+     "says": "the owl hunts at night",
+     "probability": 0.025874588434860263,
+     "cost": 3.6544939334222244,
+     "traversals": 3,
+     "clock": 6852
+    },
+    {
+     "repeat": 3,
+     "says": "the door opens to the garden",
+     "probability": 0.023180315690920328,
+     "cost": 3.764451822055405,
+     "traversals": 4,
+     "clock": 6856
+    },
+    {
+     "repeat": 4,
+     "says": "the dog chased the cat around the garden",
+     "probability": 0.016402424010878717,
+     "cost": 4.110326149532762,
+     "traversals": 5,
+     "clock": 6861
+    },
+    {
+     "repeat": 5,
+     "says": "the frog jumps into the pond",
+     "probability": 0.024492102900534572,
+     "cost": 3.709404543981552,
+     "traversals": 4,
+     "clock": 6865
+    },
+    {
+     "repeat": 6,
+     "says": "the baker bakes bread every morning",
+     "probability": 0.02198262154504758,
+     "cost": 3.817503067553307,
+     "traversals": 4,
+     "clock": 6869
+    },
+    {
+     "repeat": 7,
+     "says": "the pen is mightier than the sword",
+     "probability": 0.016006105726836327,
+     "cost": 4.134785021608872,
+     "traversals": 4,
+     "clock": 6873
+    },
+    {
+     "repeat": 8,
+     "says": "the doctor heals the sick",
+     "probability": 0.0446883993117438,
+     "cost": 3.1080413342718023,
+     "traversals": 4,
+     "clock": 6877
+    },
+    {
+     "repeat": 9,
+     "says": "the moon orbits the earth",
+     "probability": 0.01606515080744945,
+     "cost": 4.131102899128812,
+     "traversals": 4,
+     "clock": 6881
+    },
+    {
+     "repeat": 10,
+     "says": "the train arrives at the station",
+     "probability": 0.016887435226475025,
+     "cost": 4.081185411293108,
+     "traversals": 4,
+     "clock": 6885
+    },
+    {
+     "repeat": 11,
+     "says": "the moon orbits the earth",
+     "probability": 0.03739879330892188,
+     "cost": 3.2861168395494893,
+     "traversals": 4,
+     "clock": 6889
+    },
+    {
+     "repeat": 12,
+     "says": "the moon orbits the earth",
+     "probability": 0.058169960318457135,
+     "cost": 2.8443862032247824,
+     "traversals": 4,
+     "clock": 6893
+    },
+    {
+     "repeat": 13,
+     "says": "the earth orbits the sun",
+     "probability": 0.014809319676520253,
+     "cost": 4.212498588521886,
+     "traversals": 4,
+     "clock": 6897
+    },
+    {
+     "repeat": 14,
+     "says": "the doctor heals the sick",
+     "probability": 0.05981078333268023,
+     "cost": 2.816569310992874,
+     "traversals": 4,
+     "clock": 6901
+    },
+    {
+     "repeat": 15,
+     "says": "the owl hunts at night",
+     "probability": 0.03927859758662771,
+     "cost": 3.2370754991213317,
+     "traversals": 3,
+     "clock": 6904
+    },
+    {
+     "repeat": 16,
+     "says": "the ship sails across the ocean",
+     "probability": 0.014759160402527427,
+     "cost": 4.215891344725327,
+     "traversals": 5,
+     "clock": 6909
+    },
+    {
+     "repeat": 17,
+     "says": "the road leads to the village",
+     "probability": 0.016599798290171185,
+     "cost": 4.098364734887973,
+     "traversals": 4,
+     "clock": 6913
+    },
+    {
+     "repeat": 18,
+     "says": "the doctor heals the sick",
+     "probability": 0.0743534848210063,
+     "cost": 2.598924736683354,
+     "traversals": 4,
+     "clock": 6917
+    },
+    {
+     "repeat": 19,
+     "says": "the frog jumps into the pond",
+     "probability": 0.03677697511814612,
+     "cost": 3.3028833057615827,
+     "traversals": 4,
+     "clock": 6921
+    },
+    {
+     "repeat": 20,
+     "says": "the wolf howls at the moon",
+     "probability": 0.017405282115325802,
+     "cost": 4.050981548983346,
+     "traversals": 4,
+     "clock": 6925
+    },
+    {
+     "repeat": 21,
+     "says": "the doctor heals the sick",
+     "probability": 0.08841505883371045,
+     "cost": 2.4257129750486186,
+     "traversals": 4,
+     "clock": 6929
+    },
+    {
+     "repeat": 22,
+     "says": "the owl hunts at night",
+     "probability": 0.05215380295155959,
+     "cost": 2.953558176866048,
+     "traversals": 3,
+     "clock": 6932
+    },
+    {
+     "repeat": 23,
+     "says": "the owl hunts at night",
+     "probability": 0.06872832651914357,
+     "cost": 2.6775938427680215,
+     "traversals": 3,
+     "clock": 6935
+    },
+    {
+     "repeat": 24,
+     "says": "the baker bakes bread every morning",
+     "probability": 0.032306525465288755,
+     "cost": 3.432486042369064,
+     "traversals": 4,
+     "clock": 6939
+    },
+    {
+     "repeat": 25,
+     "says": "the sailor steers the ship home",
+     "probability": 0.015325667725476127,
+     "cost": 4.178226227115502,
+     "traversals": 4,
+     "clock": 6943
+    },
+    {
+     "repeat": 26,
+     "says": "the bees make honey from the flowers",
+     "probability": 0.013289648711019819,
+     "cost": 4.3207698391857265,
+     "traversals": 5,
+     "clock": 6948
+    },
+    {
+     "repeat": 27,
+     "says": "the frog jumps into the pond",
+     "probability": 0.04829755412296514,
+     "cost": 3.0303743588819056,
+     "traversals": 4,
+     "clock": 6952
+    },
+    {
+     "repeat": 28,
+     "says": "the dog chased the cat around the garden",
+     "probability": 0.026082769285965583,
+     "cost": 3.6464803632830147,
+     "traversals": 5,
+     "clock": 6957
+    },
+    {
+     "repeat": 29,
+     "says": "the train arrives at the station",
+     "probability": 0.0275866411626281,
+     "cost": 3.5904236392793214,
+     "traversals": 4,
+     "clock": 6961
+    },
+    {
+     "repeat": 30,
+     "says": "the train arrives at the station",
+     "probability": 0.04276416199974944,
+     "cost": 3.1520548636108248,
+     "traversals": 4,
+     "clock": 6965
+    }
+   ],
+   "distinct": 15,
+   "before": [
+    {
+     "option": "e b",
+     "share": 0.14782957256660914,
+     "seen": 5.241942779900634
+    },
+    {
+     "option": "e c",
+     "share": 0.11297170579924135,
+     "seen": 4.00590495707861
+    },
+    {
+     "option": "e f",
+     "share": 0.09868287217254705,
+     "seen": 3.4992319892669603
+    },
+    {
+     "option": "e do",
+     "share": 0.09378363514496961,
+     "seen": 3.3255081550039622
+    },
+    {
+     "option": "e s",
+     "share": 0.09377957914872348,
+     "seen": 3.3253643319523998
+    },
+    {
+     "option": "e w",
+     "share": 0.07490441408554187,
+     "seen": 2.65606296346068
+    },
+    {
+     "option": "e r",
+     "share": 0.06866972197195718,
+     "seen": 2.434984739785354
+    },
+    {
+     "option": "e h",
+     "share": 0.05051416709829169,
+     "seen": 1.7912002917026224
+    },
+    {
+     "option": "e mo",
+     "share": 0.04355849332373497,
+     "seen": 1.5445565161112869
+    },
+    {
+     "option": "e t",
+     "share": 0.04291049802120469,
+     "seen": 1.5215790141234649
+    },
+    {
+     "option": "e p",
+     "share": 0.040069012651054184,
+     "seen": 1.4208217470783857
+    },
+    {
+     "option": "e ear",
+     "share": 0.038072802685641796,
+     "seen": 1.3500374091838534
+    },
+    {
+     "option": "e goat climb",
+     "share": 0.0279696343147791,
+     "seen": 0.9917854736862972
+    },
+    {
+     "option": "e owl hunts ",
+     "share": 0.0266043359062271,
+     "seen": 0.9433728590053324
+    },
+    {
+     "option": "e leaves fal",
+     "share": 0.022130888786924256,
+     "seen": 0.7847472645375482
+    },
+    {
+     "option": "e quick brow",
+     "share": 0.017548666322552555,
+     "seen": 0.622264565399736
+    }
+   ],
+   "after": [
+    {
+     "option": "e do",
+     "share": 0.1730760366482807,
+     "seen": 11.256575346770392
+    },
+    {
+     "option": "e b",
+     "share": 0.12589840158087798,
+     "seen": 8.188221032083517
+    },
+    {
+     "option": "e f",
+     "share": 0.09930717167281518,
+     "seen": 6.458772005978974
+    },
+    {
+     "option": "e s",
+     "share": 0.08136645449452035,
+     "seen": 5.291937829489413
+    },
+    {
+     "option": "e owl hunts ",
+     "share": 0.07562653593625478,
+     "seen": 4.918623146609633
+    },
+    {
+     "option": "e mo",
+     "share": 0.06942221163202772,
+     "seen": 4.515104292360295
+    },
+    {
+     "option": "e t",
+     "share": 0.06922911719019412,
+     "seen": 4.5025457534912805
+    },
+    {
+     "option": "e c",
+     "share": 0.061082800475841484,
+     "seen": 3.972722967682322
+    },
+    {
+     "option": "e w",
+     "share": 0.055829943952903,
+     "seen": 3.631085983260315
+    },
+    {
+     "option": "e r",
+     "share": 0.05244615550200448,
+     "seen": 3.411010053670619
+    },
+    {
+     "option": "e p",
+     "share": 0.036939596306168776,
+     "seen": 2.4024894326917825
+    },
+    {
+     "option": "e ear",
+     "share": 0.03588569458055001,
+     "seen": 2.3339454308053327
+    },
+    {
+     "option": "e h",
+     "share": 0.027312562630075726,
+     "seen": 1.7763632973848018
+    },
+    {
+     "option": "e goat climb",
+     "share": 0.015122933482724966,
+     "seen": 0.9835702475579042
+    },
+    {
+     "option": "e leaves fal",
+     "share": 0.011965975502990146,
+     "seen": 0.7782469916429957
+    },
+    {
+     "option": "e quick brow",
+     "share": 0.009488408411770614,
+     "seen": 0.617110180452511
+    }
+   ],
+   "entropy_before": 3.761129289443582,
+   "entropy_after": 3.678680308306089,
+   "top_share_before": 0.14782957256660914,
+   "top_share_after": 0.1730760366482807
+  }
+ },
+ "corpus": {
+  "texts": 60,
+  "units": 1800
+ }
+}

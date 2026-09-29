@@ -1,0 +1,70 @@
+{
+ "experiment": "use",
+ "used": "forever. There is no x beyond which the unit stops responding. The vanishing",
+ "prefix_units": 8,
+ "settings": {
+  "seed": 1,
+  "life": 100000.0,
+  "decay": "half-life",
+  "min_seen": 0.5,
+  "depth": null,
+  "encoding": "char:3:1"
+ },
+ "arms": {
+  "said": {
+   "rounds": 20,
+   "gap": 10000,
+   "elapsed_lives": 2.0,
+   "traversals_said": 80,
+   "used_recited": true,
+   "says": "forever. There is no x beyond which the unit stops responding. The vanishing",
+   "clock": 498226,
+   "remembered": 7714,
+   "remembered_fraction": 0.10108634403952248,
+   "recited": 1,
+   "texts": 800,
+   "recited_fraction": 0.00125,
+   "bits_per_unit": 2.570488307675267,
+   "miss_rate": 0.0031796871373532005,
+   "total_seen": 33956.50866450867
+  },
+  "quiet": {
+   "rounds": 20,
+   "gap": 10000,
+   "elapsed_lives": 2.0,
+   "traversals_said": 0,
+   "used_recited": false,
+   "says": "forever. The network is learned from the one I would",
+   "clock": 498146,
+   "remembered": 7716,
+   "remembered_fraction": 0.10111255258088611,
+   "recited": 0,
+   "texts": 800,
+   "recited_fraction": 0.0,
+   "bits_per_unit": 2.5711186315011494,
+   "miss_rate": 0.0031748974531297072,
+   "total_seen": 33930.53015100083
+  },
+  "silent": {
+   "rounds": 20,
+   "gap": 10000,
+   "elapsed_lives": 2.0,
+   "traversals_said": 0,
+   "used_recited": false,
+   "says": "forever. The network is learned from the one I would",
+   "clock": 498146,
+   "remembered": 7716,
+   "remembered_fraction": 0.10111255258088611,
+   "recited": 0,
+   "texts": 800,
+   "recited_fraction": 0.0,
+   "bits_per_unit": 2.5711186315011494,
+   "miss_rate": 0.0031748974531297072,
+   "total_seen": 33930.53015100083
+  }
+ },
+ "corpus": {
+  "texts": 800,
+  "units": 55232
+ }
+}
