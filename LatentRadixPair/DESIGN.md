@@ -211,31 +211,46 @@ end.
 
 ## 10. Measurements
 
-Measured on this repository's Markdown files (82 files, 2.08 MB; every fifth file held out, 247 kB), on
-four cores. Bits per byte are the fold's, held out, with alpha 2, floor 0.02, smoothing 0. The raw-byte
-rows use the same fold over the last k bytes, so the only difference is what the context is.
+Measured on this repository's Markdown files on four cores. Bits per byte are the fold's on the held-out
+files, with alpha 2, floor 0.02, smoothing 0; the raw-byte rows use the same fold over the last k bytes, so
+the only difference between rows is what the context is.
+
+**The default tokenizer** (window 16, code 4,4:4,4:4,4, encoder width 256, predict 4, recency 0.6, 2,000
+steps of 256 windows; 84 files, 2.10 MB, every fifth file held out: 16 files, 567 kB):
 
 | context | contexts read | bits/byte | bits of context |
 |---|---|---|---|
-| latent code 16,16,16: predict 4, recency 0.6, 1,200 steps | 3,550 | **3.327** | 12 |
-| latent code 16,16,16: predict 1, recency 0.8, 600 steps | 3,779 | 3.515 | 12 |
-| latent code 16,16,16: reconstruction only (predict 0, recency 0.8), 600 steps | 4,135 | 3.521 | 12 |
-| raw bytes, last 0 (the root alone) | 0 | 4.807 | 0 |
-| raw bytes, last 1 | 162 | 3.797 | 8 |
-| raw bytes, last 2 | 5,046 | 2.975 | 16 |
-| raw bytes, last 3 | 38,840 | 2.387 | 24 |
+| latent code 16,16,16 | 3,564 | **3.189** | 12 |
+| raw bytes, last 0 (the root alone) | 0 | 4.868 | 0 |
+| raw bytes, last 1 | 162 | 3.892 | 8 |
+| raw bytes, last 2 | 4,885 | 3.025 | 16 |
+| raw bytes, last 3 | 36,603 | 2.408 | 24 |
 
-Read against the raw rows, 12 learned bits are worth about 13 raw bits with the predictive objective and
-about 11 without it: the objective, not the network, is what made the code a better key than the bytes
-it replaced. The gap to two raw bytes (16 bits) is the price of the smaller tree: 4,369 nodes against
-5,046 read contexts here, or 65,536 for a dense two-byte tree.
+Read against the raw rows, the 12 learned bits are worth about 14 raw bits. The gap to two raw bytes is
+the price of the smaller tree: 4,369 primed nodes against 65,536 for a dense two-byte tree (4,885 of them
+read here).
 
-Tokenizer training: 1,200 steps of 256 windows take about 115 s on four cores (0.1 s a step; 329 k parameters).
-The reconstruction loss on evaluation windows fell to 2.71 bits per byte; the next-byte head reached 3.63
-bits from all three symbols and 4.11 from the first alone, which is the coarse-to-fine ordering at work.
+**Shape and objective** (an earlier split of 82 files with 247 kB held out, on which raw last-1 scored
+3.797 and raw last-2 2.975; encoder width 128 and peak rate 2e-3 unless said):
 
-Throughput: reading (encoder plus counting) 102,000 bytes/s, scoring 38,000 bytes/s, encoding alone
-110,000 bytes/s, greedy prediction 21,000 bytes/s (one encoder pass per byte).
+| tokenizer | steps | bits/byte |
+|---|---|---|
+| reconstruction only (predict 0, recency 0.8) | 600 | 3.521 |
+| predict 1, recency 0.8 | 600 | 3.515 |
+| predict 4, recency 0.6 | 1,200 | 3.327 |
+| predict 4, recency 0.6, binary dimensions (2,2,2,2 per symbol) | 1,200 | 3.371 |
+| predict 4, recency 0.6, encoder width 256, peak rate 3e-3 (the default) | 1,200 | 3.235 |
+
+A code trained only to reconstruct its window was worth about 11 raw bits, no better a key than the bytes
+it replaced; the objective, more than the network, is what made it one.
+
+**Training** the default tokenizer (412 k parameters) takes 220 s for 2,000 steps (0.11 s a step). The
+reconstruction loss on evaluation windows fell to 2.43 bits per byte; the next-byte head reached 3.23 bits
+from all three symbols and 3.89 from the first alone, which is the coarse-to-fine ordering at work.
+
+**Throughput** with the default tokenizer: reading (encoder plus counting) 43,000 bytes/s, scoring
+24,500 bytes/s, encoding alone 35,000 bytes/s, greedy prediction 11,000 bytes/s (one encoder pass per
+byte). The width-128 encoder is about 2.5 times faster at 0.09 more bits per byte.
 
 ## 11. Limits and next steps
 

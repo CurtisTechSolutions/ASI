@@ -44,19 +44,21 @@ bin/latentpair bench --tokenizer tok.json.gz corpus/*.txt              # held-ou
 
 ## What the numbers say
 
-Held out: every fifth of this repository's 82 Markdown files (2.08 MB), the rest read; bits per byte of the
-fold with alpha 2, floor 0.02, smoothing 0. The raw rows use the same fold over the last k bytes.
+Held out: every fifth of this repository's 84 Markdown files (2.10 MB; 16 files, 567 kB held out), the rest
+read; bits per byte of the fold with alpha 2, floor 0.02, smoothing 0. The raw rows use the same fold over
+the last k bytes.
 
 | context | contexts read | bits/byte | bits of context |
 |---|---|---|---|
-| latent code 16,16,16 (1,200 training steps) | 3,550 | **3.327** | 12 |
-| raw bytes, last 1 | 162 | 3.797 | 8 |
-| raw bytes, last 2 | 5,046 | 2.975 | 16 |
-| raw bytes, last 3 | 38,840 | 2.387 | 24 |
+| latent code 16,16,16 (the default tokenizer, 2,000 steps) | 3,564 | **3.189** | 12 |
+| raw bytes, last 1 | 162 | 3.892 | 8 |
+| raw bytes, last 2 | 4,885 | 3.025 | 16 |
+| raw bytes, last 3 | 36,603 | 2.408 | 24 |
 
-Twelve learned bits of context are worth about thirteen raw bits; the same code trained to reconstruct
-its window alone was worth eleven. Training the tokenizer takes about 0.1 s a step on four cores; the
-model reads 100 kB/s and predicts 21 kB/s. DESIGN.md section 10 has the full table.
+Twelve learned bits of context are worth about fourteen raw bits; the same code trained only to
+reconstruct its window was worth eleven. Training the tokenizer takes 0.11 s a step on four cores (220 s
+for the default 2,000 steps); the model then reads 43 kB/s and predicts 11 kB/s. DESIGN.md section 10 has
+the full tables.
 
 ## Layout
 
