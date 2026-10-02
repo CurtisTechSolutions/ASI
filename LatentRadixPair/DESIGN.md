@@ -231,7 +231,10 @@ decode, fold, prediction and score to within floating-point noise, the codes and
 `latentpair serve` adds a JSON API and a React frontend (`rust/web/`, built with Vite and embedded in
 the binary): a card each for predicting,
 the fold with its levels, judging in outcome units, reading, scoring and training a tokenizer; the
-`rust/README.md` lists the endpoints.
+`rust/README.md` lists the endpoints. The same server answers ModelKit's HTTP API (`rust/src/kit.rs`):
+status with the list of routes it serves, train and 2NRL as polled jobs, predict with a beam, generate,
+score, feedback, checkpoints, a graph of the most-read context nodes; ModelKit's own React app then
+shows the tabs this model can serve and hides the rest (`latentpair serve --web <its dist>`).
 
 ## 10. Measurements
 

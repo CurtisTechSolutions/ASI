@@ -69,7 +69,8 @@ in Rust. DESIGN.md section 10 has the full tables.
 [`rust/`](rust/) is the same model in Rust, file-compatible with the Go implementation and checked
 against it by parity tests, with a React frontend (`latentpair serve`) that predicts, folds, judges in
 outcome units, reads, scores and trains tokenizers from the browser. `cd rust && make serve` builds both
-sides, makes a model if there is none, and serves it.
+sides, makes a model if there is none, and serves it. The server also speaks ModelKit's API, so
+`make serve-kit` drives this model from ModelKit's frontend (`rust/README.md`).
 
 ## Layout
 

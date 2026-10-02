@@ -26,7 +26,9 @@ const USAGE: &str = "latentpair: a trained context tokenizer under a primed radi
   latentpair info --model MODEL                             describe a model
   latentpair demo [--steps N] FILES...                      the whole loop on some files
   latentpair bench --tokenizer TOK FILES...                 held-out bits per byte against raw byte contexts
-  latentpair serve --model MODEL [--addr 127.0.0.1:8080]    the web frontend and JSON API
+  latentpair serve --model MODEL [--addr 127.0.0.1:8080]    the web frontend and JSON API (ModelKit's API too);
+                   [--web DIR] [--checkpoint-dir DIR]        --web serves a directory of static files instead, such as
+                                                             ModelKit's frontend/dist; --checkpoint-dir enables its checkpoints
 
 Flags take --name value; --text - reads standard input. Judgements take --strength and --outcomes
 (the potential outcomes of the space the verdict comes from; a verdict is worth strength/outcomes).
@@ -546,5 +548,13 @@ fn bench_cmd(a: &Args) -> Result<(), String> {
 fn serve_cmd(a: &Args) -> Result<(), String> {
     let path = a.get("model", "model.json.gz");
     let m = Model::load(&path)?;
-    serve::run(m, path, &a.get("addr", "127.0.0.1:8080"))
+    let opt = |name: &str| {
+        let v = a.get(name, "");
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    };
+    serve::run(m, path, serve::ServeOptions { addr: a.get("addr", "127.0.0.1:8080"), web: opt("web"), checkpoint_dir: opt("checkpoint-dir") })
 }

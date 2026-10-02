@@ -1,13 +1,17 @@
-//! The JSON API and the static frontend behind `latentpair serve`.
+//! The HTTP server behind `latentpair serve`: this model's own JSON API, the ModelKit API (`kit.rs`) as a
+//! superset of it, and a frontend: the embedded React app, or any directory of static files (`--web`),
+//! such as ModelKit's `frontend/dist`.
 //!
-//! One thread answers requests; the model sits behind a mutex. Training a new tokenizer runs on its own
-//! thread and swaps the finished model in, while progress is polled from the page.
+//! One thread answers requests; the model sits behind a mutex. Training a new tokenizer, and the ModelKit
+//! jobs, run on their own threads and take the lock a text at a time.
 
+use crate::kit::{self, Kit};
 use crate::model::Model;
 use crate::pair::{self, Settings};
 use crate::tokenizer::{self, Config, Options, Stat, Tokenizer};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Response, Server};
 
@@ -16,10 +20,8 @@ const INDEX_HTML: &str = include_str!("../web/dist/index.html");
 const APP_JS: &str = include_str!("../web/dist/app.js");
 const APP_CSS: &str = include_str!("../web/dist/app.css");
 
-struct State {
-    model: Model,
-    path: String,
-}
+/// The model and the path it is saved to.
+pub type Shared = Arc<Mutex<(Model, String)>>;
 
 #[derive(Default)]
 struct Progress {
@@ -31,45 +33,120 @@ struct Progress {
     params: usize,
 }
 
-type Shared = Arc<Mutex<State>>;
 type Prog = Arc<Mutex<Progress>>;
 
-/// Serves the model at addr until the process ends.
-pub fn run(model: Model, path: String, addr: &str) -> Result<(), String> {
-    let server = Server::http(addr).map_err(|e| format!("listen on {addr}: {e}"))?;
-    let state: Shared = Arc::new(Mutex::new(State { model, path }));
+/// How the server runs.
+pub struct ServeOptions {
+    pub addr: String,
+    /// A directory of static files to serve instead of the embedded frontend (ModelKit's `frontend/dist`).
+    pub web: Option<String>,
+    /// Enables the ModelKit checkpoint routes.
+    pub checkpoint_dir: Option<String>,
+}
+
+/// Serves the model until the process ends.
+pub fn run(model: Model, path: String, o: ServeOptions) -> Result<(), String> {
+    let server = Server::http(&o.addr).map_err(|e| format!("listen on {}: {e}", o.addr))?;
+    let state: Shared = Arc::new(Mutex::new((model, path)));
     let progress: Prog = Arc::new(Mutex::new(Progress::default()));
-    eprintln!("latentpair: serving http://{addr}/");
+    let kit = Arc::new(Kit::new(o.checkpoint_dir.clone()));
+    let web = o.web.as_ref().map(PathBuf::from);
+    if let Some(dir) = &web {
+        if !dir.join("index.html").is_file() {
+            return Err(format!("--web {}: no index.html there", dir.display()));
+        }
+        eprintln!("latentpair: serving the frontend from {}", dir.display());
+    }
+    eprintln!("latentpair: serving http://{}/ (ModelKit API included)", o.addr);
     for mut request in server.incoming_requests() {
         let mut body = String::new();
         if request.body_length().unwrap_or(0) > 0 {
             request.as_reader().read_to_string(&mut body).ok();
         }
-        let url = request.url().split('?').next().unwrap_or("/").to_string();
-        let response = match (request.method(), url.as_str()) {
-            (Method::Get, "/") | (Method::Get, "/index.html") => text_response(200, INDEX_HTML, "text/html; charset=utf-8"),
-            (Method::Get, "/app.js") => text_response(200, APP_JS, "application/javascript; charset=utf-8"),
-            (Method::Get, "/app.css") => text_response(200, APP_CSS, "text/css; charset=utf-8"),
-            (Method::Get, "/api/info") => json_result(info(&state, &progress)),
-            (Method::Get, "/api/tokenizer/progress") => json_result(Ok(progress_json(&progress))),
-            (Method::Post, p) => json_result(post(p, &body, &state, &progress)),
-            _ => text_response(404, "not found", "text/plain"),
+        let url = request.url().to_string();
+        let (path, query) = url.split_once('?').unwrap_or((url.as_str(), ""));
+        let method = request.method().to_string();
+        let response = if path.starts_with("/api/") || path.starts_with("/v1/") {
+            match (request.method(), path) {
+                (Method::Get, "/api/info") => json_result(info(&state, &progress)),
+                (Method::Get, "/api/tokenizer/progress") => json_result(Ok(progress_json(&progress))),
+                (Method::Post, p) if own_route(p) => json_result(post(p, &body, &state, &progress)),
+                _ => match kit::handle(&method, path, query, &body, &state, &kit) {
+                    Some(r) => json_result(r),
+                    None => json_error(404, &format!("no such route {method} {path}")),
+                },
+            }
+        } else if let Some(dir) = &web {
+            static_file(dir, path)
+        } else {
+            match (request.method(), path) {
+                (Method::Get, "/") | (Method::Get, "/index.html") => text_response(200, INDEX_HTML, "text/html; charset=utf-8"),
+                (Method::Get, "/app.js") => text_response(200, APP_JS, "application/javascript; charset=utf-8"),
+                (Method::Get, "/app.css") => text_response(200, APP_CSS, "text/css; charset=utf-8"),
+                _ => text_response(404, "not found", "text/plain"),
+            }
         };
         let _ = request.respond(response);
     }
     Ok(())
 }
 
-fn text_response(status: u16, body: &str, content_type: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    Response::from_string(body)
-        .with_status_code(status)
-        .with_header(Header::from_bytes("Content-Type", content_type).unwrap())
+/// The routes of this model's own API that are not ModelKit's (those answer as a superset in kit.rs).
+fn own_route(path: &str) -> bool {
+    matches!(path, "/api/fold" | "/api/decode" | "/api/read" | "/api/judge" | "/api/classes" | "/api/settings" | "/api/tokenizer/train")
 }
 
-fn json_result(r: Result<Value, String>) -> Response<std::io::Cursor<Vec<u8>>> {
+type Resp = Response<std::io::Cursor<Vec<u8>>>;
+
+fn text_response(status: u16, body: &str, content_type: &str) -> Resp {
+    Response::from_string(body).with_status_code(status).with_header(Header::from_bytes("Content-Type", content_type).unwrap())
+}
+
+fn json_result(r: Result<Value, String>) -> Resp {
     match r {
         Ok(v) => text_response(200, &v.to_string(), "application/json"),
-        Err(e) => text_response(400, &json!({ "error": e }).to_string(), "application/json"),
+        Err(e) => json_error(400, &e),
+    }
+}
+
+fn json_error(status: u16, message: &str) -> Resp {
+    text_response(status, &json!({ "error": message }).to_string(), "application/json")
+}
+
+fn mime_of(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "map" => "application/json",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// A file from the static directory, index.html for the root and for paths that are not files (a
+/// single-page app's routes), never anything outside the directory.
+fn static_file(dir: &Path, path: &str) -> Resp {
+    let rel = path.trim_start_matches('/');
+    let root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let mut target = if rel.is_empty() { root.join("index.html") } else { root.join(rel) };
+    if !target.is_file() {
+        target = root.join("index.html");
+    }
+    let Ok(canon) = target.canonicalize() else { return text_response(404, "not found", "text/plain") };
+    if !canon.starts_with(&root) {
+        return text_response(403, "forbidden", "text/plain");
+    }
+    match std::fs::read(&canon) {
+        Ok(bytes) => Response::from_data(bytes).with_status_code(200).with_header(Header::from_bytes("Content-Type", mime_of(&canon)).unwrap()),
+        Err(_) => text_response(404, "not found", "text/plain"),
     }
 }
 
@@ -79,37 +156,16 @@ fn parse<T: for<'a> Deserialize<'a>>(body: &str) -> Result<T, String> {
 
 fn info(state: &Shared, progress: &Prog) -> Result<Value, String> {
     let s = state.lock().unwrap();
-    let mut v = s.model.info();
-    v["model_path"] = json!(s.path);
+    let mut v = s.0.info();
+    v["model_path"] = json!(s.1);
     let p = progress.lock().unwrap();
-    v["training"] = if p.running {
-        json!(format!("step {}", p.stats.last().map_or(0, |s| s.step)))
-    } else {
-        Value::Null
-    };
+    v["training"] = if p.running { json!(format!("step {}", p.stats.last().map_or(0, |s| s.step))) } else { Value::Null };
     Ok(v)
 }
 
 fn progress_json(progress: &Prog) -> Value {
     let p = progress.lock().unwrap();
     json!({ "running": p.running, "done": p.done, "error": p.error, "stats": p.stats, "config": p.config, "params": p.params })
-}
-
-#[derive(Deserialize)]
-#[serde(default)]
-struct PredictReq {
-    prefix: String,
-    length: usize,
-    mode: String,
-    traversal: String,
-    backoff: String,
-    temperature: f64,
-    to_end: bool,
-}
-impl Default for PredictReq {
-    fn default() -> Self {
-        PredictReq { prefix: String::new(), length: 32, mode: "greedy".into(), traversal: "reward".into(), backoff: String::new(), temperature: 1.0, to_end: false }
-    }
 }
 
 #[derive(Deserialize)]
@@ -130,7 +186,6 @@ impl Default for FoldReq {
 #[serde(default)]
 struct TextsReq {
     texts: Vec<String>,
-    limit: usize,
 }
 
 #[derive(Deserialize)]
@@ -147,19 +202,6 @@ struct JudgeReq {
 impl Default for JudgeReq {
     fn default() -> Self {
         JudgeReq { kind: "reward".into(), text: String::new(), bad: String::new(), prefix: String::new(), strength: 0.0, outcomes: 0, read: true }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(default)]
-struct ScoreReq {
-    text: String,
-    traversal: String,
-    backoff: String,
-}
-impl Default for ScoreReq {
-    fn default() -> Self {
-        ScoreReq { text: String::new(), traversal: "reward".into(), backoff: String::new() }
     }
 }
 
@@ -185,35 +227,18 @@ impl Default for TrainTokReq {
     }
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct SaveReq {
-    path: String,
-}
-
 fn post(path: &str, body: &str, state: &Shared, progress: &Prog) -> Result<Value, String> {
     match path {
-        "/api/predict" => {
-            let r: PredictReq = parse(body)?;
-            let mut s = state.lock().unwrap();
-            let res = s.model.predict(&r.prefix, r.length, &r.mode, &r.traversal, r.temperature, r.to_end, &r.backoff, 4096)?;
-            let mut v = serde_json::to_value(&res).map_err(|e| e.to_string())?;
-            v["unit_names"] = json!(res.units.iter().map(|&u| pair::symbol(u)).collect::<Vec<_>>());
-            v["bits_per_unit"] = json!(res.cost / std::f64::consts::LN_2 / res.units.len().max(1) as f64);
-            Ok(v)
-        }
         "/api/fold" => {
             let r: FoldReq = parse(body)?;
             let mut s = state.lock().unwrap();
-            fold_json(&mut s.model, &r.prefix, &r.traversal, &r.backoff, r.top)
+            fold_json(&mut s.0, &r.prefix, &r.traversal, &r.backoff, r.top)
         }
         "/api/decode" => {
             let r: FoldReq = parse(body)?;
             let s = state.lock().unwrap();
-            let code = s.model.code(&r.prefix);
-            let decodes: Vec<Value> = (1..=s.model.tok.depth())
-                .map(|k| json!({ "known": k, "code": &code[..k], "text": s.model.tok.decode(&code, k).unwrap_or_default() }))
-                .collect();
+            let code = s.0.code(&r.prefix);
+            let decodes: Vec<Value> = (1..=s.0.tok.depth()).map(|k| json!({ "known": k, "code": &code[..k], "text": s.0.tok.decode(&code, k).unwrap_or_default() })).collect();
             Ok(json!({ "code": code, "decodes": decodes }))
         }
         "/api/read" => {
@@ -222,11 +247,12 @@ fn post(path: &str, body: &str, state: &Shared, progress: &Prog) -> Result<Value
                 return Err("no texts".into());
             }
             let mut s = state.lock().unwrap();
-            Ok(s.model.train(&r.texts))
+            Ok(s.0.train(&r.texts))
         }
         "/api/judge" => {
             let r: JudgeReq = parse(body)?;
             let mut s = state.lock().unwrap();
+            let m = &mut s.0;
             let mut watch: Vec<usize> = Vec::new();
             for t in [&r.text, &r.bad] {
                 if let Some(&b) = t.as_bytes().first() {
@@ -235,16 +261,16 @@ fn post(path: &str, body: &str, state: &Shared, progress: &Prog) -> Result<Value
                     }
                 }
             }
-            let before = s.model.fold(&r.prefix, "reward", "")?;
-            let before_pen = s.model.fold(&r.prefix, "punishment", "")?;
+            let before = m.fold(&r.prefix, "reward", "")?;
+            let before_pen = m.fold(&r.prefix, "punishment", "")?;
             let record = match r.kind.as_str() {
-                "reward" => s.model.reward(&[r.text.clone()], r.strength, None, r.read, &r.prefix, r.outcomes)?,
-                "punish" => s.model.punish(&[r.text.clone()], r.strength, None, &r.prefix, r.outcomes)?,
-                "two_nrl" => s.model.two_nrl(&[r.bad.clone()], &[r.text.clone()], r.strength, &r.prefix, r.outcomes)?,
+                "reward" => m.reward(&[r.text.clone()], r.strength, None, r.read, &r.prefix, r.outcomes)?,
+                "punish" => m.punish(&[r.text.clone()], r.strength, None, &r.prefix, r.outcomes)?,
+                "two_nrl" => m.two_nrl(&[r.bad.clone()], &[r.text.clone()], r.strength, &r.prefix, r.outcomes)?,
                 k => return Err(format!("kind must be reward, punish or two_nrl, got {k:?}")),
             };
-            let after = s.model.fold(&r.prefix, "reward", "")?;
-            let after_pen = s.model.fold(&r.prefix, "punishment", "")?;
+            let after = m.fold(&r.prefix, "reward", "")?;
+            let after_pen = m.fold(&r.prefix, "punishment", "")?;
             let changes: Vec<Value> = watch
                 .iter()
                 .flat_map(|&x| {
@@ -256,12 +282,6 @@ fn post(path: &str, body: &str, state: &Shared, progress: &Prog) -> Result<Value
                 .collect();
             Ok(json!({ "record": record, "changes": changes }))
         }
-        "/api/score" => {
-            let r: ScoreReq = parse(body)?;
-            let mut s = state.lock().unwrap();
-            let sc = s.model.score(&r.text, &r.traversal, &r.backoff)?;
-            serde_json::to_value(sc).map_err(|e| e.to_string())
-        }
         "/api/classes" => {
             let r: TextsReq = parse(body)?;
             if r.texts.is_empty() {
@@ -269,20 +289,13 @@ fn post(path: &str, body: &str, state: &Shared, progress: &Prog) -> Result<Value
             }
             let s = state.lock().unwrap();
             let texts: Vec<Vec<u8>> = r.texts.iter().map(|t| t.as_bytes().to_vec()).collect();
-            Ok(classes_json(&s.model.tok, &texts))
+            Ok(classes_json(&s.0.tok, &texts))
         }
         "/api/settings" => {
             let settings: Settings = parse(body)?;
             let mut s = state.lock().unwrap();
-            s.model.pair.configure(settings)?;
-            Ok(s.model.info())
-        }
-        "/api/save" => {
-            let r: SaveReq = parse(body)?;
-            let s = state.lock().unwrap();
-            let path = if r.path.is_empty() { s.path.clone() } else { r.path };
-            s.model.save(&path)?;
-            Ok(json!({ "saved": path }))
+            s.0.pair.configure(settings)?;
+            Ok(s.0.info())
         }
         "/api/tokenizer/train" => {
             let r: TrainTokReq = parse(body)?;
@@ -299,7 +312,7 @@ fn post(path: &str, body: &str, state: &Shared, progress: &Prog) -> Result<Value
             let mut cfg = Config { window: r.window, recency: r.recency, predict: r.predict, noise: r.noise, ..Config::default() };
             cfg.levels = tokenizer::parse_levels(&r.levels)?;
             cfg.validate()?;
-            let settings = state.lock().unwrap().model.pair.settings.clone();
+            let settings = state.lock().unwrap().0.pair.settings.clone();
             let (state, progress) = (state.clone(), progress.clone());
             std::thread::spawn(move || {
                 let outcome = (|| -> Result<(), String> {
@@ -317,7 +330,7 @@ fn post(path: &str, body: &str, state: &Shared, progress: &Prog) -> Result<Value
                     if r.read {
                         model.train_bytes(&texts);
                     }
-                    state.lock().unwrap().model = model;
+                    state.lock().unwrap().0 = model;
                     Ok(())
                 })();
                 let mut p = progress.lock().unwrap();

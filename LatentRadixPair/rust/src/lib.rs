@@ -4,6 +4,7 @@
 //! or model saved by one loads in the other. See ../DESIGN.md for the design.
 
 pub mod files;
+pub mod kit;
 pub mod model;
 pub mod nn;
 pub mod pair;

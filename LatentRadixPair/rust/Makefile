@@ -7,8 +7,10 @@ LEVELS ?= 4,4:4,4:4,4
 TOKENIZER ?= tokenizer.json.gz
 MODEL ?= model.json.gz
 ADDR ?= 127.0.0.1:8080
+KIT ?= ../../ModelKit/frontend/dist
+CHECKPOINTS ?= checkpoints
 
-.PHONY: build test demo tokenizer model bench serve fixtures frontend frontend-dev clean
+.PHONY: build test demo tokenizer model bench serve serve-kit fixtures frontend frontend-dev clean
 
 ## the binary embeds web/dist, so run `make frontend` first when the frontend changed (needs Node)
 build:
@@ -51,6 +53,15 @@ serve: frontend build
 		$(MAKE) model; \
 	fi
 	$(BIN) serve --model $(MODEL) --addr $(ADDR)
+
+## serve ModelKit's frontend (its build at KIT) over this model, with checkpoints in CHECKPOINTS
+serve-kit: build
+	@if [ ! -f "$(MODEL)" ]; then \
+		echo "no $(MODEL): making one from the documents"; \
+		if [ ! -f "$(TOKENIZER)" ]; then $(MAKE) tokenizer; fi; \
+		$(MAKE) model; \
+	fi
+	$(BIN) serve --model $(MODEL) --addr $(ADDR) --web $(KIT) --checkpoint-dir $(CHECKPOINTS)
 
 ## regenerate the parity fixtures from the Go implementation (needs Go)
 fixtures:

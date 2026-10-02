@@ -43,6 +43,33 @@ card per thing the model does:
 The **Save model** button writes the model back to its file. Light and dark follow the system; the Theme
 button overrides.
 
+## Using ModelKit's frontend
+
+The server also speaks the [ModelKit](../../ModelKit) HTTP API (the one RadixCyclicNN's servers answer),
+so ModelKit's React app can drive this model. Point the server at ModelKit's build:
+
+```sh
+target/release/latentpair serve --model model.json.gz --web ../../ModelKit/frontend/dist --checkpoint-dir checkpoints
+make serve-kit            # the same, with KIT=../../ModelKit/frontend/dist
+```
+
+`/api/status` reports `engine: "rust"` and lists the routes answered, and the app shows exactly the tabs
+those routes serve: **Train** (texts, epochs; a polled job), **Predict** (greedy, sample, and beam with
+the K best continuations), **Generate** (beam, sample, cheapest), **Score**, **2NRL** (negative then
+positive phases, a job; its strength is a verdict's strength, in this model's outcome units), **Checkpoints**
+(with `--checkpoint-dir`), **Model settings** (the encoding is the tokenizer's and read-only; the attention
+band and dynamic window say they do not apply), **Settings** and **Graph** (the most-read context nodes
+with their parent links). The tabs that need the kit's other machinery (Talk, Converse, Think, Negative,
+Evolve, Ollama, Tutor, Code, Agent, Images, Speech, Voice) are hidden, because their routes are not
+listed. `POST /api/feedback`, `/api/invert`, `/api/save`, `/api/load`, `/api/reset` and `/api/history`
+answer too, and this model's own routes stay as they are: `/api/predict`, `/api/score` and `/api/save`
+answer with both shapes at once.
+
+ModelKit lives on its own branch (`feat/modelkit`) and its build is a static directory, so any copy of
+`frontend/dist` works with `--web`; nothing of it is embedded here. Two things are the kit's to change,
+not this server's: its page title and tagline name RadixCyclicNN, and its "new model" card offers the
+kit's encodings (this server makes a fresh pair on the same tokenizer whatever encoding is chosen).
+
 ## The API
 
 All bodies and answers are JSON; errors come back as `{"error": "..."}` with status 400.
@@ -62,6 +89,13 @@ All bodies and answers are JSON; errors come back as `{"error": "..."}` with sta
 | `POST /api/tokenizer/train` | `texts[], steps, batch, lr, window, levels, recency, predict, noise, seed, read` | `started` |
 | `GET /api/tokenizer/progress` | | `running, done, error, stats[], config, params` |
 
+The ModelKit routes (`src/kit.rs`): `GET /api/health`, `/api/status`, `/api/model`, `/api/job`, `/api/history`,
+`/api/graph?limit=`, `/api/encoding`, `/api/model/attention`, `/api/model/window`, `/api/uploads`,
+`/api/checkpoints`; `POST /api/model/select`, `/api/train`, `/api/job/stop`, `/api/predict`, `/api/generate`,
+`/api/score`, `/api/2nrl`, `/api/feedback`, `/api/invert`, `/api/save`, `/api/load`, `/api/reset`,
+`/api/encoding/preview`, `/api/checkpoints/save`, `/api/checkpoints/restore`. Their bodies and answers
+are RadixCyclicNN's DESIGN.md section 12 on the `feat/modelkit` branch.
+
 The server answers on one thread and keeps the model behind a mutex; tokenizer training runs on its own
 thread and swaps the new model in when it finishes. It binds to localhost by default and has no
 authentication: put it behind something if it must be reachable from elsewhere.
@@ -74,7 +108,8 @@ authentication: put it behind something if it must be reachable from elsewhere.
 | `src/tokenizer.rs` | the network, its training, encode/decode, the tokenizer file |
 | `src/pair.rs` | the address space, count and reward trees, the fold, walks, scoring |
 | `src/model.rs` | reading, judging in outcome units, predicting, the model file |
-| `src/serve.rs` | the JSON API and the embedded frontend |
+| `src/serve.rs` | the JSON API, the embedded frontend, and `--web` for any static frontend such as ModelKit's |
+| `src/kit.rs` | the ModelKit API: status with the route list, jobs, beam, graph, checkpoints |
 | `src/bin/latentpair.rs` | the command line, the demo and the benchmark |
 | `web/src/` | the React frontend: `App.tsx`, a card per action in `cards/`, the SVG charts in `charts/`, the API types in `api.ts` |
 | `web/dist/` | the built frontend the binary embeds (committed so `cargo build` needs no Node) |
