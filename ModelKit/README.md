@@ -1,8 +1,8 @@
 # ModelKit
 
 Everything around a model: how it is taught, talked to, served and seen. The
-teaching loops, the LLM clients, the agent and its tools, speech, images and
-voice, the Model Context Protocol server, the command line, the HTTP API and
+teaching loops, the LLM clients, the agent and its tools, speech, images (and the
+diffusion codec that compresses them) and voice, the Model Context Protocol server, the command line, the HTTP API and
 the React frontend — broken out of [RadixCyclicNN](../RadixCyclicNN) so other
 directories and repositories can use them. RadixCyclicNN keeps the model
 itself: the graph, its four kinds, the encodings, training, the searches and
@@ -41,6 +41,7 @@ the part to reach for from anywhere:
 | `mcp` | a Model Context Protocol server over those tools (stdio) |
 | `archive` | ZIP uploads unpacked in memory, entry by entry |
 | `speech`, `vision`, `media` | audio and images as text a network can learn and predict, and back |
+| `codec` | the diffusion codec: Stable Diffusion run backwards as an image compressor - the encoder sends only what the generator cannot predict, step by step (a Pillow-only stand-in without torch) |
 | `critic`, `codegen`, `recall`, `chat`, `blame` | teaching loops that are *handed* a model rather than importing one: an LLM critic, code generation judged by a sandbox, the recall tutor, the LLM chat partner, and the tutor's verdicts turned into blame |
 
 ```python

@@ -4125,6 +4125,72 @@ documents that name a moved file point into `../ModelKit/`.
 
 ---
 
+### D-094 — Pictures are compressed by running the whole generator backwards: the diffusion codec
+
+**Status** Research claim · 2026-10-02 · **Layer** representation
+
+**Context — my reason** *"Let's iterate on the idea of Stable Diffusion more. I would like to reverse the process
+to compress images. This will be the encoder and decoder."* D-036 ran one part of Stable Diffusion backwards - the
+VAE - and got a latent 48 times smaller than the pixels, as text for the model. The rest of the generator, the
+denoising steps, holds what the VAE does not: a model of what pictures look like. A generator is a decoder that is
+sent nothing; it should be possible to send it *only what it cannot guess*.
+
+**Decision** The decoder is the generator, run from a fixed noise (a seed in the header), with one addition: at
+every step it adds a correction it is sent. The encoder is the same generator run on the same noise, comparing at
+every step what the generator predicts with the true latent of the picture and sending the quantised difference.
+The stream is the corrections and nothing else. A step is quantised at the precision the next step's noise would
+drown (`max(step, ntsr(t_next))`), so the early steps carry the gross shape in a few bits and the last step the
+detail; `step`, the last step's precision, is the quality knob. Each step is arithmetic-coded on its own (a coder
+written here, standard library only) and framed with its length, so the stream is **progressive**: cut it after
+any step and the decoder runs the rest of the generator uncorrected, and the diffusion fills in what was not sent.
+A caption can ride in the header as side information the generator conditions on.
+
+Two processes run the one algorithm. `sd` is Stable Diffusion itself (the UNet by DDIM, the VAE of D-036, CLIP for
+the prompt). `pyramid` is the stand-in without torch: resolution for the noise schedule, bicubic enlargement for
+the model - every level's prediction is the previous level enlarged, and the corrections are what the enlargement
+misses. It is the same loop with a different `predict`, which is the claim made concrete: the codec *is* the
+algorithm, and the model is what is plugged into it.
+
+**Rejected**
+* **DDIM inversion** - running the sampler backwards from the latent to a noise, and sending the noise. The noise
+  is the size of the latent, Gaussian and incompressible; nothing is gained until it is quantised, and then the
+  decode drifts with nothing to pull it back. Corrections along the trajectory are what keep it on the picture.
+* **Sending the full residual at one step.** The first step's prediction is garbage (a nearly pure noise divided
+  by `sqrt(alpha)`, about 0.07), so one correction there is the whole picture at full precision and the
+  generator's knowledge buys nothing. Spreading the corrections over the steps, each at the next step's precision,
+  is what lets every step's prediction remove what it can.
+* **zlib for the corrections.** It does not know a zero from a one, nor that a correction beside a large one is
+  likely large. The arithmetic coder with neighbour contexts is a hundred lines, and the stand-in's rate is what
+  makes it a codec rather than a demonstration.
+* **A noise schedule for the stand-in.** Adding Gaussian noise to a thumbnail and "denoising" it with a blur is the
+  shape of diffusion with none of its substance: a blur is a weak prior and the corrections are nearly the whole
+  signal. Resolution is the honest schedule for a fixed denoiser: cold diffusion, and a Laplacian pyramid when
+  read as a codec.
+
+**Consequences**
+* On a 256 x 192 test card the stand-in sits within a dB of JPEG at the same bytes from 1 to 3 bits per pixel
+  (33.3 dB against 32.3 at 3.1 bpp, 26.3 against 27.2 at 0.84) and above it at high rates, where JPEG cannot spend
+  the bytes. The `sd` process's rate is not measured here: it needs the weights (about four gigabytes) and a
+  machine to run them, and its tests run against a fake UNet, scheduler and VAE with the real interfaces. **The
+  claim that the trained generator beats the stand-in at the same bytes is the research claim**, and it is open
+  until measured.
+* Decoding needs the generator bit for bit: the same weights, torch version and device class for `sd` - a
+  different one drifts a little rather than failing, since every step's correction is added to the decoder's *own*
+  prediction - and the same Pillow resampling for the stand-in. A codec whose decoder is a neural network is only
+  as portable as the network's arithmetic.
+* The pure-Python coder runs about eight hundred thousand corrections a second; a megapixel picture through the
+  stand-in takes four seconds each way, through `sd` on a CPU minutes (ten UNet passes at a 128 x 96 latent).
+* `encode_text` wraps the stream as `img:rdc:<w>x<h>:<base64>`, the text form of D-036 - but an arithmetic-coded
+  stream is noise to a trigram model. The text the model trains on stays `img:sd:` / `img:tiny:` (D-036); the
+  codec is for compressing pictures, not for teaching them.
+* Python-only: the Go and Rust servers do not serve `/api/images/codec`, `/compress` or `/decompress`, and the
+  frontend has no tab for it. The `[diffusion]` extra gains `transformers`.
+
+**Lives in** `../ModelKit/modelkit/codec.py`, `../ModelKit/modelkit/cli.py` (`image codec | compress |
+decompress`), `../ModelKit/modelkit/api.py`, `../ModelKit/tests/test_codec.py`, `DESIGN.md` §21.1
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.

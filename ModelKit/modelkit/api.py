@@ -163,6 +163,11 @@ from .tutor import (
     plan_lessons,
     report_card,
 )
+from .codec import CodecError
+from .codec import decode as decode_codec
+from .codec import decode_text as decode_codec_text
+from .codec import describe as describe_codec
+from .codec import encode_text as encode_codec
 from .vision import VisionError
 from .vision import decode_text as decode_image_text
 from .vision import describe as describe_vision
@@ -192,6 +197,7 @@ _UPLOAD_PATH = "/api/uploads"
 _BINARY_ROUTES = {
     "/api/uploads": None,
     "/api/images/encode": "image",
+    "/api/images/compress": "image",
     "/api/speech/transcribe": "speech",
     "/api/speech/teach": "speech",
     "/api/voice/turn": "recording",
@@ -3594,6 +3600,55 @@ def _r_image_decode(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, result
 
 
+def _r_image_codec(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, describe_codec()
+
+
+def _r_image_compress(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """Image bytes (multipart, raw or JSON content_base64) -> the diffusion codec's stream, as base64 and as text."""
+    files = f.upload_files()
+    name, payload = files[0]
+    if not isinstance(payload, bytes):
+        raise ApiError(400, "send the image as bytes: multipart/form-data, a raw body, or JSON {name, content_base64}")
+    try:
+        step = float(_option(f, q, "step", 4.0))
+        size = int(_option(f, q, "size", 0) or 0) or None
+        steps = int(_option(f, q, "steps", 10))
+        seed = int(_option(f, q, "seed", 0))
+    except (TypeError, ValueError) as exc:
+        raise ApiError(400, "'step' must be a number; 'size', 'steps' and 'seed' integers") from exc
+    process = str(_option(f, q, "process", "auto") or "auto")
+    prompt = str(_option(f, q, "prompt", "") or "")
+    try:
+        result = encode_codec(payload, process=process, step=step, size=size, steps=steps, prompt=prompt, seed=seed)
+    except CodecError as exc:
+        raise ApiError(400, str(exc)) from exc
+    blob = result.pop("bytes")
+    result["content_base64"] = base64.b64encode(blob).decode("ascii")
+    result["name"] = name
+    return 200, result
+
+
+def _r_image_decompress(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    """``{content_base64}`` (the rdc bytes) or ``{text}`` (the text form) -> the picture as PNG."""
+    process = f.text("process", None) or None
+    try:
+        if f.present("content_base64"):
+            try:
+                blob = base64.b64decode(f.text("content_base64"), validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise ApiError(400, f"'content_base64' is not base64: {exc}") from exc
+            result = decode_codec(blob, process=process)
+        else:
+            result = decode_codec_text(f.text("text"), process=process)
+    except CodecError as exc:
+        raise ApiError(400, str(exc)) from exc
+    png = result.pop("png")
+    result.pop("image", None)
+    result["png_base64"] = base64.b64encode(png).decode("ascii")
+    return 200, result
+
+
 def _r_speech(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, describe_speech()
 
@@ -4941,6 +4996,15 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "{name, content_base64} + ?size=128&encoder=auto|sd|tiny&train=true&save_as=NAME -> {text, encoder, latent_shape, ...}"),
     ("POST", "/api/images/decode", _r_image_decode,
      "decode an encoded or predicted text back to an image: {text, encoder} -> {png_base64, width, height, repaired}"),
+    ("GET", "/api/images/codec", _r_image_codec,
+     "the diffusion codec: torch / diffusers / transformers availability, the configured diffusion model, what auto picks"),
+    ("POST", "/api/images/compress", _r_image_compress,
+     "compress an image with the diffusion codec (the generator run backwards, its predictions corrected step by step): "
+     "multipart / raw / JSON {name, content_base64} + ?process=auto|sd|pyramid&step=4&size=&steps=10&prompt=&seed=0 "
+     "-> {content_base64, text, process, width, height, size, bits_per_pixel, blocks, ...}"),
+    ("POST", "/api/images/decompress", _r_image_decompress,
+     "decompress a stream back to an image: {content_base64} or {text, process} -> {png_base64, width, height, blocks, "
+     "blocks_decoded, truncated}"),
     ("GET", "/api/speech", _r_speech,
      "the speech backends: faster-whisper / whisper / a transcription server, ffmpeg, the microphone recorders, "
      "the waveform codecs and the unique token"),

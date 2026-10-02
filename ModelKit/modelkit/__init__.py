@@ -14,8 +14,9 @@ Two layers, and the line between them is enforced by a test
   (:mod:`~modelkit.llm`, :mod:`~modelkit.ollama`, :mod:`~modelkit.chatgpt`),
   the agent's tools and browser (:mod:`~modelkit.tools`,
   :mod:`~modelkit.browser`), the MCP server over them (:mod:`~modelkit.mcp`),
-  archive uploads (:mod:`~modelkit.archive`), audio and images as text
-  (:mod:`~modelkit.speech`, :mod:`~modelkit.vision`, :mod:`~modelkit.media`),
+  archive uploads (:mod:`~modelkit.archive`), audio and images as text and
+  the diffusion codec (:mod:`~modelkit.speech`, :mod:`~modelkit.vision`,
+  :mod:`~modelkit.codec`, :mod:`~modelkit.media`),
   and the loops that are handed a model rather than importing one - the
   critic, code generation, the recall tutor, the LLM chat and blame
   (:mod:`~modelkit.critic`, :mod:`~modelkit.codegen`, :mod:`~modelkit.recall`,

@@ -14,7 +14,7 @@ dependencies = []
 
 [project.optional-dependencies]
 images = ["pillow"]
-diffusion = ["pillow", "torch", "diffusers"]
+diffusion = ["pillow", "torch", "diffusers", "transformers"]
 # Speech to text; the waveform encoder itself needs nothing, and the browser's
 # Web Speech API (or --text) supplies the words without any of these.
 speech = ["faster-whisper"]

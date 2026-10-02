@@ -57,6 +57,7 @@ runs the kit from `../ModelKit` (D-093).
 | Teach it by talking to it | `speech`, the Speech tab and `POST /api/speech/teach`: the browser records the microphone and dictates the words (Web Speech API; faster-whisper, openai-whisper or an OpenAI-compatible transcription server do it on the server side), and **one utterance becomes two texts behind the same unique token** - `<speech:9f2a1c7d> the cat sat on the mat` and `<speech:9f2a1c7d> aud:mu:8000x1:<base64>`, the waveform itself with every sample quantised to one mu-law byte. Both are trained on, so the words and the sound leave the same node of the graph; `speech decode` plays a predicted waveform back. |
 | Talk with it, by voice, all the time | the **Voice** tab, `POST /api/voice/turn` (and `/stream`) and `speech talk`: the microphone stays on, an endpointer cuts what you say into utterances and the browser's dictation writes the words down; every utterance is one turn - **heard** (the transcript and the waveform behind one token, or a model of acoustic units' units), **trained on at once**, **answered** by the model (the reply search picking up the end of your line) or by Ollama on its behalf (`answer: auto` - only when the model has nothing to say - `model`, `ollama`, `none`), **spoken** through the model's voice with the audio streamed in chunks the browser plays the moment the first one arrives, and a reply Ollama wrote **taught** to the model, so it learns to answer by itself. While it speaks it does not listen, so it never hears itself; then it listens again. D-089. |
 | Images as text | `image encode` / the Images tab run the Stable Diffusion VAE **backwards** (image -> compressed latent, 48x fewer numbers than the pixels), quantise it to bytes, base64-encode it and feed the text to the model; `decode` runs the forward process again so a predicted text becomes an image. Needs `pillow` (+ `torch`, `diffusers` and the VAE weights for the real encoder; a thumbnail stand-in works without them). |
+| Images compressed | `image compress` / `decompress`, `POST /api/images/compress` / `decompress`: the **diffusion codec** - the whole generator run backwards. The decoder runs Stable Diffusion's steps from a fixed noise; the encoder runs the same steps and, at every one, sends only the quantised difference between what the generator predicts and the true latent. The better it knows pictures, the fewer bits are left; the stream is progressive (cut it anywhere and the generator fills in the rest), the last step's quantisation is the quality knob, and a caption can ride in the header as side information. Without torch and diffusers the `pyramid` stand-in runs the same algorithm with resolution for noise and bicubic enlargement for the model, Pillow only - a real codec in its own right, within a dB of JPEG at the same bytes on a test card. D-094. |
 | External tools, browsing, exploring on its own | `agent` / `explore` and the Agent tab: the network calls tools by *writing* them (`<tool>web_fetch {"url": "..."}</tool>`) and reads the answer back as `<result>...</result>`, so a whole attempt is one training text. Ollama writes the acceptance criteria before anything is attempted, repairs the calls the network cannot write yet, judges the answer against those criteria and demonstrates with the same real tools when it failed; then 2NRL trains on the failures — the harder the worse they were — inverts, and fine-tunes on what was right. `explore` lets the network choose every task itself and follow what it finds. |
 | A real browser, and MCP | `--browser` draws each page in a headless **Chrome** over the WebDriver protocol (no driver library: `chromedriver` is started and spoken to with the standard library), so a page that renders itself with JavaScript is readable. `radixnet mcp` serves the tools **and** the network — predict, generate, score, judge against the negative network, solve a task through the agent loop — over the Model Context Protocol, so any MCP client can use this instance. |
 | Count / reward model | a second algorithm on the same graph, selectable at the top of the frontend (`--kind count` in the CLI, `POST /api/model/select`): every edge tracks how often training traversed it and a reward / penalty number, `weight = log(1 + traversals) + reward`, and one prediction returns the **top K and bottom K** continuations (beam search). |
@@ -299,6 +300,9 @@ at a time, and mutating requests answer 409 while it runs.
 | `GET /api/images` | `{"pillow","torch","diffusers","sd_model","sd_loaded","sd_error","encoders","default_size","auto","text_format"}` |
 | `POST /api/images/encode` | an image as multipart (`curl -F file=@photo.png`), a raw body, or JSON `{"name","content_base64"}` + `?size=128&encoder=auto\|sd\|tiny&train=true&save_as=photo.txt` (train settings `epochs`, `lr`, `batch_size`) -> `{"text","encoder","width","height","latent_shape","bytes","chars","source_size","name","upload","job"}` (202 with a train job) |
 | `POST /api/images/tutor` | the recall tutor: the same image forms, or `{"texts": ["img:…"]}` for pictures already encoded, + `size`, `encoder`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `blame` -> `{"modality","lessons","report","negative"}`; every lesson carries the mark out of 10, the agreement, the reason it failed and the facts behind it |
+| `GET /api/images/codec` | `{"pillow","torch","diffusers","transformers","sd_model","sd_vae","sd_loaded","sd_error","processes","default_step","default_steps","auto","format","text_format"}` - the diffusion codec (D-094) |
+| `POST /api/images/compress` | the same image forms as `/encode` + `?process=auto\|sd\|pyramid&step=4&size=&steps=10&prompt=&seed=0` -> `{"content_base64","text","process","width","height","size","header_bytes","bits_per_pixel","blocks","source_size", ...}` (the rdc bytes and the `img:rdc:` text form) |
+| `POST /api/images/decompress` | `{"content_base64"}` (the rdc bytes) or `{"text", "process"}` -> `{"png_base64","process","width","height","blocks","blocks_decoded","truncated","source_size","prompt"}` (a cut-off stream decodes its complete blocks and the generator runs the rest free) |
 | `POST /api/images/decode` | `{"text", "encoder"}` -> `{"png_base64","encoder","width","height","bytes","repaired"}` (a cut-off or rambling prediction is padded / truncated) |
 | `GET /api/speech` | `{"backends", "faster_whisper", "whisper", "whisper_model", "server_url", "server_model", "auto", "ffmpeg", "recorders", "codecs", "default_rate", "token", "token_example", "text_format", "formats"}` |
 | `POST /api/speech/transcribe` | audio as multipart (`curl -F file=@clip.wav`), a raw body, or JSON `{name, content_base64}`; options from the query string or the body (`backend`, `language`, `asr_model`, `asr_url`, `transcript`) -> `{"transcript", "backend", "model", "language", "seconds"}` |
@@ -1703,6 +1707,86 @@ the correction, so **only the characters it actually got wrong** are blamed and
 the payload it did remember clears blame (see
 [the negative network](#the-negative-network-what-went-wrong-and-why)).
 
+### The diffusion codec: the whole generator run backwards (`image compress`)
+
+`image encode` runs one part of Stable Diffusion backwards - the VAE. `image
+compress` runs the whole generator backwards, and the result is a compressed
+file rather than a text for the model.
+
+Stable Diffusion makes a picture out of nothing in steps: from noise, at every
+step the model predicts the clean picture, the noise is reduced, the prediction
+improves, and the last latent is decoded into pixels. Nothing is sent in - all
+the information is the model's own. The codec keeps those steps and adds one
+thing. The **decoder** runs them from a fixed noise (a seed in the header) and
+at every step adds a correction it is sent. The **encoder** runs the same steps
+and, at every one, compares what the generator predicts with the true latent of
+the picture and sends only the difference, quantised. The stream is the
+corrections and nothing else:
+
+```
+noise -- step 1 -- step 2 -- ... -- step n -- latent -- VAE -- picture      the decoder
+          + c1      + c2             + cn
+c_k = quantise(true latent - what the generator predicts at step k)         the encoder
+```
+
+What the generator can guess is never sent, so the better it knows pictures,
+the fewer bits are left. Early steps are quantised coarsely - a correction the
+next step's noise would drown is not worth sending yet - and the last step
+finely, so the stream is **progressive**: cut it off after any step and the
+decoder runs the remaining steps with no corrections at all, and the diffusion
+fills in what was not sent. The last step's quantisation step is the quality
+knob (`--step`, default 4; smaller is better and bigger). Each step is
+arithmetic-coded (a zero flag, a sign and a unary magnitude, each with a
+context from the neighbouring corrections - written here, standard library
+only) and framed with its length, so a cut-off file still decodes every
+complete step.
+
+```bash
+python -m radixnet image compress photo.jpg --out photo.rdc --compare        # bytes, bits per pixel, PSNR, and JPEG at the same budget
+python -m radixnet image decompress photo.rdc --out back.png
+python -m radixnet image compress photo.jpg --step 16 --text-out photo.txt   # the text form, img:rdc:<w>x<h>:<base64>
+python -m radixnet image compress photo.jpg --process sd --steps 10 --prompt 'a grey cat on a sofa' --out photo.rdc
+python -m radixnet image codec                                               # what is available, what auto picks
+```
+
+Two processes run the algorithm. **`sd`** is Stable Diffusion itself: the UNet
+by DDIM (`$RADIXNET_SD_MODEL`, default
+`stable-diffusion-v1-5/stable-diffusion-v1-5`; `pip install torch diffusers
+transformers`) over the VAE of `image encode`, `--steps` DDIM steps from the
+noise of `--seed`, and a `--prompt` the generator conditions on, riding in
+the header as side information - a few bytes of caption that tell the
+generator what it is looking at. The picture is coded at its own size rounded
+to multiples of 8 (`--size` caps the long side). **`pyramid`** is the stand-in
+when torch is not there: the same algorithm with resolution for the noise
+schedule and bicubic enlargement for the model - every level's prediction is
+the previous level enlarged, and the corrections are what the enlargement
+misses (a cold diffusion, blur for noise, with a fixed denoiser). Pillow only,
+any size, and a real codec in its own right. `auto` (the default) picks `sd`
+when it loads.
+
+How the stand-in does on a 256 x 192 test card (gradients, a check, circles,
+lines, text, a little grain), against JPEG at the same byte budget:
+
+| `--step` | bytes | bits/pixel | PSNR | JPEG quality | JPEG bytes | JPEG PSNR |
+|---|---|---|---|---|---|---|
+| 2 | 48 414 | 7.88 | 40.8 dB | 95 | 26 321 | 33.5 dB |
+| 4 | 30 766 | 5.01 | 36.9 dB | 95 | 26 321 | 33.5 dB |
+| 8 | 19 221 | 3.13 | 33.3 dB | 91 | 18 878 | 32.3 dB |
+| 16 | 10 004 | 1.63 | 29.5 dB | 76 | 9 926 | 29.7 dB |
+| 32 | 5 162 | 0.84 | 26.3 dB | 38 | 5 104 | 27.2 dB |
+
+(JPEG cannot spend more than its quality-95 file, so the first two rows have
+no JPEG at the same budget; what the stand-in keeps there is the grain.)
+Bicubic enlargement is a weak model of pictures, and that is the point: the
+algorithm is the same, and what the `sd` process adds is a model that knows
+what pictures look like. Whether that wins at the same bytes is the open
+measurement (D-094). Decoding needs the same generator as encoding, bit for
+bit: the same weights, torch and device class for `sd` (a different one
+drifts a little, it does not fail), the same Pillow resampling for the
+stand-in. The pure-Python coder does about eight hundred thousand corrections
+a second: a megapixel picture through the stand-in takes four seconds each
+way. The codec is Python-only; the Go and Rust servers do not serve it.
+
 ## Speech: teach it by talking to it
 
 Say something and the network learns **two texts that start with the same
@@ -2863,7 +2947,7 @@ with the audio - which is what the page dictates anyway.
 | `POST /api/evolve/start`, `POST /api/evolve/stop`, `GET /api/evolve/history` | the self-upgrade loop, same bodies and records as the Python server: the model generates, a discriminator judges, 2NRL follows; `blatant_mode` picks how failures drive the update and `blame` lets the critic teach the negative network. The discriminator lives beside the model as `discriminator.json` |
 | `GET /api/ollama/models`, `POST /api/ollama/corpus`, `POST /api/ollama/review`, `POST /api/ollama/correct` | a corpus written to order (`train` starts a job on the lines), the adversarial review, which with `blame` teaches the negative network what failed and why, and the copy editor, whose `blame` teaches it only the characters that changed |
 | `POST /api/negative/auto`, `GET /api/negative/auto/history` | the Negative tab, automatic: a `critic` job of write → review → blame, same bodies and records as the Python server |
-| `GET /api/images`, `POST /api/images/encode`, `/decode`, `/tutor` | images as text, same bodies and results as the Python server. The **thumbnail encoder only**: the Stable Diffusion one needs torch and diffusers, so `encoder: "sd"` is refused here with a message naming the Python side |
+| `GET /api/images`, `POST /api/images/encode`, `/decode`, `/tutor` | images as text, same bodies and results as the Python server. The **thumbnail encoder only**: the Stable Diffusion one needs torch and diffusers, so `encoder: "sd"` is refused here with a message naming the Python side The **diffusion codec** (`/api/images/codec`, `/compress`, `/decompress`, D-094) is Python-only. |
 | `GET /api/speech`, `POST /api/speech/teach`, `/decode`, `/tutor` | the waveform as text and the recall tutor over it, same bodies and results as the Python server. **Transcription is Python-only** (faster-whisper / openai-whisper are Python packages), so send the words with the audio - which is what the browser's dictation does |
 | `POST /api/codegen/start`, `GET /api/codegen/history`, `POST /api/codegen/solve`, `POST /api/codegen/run` | code generation, same bodies and results as the Python server: the teacher writes, the sandbox runs, the judge decides and 2NRL follows. The sandbox is the same Python bootstrap both languages run, so a program sees the same interpreter, the same limits and the same isolation whichever server started it. The count model pushes by `strength` rather than `neg_lr` / `pos_lr` / `batch_size` |
 | `GET /api/tools`, `POST /api/tools/call` | the external tools the network can call by writing `<tool>name {...}</tool>`, and one direct call: the same names, parameters, descriptions and JSON schemas as the Python server, so a transcript written on one side is one the other reads. Browsing is the standard library either way, with the same guards (http / https only, no credentials, no private address unless allowed, a byte cap, redirects followed by hand) |
@@ -2907,8 +2991,8 @@ of any size goes straight to the upload directory and is validated from there,
 entry by entry, a client that announces the body with `Expect: 100-continue`
 (curl, for a large file) gets the nod before it sends, and only the routes
 that read JSON keep a cap (16 MiB) on what they will hold.  `rust/README.md`
-lists every module and the three things deliberately not ported (the torch
-backend, the Stable Diffusion encoder, local Whisper).
+lists every module and the things deliberately not ported (the torch
+backend, the Stable Diffusion encoder and the diffusion codec, local Whisper).
 
 ```bash
 make rust-build        # -> ../ModelKit/rust/target/release/radixnet{,-bench} (needs Rust 1.82+)
