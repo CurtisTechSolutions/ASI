@@ -783,7 +783,7 @@ func KindOfID(name string) string {
 	text := strings.ToLower(strings.TrimSpace(name))
 	text = strings.TrimPrefix(text, ModelIDPrefix)
 	switch text {
-	case "", "radixnet", "default", "active":
+	case "", "radixnet", "radixcyclicnn", "default", "active":
 		return ""
 	}
 	return text

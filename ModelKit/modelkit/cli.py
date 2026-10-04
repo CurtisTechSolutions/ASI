@@ -1411,8 +1411,24 @@ def cmd_talk(args: argparse.Namespace, console: Console) -> dict:
     from .assistant import ANTHROPIC, OPENAI, AskError, parse_request, respond, to_format
 
     dialect = args.format
-    model, origin = open_model(args, console, required=True)
-    pair = open_guard(args, console, model)
+    agent_config = None
+    if args.agent_config:
+        from .agent_config import load_agent_config
+
+        if dialect != OPENAI:
+            raise CliError("--agent-config uses the openai chat format; omit --format anthropic")
+        if args.save or args.out:
+            raise CliError("--save and --out apply to a local model, not --agent-config")
+        agent_config = load_agent_config(args.agent_config)
+        description = f"{agent_config.id} at {agent_config.base_url}"
+    else:
+        model, origin = open_model(args, console, required=True)
+        pair = open_guard(args, console, model)
+        description = origin.describe()
+    if args.max_tokens is None:
+        args.max_tokens = agent_config.max_tokens if agent_config else 60
+    if args.temperature is None:
+        args.temperature = agent_config.temperature if agent_config else 1.0
     if args.request:
         try:
             with open(args.request, encoding="utf-8") as fh:
@@ -1458,6 +1474,21 @@ def cmd_talk(args: argparse.Namespace, console: Console) -> dict:
             console.say(f"    [{event['stop_reason']}; {said} {units} said, {event['thinking_units']} thought]")
 
     def one(body: dict) -> dict:
+        if agent_config is not None:
+            doc = agent_config.request(body)
+            exchanges.append(doc)
+            if not console.json_mode:
+                for index, choice in enumerate(doc["choices"]):
+                    if index:
+                        console.say(f"--- choice {index + 1} ---")
+                    message = choice["message"]
+                    if message.get("reasoning_content") and not args.no_thinking:
+                        console.say("  · " + str(message["reasoning_content"]))
+                    console.say("model: " + (message_text(message) or message.get("refusal") or "(nothing to say)"))
+                    for call in message.get("tool_calls") or []:
+                        function = call.get("function", {})
+                        console.say(f"tool call: {function.get('name', '')} {function.get('arguments', '')}")
+            return doc
         try:
             ask = parse_request(body, dialect)
         except AskError as exc:
@@ -1476,12 +1507,19 @@ def cmd_talk(args: argparse.Namespace, console: Console) -> dict:
         exchanges.append(doc)
         return doc
 
+    def message_text(message: dict) -> str:
+        content = message.get("content")
+        if isinstance(content, list):
+            return "".join(part["text"] for part in content
+                           if isinstance(part, dict) and isinstance(part.get("text"), str))
+        return content if isinstance(content, str) else ""
+
     def spoken_text(doc: dict) -> str:
         """The reply's text, to carry the conversation on with."""
         if dialect == ANTHROPIC:
             return "".join(b.get("text", "") for b in doc.get("content", []) if b.get("type") == "text")
         message = doc["choices"][0]["message"] if doc.get("choices") else {}
-        return message.get("content") or ""
+        return message_text(message)
 
     history: list[dict] = []
     if args.request:
@@ -1495,7 +1533,7 @@ def cmd_talk(args: argparse.Namespace, console: Console) -> dict:
     else:
         interactive = sys.stdin.isatty() and not console.json_mode
         if interactive:
-            console.say(f"talking to {origin.describe()} ({dialect} format); an empty line or Ctrl-D ends it")
+            console.say(f"talking to {description} ({dialect} format); an empty line or Ctrl-D ends it")
         doc = None
         while True:
             if interactive:
@@ -5043,11 +5081,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="what to say (repeat for several turns of one conversation)")
     p.add_argument("--system", metavar="TEXT", help="a system prompt (accepted, and not read: the network cannot follow instructions)")
     p.add_argument("--request", metavar="FILE", help="a JSON request body in the --format shape, sent as it is")
+    p.add_argument("--agent-config", metavar="FILE",
+                   help="load agent.json and send messages to its chat server instead of opening a local model (openai format)")
     p.add_argument("--format", choices=("openai", "anthropic"), default="openai",
                    help="the dialect of the answer (and of --request): openai = Chat Completions, anthropic = Messages")
-    p.add_argument("--max-tokens", type=pos_int, default=60, metavar="N",
-                   help="units (characters, or words on a word model) the reply may add to the context it picks up")
-    p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature")
+    p.add_argument("--max-tokens", type=pos_int, default=None, metavar="N",
+                   help="units (characters, or words) the reply may add (default: agent config, or 60 locally)")
+    p.add_argument("--temperature", type=nonneg_float, default=None,
+                   help="sample: softmax temperature (default: agent config, or 1 locally)")
     p.add_argument("--stop", action="append", metavar="SEQ", help="a stop sequence: the reply is cut before it (repeatable)")
     p.add_argument("--n", type=pos_int, default=1, help="openai: how many alternative replies, each unheard by the last")
     p.add_argument("--tool", action="append", metavar="NAME",

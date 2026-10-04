@@ -68,7 +68,7 @@ func TestAssistantParsesBothDialects(t *testing.T) {
 		err.Error() != "messages[0].role must be user or assistant (got 'system')" {
 		t.Fatalf("a system role in a Messages list: %v", err)
 	}
-	if KindOfID("RadixNet-Count") != "count" || KindOfID("radixnet") != "" || KindOfID("") != "" {
+	if KindOfID("RadixNet-Count") != "count" || KindOfID("radixnet") != "" || KindOfID("") != "" || KindOfID(" RadixCyclicNN ") != "" {
 		t.Fatal("model ids")
 	}
 }

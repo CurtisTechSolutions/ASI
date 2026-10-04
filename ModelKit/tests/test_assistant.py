@@ -188,7 +188,7 @@ class TestParseAnthropic(unittest.TestCase):
 class TestIds(unittest.TestCase):
     def test_a_model_is_named_by_its_kind(self):
         self.assertEqual(A.model_id(trained()), "radixnet-count")
-        for name in ("", None, "radixnet", "default", "RadixNet"):
+        for name in ("", None, "radixnet", "default", "RadixNet", "radixcyclicnn", " RadixCyclicNN "):
             self.assertEqual(A.kind_of_id(name), "")
         for name in ("radixnet-count", "count", "RadixNet-Count", " radixnet-count "):
             self.assertEqual(A.kind_of_id(name), "count")

@@ -782,7 +782,7 @@ pub fn kind_of_id(name: &str) -> String {
     let text = name.trim().to_lowercase();
     let text = text.strip_prefix(MODEL_PREFIX).unwrap_or(&text).to_string();
     match text.as_str() {
-        "" | "radixnet" | "default" | "active" => String::new(),
+        "" | "radixnet" | "radixcyclicnn" | "default" | "active" => String::new(),
         _ => text,
     }
 }
@@ -2663,5 +2663,6 @@ mod tests {
         assert_eq!(doc.at("error").at("type").as_str(), Some("invalid_request_error"));
         assert_eq!(kind_of_id("RadixNet-Count"), "count");
         assert_eq!(kind_of_id("radixnet"), "");
+        assert_eq!(kind_of_id(" RadixCyclicNN "), "");
     }
 }

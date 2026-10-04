@@ -20,6 +20,7 @@ says how to use either from another project.
 | `llm.py` | provider-independent plumbing for the language models the network talks to, and `reader_text`: what a reader is shown of a text a model wrote (the words a model of sounds spells) |
 | `ollama.py` | a local Ollama server: training corpora from a prompt, and adversarial review |
 | `chatgpt.py` | ChatGPT over the hosted API, behind the same client interface |
+| `agent_config.py` | load an `agent.json` chat connection and send Chat Completions requests; the model-free client behind `talk --agent-config` |
 | `tools.py` | the external tools the network can call, and the text format it learns them in |
 | `browser.py` | a real browser behind the web tools — Chrome over the W3C WebDriver protocol |
 | `mcp.py` | an MCP server: the network's tools *and* the network itself, over the Model Context Protocol |

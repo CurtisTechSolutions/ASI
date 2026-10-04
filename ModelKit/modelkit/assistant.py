@@ -550,12 +550,12 @@ def kind_of_id(name: str | None) -> str:
     """The kind a requested model id names (``""``: whichever model is active).
 
     ``"radixnet-count"``, ``"count"``, ``"RadixNet-Count"`` all name the count
-    model; ``""``, ``"radixnet"`` and ``"default"`` name the active one.
+    model; ``""``, ``"radixnet"``, ``"radixcyclicnn"`` and ``"default"`` name the active one.
     """
     text = (name or "").strip().lower()
     if text.startswith(MODEL_PREFIX):
         text = text[len(MODEL_PREFIX):]
-    if text in ("", "radixnet", "default", "active"):
+    if text in ("", "radixnet", "radixcyclicnn", "default", "active"):
         return ""
     return text
 
