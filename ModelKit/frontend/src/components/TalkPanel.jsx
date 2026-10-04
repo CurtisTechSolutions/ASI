@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
+import { agentReply, parseAgentConfig, validateAgentConfig } from "../agent-config.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { fmtInt, fmtNum, parseInteger, parseNumber, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
@@ -75,6 +76,11 @@ export default function TalkPanel({ status }) {
   const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [agentConfig, setAgentConfig] = useState(null);
+  const [agentMaxTokens, setAgentMaxTokens] = useState("");
+  const [agentTemperature, setAgentTemperature] = useState("");
+  const [loadingAgent, setLoadingAgent] = useState(false);
+  const [agentError, setAgentError] = useState(null);
   const abort = useRef(null);
   const units = unitName(status);
   const kind = status ? status.kind : null;
@@ -87,6 +93,33 @@ export default function TalkPanel({ status }) {
     },
     [],
   );
+
+  async function loadAgent(event) {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // the same file can be selected again after an edit
+    if (!file || busy || loadingAgent) return;
+    setLoadingAgent(true);
+    setAgentError(null);
+    try {
+      const config = parseAgentConfig(await file.text());
+      setAgentConfig(config);
+      setAgentMaxTokens(String(config.max_tokens));
+      setAgentTemperature(String(config.temperature));
+      setMessages([]);
+      setError(null);
+    } catch (err) {
+      setAgentError(err.message);
+    } finally {
+      setLoadingAgent(false);
+    }
+  }
+
+  function useThisServer() {
+    setAgentConfig(null);
+    setAgentError(null);
+    setMessages([]);
+    setError(null);
+  }
 
   /** Change the reply being written (always the last message). */
   function patchLast(update) {
@@ -102,18 +135,31 @@ export default function TalkPanel({ status }) {
   async function send(event) {
     if (event) event.preventDefault();
     const said = draft.trim();
-    if (!said || busy) return;
+    if (!said || busy || loadingAgent) return;
     setError(null);
+    let connection = null;
+    if (agentConfig) {
+      try {
+        connection = validateAgentConfig({
+          ...agentConfig,
+          max_tokens: agentMaxTokens.trim() ? Number(agentMaxTokens) : NaN,
+          temperature: agentTemperature.trim() ? Number(agentTemperature) : NaN,
+        });
+      } catch (err) {
+        setError(err.message);
+        return;
+      }
+    }
     // the conversation so far, both sides heard; a reply with nothing to say is not a message the dialect takes
     const history = messages
       .filter((m) => !m.error && (m.role === "user" || m.text))
       .map((m) => ({ role: m.role, content: m.text }));
     const body = {
-      model: "",
+      model: connection ? connection.model : "",
       messages: [...history, { role: "user", content: said }],
-      max_tokens: parseInteger(maxTokens, 60),
-      temperature: parseNumber(temperature, 1),
-      thinking: { type: "enabled" },
+      max_tokens: connection ? connection.max_tokens : parseInteger(maxTokens, 60),
+      temperature: connection ? connection.temperature : parseNumber(temperature, 1),
+      thinking: connection ? true : { type: "enabled" },
       mode,
       context: parseInteger(context, 12),
       k: parseInteger(k, 5),
@@ -132,29 +178,34 @@ export default function TalkPanel({ status }) {
     const controller = new AbortController();
     abort.current = controller;
     try {
-      await api.talkStream(
-        body,
-        (name, data) => {
-          if (name === "content_block_delta") {
-            const delta = data.delta || {};
-            if (delta.type === "thinking_delta") patchLast((m) => ({ thinking: m.thinking + delta.thinking }));
-            else if (delta.type === "text_delta") patchLast((m) => ({ text: m.text + delta.text }));
-          } else if (name === "message_delta") {
-            const record = data.radixnet || {};
-            patchLast({
-              stop: data.delta ? data.delta.stop_reason : null,
-              stopSequence: data.delta ? data.delta.stop_sequence : null,
-              turn: record.turn || null,
-              guard: record.guard || null,
-              outputTokens: data.usage ? data.usage.output_tokens : null,
-            });
-          } else if (name === "error") {
-            patchLast({ error: data && data.error && data.error.message ? data.error.message : "the stream failed" });
-          }
-        },
-        controller.signal,
-      );
-      patchLast({ streaming: false });
+      if (connection) {
+        const doc = await api.agentTalk(connection, body, controller.signal);
+        patchLast(agentReply(doc));
+      } else {
+        await api.talkStream(
+          body,
+          (name, data) => {
+            if (name === "content_block_delta") {
+              const delta = data.delta || {};
+              if (delta.type === "thinking_delta") patchLast((m) => ({ thinking: m.thinking + delta.thinking }));
+              else if (delta.type === "text_delta") patchLast((m) => ({ text: m.text + delta.text }));
+            } else if (name === "message_delta") {
+              const record = data.radixnet || {};
+              patchLast({
+                stop: data.delta ? data.delta.stop_reason : null,
+                stopSequence: data.delta ? data.delta.stop_sequence : null,
+                turn: record.turn || null,
+                guard: record.guard || null,
+                outputTokens: data.usage ? data.usage.output_tokens : null,
+              });
+            } else if (name === "error") {
+              patchLast({ error: data && data.error && data.error.message ? data.error.message : "the stream failed" });
+            }
+          },
+          controller.signal,
+        );
+        patchLast({ streaming: false });
+      }
     } catch (err) {
       if (err && err.name === "AbortError") {
         patchLast({ streaming: false, stopped: true });
@@ -174,9 +225,47 @@ export default function TalkPanel({ status }) {
 
   return (
     <>
+      <div className="card wide">
+        <h2>Chat connection</h2>
+        <p className="muted">
+          Use this server, or load an agent.json file to choose a chat endpoint.
+          Changing the connection starts a new conversation. The file is read in your browser.
+        </p>
+        <label className="field">
+          <span>Load agent.json</span>
+          <input type="file" accept=".json,application/json" onChange={loadAgent} disabled={busy || loadingAgent} />
+        </label>
+        {agentConfig ? (
+          <>
+            <p role="status">Using <b>{agentConfig.id}</b></p>
+            <dl className="kv">
+              <dt>Server</dt><dd>{agentConfig.base_url}</dd>
+              <dt>Model</dt><dd>{agentConfig.model}</dd>
+              <dt>Timeout</dt><dd>{agentConfig.timeout} seconds</dd>
+            </dl>
+            <CheckField
+              label="Request JSON output"
+              checked={agentConfig.structured}
+              onChange={(structured) => setAgentConfig((config) => ({ ...config, structured }))}
+              disabled={busy || loadingAgent}
+              hint="RadixCyclicNN accepts this preference but does not enforce JSON output"
+            />
+            <div className="actions">
+              <button type="button" onClick={useThisServer} disabled={busy || loadingAgent}>Use this server</button>
+            </div>
+          </>
+        ) : (
+          <p role="status" className="muted">Using this server&apos;s active model.</p>
+        )}
+        {loadingAgent ? <p role="status">Reading agent.json…</p> : null}
+        <Alert message={agentError} onDismiss={() => setAgentError(null)} />
+      </div>
       <form className="card" onSubmit={send}>
         <h2>Talk</h2>
-        <p className="muted">
+        {agentConfig ? <p className="muted">
+          Send a message to <b>{agentConfig.id}</b>. Replies appear when complete.
+          Max tokens and temperature below override the loaded file for this conversation.
+        </p> : <p className="muted">
           The model in today&apos;s format: a conversation of messages goes in, an assistant message comes back -
           its <b>thinking</b> first, then the <b>text</b>, both streamed as they are produced. A reply is what{" "}
           <b>Converse</b> would say next after your line (the tail of it is picked up and continued), so it is a
@@ -184,7 +273,7 @@ export default function TalkPanel({ status }) {
           paths it weighed, what the negative network vetoed and why, where it caught itself repeating - and the
           text arrives one node of the walk at a time. A system prompt is accepted by the API and not read: the
           network continues text and cannot follow an instruction.
-        </p>
+        </p>}
         <label className="field">
           <span>
             Say something <em>(Enter sends, Shift+Enter starts a new line)</em>
@@ -194,7 +283,7 @@ export default function TalkPanel({ status }) {
             rows={2}
             placeholder="tell me about the cat"
             spellCheck={false}
-            disabled={busy}
+            disabled={busy || loadingAgent}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -207,9 +296,9 @@ export default function TalkPanel({ status }) {
         <div className="row">
           <NumberField
             label="Max tokens"
-            hint={`${units} the reply may add - a token is one ${unitName(status, false)}`}
-            value={maxTokens}
-            onChange={setMaxTokens}
+            hint={agentConfig ? "maximum reply length" : `${units} the reply may add - a token is one ${unitName(status, false)}`}
+            value={agentConfig ? agentMaxTokens : maxTokens}
+            onChange={agentConfig ? setAgentMaxTokens : setMaxTokens}
             min={1}
             step={1}
           />
@@ -235,7 +324,8 @@ export default function TalkPanel({ status }) {
               ["sample", "sample (a stochastic walk)"],
             ]}
           />
-          <NumberField label="Temperature" value={temperature} onChange={setTemperature} min={0} disabled={mode !== "sample"} />
+          <NumberField label="Temperature" value={agentConfig ? agentTemperature : temperature}
+            onChange={agentConfig ? setAgentTemperature : setTemperature} min={0} disabled={!agentConfig && mode !== "sample"} />
         </div>
         <CheckField label="Show the thinking" hint="the search's trace, as it happens" checked={showThinking} onChange={setShowThinking} />
         <CheckField
@@ -259,7 +349,7 @@ export default function TalkPanel({ status }) {
           disabled={busy || !explore || explore === "0"}
         />
         <div className="actions">
-          <button type="submit" className="primary" disabled={busy || !draft.trim()}>
+          <button type="submit" className="primary" disabled={busy || loadingAgent || !draft.trim()}>
             {busy ? "Replying…" : "Send"}
           </button>
           <button type="button" disabled={!busy} onClick={() => abort.current && abort.current.abort()}>
@@ -286,7 +376,7 @@ export default function TalkPanel({ status }) {
           <p className="muted">Newest first: the latest reply is at the top and the conversation grows downwards.</p>
         ) : null}
         {messages.length === 0 ? (
-          <p className="muted">Say something above; the {kind || "active"} model answers here, thinking first.</p>
+          <p className="muted">Say something above; {agentConfig ? agentConfig.id : `the ${kind || "active"} model`} answers here.</p>
         ) : (
           <ol className="dialogue" aria-label="conversation" reversed>
             {newestFirst.map((m) => {
@@ -345,8 +435,9 @@ export default function TalkPanel({ status }) {
                       m.text || (m.streaming ? "" : m.error ? m.error : "(nothing to say)")
                     )}
                   </p>
+                  {m.toolCalls?.length ? <pre className="code wrap">{JSON.stringify(m.toolCalls, null, 2)}</pre> : null}
                   <div className="meta">
-                    {stopSays(m, units)}
+                    {stopSays(m, m.units || units)}
                     {turn ? (
                       <>
                         {" · "}cost {fmtNum(turn.cost, 3)} · p {fmtNum(turn.probability, 4)}
@@ -355,7 +446,7 @@ export default function TalkPanel({ status }) {
                         {turn.rethink ? <> · {rethinkSays(turn)}</> : null}
                       </>
                     ) : null}
-                    {Number.isFinite(m.outputTokens) ? <> · {fmtInt(m.outputTokens)} {units} written, thinking included</> : null}
+                    {Number.isFinite(m.outputTokens) ? <> · {fmtInt(m.outputTokens)} {m.units || units} written, thinking included</> : null}
                   </div>
                   <GuardNotice guard={m.guard} what="candidates" />
                 </li>
@@ -365,7 +456,7 @@ export default function TalkPanel({ status }) {
         )}
       </div>
 
-      <div className="card">
+      <div className="card wide">
         <h2>From any client</h2>
         <p className="muted">
           The same conversation is served in the two shapes every client speaks: <code>POST /v1/chat/completions</code>{" "}

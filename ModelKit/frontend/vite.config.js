@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Development: `npm run dev` serves the app on :5173 and proxies /api to the
+// Development: `npm run dev` serves the app on :5173 and proxies /api and /v1 to the
 // Python API started with `python -m radixnet serve` (127.0.0.1:8000, or
 // VITE_PROXY_TARGET — the Docker `dev` profile points it at http://api:8000).
 // Production: `npm run build` writes ./dist, which the Python server serves
@@ -12,6 +12,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
+        target: process.env.VITE_PROXY_TARGET || "http://127.0.0.1:8000",
+        changeOrigin: true,
+      },
+      "/v1": {
         target: process.env.VITE_PROXY_TARGET || "http://127.0.0.1:8000",
         changeOrigin: true,
       },

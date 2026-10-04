@@ -18,7 +18,7 @@ import unittest
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL = os.path.join(os.path.dirname(KIT), "RadixCyclicNN", "radixnet")
 
-MODEL_FREE = ("archive", "blame", "browser", "chat", "chatgpt", "codegen", "critic", "llm", "mcp", "media",
+MODEL_FREE = ("agent_config", "archive", "blame", "browser", "chat", "chatgpt", "codegen", "critic", "llm", "mcp", "media",
               "ollama", "recall", "speech", "tools", "vision")
 """The kit modules that need no model to load (see ``modelkit/__init__.py``)."""
 

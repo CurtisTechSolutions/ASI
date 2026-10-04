@@ -1134,7 +1134,7 @@ ollama pull llama3.2
 python -m radixnet tools list                                  # what the network can call
 python -m radixnet tools call --tool web_fetch --arg url=https://example.com
 python -m radixnet agent --tasks data/sample_tasks.txt         # solve a list of questions
-python -m radixnet agent --tasks data/sample_tasks.jsonl --rounds 3 --report agent.json
+python -m radixnet agent --tasks data/sample_tasks.jsonl --rounds 3 --report agent-report.json
 python -m radixnet explore --steps 20 --seed-url https://en.wikipedia.org/wiki/Cat
 python -m radixnet explore --steps 0                           # until Ctrl-C
 ```
@@ -1988,7 +1988,7 @@ for chunk in client.chat.completions.create(model="radixnet", stream=True,
 ```
 
 `model` names a kind (`radixnet-count`, `radixnet-radix`, `radixnet-resonant`,
-or just the kind); `""` and `"radixnet"` are whichever model is active, and a
+or just the kind); `""`, `"radixnet"` and `"radixcyclicnn"` are whichever model is active, and a
 kind not in memory is a 404 saying which ones are.  The dialogue's own dials
 travel in the same body by the names `/api/converse` uses (`mode`, `context`,
 `k`, `explore`, `guard`, `learn`, ...); the fields a client sends that mean
@@ -1998,6 +1998,91 @@ servers answer the same routes with the same documents (`radixnet talk` and
 `radixnet-count talk` are the same command), and
 `../ModelKit/tests/test_rust_parity_assistant.py` and `TestGoAssistantParity` hold them to
 Python's thinking and text.
+
+### Connecting with agent.json
+
+The Python `talk` command can load the supplied [agent.json](agent.json) to
+talk to a running server. The file describes a chat connection; it is separate
+from the graph saved in `model.json` and the `agent` command's training report.
+
+**In the frontend**, open **Talk → Chat connection → Load agent.json** and
+select the file. The card shows its agent ID, server, model and timeout; Max
+tokens and Temperature take the file's values and can be edited before sending.
+**Request JSON output** controls the `structured` preference. **Send** contacts
+that endpoint directly from the browser and displays the complete reply,
+thinking and usage; **Stop** cancels a request, and the configured timeout also
+ends it. The endpoint must be reachable from your browser and allow its origin
+(the RadixCyclicNN servers allow cross-origin requests).
+
+Loading a different file or choosing **Use this server** clears the conversation
+so earlier messages are not sent to the new endpoint. Returning to this server
+restores the existing streaming chat and its settings. The loaded connection
+lasts for this page session, is not uploaded to the model server, and is cleared
+on reload. A malformed file leaves the current connection in place and shows
+the error. Browser requests send no account credentials.
+
+```bash
+cd RadixCyclicNN
+# Train once, then keep the server running in this terminal:
+python -m radixnet --backend python train --data data/sample_corpus.txt --epochs 2
+python -m radixnet --backend python serve --port 8000
+
+# In another terminal, from RadixCyclicNN:
+python -m radixnet talk --agent-config agent.json --message "tell me about the cat"
+python -m radixnet --json talk --agent-config agent.json --message "the dog runs" --max-tokens 40
+```
+
+```json
+{
+  "id": "radixcyclicnn-v1",
+  "type": "chat",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "model": "radixcyclicnn",
+  "timeout": 60,
+  "max_tokens": 128,
+  "temperature": 0,
+  "structured": true
+}
+```
+
+`id` labels the connection, `type` must be `"chat"`, `base_url` is the API
+prefix (a bare host URL gets `/v1` appended), and `model` is the server's model
+name. These four strings are required. The other fields default to the values
+above: `timeout` is a positive number of seconds, `max_tokens` a positive
+integer, `temperature` a finite non-negative number (zero is preserved), and
+`structured` a boolean. Invalid files, unsupported fields and types, and bad
+URLs fail before a request is sent. Paths are relative to the current directory.
+
+`structured: true` sends `response_format: {"type": "json_object"}`; false
+leaves it out. **RadixCyclicNN currently accepts that request without enforcing
+JSON output.** The descriptor does not turn the model into an instruction
+follower or wrap its text in invented JSON. The reply stays in the normal Chat
+Completions envelope, including usage, thinking and tool calls. `--json`
+prints that envelope; it is independent of `structured`.
+
+`--max-tokens` and `--temperature` override the file for typed messages.
+`--request request.json` instead sends a complete request with the file supplying
+missing defaults; fields in that request win, including `response_format`.
+Repeat `--message` to carry on a conversation, or omit it to type at the prompt.
+Requests use `/chat/completions` beneath `base_url`, wait for a complete reply,
+and require no API key for the RadixCyclicNN server. No account credentials are
+read from the environment. Streaming request files, `--format anthropic`,
+`--save` and `--out` are rejected when using `--agent-config`.
+
+The loader is also available without a model installed:
+
+```python
+from modelkit.agent_config import load_agent_config
+
+agent = load_agent_config("agent.json")
+reply = agent.request({"messages": [{"role": "user", "content": "the cat sat"}]})
+print(reply["choices"][0]["message"]["content"])
+```
+
+The Python client can connect to any of the three RadixCyclicNN servers;
+`radixcyclicnn` selects the active model in Python, Go and Rust. The descriptor
+can also be supplied to external applications that understand this format.
+The `--agent-config` command-line option itself is currently Python-only.
 
 ## The negative network: what went wrong, and why
 

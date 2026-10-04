@@ -16,6 +16,7 @@ and Go servers can serve the page with zero npm steps. **Rebuild and recommit
 | `App.jsx` | the header, the status bar and the tabbed panels |
 | `api.js` | the fetch wrapper — JSON, and `{"error": ...}` turned into a thrown error; `converseStream` reads a route that answers as JSON Lines, one event at a time; `talkStream` reads a streamed reply from `/v1/messages` |
 | `sse.js` | server-sent events read out of a byte stream one frame at a time, for the Talk panel (`test/sse.test.mjs`) |
+| `agent-config.js` | validate an `agent.json` chat descriptor, send a request to its endpoint with timeout and cancellation, and adapt its reply to the Talk view (`test/agent-config.test.mjs`) |
 | `stream.js` | a streamed conversation, pure: `LineParser` cuts the chunks into whole lines, `applyEvent` folds the events of the turn being spoken into what the live bubble shows (`test/stream.test.mjs`) |
 | `util.js` | parsing and formatting helpers (`fmtInt`, `fmtNum`, `fmtBytes`, `fmtCounter`, `asArray`, `parseInteger`, `splitLines`, …) |
 | `thinking.js` | the THINK sentinel's records read for display: the one-line summary of a thought, the questions in a text, the request bodies of `/api/think` and `/api/ollama/think`, the Tutor tab's thinking settings and what a round learned from its teacher's thinking, which node ids are sentinels. Pure, and tested by `../test/thinking.test.mjs` |
@@ -51,7 +52,7 @@ with the API running from `../..`:
 python -m radixnet serve            # 127.0.0.1:8000
 ```
 
-`../vite.config.js` proxies every `/api/*` request to the Python server, so
+`../vite.config.js` proxies every `/api/*` and `/v1/*` request to the Python server, so
 there is no CORS or base-URL setup. `VITE_API_BASE` points a *build* at another
 host; empty (the default) means relative `/api/...` URLs, which is what both
 servers need.

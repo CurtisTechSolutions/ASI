@@ -9,6 +9,7 @@
 
 import { EventStreamParser } from "./sse.js";
 import { LineParser } from "./stream.js";
+import { requestAgentCompletion } from "./agent-config.js";
 
 /** Base URL prefix; empty by default so relative /api URLs work when the Python server serves dist. */
 export const API_BASE = String(import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
@@ -265,6 +266,7 @@ export const api = {
    */
   talk: (body) => post("/v1/messages", body),
   talkStream,
+  agentTalk: (config, body, signal) => requestAgentCompletion(config, body, { signal }),
   models: () => get("/v1/models"),
   score: (body) => post("/api/score", body),
   twoNrl: (body) => post("/api/2nrl", body),

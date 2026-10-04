@@ -1411,7 +1411,7 @@ class TestTodaysFormat(unittest.TestCase):
         self.assertEqual(doc["radixnet"]["choices"][0]["turn"]["text"], message["content"])
         self.assertEqual(doc["radixnet"]["units"], "chars")
         # the active model answers to any of its names, and to none
-        for name in ("", "radixnet", "count", "RadixNet-Count"):
+        for name in ("", "radixnet", "count", "RadixNet-Count", "radixcyclicnn"):
             status, again, _ = self.client.post("/v1/chat/completions", {**body, "model": name})
             self.assertEqual((status, again["choices"][0]["message"]["content"]), (200, message["content"]), name)
         # a conversation carried on: what was said is heard, and not said again
@@ -1512,11 +1512,14 @@ class TestTodaysFormat(unittest.TestCase):
         self.assertEqual(json.loads(text)["error"]["type"], "not_found_error")
 
     def test_learning_and_the_guard(self):
-        before = json.dumps(self.service.model.to_dict(), sort_keys=True)
+        before = self.service.model.to_dict()
+        before.pop("saved_at")  # serialization time is not model state
         body = {"messages": [{"role": "user", "content": "the cat sat on the mat"}], "n": 3, "learn": False}
         status, doc, _ = self.client.post("/v1/chat/completions", body)
         self.assertEqual(status, 200, doc)
-        self.assertEqual(json.dumps(self.service.model.to_dict(), sort_keys=True), before, "learn: false leaves the model as it was")
+        after = self.service.model.to_dict()
+        after.pop("saved_at")
+        self.assertEqual(after, before, "learn: false leaves the model as it was")
         self.assertIsNone(doc["radixnet"]["choices"][0]["guard"], "no negative network: nothing guards")
         said = doc["choices"][0]["message"]["content"]
         # the negative network guards the answer once it has been taught a failure

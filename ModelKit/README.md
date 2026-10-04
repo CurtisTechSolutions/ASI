@@ -37,6 +37,7 @@ the part to reach for from anywhere:
 | module | what |
 |---|---|
 | `llm`, `ollama`, `chatgpt` | one LLM client shape for a local Ollama and OpenAI's hosted models: list models, complete, chat; `reader_text` shows a reader the words a model of sounds spells |
+| `agent_config` | load `agent.json` connection settings and send chat requests to a running server; Python `talk --agent-config` uses it |
 | `tools`, `browser` | the agent's tools (calculator, web search and fetch, a Python sandbox, uploads) and the Chrome-over-WebDriver browser behind them |
 | `mcp` | a Model Context Protocol server over those tools (stdio) |
 | `archive` | ZIP uploads unpacked in memory, entry by entry |

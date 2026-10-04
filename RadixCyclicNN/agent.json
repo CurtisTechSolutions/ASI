@@ -1,0 +1,10 @@
+{
+  "id": "radixcyclicnn-v1",
+  "type": "chat",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "model": "radixcyclicnn",
+  "timeout": 60,
+  "max_tokens": 128,
+  "temperature": 0,
+  "structured": true
+}

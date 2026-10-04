@@ -30,6 +30,21 @@ same conversation is served to any client at `POST /v1/chat/completions`
 (OpenAI's dialect) and `POST /v1/messages` (Anthropic's); the last card shows
 the `curl`.
 
+**Talk → Chat connection → Load agent.json** selects a chat endpoint using the
+same descriptor as `python -m radixnet talk --agent-config`. The browser reads
+and validates the file, shows the ID, URL, model and timeout, and fills Max tokens
+and Temperature. Those fields and **Request JSON output** can override the
+file for this conversation. Requests go directly to the configured
+`/chat/completions` endpoint without credentials, return a complete reply,
+respect the timeout, and can be cancelled with **Stop**. Network and browser
+access errors are shown in the panel. The endpoint must permit the browser's
+origin; the RadixCyclicNN servers do.
+
+The connection lasts until reload or **Use this server**, which restores native
+streaming and its previous settings. A new connection starts a fresh conversation;
+invalid files leave the current connection intact. `structured: true` requests
+JSON output, which the current RadixCyclicNN model accepts but does not enforce.
+
 The Converse panel (`POST /api/converse`) lets the model talk to itself in a
 chat view that reads newest first: a new turn is appended to the top and pushes
 the older ones down, so the latest reply is where the eye already is and nothing
@@ -146,7 +161,7 @@ need an LLM.
        npm install
        npm run dev                         # http://localhost:5173
 
-   `vite.config.js` proxies every `/api/*` request to `http://127.0.0.1:8000`,
+   `vite.config.js` proxies every `/api/*` and `/v1/*` request to `http://127.0.0.1:8000`,
    so the app talks to the Python server without any CORS or base-URL setup.
 
 ## Production build
