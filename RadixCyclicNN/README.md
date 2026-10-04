@@ -2005,6 +2005,22 @@ The Python `talk` command can load the supplied [agent.json](agent.json) to
 talk to a running server. The file describes a chat connection; it is separate
 from the graph saved in `model.json` and the `agent` command's training report.
 
+**In the frontend**, open **Talk → Chat connection → Load agent.json** and
+select the file. The card shows its agent ID, server, model and timeout; Max
+tokens and Temperature take the file's values and can be edited before sending.
+**Request JSON output** controls the `structured` preference. **Send** contacts
+that endpoint directly from the browser and displays the complete reply,
+thinking and usage; **Stop** cancels a request, and the configured timeout also
+ends it. The endpoint must be reachable from your browser and allow its origin
+(the RadixCyclicNN servers allow cross-origin requests).
+
+Loading a different file or choosing **Use this server** clears the conversation
+so earlier messages are not sent to the new endpoint. Returning to this server
+restores the existing streaming chat and its settings. The loaded connection
+lasts for this page session, is not uploaded to the model server, and is cleared
+on reload. A malformed file leaves the current connection in place and shows
+the error. Browser requests send no account credentials.
+
 ```bash
 cd RadixCyclicNN
 # Train once, then keep the server running in this terminal:
