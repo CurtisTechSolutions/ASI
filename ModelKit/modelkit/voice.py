@@ -1,7 +1,8 @@
 """Speech from a walk: the model is heard as it traverses its graph.
 
 A model whose symbols are sounds (``--encoding phone:3:1``) emits phones as it
-walks; a model of words or letters emits text.  :class:`Speaker` takes either,
+walks; a model of words or letters emits text, and a model of tokens emits the
+bytes of text, which are read as the letters they spell.  :class:`Speaker` takes either,
 one step at a time, turns it into the tokens of the phonetic tokenizer
 (``../PhoneticTokenizer``) and feeds the formant synthesizer, which hands back
 16-bit PCM as soon as a word can be committed.  So the walk is audible while it
@@ -27,11 +28,12 @@ buttons sit on them.
 
 from __future__ import annotations
 
+import codecs
 import random
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
-from radixnet.encoding import ACOUSTIC, Encoding, acoustic_tokenizer, phonetic_tokenizer, phonetok_module
+from radixnet.encoding import ACOUSTIC, TOKENS, Encoding, acoustic_tokenizer, phonetic_tokenizer, phonetok_module, token_tokenizer
 from radixnet.graph import END, FIRST, START, RadixCyclicGraph
 from radixnet.penalty import DEFAULT_TRAVERSAL, traversal_costs
 from radixnet.search import sample_walk
@@ -49,7 +51,8 @@ class Speaker:
 
     ``encoding`` says what the pieces are: sounds pass straight through; words are
     transcribed as they come; letters are gathered into words at whitespace and
-    punctuation.  :meth:`feed` takes one emitted piece of text and returns the PCM
+    punctuation; tokens are turned back into their bytes, and the bytes into the
+    letters they spell as each character completes.  :meth:`feed` takes one emitted piece of text and returns the PCM
     that can be committed (often nothing yet); :meth:`end` closes the utterance.
     """
 
@@ -60,6 +63,7 @@ class Speaker:
         """Every token that reached the voice, for the record."""
         self._letters = ""  # the letters of the word being spelled out by a character model
         self._spoken_words = 0
+        self._text = codecs.getincrementaldecoder("utf-8")("replace")  # a token model's bytes, read as they complete
         if encoding.unit == ACOUSTIC:
             # acoustic units are spoken through the codebook's vocoder, at the codebook's rate;
             # its gain is a multiplier on the level the units were learned at, so the voice's
@@ -88,7 +92,12 @@ class Speaker:
             return self._feed_tokens(self.encoding.units(piece))
         if self.encoding.unit == "word":
             return self._feed_words(piece.split())
-        # letters: a word ends at whitespace; punctuation ends it too and becomes a pause
+        if self.encoding.unit == TOKENS:  # tokens: the text their bytes spell, spoken as a letter model's letters
+            return self._feed_letters(self._text.decode(token_tokenizer().bytes_of(piece)))
+        return self._feed_letters(piece)
+
+    def _feed_letters(self, piece: str) -> bytes:
+        """Letters: a word ends at whitespace; punctuation ends it too and becomes a pause."""
         out = bytearray()
         for ch in piece:
             if ch.isspace():
@@ -129,7 +138,11 @@ class Speaker:
         if self.vocoder is not None:
             self.tokens.append("</s>")
             return self.vocoder.end()
-        out = bytearray(self._flush_letters())  # a letter model's last word, so the sentinel is recorded after it
+        out = bytearray()
+        if self.encoding.unit == TOKENS:  # a character the walk left unfinished is read as what it is
+            out += self._feed_letters(self._text.decode(b"", final=True))
+            self._text.reset()
+        out += self._flush_letters()  # a letter model's last word, so the sentinel is recorded after it
         self.tokens.append("</s>")
         out += self.synth.end()
         self._spoken_words = 0
@@ -276,8 +289,8 @@ class Spoken:
 
 def spelled(encoding: Encoding, text: str) -> str:
     """The words a text spells: through the tokenizer for a model of sounds (so ``"the cat"`` given to a
-    phone model spells ``"the cat"`` too), the text itself for every other unit."""
-    if not encoding.phonetic:
+    phone model spells ``"the cat"`` too) or of tokens, the text itself for every other unit."""
+    if not encoding.spells:
         return text
     return encoding.spell(" ".join(encoding.units(text)))
 

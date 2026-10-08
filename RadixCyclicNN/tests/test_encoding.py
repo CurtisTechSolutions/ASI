@@ -15,6 +15,7 @@ EVERY_ENCODING = [
     Encoding(), Encoding(n=1), Encoding(n=2), Encoding(n=5), Encoding(n=4, stride=4),
     Encoding(n=5, stride=5), Encoding(n=6, stride=3), Encoding(unit=WORDS, n=1),
     Encoding(unit=WORDS, n=2), Encoding(unit=WORDS, n=3), Encoding(unit=WORDS, n=2, stride=2),
+    Encoding(unit="token"), Encoding(unit="token", n=2, stride=2),  # the BPE tokens (radixnet/bpe.py)
 ]
 """The encodings the tests drive end to end."""
 try:  # the sounds, when the phonetic tokenizer (../PhoneticTokenizer) is importable

@@ -24,8 +24,9 @@ import math
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, NoReturn, TextIO, TypeVar
+from typing import TYPE_CHECKING, Any, NoReturn, TextIO, TypeVar
 
 from . import __version__
 from radixnet import diff
@@ -49,6 +50,9 @@ from .speech import ASR_BACKENDS as SPEECH_BACKENDS
 from .speech import DEFAULT_RATE as SPEECH_RATE
 from .speech import RECORDERS as SPEECH_RECORDERS
 from .speech import SPEECH_TOKEN as SPEECH_TOKEN_HELP
+
+if TYPE_CHECKING:
+    from .bpe import BPETokenizer
 
 __all__ = ["main", "build_parser", "CliError", "EXIT_OK", "EXIT_ERROR", "EXIT_ABORTED"]
 
@@ -878,7 +882,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         ("continuation", quote(result.text)),
         ("full text", quote(result.full_text)),
     ]
-    if model.encoding.phonetic:  # a model that thinks in sounds: say what its answer spells
+    if model.encoding.spells:  # a model that thinks in sounds or tokens: say what its answer spells
         pairs.append(("spelled", quote(model.encoding.spell(result.full_text))))
     console.pairs(pairs + [
         ("cost", result.cost),
@@ -968,7 +972,7 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     rows = [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
     console.table(("#", "cost", "prob", "end", "text"), rows)
     spelled: dict[int, str] = {}
-    if model.encoding.phonetic:  # what the sounds spell, sample by sample
+    if model.encoding.spells:  # what the sounds or the tokens spell, sample by sample
         spelled = {i: model.encoding.spell(r.text) for i, r in enumerate(results)}
         console.say()
         console.table(("#", "spelled"), [[i + 1, quote(clip(s, 100))] for i, s in spelled.items()])
@@ -2556,7 +2560,7 @@ def cmd_words(args: argparse.Namespace, console: Console) -> dict:
     if encoding.unit == CHARS:
         raise CliError(
             f"{args.model} counts in {encoding.units_name}, so it has no words to list; an alphabet needs a word, "
-            f"phone, syllable or acoustic encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
+            f"phone, syllable, acoustic or token encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
         )
     rows = word_rows(encoding, model.graph.trigram_index)
     vocabulary = len(rows)
@@ -2580,6 +2584,108 @@ def cmd_words(args: argparse.Namespace, console: Console) -> dict:
         [[quote(row["word"]), row["id"], row["grams"]] for row in rows],
     )
     return result
+
+
+def _tokenizer(args: argparse.Namespace) -> tuple["BPETokenizer", str]:
+    """The tokenizer a ``tokenizer`` action reads through - ``--merges``, else the one the token unit uses - and where it came from."""
+    from .bpe import ENV, BPETokenizer, bundled_path, default_tokenizer
+
+    path = getattr(args, "merges", None)
+    try:
+        if path:
+            return BPETokenizer.load(path), path
+        tok = default_tokenizer()
+    except OSError as exc:
+        raise CliError(f"merges file {path}: {exc}") from exc
+    except ValueError as exc:
+        raise CliError(f"{path + ': ' if path else ''}{exc}") from exc
+    return tok, os.environ.get(ENV) or bundled_path()
+
+
+def _tokenizer_pairs(tok: "BPETokenizer", source: str) -> list[tuple[str, Any]]:
+    return [
+        ("tokenizer", "byte-level BPE (GPT-2's byte alphabet and pre-tokenizer)"),
+        ("merges", f"{len(tok.merges)} from {source}"),
+        ("vocabulary", f"{tok.vocab_size} ids: 256 bytes, {len(tok.vocab) - 256} merged tokens, "
+                       f"{len(tok.special)} special ({', '.join(tok.special) or 'none'})"),
+    ]
+
+
+def cmd_tokenizer_info(args: argparse.Namespace, console: Console) -> dict:
+    """Which merges the token unit reads through, and what they make."""
+    tok, source = _tokenizer(args)
+    pairs = _tokenizer_pairs(tok, source)
+    if tok.note:
+        pairs.append(("note", tok.note))
+    console.pairs(pairs)
+    return {"source": source, **tok.describe()}
+
+
+def cmd_tokenizer_encode(args: argparse.Namespace, console: Console) -> dict:
+    """Texts as tokens: ids, the tokens in the byte alphabet, and the text form a token model's graph is built over."""
+    tok, source = _tokenizer(args)
+    docs = []
+    for text in args.texts:
+        ids = tok.encode(text, allowed_special=args.special)
+        tokens = [tok.id_token(i) for i in ids]
+        units = tok.units(text)
+        docs.append({"text": text, "count": len(ids), "ids": ids, "tokens": tokens, "units": units,
+                     "text_form": " ".join(units)})
+        console.pairs([("text", quote(text)), ("tokens", len(ids)), ("text form", quote(" ".join(units)))])
+        console.table(("#", "id", "token", "bytes"),
+                      [[i, token_id, quote(t), quote(tok.token_bytes(t).decode("utf-8", "replace"))]
+                       for i, (token_id, t) in enumerate(zip(ids, tokens))])
+        console.say()
+    return {"source": source, "vocab_size": tok.vocab_size, "texts": docs}
+
+
+def cmd_tokenizer_decode(args: argparse.Namespace, console: Console) -> dict:
+    """Ids back into text, or a text of tokens (the text form) into what it says."""
+    tok, source = _tokenizer(args)
+    if args.text is not None:
+        units = tok.units(args.text)
+        ids = tok.token_ids(args.text)
+    else:
+        if not args.ids:
+            raise CliError("give the ids to decode, or --text TEXT (a text of tokens)")
+        try:
+            ids = [int(i) for i in args.ids]
+        except ValueError as exc:
+            raise CliError(f"an id is a number: {exc}") from exc
+        for i in ids:
+            if not 0 <= i < tok.vocab_size:
+                raise CliError(f"id {i} is outside a vocabulary of {tok.vocab_size}")
+        units = [tok.render(tok.id_token(i)) for i in ids if i < len(tok.vocab)]
+    text = tok.decode(ids)
+    console.pairs([("ids", len(ids)), ("text form", quote(" ".join(units))), ("text", quote(text))])
+    return {"source": source, "ids": ids, "units": units, "text": text}
+
+
+def cmd_tokenizer_learn(args: argparse.Namespace, console: Console) -> dict:
+    """Learn merges from a corpus and write them as a merges file (point RADIXNET_TOKENIZER at it to use them)."""
+    from .bpe import ENV, BPETokenizer
+
+    texts = read_texts(args.data, whole_file=args.whole_file, what="tokenizer")
+    note = args.note or f"learned by {PROG} tokenizer learn from {', '.join(os.path.basename(p) for p in args.data)}: " \
+                        f"{len(texts)} texts, vocab_size {args.vocab}"
+    started = time.perf_counter()
+    try:
+        tok = BPETokenizer.learn(texts, vocab_size=args.vocab, min_frequency=args.min_frequency, note=note)
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    try:
+        tok.save(args.out)
+    except OSError as exc:
+        raise CliError(f"cannot write {args.out}: {exc}") from exc
+    seconds = time.perf_counter() - started
+    console.pairs(_tokenizer_pairs(tok, args.out) + [
+        ("read", f"{len(texts)} texts from {', '.join(args.data)}"),
+        ("seconds", round(seconds, 3)),
+        ("use it", f"{ENV}={args.out} {PROG} --encoding token:3:1 train ..."),
+    ])
+    if tok.vocab_size < args.vocab:
+        console.note(f"note: stopped at {tok.vocab_size} ids - no pair left that occurs {args.min_frequency}+ times")
+    return {"out": args.out, "texts": len(texts), "seconds": seconds, **tok.describe()}
 
 
 def _step_label(graph, edge: int) -> str:
@@ -4792,14 +4898,16 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
     group.add_argument("--encoding", metavar="SPEC", default=default(None),
                        help="encoding of a NEW model: unit[:n[:stride]] - what one unit of text is (char | word | "
-                            "phone | syllable | acoustic), how many units a gram holds (the n of the n-gram) and how far apart "
+                            "phone | syllable | acoustic | token), how many units a gram holds (the n of the n-gram) and how far apart "
                             "consecutive grams start (1 = the sliding window, n = non-overlapping groups of n).  "
                             "char:3:1 is the default, char:5:5 groups of five letters, word:2:1 the word bigram, "
                             "word:3:1 the word trigram, phone:3:1 the trigram of sounds (the text read through the "
-                            "phonetic tokenizer: the cat -> DH AH0 # K AE1 T), syllable:2:1 the syllable bigram; the "
+                            "phonetic tokenizer: the cat -> DH AH0 # K AE1 T), syllable:2:1 the syllable bigram, "
+                            "token:3:1 (or bpe:3:1) the trigram of BPE tokens (the text read through the traditional LLM "
+                            "tokenizer: walking. -> walk ⁀ing ⁀.); the "
                             "names trigram | bigram | word-bigram | word-trigram work too.  A loaded file's own "
                             "encoding always wins, and is fixed for its life")
-    group.add_argument("--units", choices=("char", "word", "phone", "syllable", "acoustic"), default=default(None),
+    group.add_argument("--units", choices=("char", "word", "phone", "syllable", "acoustic", "token"), default=default(None),
                        help="what one unit of a NEW model is (default char); --encoding sets this too")
     group.add_argument("--ngram", type=int, metavar="N", default=default(None),
                        help="units per gram of a NEW model: the n of the n-gram (default 3)")
@@ -5722,6 +5830,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--limit", type=nonneg_int, default=20, help="words to show, most read first (0 = all)")
     p.set_defaults(handler=cmd_words)
+
+    # tokenizer ------------------------------------------------------------
+    p = command(
+        "tokenizer", "the traditional LLM tokenizer: byte-level BPE, the token unit reads through it",
+        "The tokenizer of the token unit (--encoding token:3:1): byte-level byte-pair encoding, GPT-2's way.\n"
+        "A text is cut into pre-tokens (a word with the space before it, a run of digits or of punctuation,\n"
+        "whitespace), each pre-token's UTF-8 bytes are merged pairwise by a ranked list of merges, and what is\n"
+        "left are the tokens: ids 0-255 are the bytes, the merged tokens follow, <|endoftext|> closes the\n"
+        "vocabulary.  A token model's graph is built over the tokens' text form - a token that is a space and\n"
+        "a word is written as the word, any other glued on with ⁀ (walking. -> walk ⁀ing ⁀.).\n"
+        "`encode` and `decode` show both; `learn` learns merges from a corpus; `info` says which merges are\n"
+        "in use: the bundled ones, or the file $RADIXNET_TOKENIZER names.",
+    )
+    actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
+    a = actions.add_parser("info", help="which merges the token unit reads through", formatter_class=_HelpFormatter,
+                           description="Which merges file the token unit reads through, and the vocabulary it makes.")
+    a.add_argument("--merges", metavar="FILE", help="a merges file to describe instead")
+    a.set_defaults(handler=cmd_tokenizer_info)
+    a = actions.add_parser(
+        "encode", help="texts as tokens, ids and the text form", formatter_class=_HelpFormatter,
+        description="Every text as its tokens (in the byte alphabet: Ġ is a space, Ċ a newline), their ids, and\n"
+                    "the text form a token model's graph holds.",
+    )
+    a.add_argument("texts", nargs="+", metavar="TEXT", help="texts to encode")
+    a.add_argument("--special", action="store_true", help="read <|endoftext|> in a text as the special token")
+    a.add_argument("--merges", metavar="FILE", help="read through this merges file instead")
+    a.set_defaults(handler=cmd_tokenizer_encode)
+    a = actions.add_parser(
+        "decode", help="ids, or a text of tokens, back into text", formatter_class=_HelpFormatter,
+        description="Ids back into the text they encode, exactly (a run cut inside a character decodes as\n"
+                    "U+FFFD); --text decodes a text of tokens in the text form instead (what a token model said).",
+    )
+    a.add_argument("ids", nargs="*", metavar="ID", help="token ids")
+    a.add_argument("--text", metavar="TEXT", help="a text of tokens, e.g. 'The walk ⁀ing cat ⁀.'")
+    a.add_argument("--merges", metavar="FILE", help="read through this merges file instead")
+    a.set_defaults(handler=cmd_tokenizer_decode)
+    a = actions.add_parser(
+        "learn", help="learn merges from a corpus", formatter_class=_HelpFormatter,
+        description="Learn the merges from text files, the classic way: every text is pre-tokenized and the\n"
+                    "adjacent pair of tokens that occurs most often across the corpus is merged, again and\n"
+                    "again, until the vocabulary holds --vocab ids or no pair occurs --min-frequency times.\n"
+                    "The same corpus always learns the same merges.  Point $RADIXNET_TOKENIZER at the file\n"
+                    "to train and predict through it - and keep the two together: a token model reads its\n"
+                    "tokens wrongly through any other merges.",
+    )
+    a.add_argument("--data", nargs="+", required=True, metavar="FILE",
+                   help="text files, one text per line (blank lines skipped); a .zip contributes every text file inside")
+    a.add_argument("--whole-file", action="store_true", help="treat each file as a single text")
+    a.add_argument("--vocab", type=int, default=4096, metavar="N",
+                   help="ids in all: the 256 bytes, the merged tokens and <|endoftext|> (default 4096)")
+    a.add_argument("--min-frequency", type=int, default=2, metavar="N",
+                   help="stop when the best pair occurs fewer times than this (default 2)")
+    a.add_argument("--note", default="", metavar="TEXT", help="a line to keep in the file about where the corpus came from")
+    a.add_argument("--out", required=True, metavar="PATH", help="the merges file to write")
+    a.set_defaults(handler=cmd_tokenizer_learn)
 
     # correct --------------------------------------------------------------
     p = command(

@@ -995,7 +995,7 @@ pub fn deltas(encoding: &Encoding, labels: &[String], node_ids: &[usize], text: 
     if tail.is_empty() {
         return vec![text.to_string()];
     }
-    let words = encoding.unit == Unit::Words;
+    let words = encoding.unit != Unit::Chars; // every unit but the character is written with a space between two
     let head = if words {
         if text == tail {
             String::new()
@@ -2617,6 +2617,16 @@ mod tests {
         assert_eq!(
             deltas(&words, &labels, &[0, 4, 5, 6], "the cat sat on"),
             vec!["the cat", " sat", " on"]
+        );
+        // every unit written with a space between two streams like words: the pieces rejoin the text
+        let tokens = Encoding::new(Unit::BpeTokens, 3, 1).unwrap();
+        let labels: Vec<String> = ["the cat sat", "cat sat on", "sat on the"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            deltas(&tokens, &labels, &[4, 5, 6], "the cat sat on the"),
+            vec!["the cat sat", " on", " the"]
         );
     }
 

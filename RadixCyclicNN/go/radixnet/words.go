@@ -31,6 +31,8 @@ func (e Encoding) UnitsName() string {
 		return "syllables"
 	case Acoustic:
 		return "units"
+	case BPETokens:
+		return "tokens"
 	}
 	return "chars"
 }

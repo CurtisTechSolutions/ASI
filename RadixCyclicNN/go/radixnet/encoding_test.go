@@ -22,6 +22,8 @@ var theEncodings = []Encoding{
 	{Words, 2, 1},
 	{Words, 3, 1},
 	{Words, 2, 2},
+	{BPETokens, 3, 1},
+	{BPETokens, 2, 2},
 }
 
 func TestEncodingDefaultsAndValidation(t *testing.T) {

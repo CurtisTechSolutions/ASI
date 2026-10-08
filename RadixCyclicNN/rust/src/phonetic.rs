@@ -110,7 +110,7 @@ pub fn spell(unit: Unit, text: &str) -> String {
 /// pairs: the fields are there only when they say something.  Python's
 /// `spelled_prediction`.
 pub fn spelled_prediction(enc: Encoding, full_text: &str, continuation: &str) -> Vec<(String, Json)> {
-    if !enc.unit.phonetic() {
+    if !enc.unit.spells() {
         return Vec::new();
     }
     vec![

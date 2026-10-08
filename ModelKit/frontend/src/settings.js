@@ -210,13 +210,16 @@ export const ENCODING_PRESETS = Object.freeze([
   ["phone:3:1", "phone trigram (the text as sounds)"],
   ["syllable:2:1", "syllable bigram"],
   ["acoustic:3:1", "acoustic unit trigram (sounds learned from recordings)"],
+  ["token:3:1", "BPE token trigram (the traditional LLM tokenizer)"],
+  ["token:2:1", "BPE token bigram"],
   ["custom", "custom (unit, n, stride)"],
 ]);
 
 /**
  * What one unit of a model can be, as the servers name it, with what to call
- * it: characters and words, and the sounds the phonetic tokenizer reads -
- * phones and syllables from the text, acoustic units learned from recordings.
+ * it: characters and words, the sounds the phonetic tokenizer reads - phones
+ * and syllables from the text, acoustic units learned from recordings - and
+ * the tokens of the traditional LLM tokenizer (byte-level BPE).
  */
 export const UNITS = Object.freeze([
   ["char", "characters"],
@@ -224,6 +227,7 @@ export const UNITS = Object.freeze([
   ["phone", "phones (the text as sounds)"],
   ["syllable", "syllables"],
   ["acoustic", "acoustic units (learned from recordings)"],
+  ["token", "BPE tokens (the traditional LLM tokenizer)"],
 ]);
 
 const UNIT_NAMES = Object.freeze({
@@ -232,6 +236,7 @@ const UNIT_NAMES = Object.freeze({
   phone: ["phone", "phones"],
   syllable: ["syllable", "syllables"],
   acoustic: ["acoustic unit", "acoustic units"],
+  token: ["token", "tokens"],
 });
 
 /** True for a unit the servers know. */
@@ -257,7 +262,7 @@ export function soundUnit(unit) {
  */
 export function encodingSpec(unit, n, stride) {
   if (!isUnit(unit)) {
-    return { error: `The unit must be char, word, phone, syllable or acoustic, not ${JSON.stringify(unit)}.` };
+    return { error: `The unit must be char, word, phone, syllable, acoustic or token, not ${JSON.stringify(unit)}.` };
   }
   const size = countOf(n);
   if (size === null || size < 1) return { error: "n must be a whole number of units, 1 or more." };

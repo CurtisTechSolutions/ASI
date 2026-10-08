@@ -101,6 +101,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
 
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
         phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play say acoustic-train acoustic-speak phone-go phone-rust phone-parity \
+        token-train token-predict token-generate token-words token-test token-demo tokenize tokenizer-learn tokenizer-merges token-go token-rust token-parity \
         rust-build rust-test rust-parity rust-talk go-talk bench-compare train resume predict generate score talk talk-repl 2nrl invert compress \
         window window-on window-step window-off prune prune-on prune-now prune-off \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
@@ -421,6 +422,60 @@ phone-rust: ## The Rust port over sounds: train on DATA and continue PHONE_PREFI
 
 phone-parity: ## Cross-language parity of the models over sounds (Go and Rust against Python)
 	cd $(KIT) && $(PY) -m unittest tests.test_go_parity.TestGoEncodingParity tests.test_rust_parity.TestRustWordParity.test_the_other_dials_agree_too -v
+
+# ---- the token unit: the traditional LLM tokenizer (byte-level BPE, radixnet/bpe.py) ----
+TOKEN_ENC    ?= token:3:1
+MODEL_TOKEN  ?= model.token.json
+TOKEN        := --model $(MODEL_TOKEN) --kind count --encoding $(TOKEN_ENC) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEED)
+TOKEN_PREFIX ?= the cat sat
+TOKEN_LENGTH ?= 8
+MERGES       ?= merges.txt
+VOCAB        ?= 4096
+
+token-train: ## Train a model over BPE tokens on DATA (TOKEN_ENC = token:3:1 | token:2:1 | ...; MODEL_TOKEN is its file)
+	$(RADIXNET) $(TOKEN) train --data $(DATA) --epochs $(EPOCHS) --checkpoint-dir $(CKPT_DIR)
+
+token-predict: ## Continue TOKEN_PREFIX with TOKEN_LENGTH tokens, and say what they spell
+	$(RADIXNET) $(TOKEN) predict --prefix "$(TOKEN_PREFIX)" --length $(TOKEN_LENGTH) --mode beam
+
+token-generate: ## Generate COUNT texts of at most MAX_LENGTH tokens each, spelled back into text
+	$(RADIXNET) $(TOKEN) generate --count $(COUNT) --max-length $(MAX_LENGTH) --mode beam
+
+token-words: ## The tokens the model has read, most read first
+	$(RADIXNET) $(TOKEN) words --limit $(WORD_LIMIT)
+
+token-test: ## The tokenizer's tests (Python, Go and Rust against the shared fixture) and the encoding suites it rides in
+	$(PY) -m unittest tests.test_tokens tests.test_encoding tests.test_encodings_end_to_end -v
+	cd go && $(GO) test ./radixnet/ -run 'Token|UTF8|Embedded|Encod'
+	cd rust && $(CARGO) test --lib -- bpe:: encoding::
+
+token-demo: ## Train a model over tokens on the sample corpus, then predict, generate and list its tokens
+	$(MAKE) token-train
+	$(MAKE) token-predict
+	$(MAKE) token-generate
+	$(MAKE) token-words
+
+tokenize: ## TEXT through the tokenizer: its tokens, their ids, and the text form a token model reads
+	$(RADIXNET) tokenizer encode "$(TEXT)"
+
+tokenizer-learn: ## Learn VOCAB ids of merges from DATA into MERGES (then: RADIXNET_TOKENIZER=MERGES make token-train)
+	$(RADIXNET) tokenizer learn --data $(DATA) --vocab $(VOCAB) --out $(MERGES)
+
+tokenizer-merges: ## Relearn the bundled merges from the pinned commit, copy them beside the Go port, refresh the fixture
+	$(PY) tests/make_merges.py
+	cp radixnet/data/merges.txt go/radixnet/data/merges.txt
+	$(PY) tests/make_tokens_fixture.py
+
+token-go: ## The Go port over tokens: train on DATA and continue TOKEN_PREFIX (needs `make go-build`)
+	go/bin/radixnet-count --encoding $(TOKEN_ENC) --model $(MODEL_TOKEN) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	go/bin/radixnet-count --model $(MODEL_TOKEN) predict --prefix "$(TOKEN_PREFIX)" --length $(TOKEN_LENGTH)
+
+token-rust: ## The Rust port over tokens: train on DATA and continue TOKEN_PREFIX (needs `make rust-build`)
+	rust/target/release/radixnet --encoding $(TOKEN_ENC) --model $(MODEL_TOKEN) --seed $(SEED) train --data $(DATA) --epochs $(EPOCHS)
+	rust/target/release/radixnet --model $(MODEL_TOKEN) predict --prefix "$(TOKEN_PREFIX)" --length $(TOKEN_LENGTH)
+
+token-parity: ## Cross-language parity of the models over tokens (Go and Rust against Python)
+	$(PY) -m unittest tests.test_go_parity.TestGoEncodingParity tests.test_rust_parity.TestRustWordParity -v
 
 ##@ The negative network (failures only; it filters the positive model)
 negative-blame: ## Blame every line of GARBAGE for REASON with SEVERITY (the negative model is NEGATIVE)

@@ -1947,7 +1947,7 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     if let Some(name) = r.body.get("unit").and_then(|v| v.as_str()) {
         encoding.unit = Unit::parse(name).ok_or_else(|| {
             ApiError::bad_request(format!(
-                "unit must be char, word, phone, syllable or acoustic, got {name:?}"
+                "unit must be char, word, phone, syllable, acoustic or token, got {name:?}"
             ))
         })?;
     }

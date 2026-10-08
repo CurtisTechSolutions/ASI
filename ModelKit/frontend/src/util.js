@@ -111,10 +111,12 @@ export function countingKind(status) {
  */
 export function unitsOf(status) {
   const units = status && status.units;
-  return units === "words" || units === "phones" || units === "syllables" || units === "units" ? units : "chars";
+  return units === "words" || units === "phones" || units === "syllables" || units === "units" || units === "tokens"
+    ? units
+    : "chars";
 }
 
-/** True when the active model's symbols are tokens set apart by spaces - words, sounds or acoustic units - rather than characters. */
+/** True when the active model's symbols are tokens set apart by spaces - words, sounds, acoustic units or BPE tokens - rather than characters. */
 export function wordKind(status) {
   return unitsOf(status) !== "chars";
 }
@@ -125,9 +127,10 @@ const UNIT_NAMES = Object.freeze({
   phones: ["phone", "phones"],
   syllables: ["syllable", "syllables"],
   units: ["acoustic unit", "acoustic units"],
+  tokens: ["token", "tokens"],
 });
 
-/** The model's unit as an English word: "characters" / "words" / "phones" / "syllables" / "acoustic units" (`plural: false` for the singular). */
+/** The model's unit as an English word: "characters" / "words" / "phones" / "syllables" / "acoustic units" / "tokens" (`plural: false` for the singular). */
 export function unitName(status, plural = true) {
   return UNIT_NAMES[unitsOf(status)][plural ? 1 : 0];
 }

@@ -486,7 +486,13 @@ function NewModelCard({ status, onStatus }) {
             value={unit}
             onChange={setUnit}
             options={UNITS}
-            hint={soundUnit(unit) ? "read through the phonetic tokenizer: the server needs PhoneticTokenizer beside it" : undefined}
+            hint={
+              soundUnit(unit)
+                ? "read through the phonetic tokenizer: the server needs PhoneticTokenizer beside it"
+                : unit === "token"
+                  ? "read through the byte-level BPE tokenizer: walking. is walk ⁀ing ⁀."
+                  : undefined
+            }
             disabled={busy || jobRunning}
           />
           <NumberField label="n" hint="units per gram" value={n} onChange={setN} min={1} step={1} disabled={busy || jobRunning} />

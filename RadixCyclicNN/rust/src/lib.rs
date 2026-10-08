@@ -59,6 +59,7 @@
 
 pub mod attention;
 pub mod beam;
+pub mod bpe;
 pub mod clock;
 pub mod correct;
 pub mod counter;

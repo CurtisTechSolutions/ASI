@@ -54,6 +54,8 @@ RadixCyclicNN/              the model
                             the package is not installed)
     activation.py           sine activation (parametric sine + derivatives)
     encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 34)
+    bpe.py                  the traditional LLM tokenizer: byte-level BPE and its text form, the token unit (section 42)
+    data/merges.txt         the bundled merges of the token unit (section 42)
     attention.py            the attention band: where inside a gram a correction's blame and credit land (section 38)
     window.py               the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up (section 40)
     prune.py                auto prune: the thresholds under which the graph lets go of an edge, and when (section 41)
@@ -255,7 +257,7 @@ def speak_texts(encoding, texts, rate=16000, pitch=120.0, tempo=1.0, gain=0.5, o
 def say(encoding, texts, rate=16000, pitch=120.0, tempo=1.0, gain=0.5, polish=0, vocoder="auto") -> Spoken
     # the same, collected: Spoken(pcm, rate, encoding, decoder: "voice" | "vocoder", vocoder: "neural" | "centroid"
     # | None, utterances) with .wav() and .to_dict().  Acoustic units go through the codebook's neural vocoder
-    # when it has one (D-090; vocoder = "auto", "neural" insists, "centroid" declines), each utterance rendered
+    # when it has one (D-096; vocoder = "auto", "neural" insists, "centroid" declines), each utterance rendered
     # whole; else polish = Griffin-Lim iterations over each whole utterance through the centroid vocoder (0: its
     # stream as it is).  The CLI's `say` and `--speak FILE`, the API's `POST /api/say` and the voice fallback of
     # `POST /api/speech/decode`, and the frontend's Hear buttons sit on it.
@@ -4478,7 +4480,7 @@ differ from the phonetic units, and nothing else does:
   flushing the tail as for every other unit.
 * **Through the learned vocoder, when there is one.** A codebook may carry a
   neural vocoder (`<stem>.vocoder.json` beside it, `PHONETOK_VOCODER`, the
-  bundled one for the bundled codebook; D-090): a small network the tokenizer
+  bundled one for the bundled codebook; D-096): a small network the tokenizer
   package trains on recordings, which shapes the same pulse train and noise
   the centroid vocoder uses, per frame and per bin, from the run of units
   with its context. `say` - and so the Hear buttons, `POST /api/say` and the
@@ -4635,3 +4637,57 @@ alike (`test_rust_parity_kinds` holds the Rust server to Python's keys), and onl
 * **Frontend**: nothing yet.
 
 Tests: `tests/test_prune.py` (section 14) and the kit's `tests/test_prune.py`.
+
+## 42. The token unit (`radixnet/bpe.py`, `go/radixnet/bpe.go`, `rust/src/bpe.rs`) — the traditional LLM tokenizer as an encoder and decoder layer
+
+`SPEC-Tokens.md` is the specification and `DECISIONS.md` D-097 the reasoning; this section is where each piece
+lives.
+
+### 42.1 The tokenizer
+
+`BPETokenizer` (Go `BPETokenizer`, Rust `BpeTokenizer`): the 256 byte tokens, the merges in rank order (`merges`,
+`ranks`), the vocabulary (`vocab`, id -> token in GPT-2's byte alphabet), the special tokens (`<|endoftext|>`),
+and two caches - the tokens of a pre-token, and whether a bare piece reads - behind a mutex in Go and Rust, where
+training reads from many threads.
+
+* `pretokenize(text)` - GPT-2's pattern over the classes of `SPEC-Tokens.md` §3.1 (`char_class`); Python runs it as
+  a compiled regular expression, Go and Rust as the three-step scanner §3.2 writes out.
+* `tokens(text)` / `encode(text, allowed_special)` - the text with a space before it, pre-tokenized, each pre-token's
+  bytes merged by `_merge_word` (GPT-2's `bpe()`); ids for `encode`.
+* `decode(ids)` - the bytes, one leading space taken away, read as UTF-8 with `U+FFFD` per maximal broken piece
+  (`decode_utf8` in Go and Rust, which also hands back an unfinished character for the voice).
+* `learn(texts, vocab_size, min_frequency)` - Python only: pair counts over the counted pre-tokens, a heap keyed
+  on (count, bytes) with stale entries skipped, each merge applied to the words that hold the pair and the counts of
+  the pairs it touched updated.
+* `dumps` / `loads` / `load` / `bundled` - GPT-2's `merges.txt`; `default_tokenizer()` reads `RADIXNET_TOKENIZER`,
+  else the bundled file, once per process.
+
+### 42.2 The text form, and the unit
+
+`render(token)` writes a token bare (a space and printable ASCII) or glued (`⁀` and the token); `read(piece)` is the
+token a piece stands for; `units(text)` reads a text that is the text form piece by piece and any other as text;
+`spell(text)` decodes a text of units; `bytes_of(text)` is what the voice reads. `Encoding` (all three ports) gains
+the unit `token` (`TOKENS` / `BPETokens` / `Unit::BpeTokens`): `units` / `Units` are the tokenizer's units (Go and
+Rust cut its text form with the word cutter - the units hold no whitespace), and `join`, `has_unit_prefix` and
+`reverse` read their pieces through it as they do for the phonetic units. The property `spells` (`Spells()`,
+`spells()`) - phonetic or token - is what makes `predict` and `generate` print and return `spelled`; `voice.Speaker`
+feeds a token model's bytes, decoded as characters complete, to the letter path. The streamed reply of today's
+format (`assistant.deltas`) cuts every unit but the character as it cuts words - a space before each piece - so the
+pieces of a token (or a phone, syllable or acoustic) model's reply join back into the reply, as they always did for
+words.
+
+### 42.3 The surfaces
+
+* **CLI**: `--encoding token:n:s` and `--units token` in all three; `radixnet tokenizer info | encode | decode |
+  learn` in Python (`cmd_tokenizer_*`).
+* **API**: nothing new - `/api/reset` takes the unit on all three servers, and `/api/status` reports `units:
+  "tokens"`.
+* **Frontend**: `ENCODING_PRESETS` (`token:3:1`, `token:2:1`), `UNITS` and the unit names in `settings.js` and
+  `util.js`; the New model card hints what a token is.
+* **Make**: the `token-*`, `tokenize` and `tokenizer-*` targets.
+
+Tests: `tests/test_tokens.py`, the token encodings in `tests/test_encoding.py` and
+`tests/test_encodings_end_to_end.py`, `go/radixnet/bpe_test.go` and the token encodings of
+`go/radixnet/encoding_test.go`, the unit tests of `rust/src/bpe.rs` and `rust/src/encoding.rs`, and the token cases of
+`test_go_parity.py::TestGoEncodingParity` and `test_rust_parity.py::TestRustWordParity`; `tests/tokens_fixture.json`
+is the contract the ports' unit tests read (`tests/make_tokens_fixture.py` writes it).

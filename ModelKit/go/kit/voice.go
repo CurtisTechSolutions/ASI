@@ -38,6 +38,7 @@ type Speaker struct {
 	vocoder     *phonetok.Vocoder // acoustic units are spoken through their codebook's vocoder instead
 	letters     string
 	spokenWords int
+	pending     []byte // a token model's bytes that do not finish a character yet
 	// Rate is the sample rate of the PCM: the synthesizer's, or the codebook's for acoustic units.
 	Rate int
 	// Tokens is every token that reached the voice, for the record.
@@ -86,7 +87,20 @@ func (s *Speaker) Feed(piece string) []byte {
 	if s.enc.Unit == radixnet.Words {
 		return s.feedWords(strings.Fields(piece))
 	}
-	// letters: a word ends at whitespace; punctuation ends it too and becomes a pause
+	if s.enc.Unit == radixnet.BPETokens { // tokens: the text their bytes spell, spoken as a letter model's letters
+		tok, err := radixnet.DefaultTokenizer()
+		if err != nil {
+			return nil
+		}
+		var text string
+		text, s.pending = radixnet.DecodeUTF8(append(s.pending, tok.BytesOf(piece)...), false)
+		return s.feedLetters(text)
+	}
+	return s.feedLetters(piece)
+}
+
+// feedLetters speaks letters: a word ends at whitespace; punctuation ends it too and becomes a pause.
+func (s *Speaker) feedLetters(piece string) []byte {
 	var out []byte
 	for _, r := range piece {
 		if unicode.IsSpace(r) {
@@ -144,7 +158,13 @@ func (s *Speaker) End() []byte {
 		s.Tokens = append(s.Tokens, "</s>")
 		return s.vocoder.End()
 	}
-	out := s.flushLetters() // a letter model's last word, so the sentinel is recorded after it
+	var out []byte
+	if len(s.pending) > 0 { // a character the walk left unfinished is read as what it is
+		text, _ := radixnet.DecodeUTF8(s.pending, true)
+		s.pending = nil
+		out = append(out, s.feedLetters(text)...)
+	}
+	out = append(out, s.flushLetters()...) // a letter model's last word, so the sentinel is recorded after it
 	s.Tokens = append(s.Tokens, "</s>")
 	out = append(out, s.synth.End()...)
 	s.spokenWords = 0
@@ -348,9 +368,12 @@ func VocoderName(enc radixnet.Encoding, vocoder string) (string, error) {
 }
 
 // Spelled is the words a text spells: through the tokenizer for a model of
-// sounds (so "the cat" given to a phone model spells "the cat" too), the text
-// itself for every other unit.
+// sounds (so "the cat" given to a phone model spells "the cat" too) or of
+// tokens, the text itself for every other unit.
 func Spelled(enc radixnet.Encoding, text string) string {
+	if enc.Unit == radixnet.BPETokens {
+		return enc.Spell(text)
+	}
 	if !enc.Unit.Phonetic() {
 		return text
 	}

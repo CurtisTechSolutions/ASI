@@ -966,7 +966,7 @@ func Deltas(enc radixnet.Encoding, labels []string, nodeIDs []int, text string) 
 	if tail == "" {
 		return []string{text}
 	}
-	words := enc.Unit == radixnet.Words
+	words := enc.Unit != radixnet.Chars // every unit but the character is written with a space between two
 	var head string
 	if words {
 		switch {

@@ -54,7 +54,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Sequence
 
 from .dialogue import EXPLORE, Heard, reply as dialogue_reply
-from radixnet.encoding import WORDS, Encoding
+from radixnet.encoding import CHARS, Encoding
 from radixnet.graph import FIRST
 from .tools import PARAM_TYPES, Param, Tool, ToolBox, call_text, parse_call, result_text
 
@@ -721,7 +721,7 @@ def deltas(encoding: Encoding, labels: Sequence[str], node_ids: Sequence[int], t
     tail = encoding.join(*pieces)
     if not tail:
         return [text]
-    words = encoding.unit == WORDS
+    words = encoding.unit != CHARS  # every unit but the character is written with a space between two
     if words:
         if text == tail:
             head = ""

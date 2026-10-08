@@ -138,11 +138,31 @@ func PhoneticTokens(unit UnitKind, text string) ([]string, error) {
 	return b.tok.Tokens(text), nil
 }
 
+// tokenUnits is a text as the units of the BPE tokenizer's text form.
+func tokenUnits(text string) []string {
+	tok, err := DefaultTokenizer()
+	if err != nil {
+		panic(err) // Validate refused the encoding before any text could reach here
+	}
+	return tok.Units(text)
+}
+
+// tokenText is the BPE text form of a text: its units joined by single spaces.
+func tokenText(text string) string { return strings.Join(tokenUnits(text), " ") }
+
 // Spell is the words a phonetic text spells ("DH AH0 # K AE1 T" -> "the cat"):
 // a text given in words is read as the sounds it makes first, so it spells
-// itself back, and so does a text that mixes the two.  A character or word
-// encoding returns the text as it is.
+// itself back, and so does a text that mixes the two.  A text of tokens is
+// the text it is ("The walk ⁀ing cat ⁀." -> "The walking cat.").  A character
+// or word encoding returns the text as it is.
 func (e Encoding) Spell(text string) string {
+	if e.Unit == BPETokens {
+		tok, err := DefaultTokenizer()
+		if err != nil {
+			return text
+		}
+		return tok.Spell(text)
+	}
 	if !e.Unit.Phonetic() {
 		return text
 	}
@@ -166,7 +186,7 @@ func (e Encoding) Spell(text string) string {
 // or word encoding returns the tail as it is.  Python's Encoding.spell_tail,
 // character for character.
 func (e Encoding) SpellTail(whole, tail string) string {
-	if !e.Unit.Phonetic() {
+	if !e.Unit.Spells() {
 		return tail
 	}
 	if !strings.HasSuffix(whole, tail) {
@@ -204,7 +224,7 @@ func commonRunePrefix(a, b string) string {
 // an empty map: the fields are there only when they say something.  Python's
 // spelled_prediction.
 func SpelledPrediction(enc Encoding, fullText, continuation string) map[string]any {
-	if !enc.Unit.Phonetic() {
+	if !enc.Unit.Spells() {
 		return map[string]any{}
 	}
 	return map[string]any{"spelled": enc.Spell(fullText), "spelled_continuation": enc.SpellTail(fullText, continuation)}

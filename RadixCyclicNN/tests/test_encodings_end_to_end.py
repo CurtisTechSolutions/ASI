@@ -14,7 +14,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from radixnet.countnet import CountRewardNet  # noqa: E402
-from radixnet.encoding import CHARS, PHONES, SYLLABLES, WORDS, Encoding  # noqa: E402
+from radixnet.encoding import CHARS, PHONES, SYLLABLES, TOKENS, WORDS, Encoding  # noqa: E402
 from radixnet.graph import FIRST, RadixCyclicGraph  # noqa: E402
 from radixnet.model import load_model, new_model  # noqa: E402
 
@@ -25,6 +25,7 @@ EVERY_ENCODING = [
     Encoding(n=6, stride=3),                     # groups that half-overlap
     Encoding(unit=WORDS, n=1), Encoding(unit=WORDS, n=2), Encoding(unit=WORDS, n=3),
     Encoding(unit=WORDS, n=2, stride=2),         # word groups
+    Encoding(unit=TOKENS), Encoding(unit=TOKENS, n=2, stride=2),  # BPE tokens, sliding and in groups
 ]
 try:  # the sounds, when the phonetic tokenizer (../PhoneticTokenizer) is importable
     EVERY_ENCODING += [Encoding(unit=PHONES), Encoding(unit=PHONES, n=2, stride=2), Encoding(unit=SYLLABLES, n=2)]

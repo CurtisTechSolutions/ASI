@@ -102,7 +102,12 @@ D-083 the veto can keep its provenance to itself
 D-092 a split and a merge keep what the count model hangs on its edges · D-094 auto prune: the graph lets go of the
 edges nothing walks, and the nodes they strand
 
-**Part XXIII — The model and its kit** · D-093 everything but the model is a package of its own: ModelKit
+**Part XXIII — The model and its kit** · D-093 everything but the model is a package of its own: ModelKit ·
+D-095 pictures are compressed by running the whole generator backwards: the diffusion codec · D-096 the neural
+vocoder: acoustic units heard back through a filter learned from the recordings
+
+**Part XXIV — Tokens** · D-097 the traditional LLM tokenizer is a unit of the encoding dial: byte-level BPE, and a
+text form that reads back
 
 **Part VII — Superseded decisions** · **Part VIII — Open questions**
 
@@ -3890,150 +3895,6 @@ only for a model of sounds. `../ModelKit/tests/test_teaching_in_words.py`, `../M
 
 # Part XXII — Structure
 
-### D-090 — The neural vocoder: acoustic units heard back through a filter learned from the recordings
-
-**Status** Accepted · 2026-09-28 · **Layer** output · **Extends** D-082, D-088, D-089
-
-**Context** D-082 gives a model of acoustic units a voice by holding each unit's centroid - the average of
-thousands of frames - and lending it the phases of a pulse train; polished or not, what comes back is
-speech-like and blurred, and the Voice tab (D-089) made the blur audible in every reply. The tokenizer's design
-had rejected a neural vocoder ("weights to ship, a framework to run them, nothing a Go or Rust port could
-reproduce"); all three objections were about the shape of the usual vocoder, not about learning as such.
-
-**Decision** The tokenizer package learns the vocoder's other half (`phonetok.neural`, D-090's counterpart in
-`../PhoneticTokenizer/DESIGN.md` section 5.5): the same excitation the centroid vocoder uses - a pulse train at
-the voice's pitch, each pulse spread into a short chirp so the waveform peaks where a recording's does, and the
-same deterministic noise - runs on under the utterance, and a small network (an
-embedding of the unit codes, residual blocks of dilated convolutions at the frame rate, a head, and every
-unit's own spectral template) writes per frame and per bin how loud the pulse train and how loud the noise
-should be; the frames are overlap-added exactly as the centroid vocoder's are. A source and a filter, as the
-formant synthesizer is, with the filter learned from recordings: the network is trained in numpy by hand-written
-gradients on a multi-resolution spectral loss, and the weights are one JSON file beside the codebook
-(`<stem>.vocoder.json`, or `PHONETOK_VOCODER`) that the Go and Rust ports read and run with their own excitation
-and inverse transform, bit for bit the same samples. The bundled codebook ships its vocoder, trained on the
-synthesizer's speech in four voices; a codebook learned from a person's recordings gets one from
-`phonetok vocoder train`. In this project the output decoder (D-088) speaks acoustic units through the neural
-vocoder whenever the codebook has one - `say`, `POST /api/say`, the Hear buttons and the Voice tab's replies -
-each utterance rendered whole once it is known, and says so (`vocoder: "neural" | "centroid" | null` in every
-`Spoken` record, `vocoder` in `GET /api/voice`); `--vocoder centroid` (`vocoder` on the API, a setting in the
-Voice tab) keeps the codebook's own, `neural` insists on the learned one. `speak` still streams a walk through
-the centroid vocoder as it walks: the network hears a frame's neighbours on both sides, so it waits for the
-utterance.
-
-**Alternatives rejected**
-* **Predicting the waveform's phases outright** (an iSTFT-style network with a phase head). Tried first: within
-  a run of one unit the network's input is the same frame after frame, so it cannot make a phase advance at the
-  voice's pitch, the frames cancel in the overlap-add, and the pitch collapses onto the frame rate. The
-  excitation carries the pitch, and the network need only shape it.
-* **Predicting log-mel frames for the centroid vocoder to render.** A better-than-centroid frame is still
-  rendered with the same blur; the filter has to be learned at the transform's own resolution.
-* **A framework** (torch) for training. The network is small enough that its gradients fit in a few hundred
-  lines of numpy, which every laptop has and which the ports never need.
-* **The radix graph as the vocoder** (raised while this was built). A count graph replays waveform texts it has
-  heard and cannot regress a continuous spectrum for a sequence it has not; a second discrete stage of finer
-  units over the first, learned the same way, could one day sit between the units and this vocoder.
-
-**Consequences** Held-out synthesizer speech comes back nearer the original than through the centroid vocoder
-(the log-mel distance over the speech roughly halved; the numbers are in the vocoder file's `trained` report,
-`phonetok vocoder info`). The round trip - hearing the output again as the same units - stays the centroid
-vocoder's by construction: its frames *are* the centroids, and the codebook hears every frame against the
-utterance's mean, so a vocoder whose silences are a little louder than the recording's moves every unit. A
-reply's audio is no longer streamed chunk by chunk while it is made (the Voice tab already played the reply
-only once its first chunk arrived; a whole utterance takes a few hundred milliseconds with numpy, a few
-seconds without it). `polish` applies to the centroid vocoder alone. `tests/test_acoustic_units.py`,
-`tests/test_voice.py`, `tests/test_voicechat.py`, the say parity of the Go and Rust suites.
-
-**Lives in** `../PhoneticTokenizer/phonetok/neural.py` (the model, the trainer, the file), `../PhoneticTokenizer/rust/src/neural.rs`,
-`../PhoneticTokenizer/go/phonetok/neural.go`, `radixnet/voice.py` (`say`, `VOCODERS`, `vocoder_name`, `Spoken.vocoder`),
-`radixnet/voicechat.py`, `radixnet/api.py`, `radixnet/cli.py`, `frontend/src/components/VoicePanel.jsx`,
-`frontend/src/components/HearButton.jsx`, `go/radixnet/voice.go`, `go/server/media.go`, `go/server/voice.go`,
-`rust/src/voice.rs`, `rust/src/voicechat.rs`, `rust/src/service.rs`
-
----
-
-### D-087 — The dynamic window: nodes halved down a binary ladder, and grown back at the top
-
-**Status** Research claim · 2026-09-25 · **Layer** representation · **Extends** D-007 ·
-**Specified in** `SPEC-DynamicWindow.md`
-
-**Context — my reason** *"Implement a dynamic window that is sized in the binary number system. It starts at 32,
-then moves to 16, then 8, then maybe 4. This algorithm will split nodes into two parts and assign the same weights
-and data for traversal as well as a heavy connection for the two halves. This process happens manually or
-automatically. Then we size up the windows back to 32 and do this process again."* It applies to the actual nodes
-of the radix cyclic graph: a node with the value `ABCD` becomes `AB` and `CD`.
-
-Compression (D-007) only ever coarsens the structure. It merges every unary chain into one node, and a merged node
-is a corridor: entered at its first gram, left at its last, with nothing to learn inside - no edge, no count, no
-weight - and nowhere to branch. The graph's granularity is whatever the corpus's branching happened to leave. The
-claim is that the structure should *breathe*: a ceiling on a node's length that halves - 32, 16, 8, 4 - cuts the
-corridors into halves that carry the same data for traversal and are joined by a heavy connection, so a walk is
-unchanged the moment they are cut but has places to branch afterwards; and then the ceiling goes back up to 32 and
-what nothing branched into grows together again.
-
-**Decision** A `DynamicWindow` on the graph, beside the encoding and the band: a ladder of powers of two from a top
-to a floor (32 down to 4 by default), the size it stands at, and whether it steps by itself. One **step** merges
-what fits the window (compression, which with the window on merges nothing longer than its size), halves every node
-that is longer at its middle gram - the first half keeping the odd gram, the id and the in-edges, the second half
-the rest and the out-edges, both the node's state, activation parameters and count - and moves the window down the
-ladder, back to the top from the floor. The edge between two halves is the **heavy connection**, in each kind's own
-currency: the count the node had (what a split already hands its bridge, and what makes it heavy where weights are
-computed from counts), the weight `W_HEAVY = 8` in the sine model (negated while inverted), the traversals of the
-out-edges it stands before in the phase model, which counts edges and not nodes. A step happens by hand (`radixnet
-window --step`, `POST /api/model/window/step`, the Step button) or automatically at the end of every training
-epoch, in every kind's loop, feedback passes included. All three implementations carry it, node for node.
-
-**Alternatives rejected**
-* **Pinning the halves for good** - a flag on the bridge, the way a blamed edge is kept out of compression
-  (D-046). The cycle would then be one-way: after 32, 16, 8, 4 the graph would be shredded to four-unit nodes
-  forever, compression - the structure's whole idea - switched off, and "back up to 32" would have nothing to do.
-  The window as a ceiling on *merging* gives the ladder both directions: down, it cuts; up, compression regrows
-  whatever stayed unary.
-* **Measuring the window in grams.** The halving is exact in grams, but every length the system reports - labels,
-  `length`, `max_length`, a text's `chars` - is in units, and a window of 32 that meant 34 characters would be the
-  one number counted differently.
-* **Cutting at the unit midpoint regardless of the overlap** - `ABCD` into `AB` and `CD` under the trigram. Not
-  representable: neither half holds a trigram, the trigram `BCD` would have to live in two nodes at once, and every
-  edge, split, decode and the index rest on the overlap (D-006). Under a sliding encoding `ABCD` *is* `ABC -> BCD`
-  merged and comes apart into those, sharing the pivot; under a grouping encoding (`char:2:2`) the cut is exactly
-  `AB` and `CD`.
-* **A heavy weight scaled to the activation** (`w = S / f²`), so that the bridge's *score* were fixed. Brittle at
-  `f ≈ 0`, and unlike every other weight in the network, none of which is scaled to its endpoints. A fixed heavy
-  weight is as heavy as the activation allows, which is what every weight in the sine model is - and it stays a
-  learned weight, moved like any other when the data disagrees.
-* **A reward on the count model's bridge.** A reward is what a judge said (D-026); the bridge's count already says
-  everything the node ever saw, and a share of 1 needs no number added to it.
-* **The window as the encoding's `n`** - 32-grams halved into 16-grams. It would re-key the whole index at every
-  rung, and could not climb back: training at `n = 4` leaves node lengths that are not multiples of 32. The gram is
-  fixed for a graph's life (D-071); the window only decides how many of them a node holds.
-* **Stepping on corrections or ratings rather than epochs.** Feedback passes are epochs and step like any other; a
-  step tied to a judge would move the ladder at a rate the tutor, not the schedule, decides.
-
-**Consequences**
-* **Off is the old file to the bit**, on every kind, whether the window was never touched or switched on and off:
-  the block is written only while it is on, an epoch's record carries `splits` and `window` only when it stepped,
-  and the same unary halves merge back at the next compression once it is off - the graph is never left in a state
-  the old rules could not have produced.
-* **What changes.** On, the graph alternates between coarse and fine. Going down, the halves can learn apart: a
-  transition into the second half's first gram no longer needs a split, a child can attach to the first half
-  without one. Back at the top, what stayed unary is consolidated - one side's activation kept, the other's edges
-  rescaled, D-007's lossy merge made periodic - while a half that gained a branch stays a node. A step at the floor
-  turns a 30-unit corridor into eight nodes; the top turns them back into one.
-* **The bridge keeps the cut invisible to traversal.** The first half has one child, so the step across the bridge
-  is probability 1 and cost 0 - the deterministic step inside the merged node. The heaviness matters afterwards,
-  against a competitor: `8 · f²` against at most `1.5 · f · f'` in the sine model, decisive near `|f| = 1` and
-  modest at a small activation; a share of everything the node saw in the counting kinds.
-* **Two kinds count differently, and the bridge says so.** The phase model counts edges, not nodes, so its bridge
-  takes what passed through; the negative network counts nothing - its evidence is blame - so its bridge carries
-  none, honestly, and a `judge` over the halves finds the blame it found over the node.
-* **Nothing is graded.** Whether a model cycled 32 → 4 → 32 predicts better than one left alone, or only the same
-  with more edges in between, is the research question; the window makes it askable (Q-20).
-
-**Lives in** `radixnet/window.py`, `radixnet/graph.py::split_window / merge_child`,
-`radixnet/model.py::window_config / configure_window / window_step / _window_epoch`, `go/radixnet/window.go`,
-`rust/src/window.rs`, `../ModelKit/frontend/src/components/DynamicWindowCard.jsx`, `SPEC-DynamicWindow.md`
-
----
-
 ### D-092 — A split and a merge keep what the count model hangs on its edges: the window, the verdicts, the reward
 
 **Status** Accepted · 2026-09-28 · **Layer** structure · **Extends** D-007, D-058, D-087; **amends** SPEC-LeastPunished §3.4
@@ -4317,6 +4178,228 @@ decompress`), `../ModelKit/modelkit/api.py`, `../ModelKit/tests/test_codec.py`, 
 
 ---
 
+### D-096 — The neural vocoder: acoustic units heard back through a filter learned from the recordings
+
+**Status** Accepted · 2026-09-28 · **Layer** output · **Extends** D-082, D-088, D-089
+
+**Context** D-082 gives a model of acoustic units a voice by holding each unit's centroid - the average of
+thousands of frames - and lending it the phases of a pulse train; polished or not, what comes back is
+speech-like and blurred, and the Voice tab (D-089) made the blur audible in every reply. The tokenizer's design
+had rejected a neural vocoder ("weights to ship, a framework to run them, nothing a Go or Rust port could
+reproduce"); all three objections were about the shape of the usual vocoder, not about learning as such.
+
+**Decision** The tokenizer package learns the vocoder's other half (`phonetok.neural`, D-096's counterpart in
+`../PhoneticTokenizer/DESIGN.md` section 5.5): the same excitation the centroid vocoder uses - a pulse train at
+the voice's pitch, each pulse spread into a short chirp so the waveform peaks where a recording's does, and the
+same deterministic noise - runs on under the utterance, and a small network (an
+embedding of the unit codes, residual blocks of dilated convolutions at the frame rate, a head, and every
+unit's own spectral template) writes per frame and per bin how loud the pulse train and how loud the noise
+should be; the frames are overlap-added exactly as the centroid vocoder's are. A source and a filter, as the
+formant synthesizer is, with the filter learned from recordings: the network is trained in numpy by hand-written
+gradients on a multi-resolution spectral loss, and the weights are one JSON file beside the codebook
+(`<stem>.vocoder.json`, or `PHONETOK_VOCODER`) that the Go and Rust ports read and run with their own excitation
+and inverse transform, bit for bit the same samples. The bundled codebook ships its vocoder, trained on the
+synthesizer's speech in four voices; a codebook learned from a person's recordings gets one from
+`phonetok vocoder train`. In this project the output decoder (D-088) speaks acoustic units through the neural
+vocoder whenever the codebook has one - `say`, `POST /api/say`, the Hear buttons and the Voice tab's replies -
+each utterance rendered whole once it is known, and says so (`vocoder: "neural" | "centroid" | null` in every
+`Spoken` record, `vocoder` in `GET /api/voice`); `--vocoder centroid` (`vocoder` on the API, a setting in the
+Voice tab) keeps the codebook's own, `neural` insists on the learned one. `speak` still streams a walk through
+the centroid vocoder as it walks: the network hears a frame's neighbours on both sides, so it waits for the
+utterance.
+
+**Alternatives rejected**
+* **Predicting the waveform's phases outright** (an iSTFT-style network with a phase head). Tried first: within
+  a run of one unit the network's input is the same frame after frame, so it cannot make a phase advance at the
+  voice's pitch, the frames cancel in the overlap-add, and the pitch collapses onto the frame rate. The
+  excitation carries the pitch, and the network need only shape it.
+* **Predicting log-mel frames for the centroid vocoder to render.** A better-than-centroid frame is still
+  rendered with the same blur; the filter has to be learned at the transform's own resolution.
+* **A framework** (torch) for training. The network is small enough that its gradients fit in a few hundred
+  lines of numpy, which every laptop has and which the ports never need.
+* **The radix graph as the vocoder** (raised while this was built). A count graph replays waveform texts it has
+  heard and cannot regress a continuous spectrum for a sequence it has not; a second discrete stage of finer
+  units over the first, learned the same way, could one day sit between the units and this vocoder.
+
+**Consequences** Held-out synthesizer speech comes back nearer the original than through the centroid vocoder
+(the log-mel distance over the speech roughly halved; the numbers are in the vocoder file's `trained` report,
+`phonetok vocoder info`). The round trip - hearing the output again as the same units - stays the centroid
+vocoder's by construction: its frames *are* the centroids, and the codebook hears every frame against the
+utterance's mean, so a vocoder whose silences are a little louder than the recording's moves every unit. A
+reply's audio is no longer streamed chunk by chunk while it is made (the Voice tab already played the reply
+only once its first chunk arrived; a whole utterance takes a few hundred milliseconds with numpy, a few
+seconds without it). `polish` applies to the centroid vocoder alone. `tests/test_acoustic_units.py`,
+`tests/test_voice.py`, `tests/test_voicechat.py`, the say parity of the Go and Rust suites.
+
+**Lives in** `../PhoneticTokenizer/phonetok/neural.py` (the model, the trainer, the file), `../PhoneticTokenizer/rust/src/neural.rs`,
+`../PhoneticTokenizer/go/phonetok/neural.go`, `radixnet/voice.py` (`say`, `VOCODERS`, `vocoder_name`, `Spoken.vocoder`),
+`radixnet/voicechat.py`, `radixnet/api.py`, `radixnet/cli.py`, `frontend/src/components/VoicePanel.jsx`,
+`frontend/src/components/HearButton.jsx`, `go/radixnet/voice.go`, `go/server/media.go`, `go/server/voice.go`,
+`rust/src/voice.rs`, `rust/src/voicechat.rs`, `rust/src/service.rs`
+
+---
+
+### D-087 — The dynamic window: nodes halved down a binary ladder, and grown back at the top
+
+**Status** Research claim · 2026-09-25 · **Layer** representation · **Extends** D-007 ·
+**Specified in** `SPEC-DynamicWindow.md`
+
+**Context — my reason** *"Implement a dynamic window that is sized in the binary number system. It starts at 32,
+then moves to 16, then 8, then maybe 4. This algorithm will split nodes into two parts and assign the same weights
+and data for traversal as well as a heavy connection for the two halves. This process happens manually or
+automatically. Then we size up the windows back to 32 and do this process again."* It applies to the actual nodes
+of the radix cyclic graph: a node with the value `ABCD` becomes `AB` and `CD`.
+
+Compression (D-007) only ever coarsens the structure. It merges every unary chain into one node, and a merged node
+is a corridor: entered at its first gram, left at its last, with nothing to learn inside - no edge, no count, no
+weight - and nowhere to branch. The graph's granularity is whatever the corpus's branching happened to leave. The
+claim is that the structure should *breathe*: a ceiling on a node's length that halves - 32, 16, 8, 4 - cuts the
+corridors into halves that carry the same data for traversal and are joined by a heavy connection, so a walk is
+unchanged the moment they are cut but has places to branch afterwards; and then the ceiling goes back up to 32 and
+what nothing branched into grows together again.
+
+**Decision** A `DynamicWindow` on the graph, beside the encoding and the band: a ladder of powers of two from a top
+to a floor (32 down to 4 by default), the size it stands at, and whether it steps by itself. One **step** merges
+what fits the window (compression, which with the window on merges nothing longer than its size), halves every node
+that is longer at its middle gram - the first half keeping the odd gram, the id and the in-edges, the second half
+the rest and the out-edges, both the node's state, activation parameters and count - and moves the window down the
+ladder, back to the top from the floor. The edge between two halves is the **heavy connection**, in each kind's own
+currency: the count the node had (what a split already hands its bridge, and what makes it heavy where weights are
+computed from counts), the weight `W_HEAVY = 8` in the sine model (negated while inverted), the traversals of the
+out-edges it stands before in the phase model, which counts edges and not nodes. A step happens by hand (`radixnet
+window --step`, `POST /api/model/window/step`, the Step button) or automatically at the end of every training
+epoch, in every kind's loop, feedback passes included. All three implementations carry it, node for node.
+
+**Alternatives rejected**
+* **Pinning the halves for good** - a flag on the bridge, the way a blamed edge is kept out of compression
+  (D-046). The cycle would then be one-way: after 32, 16, 8, 4 the graph would be shredded to four-unit nodes
+  forever, compression - the structure's whole idea - switched off, and "back up to 32" would have nothing to do.
+  The window as a ceiling on *merging* gives the ladder both directions: down, it cuts; up, compression regrows
+  whatever stayed unary.
+* **Measuring the window in grams.** The halving is exact in grams, but every length the system reports - labels,
+  `length`, `max_length`, a text's `chars` - is in units, and a window of 32 that meant 34 characters would be the
+  one number counted differently.
+* **Cutting at the unit midpoint regardless of the overlap** - `ABCD` into `AB` and `CD` under the trigram. Not
+  representable: neither half holds a trigram, the trigram `BCD` would have to live in two nodes at once, and every
+  edge, split, decode and the index rest on the overlap (D-006). Under a sliding encoding `ABCD` *is* `ABC -> BCD`
+  merged and comes apart into those, sharing the pivot; under a grouping encoding (`char:2:2`) the cut is exactly
+  `AB` and `CD`.
+* **A heavy weight scaled to the activation** (`w = S / f²`), so that the bridge's *score* were fixed. Brittle at
+  `f ≈ 0`, and unlike every other weight in the network, none of which is scaled to its endpoints. A fixed heavy
+  weight is as heavy as the activation allows, which is what every weight in the sine model is - and it stays a
+  learned weight, moved like any other when the data disagrees.
+* **A reward on the count model's bridge.** A reward is what a judge said (D-026); the bridge's count already says
+  everything the node ever saw, and a share of 1 needs no number added to it.
+* **The window as the encoding's `n`** - 32-grams halved into 16-grams. It would re-key the whole index at every
+  rung, and could not climb back: training at `n = 4` leaves node lengths that are not multiples of 32. The gram is
+  fixed for a graph's life (D-071); the window only decides how many of them a node holds.
+* **Stepping on corrections or ratings rather than epochs.** Feedback passes are epochs and step like any other; a
+  step tied to a judge would move the ladder at a rate the tutor, not the schedule, decides.
+
+**Consequences**
+* **Off is the old file to the bit**, on every kind, whether the window was never touched or switched on and off:
+  the block is written only while it is on, an epoch's record carries `splits` and `window` only when it stepped,
+  and the same unary halves merge back at the next compression once it is off - the graph is never left in a state
+  the old rules could not have produced.
+* **What changes.** On, the graph alternates between coarse and fine. Going down, the halves can learn apart: a
+  transition into the second half's first gram no longer needs a split, a child can attach to the first half
+  without one. Back at the top, what stayed unary is consolidated - one side's activation kept, the other's edges
+  rescaled, D-007's lossy merge made periodic - while a half that gained a branch stays a node. A step at the floor
+  turns a 30-unit corridor into eight nodes; the top turns them back into one.
+* **The bridge keeps the cut invisible to traversal.** The first half has one child, so the step across the bridge
+  is probability 1 and cost 0 - the deterministic step inside the merged node. The heaviness matters afterwards,
+  against a competitor: `8 · f²` against at most `1.5 · f · f'` in the sine model, decisive near `|f| = 1` and
+  modest at a small activation; a share of everything the node saw in the counting kinds.
+* **Two kinds count differently, and the bridge says so.** The phase model counts edges, not nodes, so its bridge
+  takes what passed through; the negative network counts nothing - its evidence is blame - so its bridge carries
+  none, honestly, and a `judge` over the halves finds the blame it found over the node.
+* **Nothing is graded.** Whether a model cycled 32 → 4 → 32 predicts better than one left alone, or only the same
+  with more edges in between, is the research question; the window makes it askable (Q-20).
+
+**Lives in** `radixnet/window.py`, `radixnet/graph.py::split_window / merge_child`,
+`radixnet/model.py::window_config / configure_window / window_step / _window_epoch`, `go/radixnet/window.go`,
+`rust/src/window.rs`, `../ModelKit/frontend/src/components/DynamicWindowCard.jsx`, `SPEC-DynamicWindow.md`
+
+---
+
+# Part XXIV — Tokens
+
+### D-097 — The traditional LLM tokenizer is a unit of the encoding dial: byte-level BPE, and a text form that reads back
+
+**Status** Accepted · 2026-09-28 · **Layer** representation · **Extends** D-071, D-080 · **Revisits** D-006's
+rejection of a learned sub-word tokenizer · **Specified in** `SPEC-Tokens.md`
+
+**Context — my reason** *"Implement a new encoder and decoder layer that follows the traditional LLM tokenizer."*
+D-006 rejected a learned sub-word tokenizer for two reasons - it needs a corpus before training can start, and it
+freezes what the model can read - and D-071 and D-080 kept the rejection. Both reasons are answered by the
+tokenizer the large models actually use. It is *byte-level*: every byte is a token, so a frozen vocabulary still
+reads every text there is, exactly, with no `<unk>`; what the merges add is only which runs of bytes travel
+together. And the corpus it needs can be one the repository already has, learned once and shipped, the way the
+phonetic lexicon and the acoustic codebook ship. So the question stops being *whether* and becomes *where*: the
+encoding dial already says what one unit of a text is (D-071), and a unit that is read through a tokenizer already
+exists (D-080). A token is a unit.
+
+**Decision** A sixth unit, `token` (`--encoding token:3:1`, or `bpe:3:1`), in all three ports. The encoder is
+GPT-2's, piece for piece: its byte alphabet (`Ġ` for the space), its pre-tokenizer pattern (contractions, a word or
+a run of digits or punctuation with the space before it, whitespace leaving its last space to what follows), its
+ranked merges applied the pair with the best rank first, everywhere, left to right, its `merges.txt` file, ids
+with the bytes first and `<|endoftext|>` last; plus the one thing SentencePiece models add, a space before every
+text, so the first word is the same token as the same word anywhere else. The decoder is its inverse, exactly. The
+merges ship learned from the repository's own prose (4096 ids, `tests/make_merges.py`, pinned to a commit), and
+`RADIXNET_TOKENIZER` points every port at another file, which `radixnet tokenizer learn` makes from a corpus.
+
+The graph needed one thing more than a tokenizer: a **text form**. A label is its units joined by single spaces
+and is cut into units again all day, so the tokens had to be written in a way the tokenizer reads back as the same
+tokens - any run of them, since a label starts and ends wherever a gram does. A token that is a space and printable
+ASCII is written as that ASCII, bare (`Ġcat` is `cat`); every other token is glued on with `⁀`, a mark outside the
+byte alphabet (`ing` is `⁀ing`, `.` is `⁀.`). `"The walking cat."` is `The walk ⁀ing cat ⁀.`, and a text of plain
+words is its own text form. A text whose every single-spaced piece reads as a token is read piece by piece;
+anything else is read as text; and where both readings apply they give the same tokens (`SPEC-Tokens.md` §5.3
+proves both halves). So a label cuts into the tokens it was made of, a prefix typed as text is looked for as its
+tokens, and nothing in the graph, the search, the weights or the file changed.
+
+**Alternatives rejected**
+* **GPT-2's form as the label** (`the Ġcat Ġsat .`). It marks the space and leaves the glue unmarked - backwards
+  for text: a word typed after a space would read as a glued token, and no prefix a person types could match a
+  label. The bare-and-glued form is the same information with the mark moved to where text needs it.
+* **A label as the tokens' bytes run together**, cut by encoding it again. Encoding a stretch of text is not always
+  the stretch of the encoding (a contraction, the last space of a run cut it differently), so a label could come
+  back as other tokens.
+* **A tokenizer package beside this one**, as the phonetic tokenizer is (D-080). That one is wanted by other
+  projects and carries a lexicon and a voice; this one is a module per port and a data file, and the encoding layer
+  is its only reader.
+* **The vocabulary in the model file**, learned from a model's first corpus: the most self-contained, and the
+  traditional workflow, but it would turn the encoding - a value compared and copied everywhere - into a registry of
+  tokenizers, one per loaded model. The file and the environment variable are the rule the lexicon and the codebook
+  already follow.
+* **GPT-2's own vocabulary.** Not in the repository, not fetchable from a checkout, and not this project's; its
+  `merges.txt` is in the format the loader reads, for anyone who brings it.
+* **The Unicode categories for the pre-tokenizer's classes.** The Rust standard library has none to ask; a fixed
+  table is the same in three ports.
+
+**Consequences**
+* **D-006's first reason is answered, its second priced.** A token model can read any text exactly - bytes are the
+  floor - but what it reads *well* is what the merges were learned from; English prose of the kind this repository
+  is written in reads at about three characters a token, 1.7 tokens a word. Text unlike it falls back towards
+  bytes, which is readable and exact but long.
+* **A model is only as portable as its merges.** Train and predict with the same file, in every port - the rule
+  D-080 wrote for the lexicon. Relearning the bundled merges is a new vocabulary, not an update.
+* **Compression means phrases of subwords.** Under `token:3:1` a merged node is a run of tokens - `the cat sat on
+  the mat` is one node of six tokens on the sample corpus - and a branch point falls at a token, not a character
+  and not only at a word: `walk` can go on to `⁀ing` or `⁀ed`.
+* **What the model says is decoded, not respelled.** Unlike the phonetic units, spelling a text of tokens back is
+  exact: `spelled` is the text, and the voice speaks it as letters, a character held until its last byte arrives.
+* **Learning is Python's.** The Go and Rust ports read the merges file and carry the encoder, the decoder and the
+  text form; `radixnet tokenizer learn` writes the file for all three.
+* **Nothing is graded.** Whether a graph over tokens predicts better than one over characters or words - fewer,
+  larger units, more shared prefixes - is the research question (Q-21).
+
+**Lives in** `radixnet/bpe.py`, `radixnet/data/merges.txt`, `radixnet/encoding.py` (`TOKENS`), `radixnet/cli.py`
+(`tokenizer`), `radixnet/voice.py`, `go/radixnet/bpe.go`, `go/radixnet/data/merges.txt`, `rust/src/bpe.rs`,
+`tests/test_tokens.py`, `tests/tokens_fixture.json`, `tests/make_merges.py`, `SPEC-Tokens.md`, `DESIGN.md` §42
+
+---
+
 # Part VII — Superseded decisions
 
 Kept because the reversal is information.
@@ -4483,3 +4566,11 @@ measured: a model cycled 32 → 16 → 8 → 4 → 32 over the same corpus as on
 alone, compared on its loss, on the branch points its halves grew and on what
 it predicts, is the experiment - and it decides whether the top should merge
 back at all, or whether the halves that learned to differ should be kept.
+
+**Q-21 — What do tokens buy the graph (D-097)?** A token model walks fewer, larger
+units than a character model and branches inside words, which a word model cannot;
+whether that predicts better, compresses better or only differently is not measured.
+The same corpus trained under `char:3:1`, `word:3:1` and `token:3:1`, compared on
+held-out loss per character, on node and edge counts, and on what each continues
+a prefix with, is the experiment - and the vocabulary size is a fourth dial it
+should sweep.

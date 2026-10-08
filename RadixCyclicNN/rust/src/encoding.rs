@@ -63,6 +63,12 @@ pub enum Unit {
     /// graph is built over; as text the units are tokens taken as they come,
     /// like words, and what the model says is spoken through the vocoder.
     Acoustic,
+    /// One *token* of the traditional LLM tokenizer: byte-level byte-pair
+    /// encoding, GPT-2's way ([`crate::bpe`]).  The text is read through the
+    /// tokenizer, and a label is the tokens' text form - a token that is a space
+    /// and a word written as the word, any other glued on with `⁀` - so
+    /// `"The walking cat."` is the units `The walk ⁀ing cat ⁀.`.
+    BpeTokens,
 }
 
 impl Unit {
@@ -74,12 +80,26 @@ impl Unit {
             Unit::Phones => "phone",
             Unit::Syllables => "syllable",
             Unit::Acoustic => "acoustic",
+            Unit::BpeTokens => "token",
         }
     }
 
     /// Whether the units are sounds rather than letters or words.
     pub fn phonetic(self) -> bool {
         matches!(self, Unit::Phones | Unit::Syllables)
+    }
+
+    /// Whether a text is *read* into these units through a tokenizer whose text
+    /// form is idempotent (sounds, syllables, BPE tokens): a text that already is
+    /// units passes through, anything else is read.
+    pub fn reads(self) -> bool {
+        matches!(self, Unit::Phones | Unit::Syllables | Unit::BpeTokens)
+    }
+
+    /// Whether a text of these units spells something else - sounds their
+    /// words, tokens their text - which [`Encoding::spell`] gives.
+    pub fn spells(self) -> bool {
+        self.reads()
     }
 
     /// Whether the units are whitespace-separated tokens taken as they come
@@ -100,6 +120,7 @@ impl Unit {
             Unit::Phones => "phones",
             Unit::Syllables => "syllables",
             Unit::Acoustic => "units",
+            Unit::BpeTokens => "tokens",
         }
     }
 
@@ -111,6 +132,7 @@ impl Unit {
             "phone" | "phones" | "phoneme" | "phonemes" | "sound" | "sounds" => Some(Unit::Phones),
             "syllable" | "syllables" | "syl" => Some(Unit::Syllables),
             "acoustic" | "acoustics" | "audio" | "unit" | "units" => Some(Unit::Acoustic),
+            "token" | "tokens" | "bpe" | "subword" | "subwords" => Some(Unit::BpeTokens),
             _ => None,
         }
     }
@@ -161,6 +183,9 @@ impl Encoding {
         if self.unit == Unit::Acoustic {
             crate::phonetic::acoustic_tokenizer()?; // and the acoustic unit its codebook, to hear recordings and be heard
         }
+        if self.unit == Unit::BpeTokens {
+            crate::bpe::default_tokenizer()?; // and the token unit its merges
+        }
         if self.n < 1 {
             return Err(format!("n must be >= 1, got {}", self.n));
         }
@@ -205,6 +230,7 @@ impl Encoding {
             Unit::Phones => "phone",
             Unit::Syllables => "syllable",
             Unit::Acoustic => "unit",
+            Unit::BpeTokens => "token",
         };
         let kind = if self.sliding() { "sliding" } else { "groups" };
         format!("{}-{unit} grams, stride {} ({kind})", self.n, self.stride)
@@ -221,6 +247,9 @@ impl Encoding {
             // pause, the gap between two words a #.  Text that is already sounds passes
             // through unchanged, so a label cuts into the units it was made of.
             Unit::Phones | Unit::Syllables => Units::words(&crate::phonetic::text(self.unit, text)),
+            // the text read through the BPE tokenizer; text that already is tokens passes
+            // through unchanged, so a label cuts into the units it was made of
+            Unit::BpeTokens => Units::words(&crate::bpe::text(text)),
         }
     }
 
@@ -230,6 +259,7 @@ impl Encoding {
             Unit::Chars => text.chars().count(),
             Unit::Words | Unit::Acoustic => text.split_whitespace().count(),
             Unit::Phones | Unit::Syllables => crate::phonetic::text(self.unit, text).split_whitespace().count(),
+            Unit::BpeTokens => crate::bpe::units(text).len(),
         }
     }
 
@@ -257,10 +287,14 @@ impl Encoding {
         }
         let mut out = String::new();
         for part in parts {
-            // a piece given as text joins as the sounds it makes, so a joined text is all sounds
+            // a piece given as text joins as the sounds it makes (or the tokens it reads as), so a
+            // joined text is all units
             let sounds;
             let part: &str = if self.unit.phonetic() {
                 sounds = crate::phonetic::text(self.unit, part);
+                sounds.as_str()
+            } else if self.unit == Unit::BpeTokens {
+                sounds = crate::bpe::text(part);
                 sounds.as_str()
             } else {
                 part
@@ -288,9 +322,13 @@ impl Encoding {
             return text.starts_with(prefix);
         }
         let sounds;
-        let prefix = if self.unit.phonetic() {
-            // a prefix given as text is looked for as the sounds it makes
-            sounds = crate::phonetic::text(self.unit, prefix);
+        let prefix = if self.unit.reads() {
+            // a prefix given as text is looked for as the units it reads as
+            sounds = if self.unit == Unit::BpeTokens {
+                crate::bpe::text(prefix)
+            } else {
+                crate::phonetic::text(self.unit, prefix)
+            };
             if sounds.is_empty() {
                 return true;
             }
@@ -303,8 +341,15 @@ impl Encoding {
 
     /// The words a phonetic text spells (`"DH AH0 # K AE1 T"` -> `"the cat"`); a
     /// text given in words is read as the sounds it makes first, so it spells
-    /// itself back.  A character or word encoding returns the text as it is.
+    /// itself back.  A text of tokens is the text it is (`"The walk ⁀ing cat ⁀."`
+    /// -> `"The walking cat."`).  A character or word encoding returns the text as it is.
     pub fn spell(&self, text: &str) -> String {
+        if self.unit == Unit::BpeTokens {
+            return match crate::bpe::default_tokenizer() {
+                Ok(tok) => tok.spell(text),
+                Err(_) => text.to_string(),
+            };
+        }
         if !self.unit.phonetic() {
             return text.to_string();
         }
@@ -322,7 +367,7 @@ impl Encoding {
     /// is spelled on its own.  A character or word encoding returns the tail
     /// as it is.  Python's `Encoding.spell_tail`, character for character.
     pub fn spell_tail(&self, whole: &str, tail: &str) -> String {
-        if !self.unit.phonetic() {
+        if !self.unit.spells() {
             return tail.to_string();
         }
         let Some(before) = whole.strip_suffix(tail) else {
@@ -488,7 +533,7 @@ pub fn parse_encoding(spec: &str) -> Result<Encoding, String> {
     }
     let unit = Unit::parse(parts[0]).ok_or_else(|| {
         format!(
-            "encoding {spec:?}: unit must be char, word, phone, syllable or acoustic, got {:?}",
+            "encoding {spec:?}: unit must be char, word, phone, syllable, acoustic or token, got {:?}",
             parts[0]
         )
     })?;
@@ -721,6 +766,32 @@ mod tests {
             let back = e.decode_grams(grams.iter().map(|s| s.as_str()));
             assert_eq!(back, e.normalize(text), "{e}");
         }
+    }
+
+    #[test]
+    fn a_token_encoding_reads_text_through_the_bpe_tokenizer() {
+        let e = parse_encoding("bpe:3:1").unwrap();
+        assert_eq!(e.to_string(), "token:3:1");
+        assert_eq!(
+            (e.units_name(), e.describe().as_str()),
+            ("tokens", "3-token grams, stride 1 (sliding)")
+        );
+        assert!(e.unit.spells() && !e.unit.phonetic() && !e.unit.tokens());
+        assert_eq!(
+            e.encode("The walking cat."),
+            vec!["The walk ⁀ing", "walk ⁀ing cat", "⁀ing cat ⁀."]
+        );
+        assert_eq!(e.len("The walking cat."), 5);
+        assert_eq!(e.normalize("The walking cat."), "The walk ⁀ing cat ⁀.");
+        assert_eq!(e.spell("The walk ⁀ing cat ⁀."), "The walking cat.");
+        let path = ["The walk ⁀ing", "walk ⁀ing cat", "⁀ing cat ⁀."];
+        assert_eq!(e.decode_path(&path, 0, false), "cat ⁀.");
+        // a prefix is matched by its tokens, and a piece given as text joins as its tokens
+        assert!(e.has_unit_prefix("the cat sat ⁀.", "the cat sat."));
+        assert!(!e.has_unit_prefix("the cat sat ⁀.", "the ca"));
+        assert_eq!(e.join(&["the cat", "sat."]), "the cat sat ⁀.");
+        assert_eq!(e.reverse("The walking cat."), "⁀. cat ⁀ing walk The");
+        assert_eq!(e.spell("the cat sat ⁀."), "the cat sat.");
     }
 
     #[test]

@@ -88,6 +88,7 @@ takes a write lock.**
 | `negative.go` | the negative network — the failures, and why |
 | `correct.go`, `diff.go` | corrections, and the character diff that decides which steps to blame |
 | `attention.go` | the attention band: where inside a gram a correction's blame and credit land (`BandWeights`, `SpreadCharges`, `chargedSteps`, the preview) |
+| `bpe.go` | the traditional LLM tokenizer of the `token` unit, `radixnet/bpe.py` token for token: the byte alphabet, the pre-tokenizer (`Pretokenize`), the merges (`BPETokenizer`, `ParseMerges`, the bundled `data/merges.txt` embedded), ids and an exact decoder, the text form (`Render`, `Read`, `Units`, `Spell`) and `DefaultTokenizer` (`RADIXNET_TOKENIZER`); `bpe_test.go` holds it to `../../tests/tokens_fixture.json` |
 | `window.go` | the dynamic window: the ladder of node sizes halving from 32 to 4 and back up (`DynamicWindow`, `Ladder`), the halving (`SplitWindow`), the step by hand and at the end of every epoch (`WindowStep`, `windowEpoch`) and what the API and the CLI show (`WindowConfig`, `ConfigureWindow`) |
 
 ## Built on it

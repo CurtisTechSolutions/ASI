@@ -36,9 +36,10 @@ from .backend import (
     get_backend,
     torch_available,
 )
+from .bpe import BPETokenizer
 from .encoding import (
-    ACOUSTIC, BACK_LABEL, CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, THINK_LABEL, WINDOW, WORDS, Decoder, Encoder,
-    Encoding, parse_encoding,
+    ACOUSTIC, BACK_LABEL, CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, THINK_LABEL, TOKENS, WINDOW, WORDS, Decoder,
+    Encoder, Encoding, parse_encoding,
 )
 from .graph import BACK, END, FIRST, START, THINK, RadixCyclicGraph
 from .beam import Prediction, beam_predict
@@ -72,7 +73,8 @@ __all__ = [
     "DEFAULT_A", "DEFAULT_B", "DEFAULT_H", "DEFAULT_K",
     "edge_signal", "sine_activation", "sine_derivative", "sine_partials",
     "CSR", "Backend", "NodeParams", "PythonBackend",
-    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "Encoding", "parse_encoding",
+    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "TOKENS", "Encoding", "parse_encoding",
+    "BPETokenizer",
     "END", "START", "RadixCyclicGraph",
     "DynamicWindow", "WINDOW_TOP", "WINDOW_FLOOR",
     "AutoPrune", "PRUNE_MIN_COUNT", "PRUNE_MIN_SHARE", "PRUNE_EVERY",
