@@ -40,6 +40,7 @@ runs the kit from `../ModelKit` (D-093).
 | A second way through: the least punished | `--traversal least-punished` (Python, Go and Rust, `predict` / `generate` / `bench`, `traversal` in the HTTP API and a selector on the Predict and Generate tabs): the walk is ranked by the **blame** on its worst step first and by the cost only between steps nothing is held against, and at every node it may only take the children the model has the least against. A step's punishment is the penalty side of its reward plus `log(1 + incorrect)` of the judged path context - the failures counted **against nothing**, so a reward cannot buy blame off the way it nets it off the edge. On a graph where nothing was ever punished it is the ordinary search, to the bit. `SPEC-LeastPunished.md` is the specification. |
 | An attention band for each n-gram | `radixnet attention --blur 0.5` (Python, Go and Rust; `POST /api/model/attention`; the Attention band card on Model settings): each gram is read the way an eye reads a line - sharp at its centre, blurred towards its ends - so a **correction** charges the gram that has a changed unit at its centre the most, and the grams that only glimpse it at an edge less, instead of charging only the step that wrote it. Every changed unit hands out one charge; a thumbs up or down, which marks every unit alike, is untouched. Off by default, saved with the model. `SPEC-AttentionBand.md` is the specification. |
 | A dynamic window over the nodes | `radixnet window --on` (Python, Go and Rust; `POST /api/model/window`; the Dynamic window card on Model settings): a ceiling on a node's length, sized in the **binary number system** - it starts at 32 units, moves to 16, then 8, then 4, and goes back up to 32 and runs again. One **step** merges what fits the window, halves every node that is longer into two halves that carry the **same state, activation and count**, joined by a **heavy connection**, and moves the window down the ladder; it steps by itself at the end of every training epoch or by hand (`--step`). A node `ABCD` becomes `AB` and `CD` under a grouping encoding, `ABC` and `BCD` under the trigram. Off by default, saved with the model. `SPEC-DynamicWindow.md` is the specification. |
+| Auto prune: the graph lets go of what it stopped using | `radixnet prune --on` (Python; `POST /api/model/prune`): compression only ever merges, so nothing the graph learned was ever removed. An edge traversed fewer than `--min-count` times (default 1: only what was never traversed) or taking less than `--min-share` of its node's out-traversals (default 0: off) is **pruned**, every real node then left with no way in or no way out goes with its edges, and the chains that opens are merged - unless something was **taught** about an edge (a hand-over, a reward, a judged context, blame), which is never pruned and keeps its node. By itself at the end of every training epoch, or by hand (`--now`). Off by default, saved with the model. `SPEC-AutoPrune.md` is the specification. |
 | Train and predict | `train`, `predict`, `generate`, `score` in the Python API, CLI, HTTP API and frontend. |
 | Traverse by the punishments, not the rewards | `--traversal punishment` (`traversal` in the HTTP API, a selector on the Predict and Generate tabs, all three languages): the rewards leave the score altogether and the **penalties** price every step, so the cheapest path is the one that accumulated the **least punishment**. It is *what* a search looks for, as opposed to `--mode`, which is how it looks - every mode of every kind can run either traversal. See below. |
 | Automated English lessons | `tutor` / the Tutor tab / `POST /api/tutor/start` (both servers): the teacher - a local Ollama model or ChatGPT - writes sentence openings that drill a point of grammar, the network completes them with the prediction search, the same teacher marks each sentence out of 10 for grammar, spelling and fluency and writes the correction; the correction is then aligned with what the network wrote and only the trigram nodes that differ move (`correct`), the failures are asked about (*why* is this wrong, and what else is wrong the same way - see below), and the round's mistakes become the next round's syllabus. |
@@ -139,6 +140,7 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make negative-why TEXT="..."` / `negative-filter COUNT=3` / `negative-reasons` / `negative-forget REASON=...` | explain a text, run the pair, list what the tutor blamed, drop a reason |
 | `make invert` / `make compress` | invert the network / merge unary chains |
 | `make window` / `window-on WINDOW_TOP=32 WINDOW_FLOOR=4` / `window-step STEPS=1` / `window-off` | the dynamic window: show it / switch it on (stepping at the end of every training epoch) / step it by hand - merge what fits, halve what is longer, move the window / switch it off |
+| `make prune` / `prune-on PRUNE_MIN_COUNT=1 PRUNE_MIN_SHARE=0` / `prune-now` / `prune-off` | auto prune: show it / switch it on (pruning at the end of every training epoch) / prune by hand - remove the edges under the thresholds and the nodes they strand, merge / switch it off |
 | `make evolve GENERATIONS=3` / `make evolve-forever` / `make evolve-blame` | GAN-style self-upgrade loop (`evolve-blame` also teaches the negative network) |
 | `make info` / `make checkpoints` / `make restore NAME=latest` | statistics / list checkpoints / restore one into `MODEL` |
 | `make bench CHARS=50000 BACKEND=python` | throughput benchmark |
@@ -248,6 +250,7 @@ follows the kind - `model.count.json`, `model.word.json`, `model.resonant.json`)
 | `correct` | teach one correction: `--wrong TEXT` (what the network wrote), `--right TEXT` (what it should say), `--blame` / `--reason TAG` / `--note TEXT` / `--negative PATH` (teach the negative network from the same diff), `--strength 1`, `--weight 1` (how bad the attempt was), `--reward 1`, `--keep 0` (what the unchanged words still earn; a whole path is only rewarded when the answer was right), `--no-count`, `--dry-run` (show the alignment only), `--out` |
 | `attention` | the attention band - where inside a gram a correction lands: without options it is shown; `--on` (at the blur it had, else 0.5), `--blur X` (0..1: the band is 1 at a gram's centre and 1 - X at its ends; switches it on), `--off` (each changed unit charged to the step that wrote it) change it and save the model (`--dry-run`: in memory only, `--out PATH`); `--wrong TEXT --right TEXT` prints where that correction would land, gram by gram, under the band and without it. The count model and the negative network take a band (point `--model` at the negative file for its own); the sine and phase models refuse one |
 | `window` | the dynamic window - a ladder of node sizes halving from 32 to 4 and back up: without options it is shown; `--on` (at the ladder it had, else 32 down to 4, standing at the top, stepping every epoch), `--top N`, `--floor N` (powers of two), `--size N` (where it stands), `--auto` / `--manual`, `--off` change it and save the model (`--dry-run`: in memory only, `--out PATH`); `--step [N]` takes N steps - each merges what fits the window, halves every node that is longer (both halves keep the node's state, activation and count, joined by a heavy connection) and moves the window - and saves. Every kind takes a window |
+| `prune` | auto prune - the graph letting go of the edges nothing walks and the nodes they strand: without options it is shown; `--on` (at the thresholds it had, else never-traversed edges, every epoch), `--min-count N`, `--min-share X` (0..1), `--every N`, `--auto` / `--manual`, `--off` change it and save the model (`--dry-run`: in memory only, `--out PATH`); `--now` prunes at the model's thresholds (the defaults while it is off) - removes the edges under them unless something was taught about them, then every real node left with no way in or no way out, then merges - and saves. Every kind takes it |
 | `paths` | count model: the judged paths - `--limit 20`, `--node LABEL` (only the paths leaving one node). Each line is `prev -> parent -> child`, its correct / incorrect counter, how often it has been walked since (`seen`) and what that says about the edge (`seen ratio`, `correct ratio`) |
 | `words` | word model: its alphabet - `--limit 20` (0 = all). Every word it has read, with how many of the graph's three-word windows hold it; a word graph is addressed in words everywhere else too (`nodes --node "sat on the mat"`) |
 | `nodes` | count model: each node against the nodes around it - `--limit 10`, `--node LABEL`. A row per previous node and a row per next node, each with its share of that side's traffic (`seen %`) and of that side's reward (`reward %`, signed), how much of the edge a judged context has been watching, and what those contexts made of it |
@@ -283,6 +286,9 @@ at a time, and mutating requests answer 409 while it runs.
 | `POST /api/model/attention/preview` | `{"wrong", "right", "blur"}` -> `{"kind", "attention", "blur", "weights", "changes", "wrong", "right"}`, each side `{"text", "units", "grams", "spans", "writer", "charges", "focus", "end"}`: where one correction would land, gram by gram - `writer` the rule with the band off, `charges` each gram's share under the band, `focus` the gram that sees a change most sharply. Changes nothing |
 | `GET /api/model/window` | the active model's dynamic window: `{"kind", "window": {"on", "top", "floor", "size", "auto", "sizes" (the ladder), "next", "unit", "units", "ngram", "longer" (real nodes a step would halve; null while off), "longest", "nodes", "heavy" (the sine model's bridge weight; null where the bridge is heavy by its count), "default_top", "default_floor"}}` |
 | `POST /api/model/window` | `{"on", "top", "floor", "size", "auto"}`: `on: false` switches it off (the graph stays as it is), `on: true` or any setting switches it on at the values given over the ones it had (else 32 down to 4, at the top, stepping every epoch); a new top or floor keeps the size on the ladder -> `{"kind", "window", "stats"}`; 400 for a size that is not a power of two or off the ladder |
+| `GET /api/model/prune` | the active model's auto prune: `{"kind", "prune": {"on", "min_count", "min_share", "every", "auto", "rule" (the thresholds in words; null while off), "candidates" (edges a prune would remove now; null while off), "stranded" (real nodes with no way in or no way out), "nodes", "edges", "default_min_count", "default_min_share", "default_every"}}` |
+| `POST /api/model/prune` | `{"on", "min_count", "min_share", "every", "auto"}`: `on: false` switches it off (the graph stays as it is), `on: true` or any setting switches it on at the values given over the ones it had (else never-traversed edges, at the end of every epoch); 400 for a negative count, a share outside [0, 1) or `every` under 1 -> `{"kind", "prune", "stats"}` |
+| `POST /api/model/prune/now` | `{"min_count", "min_share"}` (default: the model's thresholds, or the defaults while it is off): prune by hand - the edges under the thresholds unless something was taught about them, then every real node left with no way in or no way out, then the merges that opens -> `{"kind", "pruned": {"candidates", "edges", "nodes", "merges", "nodes_before", "nodes_after", "edges_before", "edges_after", "prune"}, "prune", "stats"}` |
 | `POST /api/model/window/step` | `{"steps"}` (default 1): each step merges what fits the window, halves every node that is longer and moves the window down the ladder, back to the top from the floor -> `{"kind", "step": {"steps", "sizes", "from", "to", "merges", "splits", "nodes_before", "nodes_after", "edges_before", "edges_after", "window"}, "window", "stats"}`; 400 while it is off |
 | `POST /api/train` | `{"texts": [...]}` or `{"text": "one per line"}` and/or `{"files": ["upload names"], "whole_file": false}` + `epochs`, `lr`, `act_lr`, `lr_schedule`, `act_lr_schedule` (expressions of the epoch), `reverse_schedule`, `batch_size`, `auto_compress`, and how the run walks its texts: `order`, `curriculum`, `replay`, `replay_size`, `patience`, `min_delta` (each off when left out; a value out of range is a 400), and `reverse` (read every text backwards, in the model's units - [Training in reverse](#training-in-reverse)) -> `{"job": {...}}`; every epoch record carries the `lr` / `act_lr` used, and the one that stopped the run early `"early_stop": true` |
 | `GET /api/schedule` | what a schedule expression may use: `{"variables", "constants", "functions", "helpers", "presets": [{"name","lr","act_lr","description"}]}` |
@@ -2745,6 +2751,57 @@ card, which draws the ladder and steps it by hand. All three implementations
 halve the same nodes and write the same file for it. `SPEC-DynamicWindow.md` is
 the specification and `DECISIONS.md` D-087 the reasoning.
 
+## Auto prune: let go of the edges nothing walks, and the nodes they strand
+
+Compression only ever merges. Nothing the graph learned is ever removed: a text
+read once leaves its edges behind for good, a split leaves a bridge nothing
+crosses again, a text registered for scoring leaves nodes that were never
+walked, and a model taught for long enough carries every transition it ever
+saw. **Auto prune** is the other half of self-compression - the graph lets go
+of what it has stopped using. Two thresholds over what the graph already
+counts, applied to every edge leaving a node:
+
+| threshold | an edge is pruned when | default |
+|---|---|---|
+| `--min-count N` | it was traversed fewer than N times | `1` - only what was never traversed (`0` switches the rule off) |
+| `--min-share X` | it takes less than share X of its node's out-traversals | `0` - off; it is what thins a busy node of its rare continuations |
+
+After the edges go, every real node left with **no way in** or **no way out**
+goes too, with the edges it still had, swept until nothing is stranded; then
+the unary chains the removals opened are merged. An edge is **never** pruned
+while something was *taught* about it rather than observed - a hand-over into
+`BACK` or `THINK`, the count model's rewards and judged contexts, the negative
+network's blame and clearing, the phase model's rewards - and a node holding
+such an edge is never swept, so what went wrong stays nameable. A count of 0 is
+read as *unknown*, not never, while a node's out-edges do not account for what
+came in (the bridge of a split in a kind that counts edges and not nodes), so
+the phase model and the negative network are pruned as carefully as the rest.
+The negative network counts nothing, so there an edge's traffic is the
+evidence it carries.
+
+The prune happens **automatically** at the end of every `--every`-th training
+epoch while the setting is on (the default), after the compression and the
+window's step the epoch already does, or **by hand**:
+
+```bash
+python -m radixnet --model model.json prune --on                          # never-traversed edges, every epoch
+python -m radixnet --model model.json prune --min-share 0.02              # and the rare continuations of a busy node
+python -m radixnet --model model.json train --data data/sample_corpus.txt --epochs 3   # each epoch: ..., prune
+python -m radixnet --model model.json prune --manual --now                # by hand, now
+#   pruned    18 edge(s) under the thresholds; 37 edge(s) and 17 node(s) removed, 15 merge(s) after; nodes 466 -> 434, edges 824 -> 772
+python -m radixnet --model model.json prune                               # show it
+python -m radixnet --model model.json prune --off                         # nothing is pruned again
+```
+
+It is saved with the model (`"auto_prune": {"min_count": 1, "min_share": 0.0,
+"every": 1, "auto": true}` in the graph block, only while it is on), shown by
+`prune` and `info`, and reported as `pruned_edges` / `pruned_nodes` in the
+record of every epoch that pruned; the stats, which every port answers alike,
+do not carry it. **Python only**: the Go and Rust ports keep
+the block on file and do not prune; a model pruned in Python loads in both as
+the smaller graph it is. `SPEC-AutoPrune.md` is the specification and
+`DECISIONS.md` D-094 the reasoning.
+
 ## Go implementation of the count / reward model
 
 `go/` holds a Go port of the count / reward model (`CountRewardNet`) **and of
@@ -3119,7 +3176,8 @@ make frontend-test  # cd ../ModelKit/frontend && npm test (node --test over the 
 ```
 RadixCyclicNN/        the model
   radixnet/           activation, counter, encoding, graph, backend(+torch), search, beam, phasesearch, penalty,
-                      model, countnet, negative, resonance, metacog, diff, schedule, training, attention, window;
+                      model, countnet, negative, resonance, metacog, diff, schedule, training, attention, window,
+                      prune;
                       __main__ hands `python -m radixnet` to the kit's command line
   tests/              unittest suite of the model (needs nothing from the kit)
   go/                 Go port of the model: radixnet/ (library)
@@ -3133,6 +3191,7 @@ RadixCyclicNN/        the model
   SPEC-LeastPunished.md   the traversal that follows the blame (built)
   SPEC-AttentionBand.md   where inside a gram a correction lands (built)
   SPEC-DynamicWindow.md   the ladder of node sizes, halving from 32 to 4 and back up (built)
+  SPEC-AutoPrune.md   the graph letting go of the edges nothing walks, and the nodes they strand (built, Python)
   SPEC-EdgeDecay.md   a node's edges fading on the graph's own clock (proposed)
 
 ModelKit/             everything around the model (../ModelKit/README.md)

@@ -99,7 +99,8 @@ D-083 the veto can keep its provenance to itself
 **Part XXI — Attention** · D-086 the attention band: a correction lands where the gram looks, not where it wrote
 
 **Part XXII — Structure** · D-087 the dynamic window: nodes halved down a binary ladder, and grown back at the top ·
-D-092 a split and a merge keep what the count model hangs on its edges
+D-092 a split and a merge keep what the count model hangs on its edges · D-094 auto prune: the graph lets go of the
+edges nothing walks, and the nodes they strand
 
 **Part XXIII — The model and its kit** · D-093 everything but the model is a package of its own: ModelKit
 
@@ -4122,6 +4123,72 @@ documents that name a moved file point into `../ModelKit/`.
 **Lives in** `../ModelKit/` (its `README.md` is the map), `radixnet/__main__.py`,
 `../ModelKit/tests/test_layers.py`, `../ModelKit/go/go.mod`, `../ModelKit/rust/Cargo.toml`, `Makefile`,
 `Dockerfile`, `Dockerfile.dockerignore`, `docker-compose.yml`, `DESIGN.md` §2, `go/README.md`, `rust/README.md`
+
+---
+
+### D-094 — Auto prune: the graph lets go of the edges nothing walks, and the nodes they strand
+
+**Status** Accepted · 2026-10-08 · **Layer** structure · **Extends** D-007, D-046, D-087 ·
+**Specified in** `SPEC-AutoPrune.md`
+
+**Context — my reason** *"Add an auto prune functionality to the RadixCyclicNN."* The graph is self-compressing
+(D-007) and never shrinks: compression merges, it does not remove. A text read once leaves its edges behind for
+good; a split leaves a bridge nothing crosses again; a text registered for scoring leaves nodes that were never
+walked; and a model taught for long enough carries every transition it ever saw, priced by every search. The
+dynamic window (D-087) changes the grain of the structure, not its extent. Nothing in the model forgets.
+
+**Decision** An `AutoPrune` setting on the graph beside the window: two thresholds over what the graph already
+counts, applied to every edge leaving a node - an edge carrying less than `min_count` of traffic (default 1: only
+what was never traversed), or less than `min_share` of its node's out-traffic (default 0: off), is removed. Then
+every real node left with no way in or no way out goes with the edges it still had, swept until nothing is
+stranded, and the chains the removals opened are merged. **What was taught is never pruned**: an edge into `BACK`
+or `THINK`, the count model's rewards and judged contexts, the negative network's blame and clearing, the phase
+model's rewards - the evidence that keeps an edge out of compression keeps it out of the prune, and a node holding
+such an edge is never swept. Traffic is read in the kind's own currency: traversals, or in the negative network,
+which counts nothing, the evidence an edge carries. **A count of 0 is unknown, not never, while the node's
+out-edges do not account for what came in** - every walk that enters a node leaves it, so the deficit crossed an
+edge whose count was never written (the bridge of a split in the phase model, which counts edges and not nodes,
+or in the negative network), and none of that node's zero-count edges is a candidate. It runs by hand (`radixnet
+prune --now`, `POST /api/model/prune/now`) or at the end of every `every`-th training epoch in every kind's loop,
+after the compression and the window's step, so what it removes is measured on the settled structure. Python
+only: the Go and Rust ports keep the block on file and do not prune.
+
+**Alternatives rejected**
+* **Pruning by weight or by cost.** A learned weight is an opinion the model holds and revises; a count is a
+  record of what happened. Removing an edge because the model currently dislikes it would make pruning a
+  second learning rule, and one that could not be told from 2NRL's inversion (D-010), which flips every opinion.
+* **A clock - pruning what was not walked lately.** The right idea and the wrong place: fading on graph time is
+  `SPEC-EdgeDecay.md`, and it fades weights, not structure. A prune on recency would need a per-edge stamp the
+  graph does not keep, and the count model's sliding window is one kind's.
+* **Giving the phase model's split bridge the traffic it carried** - the honest count, and what `_heavy_bridge`
+  already does for the window's halves. It would have changed every model file the Rust port writes for the phase
+  kind, which the parity suites hold byte for byte. Reading the missing count as unknown gets the same answer
+  from the counts that exist, in every kind, and changes no file.
+* **Sweeping through a protected edge.** A stranded node that holds blame is unreachable and useless to a walk,
+  and it is also the only place the blamed fragment is named. D-046 made that trade once; the prune keeps it.
+* **Pruning only by hand.** The request was *auto*; and a prune that runs where compression already runs costs one
+  pass over the edges per epoch and nothing the epoch did not already settle.
+
+**Consequences**
+* **Off is the old file to the bit**, on every kind: nothing is written while it is off, an epoch's record carries
+  `pruned_edges` / `pruned_nodes` only when the prune ran, and a model whose setting was switched on and off
+  without a prune is the untouched one.
+* **A pruned text is unknown again.** Its grams leave the index; the next text that holds them creates fresh nodes
+  from the seeded stream. A pruned-and-retaught model is not byte for byte the untouched one, and nothing
+  promises that.
+* **The default is gentle.** `min_count = 1` removes only what was registered and never walked - scored texts,
+  inverted paths, the odd dead bridge. `min_share` is the dial that thins a busy node, and it is off until asked.
+* **The sine model protects nothing but the sentinels' lessons.** Its feedback moves weights and leaves no mark
+  on the edge, so a rewarded text seen once is pruned at `min_count = 2` like any other. A record of verdicts on
+  the sine model's edges would be a new kind of state, and is not in this decision.
+* **Not ported.** The Go and Rust ports read the model as it is; a graph pruned in Python is a smaller graph to
+  them and nothing more. A port is a decision of its own.
+
+**Lives in** `radixnet/prune.py`, `radixnet/graph.py::edge_protected / edge_traffic / remove_edge / remove_node /
+prune_candidates / stranded_nodes / prune`, the overrides in `radixnet/countnet.py`, `radixnet/negative.py`,
+`radixnet/resonance.py`, `radixnet/model.py::prune_config / configure_prune / prune / _prune_epoch`,
+`../ModelKit/modelkit/cli.py::cmd_prune`, `../ModelKit/modelkit/api.py` (`/api/model/prune`), `Makefile`,
+`SPEC-AutoPrune.md`, `tests/test_prune.py`, `../ModelKit/tests/test_prune.py`
 
 ---
 

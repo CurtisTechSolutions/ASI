@@ -1755,6 +1755,32 @@ class ModelService:
                 raise ApiError(400, str(exc)) from exc
             return {"kind": model.kind, "step": done, "window": done["window"], "stats": model.stats()}
 
+    def prune(self) -> dict:
+        """The active model's auto prune: the thresholds, when they run, and what they would remove now (:mod:`radixnet.prune`)."""
+        with self.session() as model:
+            return {"kind": model.kind, "prune": model.prune_config()}
+
+    def configure_prune(
+        self, on: bool | None = None, min_count: int | None = None, min_share: float | None = None,
+        every: int | None = None, auto: bool | None = None,
+    ) -> dict:
+        """Switch the active model's auto prune on (at the thresholds given) or off; 400 for thresholds that make no sense."""
+        with self.mutating() as model:
+            try:
+                config = model.configure_prune(on=on, min_count=min_count, min_share=min_share, every=every, auto=auto)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"kind": model.kind, "prune": config, "stats": model.stats()}
+
+    def prune_now(self, min_count: int | None = None, min_share: float | None = None) -> dict:
+        """Prune the active model by hand: at its thresholds, or the ones given for this prune alone."""
+        with self.mutating() as model:
+            try:
+                done = model.prune(min_count=min_count, min_share=min_share)
+            except ValueError as exc:
+                raise ApiError(400, str(exc)) from exc
+            return {"kind": model.kind, "pruned": done, "prune": done["prune"], "stats": model.stats()}
+
     def _replace_model(self, model: GraphModel) -> dict:
         """Install ``model``; a model of another kind that was active is kept in memory (see :meth:`select_kind`)."""
         with self.mutating():
@@ -3238,6 +3264,21 @@ def _r_window_set(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 def _r_window_step(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.window_step(f.integer("steps", 1, minimum=1))
+
+
+def _r_prune(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.prune()
+
+
+def _r_prune_set(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.configure_prune(
+        on=f.flag("on", None), min_count=f.integer("min_count", None), min_share=f.number("min_share", None),
+        every=f.integer("every", None), auto=f.flag("auto", None),
+    )
+
+
+def _r_prune_now(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
+    return 200, svc.prune_now(min_count=f.integer("min_count", None), min_share=f.number("min_share", None))
 
 
 def _r_encoding(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -4876,6 +4917,21 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "that is longer (both halves keep the node's data, joined by a heavy connection) and moves the window down "
      "the ladder, back to the top from the floor -> {kind, step: {steps, sizes, from, to, merges, splits, "
      "nodes_before, nodes_after, edges_before, edges_after, window}, window, stats}; 400 while it is off"),
+    ("GET", "/api/model/prune", _r_prune,
+     "the active model's auto prune - the graph letting go of the edges nothing walks and the nodes they strand: "
+     "{kind, prune: {on, min_count, min_share, every, auto, rule (the thresholds in words; null while off), "
+     "candidates (edges a prune would remove now; null while off), stranded (real nodes with no way in or out), "
+     "nodes, edges, default_min_count, default_min_share, default_every}}"),
+    ("POST", "/api/model/prune", _r_prune_set,
+     "switch auto prune: {on, min_count, min_share, every, auto} - on: false switches it off (the graph stays as "
+     "it is), on: true or any setting switches it on at the values given over the ones it had (else edges never "
+     "traversed, at the end of every epoch); 400 for a negative count, a share outside [0, 1) or every under 1 "
+     "-> {kind, prune, stats}"),
+    ("POST", "/api/model/prune/now", _r_prune_now,
+     "prune by hand: {min_count, min_share} (default: the model's thresholds, or the defaults while it is off) - "
+     "removes the edges under the thresholds unless something was taught about them, then every real node left "
+     "with no way in or no way out, then merges the chains that opened -> {kind, pruned: {candidates, edges, "
+     "nodes, merges, nodes_before, nodes_after, edges_before, edges_after, prune}, prune, stats}"),
     ("GET", "/api/negative", _r_negative,
      "the negative network: stats, the reason table (what the tutor blamed), the journal of what it said and the "
      "filter settings"),

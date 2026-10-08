@@ -29,7 +29,7 @@ make rust-parity                              # Rust against Python
 Most files are `test_<module>.py` for `../modelkit/<module>.py`, named to
 match. Where a model feature has a command-line or HTTP side, the kit's file
 carries the model's name and tests that side — `test_attention.py`,
-`test_window.py`, `test_penalty.py`, `test_countnet.py`, `test_negative.py`,
+`test_window.py`, `test_prune.py`, `test_penalty.py`, `test_countnet.py`, `test_negative.py`,
 `test_resonance.py`, `test_schedule.py`, `test_search_training.py` and
 `test_acoustic_units.py` here are the command line and the API of what the
 model's files of the same name test in the model.

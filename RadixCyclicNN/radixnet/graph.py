@@ -19,6 +19,10 @@ Storage is flat parallel lists indexed by node id / edge id; per-node dicts
 hold the edges for O(1) lookup.  Removed nodes and edges are tombstoned (ids
 are never reused) and compacted only by :meth:`to_dict`.
 
+Compression only ever coarsens the structure; :meth:`RadixCyclicGraph.prune`
+is what lets it shrink - the edges nothing walks go, and the real nodes they
+leave with no way in or no way out go with them (:mod:`radixnet.prune`).
+
 Every counter here - node and edge visit counts, the traversal total, the
 version stamps - is a *cyclic counter* (:mod:`radixnet.counter`): it wraps back
 to 0 at :data:`~radixnet.counter.COUNTER_LIMIT` and counts the wrap as a reset,
@@ -40,6 +44,7 @@ from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
 from .encoding import (
     BACK_LABEL, CHARS, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, Decoder, Encoder, Encoding, _piece,
 )
+from .prune import AutoPrune
 from .window import DynamicWindow
 
 __all__ = ["START", "END", "BACK", "THINK", "FIRST", "RadixCyclicGraph", "Z_RANGE", "W_LOW", "W_HIGH", "W_HEAVY"]
@@ -174,6 +179,13 @@ class RadixCyclicGraph:
         On, :meth:`merge_child` merges nothing longer than its ``size`` and a
         step (:meth:`split_window`) halves what is longer.  It travels with
         the model file while it is on."""
+        self.auto_prune = AutoPrune()
+        """The thresholds under which an edge is let go of, and when (:mod:`radixnet.prune`).
+
+        Off by default: the graph keeps every edge it ever learned.  On, a
+        :meth:`prune` removes the edges under the thresholds and the real
+        nodes they strand, by hand or at the end of a training epoch.  It
+        travels with the model file while it is on."""
         self.rng = random.Random(self.seed)
         self.labels: list[str] = []
         self.z: list[float] = []
@@ -619,6 +631,210 @@ class RadixCyclicGraph:
             if done == 0:
                 return merges
             merges += done
+
+    # -- pruning: letting go of what nothing walks --------------------------
+
+    def edge_protected(self, e: int) -> bool:
+        """Was something *taught* about edge ``e``, rather than observed?  Such an edge is never pruned.
+
+        Here: an edge into ``BACK`` or ``THINK``, a lesson a voice learned by
+        experience (:meth:`observe_back`, :meth:`observe_think`) that no corpus
+        could teach again.  The kinds that hang evidence on their edges add
+        their own - a reward, a judged context, blame or clearing - the same
+        evidence that keeps an edge out of compression.
+        """
+        return e in self.parents[BACK].values() or e in self.parents[THINK].values()
+
+    def edge_traffic(self, e: int) -> float:
+        """What the prune rule measures an edge by: how much went over it, in the kind's own currency.
+
+        Its traversals here and in the kinds that count them; the negative
+        network, which counts nothing, measures an edge by the evidence it
+        carries.  ``min_count`` and ``min_share`` are read in these units.
+        """
+        return float(self.edge_traversals(e))
+
+    def _edge_removed(self, e: int) -> None:
+        """Hook: edge ``e`` was just tombstoned by :meth:`remove_edge` (a kind drops what it hangs on it)."""
+
+    def _node_removed(self, node: int) -> None:
+        """Hook: real node ``node`` was just tombstoned by :meth:`remove_node`, its edges already gone."""
+
+    def remove_edge(self, e: int) -> bool:
+        """Tombstone edge ``e`` (ids are never reused); returns whether it was alive.
+
+        The counters it carried go with it - a pruned traversal is not
+        history the graph keeps - and its parent's costs are stale afterwards.
+        """
+        if e < 0 or e >= len(self.edge_alive) or not self.edge_alive[e]:
+            return False
+        for p, ch in enumerate(self.children):
+            for c, edge in ch.items():
+                if edge == e:
+                    return self._remove_edge_between(p, c) == e
+        raise RuntimeError(f"internal error: alive edge {e} belongs to no node")
+
+    def _remove_edge_between(self, p: int, c: int) -> int:
+        """:meth:`remove_edge` for ``p -> c`` without a scan; returns the edge id (``-1`` if there was none)."""
+        e = self.children[p].pop(c, None)
+        if e is None:
+            return -1
+        del self.parents[c][p]
+        self.edge_alive[e] = False
+        self.edge_count[e] = 0
+        self.edge_count_resets.pop(e, None)
+        self._n_alive_edges -= 1
+        self.version += 1
+        self.structure_version += 1
+        self._edge_removed(e)
+        return e
+
+    def remove_node(self, node: int) -> int:
+        """Tombstone real node ``node`` with every edge in and out of it; returns how many edges went.
+
+        Its grams leave the index: a text that passes through them is unknown
+        to the graph again, and the next :meth:`observe_sequence` that reads
+        it creates fresh nodes for them.  ``ValueError`` for a sentinel.
+        """
+        if node < FIRST:
+            raise ValueError("cannot remove a sentinel node")
+        if node < 0 or node >= len(self.labels) or not self.alive[node]:
+            return 0
+        removed = 0
+        for c in list(self.children[node]):
+            self._remove_edge_between(node, c)
+            removed += 1
+        for p in list(self.parents[node]):
+            if p != node:  # the self-loop went with the children
+                self._remove_edge_between(p, node)
+                removed += 1
+        enc = self.encoding
+        view = enc.units(self.labels[node])
+        index = self.trigram_index
+        for o in range(0, len(view) - self._n + 1, self._stride):
+            gram = _piece(view, o, o + self._n)
+            if index.get(gram, (None,))[0] == node:
+                del index[gram]
+        self.labels[node] = ""
+        self.count[node] = 0
+        self.count_resets.pop(node, None)
+        self.alive[node] = False
+        self._n_alive_nodes -= 1
+        self.version += 1
+        self.structure_version += 1
+        self._node_removed(node)
+        return removed
+
+    def prune_candidates(self, min_count: int | None = None, min_share: float | None = None) -> list[int]:
+        """The edges a prune under the thresholds would remove (the graph's own when none are given).
+
+        An edge leaving any alive node is a candidate when it is not protected
+        (:meth:`edge_protected`) and it was traversed fewer than ``min_count``
+        times (a rule ``0`` switches off), or it takes less than ``min_share``
+        of its node's out-traversals (``0`` switches off; a node nothing has
+        traversed yet has no shares, and only the count rule speaks).
+
+        The traffic is :meth:`edge_traffic` - traversals, or the negative
+        network's evidence.  A traffic of 0 is read as *unknown*, not as
+        never, while the node's out-edges do not account for what came in:
+        every walk that enters a real node leaves it, so when the in-traffic
+        exceeds the out-traffic the difference crossed an edge whose count
+        was never written - the bridge of a split in a kind that counts edges
+        and not nodes (the phase model), or that counts nothing but what a
+        judge said (the negative network), where the bridge starts at the
+        node's count of 0 - and none of the node's uncounted edges is a
+        candidate, since nothing says which of them carried it.
+        """
+        setting = self.auto_prune
+        min_count = setting.min_count if min_count is None else int(min_count)
+        min_share = setting.min_share if min_share is None else float(min_share)
+        if min_count <= 0 and min_share <= 0.0:
+            return []
+        protected = self.edge_protected
+        traffic = self.edge_traffic
+        parents = self.parents
+        out: list[int] = []
+        for p, ch in enumerate(self.children):
+            if not ch or not self.alive[p]:
+                continue
+            edges = list(ch.values())
+            counts = [traffic(e) for e in edges]
+            total = 0.0
+            for count in counts:
+                total += count
+            unknown = False
+            if p >= FIRST and 0.0 in counts:
+                came_in = 0.0
+                for e in parents[p].values():
+                    came_in += traffic(e)
+                # some of what came in left over an edge that was never counted (a sum of shares in a
+                # different order is the same sum, so a float's last bit is not a deficit)
+                unknown = came_in > total + 1e-9 * max(came_in, total)
+            for e, count in zip(edges, counts):
+                if count == 0.0 and unknown:
+                    continue
+                if min_count > 0 and count < min_count:
+                    pass
+                elif min_share > 0.0 and total > 0 and count / total < min_share:
+                    pass
+                else:
+                    continue
+                if not protected(e):
+                    out.append(e)
+        return out
+
+    def stranded_nodes(self) -> list[int]:
+        """Real nodes with no way in (no parent but themselves) or no way out (no child but themselves).
+
+        A walk cannot reach the first and can never end through the second;
+        a prune removes both unless an edge they still hold is protected.
+        """
+        out: list[int] = []
+        children, parents = self.children, self.parents
+        for node in range(FIRST, len(self.labels)):
+            if not self.alive[node]:
+                continue
+            ways_in = sum(1 for p in parents[node] if p != node)
+            ways_out = sum(1 for c in children[node] if c != node)
+            if ways_in == 0 or ways_out == 0:
+                out.append(node)
+        return out
+
+    def prune(self, min_count: int | None = None, min_share: float | None = None) -> dict:
+        """Remove the edges under the thresholds and the real nodes they strand; returns what went.
+
+        ``{"candidates": the edges the thresholds named, "edges": every edge
+        removed (those and the ones the stranded nodes still had), "nodes":
+        the nodes removed}``.  Nodes are swept until none is stranded: a node
+        that goes can strand the next.  A node holding a protected edge is
+        never swept, so what was taught stays nameable.  Nothing is merged
+        here: the caller compresses, as it does after any structural change.
+        """
+        candidates = self.prune_candidates(min_count, min_share)
+        edges = 0
+        if candidates:
+            where = {e: (p, c) for p, ch in enumerate(self.children) for c, e in ch.items()}
+            for e in candidates:
+                p, c = where[e]
+                if self._remove_edge_between(p, c) >= 0:
+                    edges += 1
+        nodes = 0
+        if edges:
+            protected = self.edge_protected
+            while True:
+                swept = 0
+                for node in self.stranded_nodes():
+                    if not self.alive[node]:
+                        continue  # an earlier removal this round took it
+                    held = list(self.children[node].values()) + list(self.parents[node].values())
+                    if any(protected(e) for e in held):
+                        continue
+                    edges += self.remove_node(node)
+                    nodes += 1
+                    swept += 1
+                if not swept:
+                    break
+        return {"candidates": len(candidates), "edges": edges, "nodes": nodes}
 
     def observe_sequence(
         self, trigrams: Sequence[str], count: bool = True, origin: int = START
@@ -1156,6 +1372,8 @@ class RadixCyclicGraph:
             **({"attention": self.attention.to_dict()} if self.attention.on else {}),
             # the dynamic window, likewise: the ladder, where it stands and whether it steps by itself
             **({"dynamic_window": self.dynamic_window.to_dict()} if self.dynamic_window.on else {}),
+            # auto prune, likewise: the thresholds, when they run and whether they run by themselves
+            **({"auto_prune": self.auto_prune.to_dict()} if self.auto_prune.on else {}),
             "seed": self.seed,
             "inverted": self.inverted,
             "version": self.version.value,
@@ -1195,6 +1413,7 @@ class RadixCyclicGraph:
         g = cls(seed=int(d.get("seed", 0)), encoding=Encoding.from_dict(d.get("encoding")))
         g.attention = AttentionBand.from_dict(d.get("attention"))
         g.dynamic_window = DynamicWindow.from_dict(d.get("dynamic_window"))
+        g.auto_prune = AutoPrune.from_dict(d.get("auto_prune"))
         enc = g.encoding
         g.inverted = bool(d.get("inverted", False))
         g.labels = labels

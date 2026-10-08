@@ -58,6 +58,7 @@ from .penalty import (
 from .phasesearch import phase_beam, phase_dijkstra, phase_walk
 from .resonance import ResonantGraph, ResonantNet, trigram_phase
 from .search import PathResult, dijkstra_predict, sample_walk
+from .prune import DEFAULT_EVERY as PRUNE_EVERY, DEFAULT_MIN_COUNT as PRUNE_MIN_COUNT, DEFAULT_MIN_SHARE as PRUNE_MIN_SHARE, AutoPrune
 from .window import DEFAULT_FLOOR as WINDOW_FLOOR, DEFAULT_TOP as WINDOW_TOP, DynamicWindow
 
 __all__ = [
@@ -74,6 +75,7 @@ __all__ = [
     "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "Encoding", "parse_encoding",
     "END", "START", "RadixCyclicGraph",
     "DynamicWindow", "WINDOW_TOP", "WINDOW_FLOOR",
+    "AutoPrune", "PRUNE_MIN_COUNT", "PRUNE_MIN_SHARE", "PRUNE_EVERY",
     "PathResult", "dijkstra_predict", "sample_walk",
     "phase_beam", "phase_dijkstra", "phase_walk",
     "TRAVERSALS", "DEFAULT_TRAVERSAL", "PenaltyCosts", "PhasePenaltyCosts",

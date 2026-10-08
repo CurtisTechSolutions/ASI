@@ -56,6 +56,7 @@ RadixCyclicNN/              the model
     encoding.py             Encoder / Decoder, and the word alphabet (Vocabulary, section 34)
     attention.py            the attention band: where inside a gram a correction's blame and credit land (section 38)
     window.py               the dynamic window: a ladder of node sizes, halving from 32 to 4 and back up (section 40)
+    prune.py                auto prune: the thresholds under which the graph lets go of an edge, and when (section 41)
     counter.py              cyclic counters: every growing integer wraps at COUNTER_LIMIT and counts the reset (section 28)
     graph.py                RadixCyclicGraph (nodes, edges, trigram index, split/merge, CSR export/import, to_dict/from_dict)
     backend.py              CSR, NodeParams, Backend protocol, PythonBackend, TorchBackend, get_backend()
@@ -434,6 +435,22 @@ def split_window(self, size: int) -> int
     # phase model gives it the traversals of the out-edges it stands before, every other kind the node's count
     # that split already gave it.  Returns the number of splits.  ValueError for size < 1.
 
+def edge_protected(self, e: int) -> bool        # was something taught about e?  into BACK / THINK here; the kinds add
+                                                # their evidence (reward, judged context, blame / clearing)
+def edge_traffic(self, e: int) -> float         # what the prune rule reads: traversals; the negative network's evidence
+def remove_edge(self, e: int) -> bool           # tombstone one edge (counters dropped, parents/children updated)
+def remove_node(self, node: int) -> int         # tombstone a real node with every edge in and out; its grams leave
+                                                # the index.  ValueError for a sentinel.  Returns the edges removed
+def prune_candidates(self, min_count=None, min_share=None) -> list[int]
+    # The edges under the thresholds (section 41; the graph's own when none are given), never a protected one, and
+    # never a zero-traffic edge of a node whose in-traffic exceeds its out-traffic (a count that was never written
+    # is unknown, not 0).
+def stranded_nodes(self) -> list[int]           # real nodes with no way in or no way out (a self-loop is neither)
+def prune(self, min_count=None, min_share=None) -> dict
+    # Remove the candidates, then sweep the stranded nodes until none is (a node holding a protected edge stays).
+    # Returns {"candidates", "edges", "nodes"}.  Nothing is merged here; the model compresses after.  The kinds
+    # that compute their weights recompute them after; the count model also forgets the pruned edges' window events.
+
 def invert(self) -> None
     # w -> -w for every alive edge; a -> -a AND k -> -k for every node (incl. START/END), which is the exact
     # negation of the unit: f = a*sin(b(x-h))+k, so flipping `a` alone leaves -f + 2k and only negates while
@@ -472,6 +489,7 @@ def to_dict(self) -> dict ; @classmethod from_dict(cls, d) -> RadixCyclicGraph
 4. For every alive edge `p->c` with neither endpoint a sentinel: `labels[p][-2:] == labels[c][:2]` (window overlap).
 5. `children`/`parents` are mirror images; every alive edge appears in both; dead nodes have empty dicts.
 6. After `compress()`, no unary chain remains (no non-sentinel p with exactly one child c != p, c non-sentinel, where c has exactly one parent) - except a chain the dynamic window holds apart: with the window on, one whose merged label would be longer than its size (section 40).
+   After `prune()` (section 41) a removed node has no edges and none of its grams in the index, every surviving edge joins two alive nodes, and a text none of whose grams were pruned still round-trips; a pruned text does not, until it is observed again.
 7. After `observe_sequence(encode(t))`, walking `t`'s trigrams through the index and decoding gives `t` (structure round trip), before and after `compress()`.
 8. Every counter is non-negative, every stored reset count is in `1..COUNTER_LIMIT - 1` and belongs to a real id; after `carry_counters()` every reading is below `COUNTER_LIMIT`.
 
@@ -777,6 +795,7 @@ output only, one JSON document on stdout).
 | `invert` | `--out` | inverts and saves |
 | `compress` | `--out` | compresses and saves, prints merges (within the dynamic window, when it is on) |
 | `window` | `--on`, `--off`, `--top N`, `--floor N`, `--size N`, `--auto` / `--manual`, `--step [N]`, `--dry-run`, `--out` | the dynamic window (section 40): without options it is shown; the settings switch it on (at the ladder given over the one it had, else 32 down to 4) or off and save; `--step` merges what fits the window, halves every node that is longer, moves the window down the ladder, N times, and saves; JSON: `window` (the config), `changed`, `step`, `saved` |
+| `prune` | `--on`, `--off`, `--min-count N`, `--min-share X`, `--every N`, `--auto` / `--manual`, `--now`, `--dry-run`, `--out` | auto prune (section 41): without options it is shown; the settings switch it on (at the thresholds given over the ones it had, else never-traversed edges, every epoch) or off and save; `--now` removes the edges under the thresholds and the nodes they strand, merges, and saves; JSON: `prune` (the config), `changed`, `pruned`, `saved` |
 | `evolve` | `--data FILE`, `--generations N` (0 = forever, Ctrl-C stops cleanly and saves), `--samples`, `--max-length`, `--discriminator PATH` (load/save), `--checkpoint-dir`, `--checkpoint-every`, `--out` | GAN loop |
 | `info` | | stats + history tail |
 | `checkpoints` | `--dir DIR`, `--restore NAME --out PATH` | list / restore |
@@ -822,6 +841,9 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/model/attention/preview` | `{"wrong","right","blur"}` | `{"kind","attention","blur","weights","changes","wrong","right"}`, each side `{"text","units","grams","spans","writer","charges","focus","end"}` — where one correction would land, gram by gram, under the writer rule and under a band (`blur`, else the model's, else the default); changes nothing |
 | GET `/api/model/window` | | `{"kind","window": {"on","top","floor","size","auto","sizes","next","unit","units","ngram","longer","longest","nodes","heavy","default_top","default_floor"}}` — the active model's dynamic window (section 40): the ladder of node sizes and where it stands; `longer` is how many real nodes a step would halve (null while off), `heavy` the sine model's bridge weight (null where the bridge is heavy by its count) |
 | POST `/api/model/window` | `{"on","top","floor","size","auto"}` | `{"kind","window","stats"}` — `on: false` switches it off (the graph stays as it is); `on: true` or any setting switches it on at the values given over the ones it had (else 32 down to 4, at the top, stepping every epoch), a new top or floor keeping the size on the ladder; 400 for a size that is not a power of two, a floor over the top or a size off the ladder |
+| GET `/api/model/prune` | | `{"kind","prune": {"on","min_count","min_share","every","auto","rule","candidates","stranded","nodes","edges","default_min_count","default_min_share","default_every"}}` — the active model's auto prune (section 41): the thresholds, when they run, the rule in words and how many edges a prune would remove now (both null while off), and how many real nodes have no way in or no way out |
+| POST `/api/model/prune` | `{"on","min_count","min_share","every","auto"}` | `{"kind","prune","stats"}` — `on: false` switches it off (the graph stays as it is); `on: true` or any setting switches it on at the values given over the ones it had (else never-traversed edges, every epoch); 400 for a negative count, a share outside `[0, 1)` or `every` under 1 |
+| POST `/api/model/prune/now` | `{"min_count","min_share"}` | `{"kind","pruned": {"candidates","edges","nodes","merges","nodes_before","nodes_after","edges_before","edges_after","prune"},"prune","stats"}` — prune by hand, at the model's thresholds or the ones given for this prune alone (the defaults while it is off) |
 | POST `/api/model/window/step` | `{"steps"}` (default 1) | `{"kind","step": {"steps","sizes","from","to","merges","splits","nodes_before","nodes_after","edges_before","edges_after","window"},"window","stats"}` — the window stepped by hand: each step merges what fits, halves every node that is longer and moves the window down the ladder, back to the top from the floor; 400 while it is off or for fewer than one step; 409 while a job runs |
 | POST `/api/2nrl` | `{"bad": [...],"good": [...],"neg_epochs","pos_epochs","neg_lr","pos_lr"}` (`bad_text`/`good_text` newline forms also accepted) | job (async, type "2nrl") |
 | POST `/api/feedback` | rated texts `{"good": [thumbs up], "bad": [thumbs down]}` (also `*_text`, `*_files`), `neg_epochs=2`, `pos_epochs=3`, `neg_lr=0.5`, `pos_lr=0.1`, `batch_size=4` | `{"job" (type "feedback"), "action": "2nrl"\|"reward"\|"punish", "good", "bad"}` — both kinds: `two_nrl(bad, good)`; only good: a positive-phase `train`; only bad: a negative-phase `train` then `invert()`. Used by the frontend's Generate tab (thumbs up / down per sample) and the `feedback` CLI command |
@@ -1002,6 +1024,7 @@ Plain readable CSS, responsive (single column under 800px). No TypeScript.
 * `test_dialogue.py` — `tail_context`, `Heard` (said / added / echo, and a longer utterance that only contains an earlier one), `stutter` / `stutter_at` (a run said twice in a row, where it starts saying it again, and the English that repeats a word and means it), `backtrack` (both kinds and where each is cut, what it keeps, what it explores, the words it may not rethink, a one-word line, the settings off, a voice with nowhere to go, a way out it has already said, and a conversation backing out of its repeats), `teach_back` (the node it teaches, the search refusing by itself after enough hand-overs, a conversation leaving the model knowing more, the learning off, and a repeat the graph cannot place), `repeats`, `converse`: alternating speakers, the opening as a given turn, every reply picks up (a whole-word part of) the previous line, no repeats / echoes in beam mode, a long conversation that runs out of new things to say (its duplicates flagged once each, and it stops rather than looping), no reply repeating its own words unless `avoid_word_repeats` is off (and a voice that can only stutter punished for it), determinism, history continuation, seeded sampling, speakers and a partner model, repeats on request, the empty model, validation; `stream` (section 22.1): the turns streamed are the turns returned, the window between two turns belongs to the one that follows and shows the backing up event for event against the rethink record, a `backtrack` streamed on its own, and streaming changing nothing (the same turns and the same graph afterwards). `test_api.py::test_converse_stream` reads the route's JSON Lines, `test_cli.py` the `--stream` output in both modes, and the Go / Rust sides are held to the same events by `test_go_parity.py::test_the_same_conversation_streamed` and `test_rust_parity_dialogue.py`.
 * `test_tutor.py` — a fake Ollama plays the English teacher: `cue` / `overall_score` / the error-type mapping / the report card; the tolerant exercise and grade parsers; the marking (batches, an empty completion failed without a call, an unreadable answer left unrated); the loop over a real model and over a scripted one (what reaches the graph: corrections taught from their diff, weighted garbage for the rest and the mark-weighted rewards), adapting to the weakest points, drills, the dry run, per-lesson learning, the stop event, both model kinds; the next lesson plan (the weak points of a card, the upgrade ladder and the brief the marks write, the plan the marks alone imply, the tolerant plan parser, the teacher's plan merged with it - its brief kept, its difficulty ignored - a run that ends with one and a run taught to one); the auto run (batches that plan and apply themselves, per-batch report cards, `apply_plan`, stopping between batches, a batch that cannot be planned); the five endpoints and the CLI.
 * `test_window.py` — the **dynamic window** (section 40, `../SPEC-DynamicWindow.md`): the ladder and what it refuses; `ABCD` cut into `AB` and `CD` under a grouping encoding and into `ABC` and `BCD` under the trigram; a node halved at its middle gram, again until it fits, never below one gram; the halves carrying the same state, parameters and count, joined by the heavy connection (the sine model's weight and its sign while inverted, the counting kinds' count, the phase model's through-traffic); compression stopping at the window and resuming when it is off; a step merging, halving and moving, and the top regrowing what stayed unary; the settings; the automatic step on every kind; the file block beside the band, and off being the old file to the bit; the CLI and the HTTP API. The cross-language half is `test_go_parity.py::test_the_dynamic_window_halves_the_same_nodes` and `test_rust_parity_tools.py::TestRustWindowParity / TestRustWindowRoutes`, with `go/radixnet/window_test.go`, `../ModelKit/go/server/window_test.go` and the unit tests of `rust/src/window.rs` on their own sides.
+* `test_prune.py` — **auto prune** (section 41, `../SPEC-AutoPrune.md`): the setting and what it refuses; a text registered but never walked pruned away while the trained texts still walk; a busy node thinned of its rare continuation; what was taught - a hand-over, a reward, a judged context, blame - never pruned and the node holding it never swept; the sweep running until nothing is stranded, a self-loop no way in or out; the file compacting what was pruned, the file block, and off being the old file to the bit; the automatic prune at the end of an epoch on every kind, every `every`-th epoch, never by hand; a prune by hand with the setting off; the sine model protecting nothing but the sentinels' lessons. The CLI and the HTTP API are the kit's `test_prune.py`.
 
 ---
 
@@ -4486,3 +4509,67 @@ tests in `rust/src/window.rs`, `../ModelKit/frontend/test/window.test.mjs`, and 
 `test_the_dynamic_window_halves_the_same_nodes` in `test_go_parity.py` and `TestRustWindowParity` /
 `TestRustWindowRoutes` in `test_rust_parity_tools.py`, which hold both ports to Python's nodes, bridges, records
 and - for Rust - model files byte for byte.
+
+## 41. Auto prune (`radixnet/prune.py`) — the graph lets go of the edges nothing walks, and the nodes they strand
+
+`SPEC-AutoPrune.md` is the specification and D-094 the decision. Compression (section 5) only ever merges: nothing the
+graph learned is removed, so a text read once, a bridge nothing crosses again and a text registered for scoring all
+stay for good. **Auto prune** is the other half of self-compression. Python only; the Go and Rust ports keep the
+`auto_prune` block on file and do not prune.
+
+### 41.1 The setting
+
+`AutoPrune(on, min_count, min_share, every, auto)` lives on the graph (`RadixCyclicGraph.auto_prune`) beside the
+window, and like it may change at any time: the setting touches nothing, only a prune does. Off - `AutoPrune()`, the
+zero value, the default - nothing is written and nothing is pruned. `check_thresholds` refuses a negative
+`min_count`, a `min_share` outside `[0, 1)`, an `every` under 1 and a boolean where a number goes; `due(epoch)` says
+whether the automatic prune runs at the end of a lifetime epoch (`on and auto and epoch % every == 0`).
+
+### 41.2 The rule (`RadixCyclicGraph.prune_candidates`)
+
+For every alive node with out-edges, each edge's traffic (`edge_traffic`: its traversals, or in the negative
+network the blame and clearing it carries) and the node's total. An edge is a candidate when its traffic is under
+`min_count` (`0` switches the rule off) or its share of the total is under `min_share` (`0` switches it off; a node
+with no traffic has no shares), unless it is **protected** (`edge_protected`: into `BACK` / `THINK` in every kind,
+plus a reward or a judged context in the count model, blame or clearing in the negative network, a reward in the
+phase model), or unless its traffic is 0 and the node's **in-traffic exceeds its out-traffic** - every walk that
+enters a node leaves it, so the deficit crossed an edge whose count was never written (the bridge of a split in a
+kind that counts edges and not nodes, or nothing at all), and nothing says which of the node's zero-traffic edges
+carried it. The float comparison allows the last bit.
+
+### 41.3 The prune (`RadixCyclicGraph.prune`)
+
+The candidates are removed (`_remove_edge_between`: tombstoned, counters dropped, `parents` / `children` updated,
+`version` and `structure_version` bumped, the kind's `_edge_removed` hook - the count model drops the edge's
+contexts, reward and window share). Then every real node with no way in (no parent but itself) or no way out (no
+child but itself) is removed with its remaining edges (`remove_node`: its grams leave the index, the kind's
+`_node_removed` hook - the count model drops the contexts the node was the `prev` of), swept until no node is
+stranded; a node holding a protected edge is never swept. Returns `{"candidates", "edges", "nodes"}`. The kinds
+that compute their weights override `prune` to recompute them after, and the count model rebuilds its sliding
+window without the pruned edges' events. Node and edge ids are tombstoned as a merge tombstones them, and compacted
+by `to_dict`.
+
+### 41.4 The model (`GraphModel`)
+
+`prune_config()` describes it (the setting, `rule` in words and `candidates` - both null while off - `stranded`,
+`nodes`, `edges`, the defaults); `configure_prune(on, min_count, min_share, every, auto)` switches or moves it as
+`configure_window` does; `prune(min_count, min_share, compress=True)` prunes now - at the model's thresholds, the
+ones given for this prune alone, or the defaults while the setting is off - and compresses once after, returning
+what happened with the config as `prune`; `_prune_epoch(epoch, compress)` is the automatic prune at the end of an
+epoch, after the compression and the window's step, in every kind's loop (the negative network's clearing passes
+excepted: they add no structure). The epoch's record carries `pruned_edges` / `pruned_nodes` whenever it ran and
+its `merges` include the merges that followed. `stats()` does not report it: the stats are what every port answers
+alike (`test_rust_parity_kinds` holds the Rust server to Python's keys), and only Python prunes.
+
+### 41.5 The file, the CLI, the API
+
+* **File**: `"auto_prune": {"min_count": 1, "min_share": 0.0, "every": 1, "auto": true}` in the graph document, only
+  while it is on, right after `dynamic_window`; off is the old file to the bit.
+* **CLI**: `radixnet prune` shows it; `--on`, `--min-count`, `--min-share`, `--every`, `--auto` / `--manual`, `--off`
+  change it and save the model (not with `--dry-run`); `--now` prunes and saves; `info` has an `auto prune` row.
+  `make prune` / `prune-on` / `prune-now` / `prune-off`.
+* **API**: `GET` / `POST /api/model/prune` and `POST /api/model/prune/now` (section 12); `GET /api/model` and
+  `GET /api/status` do not carry it, as the stats do not.
+* **Frontend**: nothing yet.
+
+Tests: `tests/test_prune.py` (section 14) and the kit's `tests/test_prune.py`.

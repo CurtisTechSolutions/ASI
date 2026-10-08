@@ -42,6 +42,7 @@ from .penalty import DEFAULT_TRAVERSAL, resolve_traversal, traversal_costs
 from .search import LEAST_PUNISHED, REWARD, PathResult, check_sampling, dijkstra_predict, parse_traversal, sample_walk
 from .schedule import preview_points
 from .training import ReplayBuffer, TrainingPlan, check_plan
+from .prune import DEFAULT_EVERY, DEFAULT_MIN_COUNT, DEFAULT_MIN_SHARE, AutoPrune
 from .window import DEFAULT_FLOOR, DEFAULT_TOP, DynamicWindow, check_ladder
 
 __all__ = [
@@ -722,6 +723,105 @@ class GraphModel:
         done = self.window_step(1, compress=compress)
         return {"window": done["from"], "splits": done["splits"], "merges": done["merges"]}
 
+    # -- auto prune: letting go of the edges nothing walks ------------------------
+
+    def prune_config(self) -> dict:
+        """Auto prune as the API, the CLI and the frontend show it (:mod:`radixnet.prune`).
+
+        ``rule`` is the thresholds in words (``None`` while off), ``candidates``
+        how many edges a prune would remove now (``None`` while off),
+        ``stranded`` how many real nodes have no way in or no way out as the
+        graph stands, ``nodes`` the real nodes and ``edges`` the alive edges.
+        """
+        graph = self.graph
+        setting = graph.auto_prune
+        return {
+            "on": setting.on,
+            "min_count": setting.min_count,
+            "min_share": setting.min_share,
+            "every": setting.every,
+            "auto": setting.auto,
+            "rule": setting.rule() if setting.on else None,
+            "candidates": len(graph.prune_candidates()) if setting.on else None,
+            "stranded": len(graph.stranded_nodes()),
+            "nodes": graph.num_nodes() - FIRST,
+            "edges": graph.num_edges(),
+            "default_min_count": DEFAULT_MIN_COUNT,
+            "default_min_share": DEFAULT_MIN_SHARE,
+            "default_every": DEFAULT_EVERY,
+        }
+
+    def configure_prune(
+        self, *, on: bool | None = None, min_count: int | None = None, min_share: float | None = None,
+        every: int | None = None, auto: bool | None = None,
+    ) -> dict:
+        """Switch auto prune on or off, or move its thresholds; returns :meth:`prune_config`.
+
+        ``on=False`` switches it off, whatever else is given: the graph stays
+        as the last prune left it.  ``on=True`` or any setting switches it on -
+        at the values given over the ones it had, else the defaults (an edge
+        never traversed is pruned, at the end of every epoch).  ``ValueError``
+        for a negative count, a share outside ``[0, 1)`` or ``every`` under 1.
+        Nothing here touches the graph: only a prune does (:meth:`prune`).
+        """
+        current = self.graph.auto_prune
+        if on is False:
+            self.graph.auto_prune = AutoPrune()
+            return self.prune_config()
+        if on is None and min_count is None and min_share is None and every is None and auto is None:
+            return self.prune_config()
+        self.graph.auto_prune = AutoPrune(
+            True,
+            (current.min_count if current.on else DEFAULT_MIN_COUNT) if min_count is None else min_count,
+            (current.min_share if current.on else DEFAULT_MIN_SHARE) if min_share is None else min_share,
+            (current.every if current.on else DEFAULT_EVERY) if every is None else every,
+            (current.auto if current.on else True) if auto is None else bool(auto),
+        )
+        return self.prune_config()
+
+    def prune(self, min_count: int | None = None, min_share: float | None = None, compress: bool = True) -> dict:
+        """Prune now: remove the edges under the thresholds and the real nodes they strand, then compress.
+
+        The thresholds are the model's unless given - a prune by hand works
+        with the setting off, at the defaults or the values asked for.
+        ``compress=False`` leaves the unary chains the removals opened to a
+        caller that merges anyway.  Returns what happened: the candidates the
+        thresholds named, the edges and nodes removed, the merges, the graph's
+        size before and after, with :meth:`prune_config` as ``prune``.
+        ``ValueError`` for thresholds that make no sense.
+        """
+        graph = self.graph
+        if min_count is not None or min_share is not None:
+            AutoPrune(True, graph.auto_prune.min_count if min_count is None else min_count,
+                      graph.auto_prune.min_share if min_share is None else min_share)  # the same checks
+        nodes_before, edges_before = graph.num_nodes(), graph.num_edges()
+        done = graph.prune(min_count, min_share)
+        merges = graph.compress() if compress and done["edges"] else 0
+        return {
+            "candidates": done["candidates"],
+            "edges": done["edges"],
+            "nodes": done["nodes"],
+            "merges": merges,
+            "nodes_before": nodes_before,
+            "nodes_after": graph.num_nodes(),
+            "edges_before": edges_before,
+            "edges_after": graph.num_edges(),
+            "prune": self.prune_config(),
+        }
+
+    def _prune_epoch(self, epoch: int, compress: bool = True) -> dict | None:
+        """The automatic prune at the end of lifetime epoch ``epoch``, or ``None`` when it is off, by hand or not due.
+
+        Returns ``{"edges", "nodes", "merges"}``; the epoch's record carries the
+        first two as ``pruned_edges`` / ``pruned_nodes`` and its ``merges`` the
+        third.  It runs after the compression and the window's step the epoch
+        already did, so what it removes is measured on the settled structure.
+        """
+        if not self.graph.auto_prune.due(epoch):
+            return None
+        done = self.prune(compress=compress)
+        return {"edges": done["edges"], "nodes": done["nodes"], "merges": done["merges"]}
+
     def _paths_of(self, texts: list[str]) -> list[list[int]]:
         """Node paths (sentinels included) of texts, registering a text structurally when it cannot be walked yet."""
         graph = self.graph
@@ -1323,6 +1423,10 @@ class RadixNet(GraphModel):
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
             pending_merges = 0
             stepped = self._window_epoch()  # the dynamic window's step, after the compression it rides on
+            # the automatic prune, last: what it removes is measured on the settled structure
+            pruned = self._prune_epoch(meta_counter(meta, "epochs_total").bumped(1).value, cfg.auto_compress)
+            if pruned:
+                merges += pruned["merges"]
             loss = loss_sum / n if n else 0.0
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             epoch = meta_add(meta, "epochs_total", 1)
@@ -1336,6 +1440,7 @@ class RadixNet(GraphModel):
                 "compression_ratio": graph.compression_ratio(),
                 "merges": merges,
                 **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
+                **({"pruned_edges": pruned["edges"], "pruned_nodes": pruned["nodes"]} if pruned else {}),
                 "transitions": n,
                 "seconds": time.perf_counter() - t0,
                 "skipped_short": skipped_short,

@@ -2656,6 +2656,56 @@ def cmd_window(args: argparse.Namespace, console: Console) -> dict:
         ("saved", saved["path"] if saved else ("- (dry run)" if (changes or stepped) and args.dry_run else "-")),
     ])
     return {"model": origin.to_dict(), "window": config, "changed": changes, "step": stepped, "saved": saved}
+
+
+def cmd_prune(args: argparse.Namespace, console: Console) -> dict:
+    """Auto prune: show it, set its thresholds, switch it on or off, or prune by hand now."""
+    settings = args.on or args.auto or args.manual or any(v is not None for v in (args.min_count, args.min_share, args.every))
+    if args.off and settings:
+        raise CliError("--off takes no other setting: switching auto prune off is all it does")
+    if args.auto and args.manual:
+        raise CliError("--auto and --manual contradict each other")
+    model, origin = open_model(args, console, required=True)
+    changes: dict = {}
+    pruned = None
+    saved = None
+    if settings or args.off:
+        try:
+            model.configure_prune(
+                on=False if args.off else True, min_count=args.min_count, min_share=args.min_share, every=args.every,
+                auto=True if args.auto else False if args.manual else None,
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+        changes = model.graph.auto_prune.to_dict() or {"on": False}
+    if args.now:
+        try:
+            pruned = model.prune()  # at the model's thresholds - the ones just set - or the defaults while off
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+    if (changes or pruned) and not args.dry_run:
+        saved = save_model(model, args.out or args.model)
+    config = model.prune_config()
+    setting = model.graph.auto_prune
+    if pruned:
+        pruned_text = (
+            f"{pruned['candidates']} edge(s) under the thresholds; {pruned['edges']} edge(s) and {pruned['nodes']} "
+            f"node(s) removed, {pruned['merges']} merge(s) after; nodes {pruned['nodes_before']} -> "
+            f"{pruned['nodes_after']}, edges {pruned['edges_before']} -> {pruned['edges_after']}"
+        )
+    else:
+        pruned_text = "-"
+    console.pairs([
+        ("model", origin.describe()),
+        ("prune", setting.describe()),
+        ("edges", f"{config['edges']} edge(s) over {config['nodes']} real node(s)" + (
+            f", {config['candidates']} under the thresholds" if setting.on else "")),
+        ("stranded", f"{config['stranded']} real node(s) with no way in or no way out"),
+        ("changed", ", ".join(f"{k}={fmt(v)}" for k, v in changes.items()) if changes else "nothing"),
+        ("pruned", pruned_text),
+        ("saved", saved["path"] if saved else ("- (dry run)" if (changes or pruned) and args.dry_run else "-")),
+    ])
+    return {"model": origin.to_dict(), "prune": config, "changed": changes, "pruned": pruned, "saved": saved}
 # --------------------------------------------------------------------------
 # the negative network (the failures, and why)
 # --------------------------------------------------------------------------
@@ -3443,6 +3493,7 @@ def cmd_info(args: argparse.Namespace, console: Console) -> dict:
           if model.kind == "resonant" else []),
         *([("attention", model.graph.attention.describe(model.encoding.n))] if model.takes_corrections else []),
         ("dynamic window", model.graph.dynamic_window.describe(units_of(model))),
+        ("auto prune", model.graph.auto_prune.describe()),
         ("seed", meta.get("seed")),
         ("created", meta.get("created")),
     ])
@@ -5596,6 +5647,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="change the window in memory only; nothing is saved")
     p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
     p.set_defaults(handler=cmd_window)
+    # prune ----------------------------------------------------------------
+    p = command(
+        "prune", "auto prune: let go of the edges nothing walks, and the nodes they strand",
+        "Compression only ever merges; nothing the graph learned is ever removed.  Auto prune is the other half:\n"
+        "an edge traversed fewer than --min-count times (default 1: only what was never traversed), or taking\n"
+        "less than --min-share of its node's out-traversals (default 0: off), is removed - unless something was\n"
+        "taught about it: a hand-over, a reward, a judged context, blame.  Every real node then left with no\n"
+        "way in or no way out goes with its edges, and the unary chains that opens are merged.  It prunes by\n"
+        "itself at the end of every --every-th training epoch (--auto, the default) or by hand (--manual, then\n"
+        "--now).  Off (the default), nothing is pruned.  Without options auto prune is shown; --on, --min-count,\n"
+        "--min-share, --every, --auto / --manual and --off change it and save the model (--dry-run: in memory\n"
+        "only); --now prunes at the model's thresholds (the defaults while it is off) and saves.",
+    )
+    state = p.add_mutually_exclusive_group()
+    state.add_argument("--on", action="store_true",
+                       help="switch auto prune on (at the thresholds it had, else never-traversed edges, every epoch)")
+    state.add_argument("--off", action="store_true", help="switch auto prune off: nothing is pruned, the graph stays as it is")
+    p.add_argument("--min-count", dest="min_count", type=int, metavar="N",
+                   help="prune an edge traversed fewer than N times (default 1; 0 switches the rule off); switches it on")
+    p.add_argument("--min-share", dest="min_share", type=float, metavar="X",
+                   help="prune an edge taking less than share X (0..1) of its node's out-traversals (default 0: off)")
+    p.add_argument("--every", type=int, metavar="N", help="prune at the end of every N-th training epoch (default 1)")
+    p.add_argument("--auto", action="store_true", help="prune at the end of training epochs (the default)")
+    p.add_argument("--manual", action="store_true", help="prune only when --now asks")
+    p.add_argument("--now", action="store_true", help="prune now, at the model's thresholds, and save")
+    p.add_argument("--dry-run", action="store_true", help="change the setting (and prune) in memory only; nothing is saved")
+    p.add_argument("--out", metavar="PATH", help="where to save the model (default: --model)")
+    p.set_defaults(handler=cmd_prune)
     # negative -------------------------------------------------------------
     p = command(
         "negative", "the negative network: failures, why they failed, and the filter",
