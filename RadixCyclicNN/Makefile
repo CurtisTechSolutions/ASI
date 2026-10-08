@@ -102,6 +102,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
 .PHONY: help install install-gpu check test go-build go-test go-parity go-serve go-negative \
         phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play say acoustic-train acoustic-speak phone-go phone-rust phone-parity \
         rust-build rust-test rust-parity rust-talk go-talk bench-compare train resume predict generate score talk talk-repl 2nrl invert compress \
+        window window-on window-step window-off prune prune-on prune-now prune-off \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
         evolve evolve-forever evolve-blame info checkpoints restore bench demo serve test-core frontend-install frontend-build \
         frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-correct ollama-2nrl \
@@ -294,6 +295,21 @@ window-step: ## Step the dynamic window by hand STEPS times: merge what fits, ha
 
 window-off: ## Switch the dynamic window off (compression is unbounded again) and save
 	$(RADIXNET) $(GLOBAL) window --off
+
+PRUNE_MIN_COUNT ?= 1
+PRUNE_MIN_SHARE ?= 0
+
+prune: ## Show auto prune: the thresholds under which an edge is let go of, and what a prune would remove now
+	$(RADIXNET) $(GLOBAL) prune
+
+prune-on: ## Switch auto prune on (PRUNE_MIN_COUNT=1 PRUNE_MIN_SHARE=0; it prunes at the end of every training epoch) and save
+	$(RADIXNET) $(GLOBAL) prune --on --min-count $(PRUNE_MIN_COUNT) --min-share $(PRUNE_MIN_SHARE)
+
+prune-now: ## Prune by hand now: remove the edges under the thresholds and the nodes they strand, merge, save
+	$(RADIXNET) $(GLOBAL) prune --now
+
+prune-off: ## Switch auto prune off (nothing is pruned; the graph stays as it is) and save
+	$(RADIXNET) $(GLOBAL) prune --off
 
 ##@ Word n-grams (the encoding dial's word unit: the same model over words)
 MODEL_WORD  ?= model.word.json

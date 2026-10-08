@@ -616,6 +616,33 @@ class CountRewardGraph(RadixCyclicGraph):
             self.recompute_weights()
         return splits
 
+    def edge_protected(self, e: int) -> bool:
+        """Also an edge that was rewarded or penalised, or that a judged walk went over: a verdict is taught."""
+        return super().edge_protected(e) or self.edge_reward[e] != 0.0 or e in self._by_edge
+
+    def _edge_removed(self, e: int) -> None:
+        """A pruned edge takes its contexts, its reward and its window share with it."""
+        for prev in list(self._by_edge.get(e, ())):
+            self._drop_path(prev, e)
+        self.edge_reward[e] = 0.0
+        self.window_edge_count[e] = 0
+        self._ctx_cache.clear()
+
+    def _node_removed(self, node: int) -> None:
+        """A pruned node was the context of nothing any more."""
+        for edge in list(self._by_prev.get(node, ())):
+            self._drop_path(node, edge)
+        self._path_parents = None
+
+    def prune(self, min_count: int | None = None, min_share: float | None = None) -> dict:
+        """Prune, then forget the pruned edges' events in the sliding window and give every edge its weight."""
+        done = super().prune(min_count, min_share)
+        if done["edges"]:
+            alive = self.edge_alive
+            self._window = deque(e for e in self._window if e < len(alive) and alive[e])
+            self.recompute_weights()
+        return done
+
     def merge_child(self, p: int) -> bool:
         """Merge, then keep what this model hangs on its edges consistent: ``q -> p -> c -> c'`` becomes
         ``q -> p -> c'``.
@@ -1108,6 +1135,10 @@ class CountRewardNet(GraphModel):
             merges = (graph.compress() if cfg.auto_compress else 0) + pending_merges
             pending_merges = 0
             stepped = self._window_epoch()  # the dynamic window's step, after the compression it rides on
+            # the automatic prune, last: what it removes is measured on the settled structure
+            pruned = self._prune_epoch(meta_counter(meta, "epochs_total").bumped(1).value, cfg.auto_compress)
+            if pruned:
+                merges += pruned["merges"]
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             epoch = meta_add(meta, "epochs_total", 1)
             record = {
@@ -1120,6 +1151,7 @@ class CountRewardNet(GraphModel):
                 "compression_ratio": graph.compression_ratio(),
                 "merges": merges,
                 **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
+                **({"pruned_edges": pruned["edges"], "pruned_nodes": pruned["nodes"]} if pruned else {}),
                 "transitions": len(transitions),
                 "seconds": time.perf_counter() - t0,
                 "skipped_short": skipped_short,

@@ -78,6 +78,7 @@ from .model import (
     _utc_now,
     carry_meta,
     meta_add,
+    meta_counter,
     meta_add_keyed,
     meta_stats,
 )
@@ -452,6 +453,29 @@ class NegativeGraph(RadixCyclicGraph):
             self.recompute_weights()
         return splits
 
+    def edge_protected(self, e: int) -> bool:
+        """Also an edge that carries evidence - blame or clearing: what went wrong stays an edge, and nameable."""
+        return super().edge_protected(e) or self.edge_blame[e] > 0 or self.edge_clear[e] > 0
+
+    def edge_traffic(self, e: int) -> float:
+        """This network counts nothing: what went over an edge is the evidence it carries, blame and clearing.
+
+        Evidence protects an edge, so the thresholds only ever reach the
+        edges that carry none - the structure a judgement registered and
+        never ruled on - and the bridge of a split inside a blamed chain, which
+        carries none either, is told from those by the flow rule
+        (:meth:`RadixCyclicGraph.prune_candidates`): the blame that entered
+        its node left over it.
+        """
+        return self.edge_blame[e] + self.edge_clear[e]
+
+    def prune(self, min_count: int | None = None, min_share: float | None = None) -> dict:
+        """Prune what carries no evidence, then give every edge its weight again."""
+        done = super().prune(min_count, min_share)
+        if done["edges"]:
+            self.recompute_weights()
+        return done
+
     def invert(self) -> None:
         """Swap blame and clearing: what the tutor rejected becomes what it accepted, and back.
 
@@ -730,6 +754,13 @@ class NegativeNet(GraphModel):
             pending_merges = 0
             # the dynamic window's step, after the compression it rides on: a blame pass is a training pass
             stepped = self._window_epoch() if blame else None
+            # and the automatic prune, last - a clearing pass adds no structure, so it prunes none away
+            pruned = (
+                self._prune_epoch(meta_counter(meta, "epochs_total").bumped(1).value, cfg.auto_compress)
+                if blame else None
+            )
+            if pruned:
+                merges += pruned["merges"]
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             epoch = meta_add(meta, "epochs_total", 1)
             record = {
@@ -742,6 +773,7 @@ class NegativeNet(GraphModel):
                 "compression_ratio": graph.compression_ratio(),
                 "merges": merges,
                 **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
+                **({"pruned_edges": pruned["edges"], "pruned_nodes": pruned["nodes"]} if pruned else {}),
                 "transitions": len(flat),
                 "seconds": time.perf_counter() - t0,
                 "skipped_short": skipped_short,

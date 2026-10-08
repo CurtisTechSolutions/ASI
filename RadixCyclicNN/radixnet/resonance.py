@@ -518,6 +518,17 @@ class ResonantGraph(RadixCyclicGraph):
             self.recompute_weights()
         return splits
 
+    def edge_protected(self, e: int) -> bool:
+        """Also an edge that was rewarded or penalised: a verdict is taught, and stays."""
+        return super().edge_protected(e) or self.edge_reward[e] != 0.0
+
+    def prune(self, min_count: int | None = None, min_share: float | None = None) -> dict:
+        """Prune, then give every edge its weight again from the counts, the rewards and the phase."""
+        done = super().prune(min_count, min_share)
+        if done["edges"]:
+            self.recompute_weights()
+        return done
+
     def merge_child(self, p: int) -> bool:
         merged = super().merge_child(p)
         if merged:
@@ -885,6 +896,8 @@ class ResonantNet(GraphModel):
                 graph.recompute_weights()
             # the dynamic window's step; this kind compresses once before its passes, so the step merges as well
             stepped = self._window_epoch(compress=cfg.auto_compress)
+            # the automatic prune, last: what it removes is measured on the settled structure
+            pruned = self._prune_epoch(base + epoch, cfg.auto_compress)
             graph.carry_counters()  # the epoch is over: wrap whatever reached the limit
             loss = cost / max(1, transitions)
             record = {
@@ -895,8 +908,9 @@ class ResonantNet(GraphModel):
                 "edges": graph.num_edges(),
                 "trigrams": graph.num_trigrams(),
                 "compression_ratio": graph.compression_ratio(),
-                "merges": stepped["merges"] if stepped else 0,
+                "merges": (stepped["merges"] if stepped else 0) + (pruned["merges"] if pruned else 0),
                 **({"splits": stepped["splits"], "window": stepped["window"]} if stepped else {}),
+                **({"pruned_edges": pruned["edges"], "pruned_nodes": pruned["nodes"]} if pruned else {}),
                 "transitions": transitions,
                 "traversed": transitions if count else 0,
                 "reward": reward * transitions,
