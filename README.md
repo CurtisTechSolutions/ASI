@@ -12,6 +12,14 @@ I put in months of continuous extreme effort to research AGI/ASI, and this is th
 
 All rights reserved; all research is 100% my own, and none of this repo is allowed to be used for profit, unless used by my own company or myself [My company (CTS)](https://www.curtistechsolutions.com)
 
+## Where to start
+
+[SPEC-Integration.md](SPEC-Integration.md) is the map of the repository: how the
+model ([RadixCyclicNN](RadixCyclicNN)) and the kit around it
+([ModelKit](ModelKit) - the command line, the HTTP API, the React frontend, the
+OpenAI and Anthropic dialects, the teaching loops, MCP, Docker) fit together,
+and what a new raw model has to supply before each of those surfaces works.
+
 ## Details
 
 It all started when I was frustrated with the current AGI/LLM hype. I was building a company/product called Amy AI (Executive Email Assistant). I grew extremely frustrated with how much AI was parroted as the "Next big thing", and "AI *this*", "AI *that*". I was looking for hard problems to solve at the time, so I said: "screw it, I'll do it myself!". So, that's what I did! I reverse-engineered my entire brain, from memory to executive function, delved into neuroscience, and more. Overall, I have many pages of notes, scribbles, diagrams, methodologies, and more. I've also optimized the training process with my own proprietary custom training algorithms.
