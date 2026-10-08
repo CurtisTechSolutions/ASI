@@ -448,6 +448,72 @@ def test_conjunctive_goals_order_the_cheap_selective_part_first():
     assert expected_work(best) < expected_work(list(reversed(best)))
 
 
+# ------------------------------------------------------------ rule transfer
+def _rule_net(train_game, seed=0, states=50):
+    import random as _r
+    from gren.oracle import build_all
+    from gren.sbnn import GrowingSBNN
+    o = build_all()[train_game]; g = o.game; rng = _r.Random(seed)
+    rows = []
+    for _ in range(states):
+        s = g.random_state(rng) if hasattr(g, "random_state") else g.new(seed=rng.randrange(10 ** 6))
+        for mv in o.candidates(s, rng, 10):
+            try:
+                f = g.generalise(s, mv); lab = "LEGAL" if g.is_legal(s, mv) else o.why(s, mv)[0]
+            except Exception: continue
+            rows.append(({f"{b}[{i}]": v for b, vec in f.items() for i, v in enumerate(vec)}, lab))
+    by = {}
+    for f, l in rows: by.setdefault(l, []).append((f, l))
+    tr = []
+    for l, rs in by.items(): rng.shuffle(rs); tr += rs[:100]
+    rng.shuffle(tr)
+    net = GrowingSBNN(nh=24, seed=seed)
+    for _ in range(6):
+        for f, l in tr: net.step(f, l, lr=0.05)
+    return net
+
+
+def _rule_test(game, seed=1, states=40):
+    import random as _r
+    from gren.oracle import build_all
+    o = build_all()[game]; g = o.game; rng = _r.Random(seed); out = {}
+    for _ in range(states):
+        s = g.random_state(rng) if hasattr(g, "random_state") else g.new(seed=rng.randrange(10 ** 6))
+        for mv in o.candidates(s, rng, 10):
+            try:
+                f = g.generalise(s, mv); lab = "LEGAL" if g.is_legal(s, mv) else o.why(s, mv)[0]
+            except Exception: continue
+            out.setdefault(lab, []).append({f"{b}[{i}]": v for b, vec in f.items() for i, v in enumerate(vec)})
+    return out
+
+
+def test_a_shared_rule_with_the_same_meaning_transfers_whole():
+    """go and sudoku share GRID_PLACE[2] -- 'target cell empty' -- with the same
+    orientation, and 'occupied cell is refused' means the same thing in both.
+    A go-trained net reads sudoku's occupied-target refusals almost perfectly."""
+    net = _rule_net("go"); test = _rule_test("sudoku")
+    occ = test.get("OCCUPIED_TARGET", [])[:80]
+    assert len(occ) >= 20, "fixture has too few occupied-target refusals"
+    hit = sum(1 for f in occ if max((p := net.predict(f)), key=p.get) == "OCCUPIED_TARGET")
+    assert hit / len(occ) > 0.85, hit / len(occ)
+
+
+def test_a_shared_feature_with_the_opposite_meaning_anti_transfers():
+    """A checkers jump has an occupied midpoint: the piece being captured. To a
+    chess-trained net an occupied midpoint on a diagonal is a blocked bishop.
+    So it calls checkers' LEGAL jumps BLOCKED_PATH -- a chess-only code -- for
+    most of them. Same feature, opposite rule; this is insight 30 measured at
+    the level of a single rule."""
+    net = _rule_net("chess"); test = _rule_test("checkers")
+    legal = test.get("LEGAL", [])[:100]
+    assert len(legal) >= 30
+    preds = [max((p := net.predict(f)), key=p.get) for f in legal]
+    wrong = [q for q in preds if q != "LEGAL"]
+    assert len(wrong) / len(preds) > 0.5, "chess-trained net should reject most checkers-legal moves"
+    assert wrong.count("BLOCKED_PATH") / max(1, len(wrong)) > 0.5, \
+        f"the rejection should be BLOCKED_PATH, got {sorted(set(wrong))}"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

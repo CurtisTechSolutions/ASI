@@ -332,7 +332,7 @@ def main(argv=None):
         q.add_argument("--iters", type=int, default=16)
         q.add_argument("--permutations", type=int, default=8)
         q.add_argument("--epochs", type=int, default=6)
-        q.add_argument("--lr", type=float, default=0.05)
+        q.add_argument("--lr", type=float, default=0.35)
         q.add_argument("--seed", type=int, default=0)
         q.add_argument("--trials", type=int, default=3)
         q.add_argument("--generations", type=int, default=3)

@@ -364,6 +364,43 @@ def test_model_trains_and_reports_both_losses():
     assert recs[-1]["loss"] < recs[-1]["uniform_loss"], "worse than guessing"
 
 
+def _infer_loss(net, cfg, texts):
+    nll = 0.0; n = 0
+    for text in texts:
+        for p in range(len(text) + 1):
+            ctx = text[max(0, p - net.hasher.context):p]
+            y = net.alphabet.encode(text[p]) if p < len(text) else 1
+            r = net.step(ctx, None, cfg, learn=False, charge=False)
+            nll -= math.log(max(r.agg[y] if y < len(r.agg) else 1e-12, 1e-12)); n += 1
+    return nll / n
+
+
+def test_the_credit_path_beats_uniform_at_inference():
+    """The claim the whole design makes, on the REAL inference path: y withheld,
+    BeliefCongestion, solver, aggregate. Measured at the defaults: 2.353 against
+    a uniform 2.708 at 60 epochs, and below uniform at every budget tried."""
+    texts = ["the cat sat on the mat", "the dog sat on the log"]
+    net = GTMNet(n=64, F=128, R=16, H=6, K=4, meta_n=16, seed=0, context=10)
+    cfg = TrainConfig(epochs=8, seats=64, iters=16, permutations=8, batch=64, seed=0,
+                      meta=False, coalitions=False)
+    net.train(texts, cfg)
+    assert _infer_loss(net, cfg, texts) < net.uniform_loss(), "not better than guessing"
+
+
+def test_regret_credit_collapses_to_uniform():
+    """The measured failure, pinned so it stays reproducible. Teaching abstention
+    through the counterfactual works -- too well: q_abstain rises, bids fall
+    under the reserve, nobody is seated, and the aggregate is the eps smoothing.
+    Real inference loss lands on exactly log|V|, +-0.00. If this test starts
+    failing, the collapse has been fixed and README needs updating."""
+    texts = ["the cat sat on the mat", "the dog sat on the log"]
+    net = GTMNet(n=64, F=128, R=16, H=6, K=4, meta_n=16, seed=0, context=10)
+    cfg = TrainConfig(epochs=8, seats=64, iters=16, permutations=8, batch=64, seed=0,
+                      meta=False, coalitions=False, credit="regret")
+    net.train(texts, cfg)
+    assert abs(_infer_loss(net, cfg, texts) - net.uniform_loss()) < 0.05
+
+
 def test_model_round_trips_through_a_file():
     net = GTMNet(n=24, F=32, R=6, H=4, K=3, meta_n=8, seed=0, context=6)
     net.train(["abc", "abd"], TrainConfig(epochs=1, seats=8, iters=8, permutations=4, seed=0))

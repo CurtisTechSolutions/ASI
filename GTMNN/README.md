@@ -22,7 +22,7 @@ python3 -m gtmnn.cli modifier    # GREN's mechanic sets, hashed
 python3 -m gtmnn.cli trie        # the game-theory trie; every solver compared
 python3 -m gtmnn.cli transfer    # does chess transfer to checkers?
 python3 -m gtmnn.cli evolve      # cull, birth, evolutionary stability
-python3 -m tests.test_gtmnn      # 47 tests
+python3 -m tests.test_gtmnn      # 49 tests
 ```
 
 Pure standard library. `gtmnn.games` and `gtmnn.play` read `CyclicCortex`'s game
@@ -211,43 +211,74 @@ population's predictive loss was **4.2**, against a uniform baseline of **2.77**
 Reading the first as the second is the mistake the pair exists to prevent — I
 made it first, and the honest number is the one that matters.
 
-## What does not hold: the population barely learns to predict
+## The credit path learns — after three corrections to how I measured it
 
-This is the headline negative result and it is the thing to fix next.
+The first version of this section said the population barely learns to predict.
+That was wrong, and it was wrong because of the comparison rather than the thing
+compared — the third time in this repository a control has decided an outcome.
 
-| | belief loss | vs uniform 2.71 |
-|---|---|---|
-| untrained | 3.23 | worse |
-| full game path — auction, equilibrium, Shapley, REINFORCE | **2.84** | still worse |
-| **same architecture, direct supervised signal** | **1.50** | **far better** |
+Real inference loss (`y` withheld, `BeliefCongestion`, solver, aggregate), against
+a uniform baseline of **2.708**. Geometry: `n = 64`, `M = 64` — every micro seated —
+`R = 16`, three seeds. At the CLI's default 24 seats of 192 the same trend holds
+but sits above uniform at short budgets, because only an eighth of the population
+plays each game; that is the seats-per-game effect in the next section.
 
-The supervised control is the important row. It uses the *identical* micros,
-sine activation, feature hashing and aggregate, and simply tells each micro "if
-you hold `y`, say it; if you do not, abstain". It reaches 1.14–2.47 across
-geometries, comfortably below the baseline. So the architecture has ample
-capacity for the task and **the credit path is what fails to deliver a signal
-that sharpens the population**.
+| condition | 6 epochs | 20 epochs | 60 epochs |
+|---|---|---|---|
+| Shapley credit, lr 0.05 (the old default) | 3.445 | 3.167 | 2.781 |
+| **Shapley credit, lr 0.35** | **2.691** | **2.631** | **2.353** |
+| same micros, direct supervised signal | 2.708 | 2.375 | 0.905 |
 
-More training does not close it: at 6 900 learning steps per micro the belief
-loss moved 3.226 → 3.204, and 150 epochs did *worse* than 20. It is not a signal
-shortage.
+**It learns.** Below uniform at every budget, improving monotonically. The
+credit path was never broken; its coefficient was mis-scaled. `φ` is a
+*marginal contribution*, and a seat's mean `|φ|` is about 0.15, so at
+`lr = 0.05` the population was learning roughly 7× slower than the same micros
+under a unit supervised signal. `TrainConfig.lr` is now 0.35.
 
-Two candidate causes were tested and **both were wrong**, which is worth
-recording so they are not re-tried from intuition:
+### The three corrections
 
-* *B against λ* (`DESIGN.md` open question 1). Swept from 2 to ∞. Abstention
-  falls from 56% to 0% as the ratio rises and the inference loss does not
-  improve at any setting — 3.42 at best, still above uniform. The ratio is real
-  but it is not the binding constraint.
-* *The null-player axiom forbids rewarding a correct silence.* A micro that
-  correctly abstains contributed nothing, so Shapley scores it exactly zero and
-  it never learns to stay quiet. Deliberately breaking the axiom to reward it
-  made things **worse** (2.838 → 3.050), so this is not it either.
+1. **"Supervised reaches 1.50 where the credit path reaches 2.84."** Those were
+   measured at 30–100 epochs and 4–6 epochs respectively. At matched 6 epochs
+   the old credit path scores 2.886 against supervised's 2.820 — within 0.07.
+   I compared two different budgets and called the gap architectural.
+2. **"More training doesn't help."** That was measured on code that still had the
+   empty-slot bug and argmax targets. On current code, loss falls monotonically
+   through 60 epochs.
+3. **"The abstain trap isn't real."** It is. Under Shapley credit nothing raises
+   `q_abstain`, so it never triggers — bidders actually *rise* from 16 to 54 of
+   64 over training. But give the population a signal that teaches abstention
+   and it fires immediately (next section).
 
-What the population *does* do is specialise: `gini` rises to 0.54 when every
-micro gets seated, against 0.05 when only 24 of 256 do. That is `DESIGN.md` open
-question 5 — "does the population actually specialise?" — answered yes, and it
-makes seat count the first thing to look at.
+Two hypotheses tested and refuted on the way: Monte-Carlo noise in `φ` (SNR 3.3
+at 8 permutations, zero sign-flips) and the `B`/`λ` ratio (already ruled out).
+The gradient code was re-derived line by line and matches finite differences
+across all 45 parameters of a micro; there was no bug in it.
+
+### What is still not fixed, and the attempt that made it worse
+
+Supervised reaches **0.905** at 60 epochs. The credit path's 2.353 is a real gap,
+and the reason is structural: only *holders* — seats that hold `y` — receive a
+non-zero `φ`. That is about 23% of seat-games. A non-holder abstains, is a null
+player, gets exactly `φ = 0`, and is never taught that abstaining was *right*.
+Measured: `q_abstain` **falls** over training (0.201 → 0.163), because the only
+signal a micro ever gets is "push toward `y`" in the contexts where it holds `y`,
+and normalisation drags ABSTAIN down with everything else.
+
+`credit="regret"` supplies the missing term the principled way — counterfactual
+regret (Hart & Mas-Colell, already the inference solver) with Shapley as the
+payoff: advantage = `φ(what I did) − marginal(what I could have done)`. A
+non-holder's advantage becomes `0 − marginal(playing its best wrong symbol) > 0`,
+which pushes it toward ABSTAIN; a holder's stays `φ`. It does exactly what it was
+designed to do — `q_abstain` rises to 0.33 — **and collapses the inference game to
+uniform: `2.708 ± 0.00` at every budget.** Abstainers are 77% of seats and take
+76% of the gradient; as they learn silence their bids fall under the reserve,
+nobody is seated, the belief game plays short-handed to no one, and the aggregate
+is the ε-smoothing. `belief_loss` frozen at 3.182 across 6, 20 and 60 epochs says
+the pool stopped changing at all — that is the abstain trap, closed.
+
+So the open question is sharper than it was: **how do you teach a micro to be
+quiet without it going silent for good?** The `regret` option is kept, default
+off, so the collapse stays reproducible.
 
 ## The GREN handoff: one modifier, three projects
 

@@ -168,3 +168,69 @@ def banzhaf_values(game, profile, pool, y, samples=64, rng=None, eps=1e-3):
             acc += v(S | {i}) - v(S)
         phi[i] = acc / samples
     return phi
+
+
+def counterfactual_marginal(game, profile, pool, y, seat, slot, eps=1e-3):
+    """What seat i would have contributed, last in, had it played `slot` instead.
+
+    The null-player axiom is correct and it creates a blind spot: a micro that
+    abstains when it does not hold y has changed nothing, so phi is exactly 0
+    and it takes exactly no step -- it is never taught that abstaining was
+    RIGHT. Measured: q_abstain FALLS over training (0.201 -> 0.163) because the
+    only signal a micro ever receives is "push toward y" in the contexts where
+    it holds y, and normalisation drags ABSTAIN down with everything else. At
+    inference it then names one of its four symbols in every context.
+
+    Regret matching (Hart & Mas-Colell 2000) supplies the missing term: the
+    advantage of an action is its payoff minus the payoff of the best
+    alternative. With Shapley as the payoff, an abstainer's advantage is
+    0 - marginal(playing its best wrong symbol) > 0, which pushes it toward
+    ABSTAIN, and a holder's is phi - 0 = phi, unchanged.
+
+    This is the LAST-IN marginal to the full coalition, not a Shapley average
+    over orderings: one aggregate recomputation, O(V), exact. That is a
+    deliberate approximation -- the counterfactual is a single alternative
+    action, not a player whose fair share needs settling."""
+    V = game.ctx.alphabet_size
+    base = eps / V
+    contrib = _contributions(game, profile, pool)
+    score_y, total = base, eps
+    for k, pairs in enumerate(contrib):
+        if k == seat: continue
+        for sym, w in pairs:
+            total += w
+            if sym == y: score_y += w
+    v_without = math.log(score_y) - math.log(total)
+    sym = game.ctx.slot_symbol[seat][slot]
+    if sym is None: return 0.0                      # abstaining contributes nothing
+    rho = pool.reputation(game.seats[seat])
+    total += rho
+    if sym == y: score_y += rho
+    return (math.log(score_y) - math.log(total)) - v_without
+
+
+def regret_advantages(game, profile, pool, y, phi, eps=1e-3):
+    """phi_i minus the last-in marginal of seat i's best alternative action.
+
+    For a seat on a symbol, the alternative is ABSTAIN (marginal 0) and the
+    advantage is phi_i. For a seat on ABSTAIN, the alternative is its most
+    believed symbol, and the advantage is -marginal(that), positive when the
+    symbol is wrong and negative when the micro was holding y and stayed quiet.
+    """
+    K = pool.K
+    out = array("d", [0.0]) * len(game.seats)
+    for seat, i in enumerate(game.seats):
+        row = profile[seat]
+        on_abstain = row[K] >= max(row[s] for s in range(K)) if K else True
+        if not on_abstain:
+            out[seat] = phi[seat]
+            continue
+        best, bs = None, -1.0
+        for s in range(K):
+            if game.ctx.slot_symbol[seat][s] is None: continue
+            if not game.playable(seat)[s]: continue
+            if row[s] > bs or (best is None): best, bs = s, row[s]
+        if best is None:
+            out[seat] = phi[seat]; continue
+        out[seat] = phi[seat] - counterfactual_marginal(game, profile, pool, y, seat, best, eps)
+    return out

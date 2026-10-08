@@ -18,8 +18,14 @@ FORMAT_VERSION = 1
 @dataclass
 class TrainConfig:
     epochs: int = 5
-    lr: float = 0.05
-    act_lr: float = 0.005            # an order of magnitude slower: the activation
+    lr: float = 0.35                 # NOT 0.05. phi is a marginal contribution and
+                                     # a seat's mean |phi| is ~0.15, so at lr 0.05
+                                     # the credit path learned ~7x slower than the
+                                     # same micros under a unit supervised signal.
+                                     # Measured (real inference loss, 60 epochs):
+                                     # 2.781 at 0.05 against 2.353 at 0.35, with
+                                     # uniform at 2.708. See README.
+    act_lr: float = 0.035            # an order of magnitude slower: the activation
                                      # is shared structure and should move slower
                                      # than the weights that use it
     seats: int = 64
@@ -41,6 +47,14 @@ class TrainConfig:
     shuffle: bool = True
     seed: int = 0
     coalitions: bool = True
+    credit: str = "shapley"    # "shapley": advantage = phi; a null player takes no step
+                               # "regret":  advantage = phi - marginal(best alternative),
+                               #            which DOES teach abstention -- and collapses
+                               #            the inference game to uniform. Abstainers are
+                               #            77% of seats and take 76% of the gradient;
+                               #            q_abstain rises, bids fall under the reserve,
+                               #            nobody is seated, the aggregate is the eps
+                               #            smoothing. Kept so the collapse is reproducible.
 
     def to_dict(self): return asdict(self)
 
@@ -180,6 +194,8 @@ class GTMNet:
         if learn and y is not None:
             phi = shap_mod.shapley_values(sg, eq.profile, pool, y,
                                           permutations=cfg.permutations, rng=self.rng)
+            adv = (shap_mod.regret_advantages(sg, eq.profile, pool, y, phi.phi)
+                   if cfg.credit == "regret" else phi.phi)
             us = sg.utilities(eq.actions)
             pool.discount_reputation()
             for seat, i in enumerate(sg.seats):
@@ -191,7 +207,7 @@ class GTMNet:
                     if sym == y: pool.hits[i] += 1.0
                 pool.age[i] += 1
                 if phi.phi[seat] > 0.0: pool.note_symbol(i, y, phi.phi[seat])
-                self._pending.append((i, list(eq.profile[seat]), phi.phi[seat], feat))
+                self._pending.append((i, list(eq.profile[seat]), adv[seat], feat))
             self._games += 1
         return StepResult(agg, eq, alloc, coals, mres, phi, sg)
 
