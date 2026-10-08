@@ -1,0 +1,418 @@
+# MultiGradientNN — Design Specification
+
+A neural network that keeps to traditional norms — ordinary layers, ordinary
+backpropagation — and expands **gradient descent** by giving every layer its own
+gradient and stacking those gradients into a connected volume.
+
+Directory: `MultiGradientNN/` (this directory).
+
+This document is the contract the implementation will be written against.
+It is **concept stage**: sections 1–5 are settled, section 6 lists the decisions
+that are still open. Nothing in section 6 has been chosen — where this document
+has to name something to keep the notation usable, it says so explicitly.
+
+---
+
+## 1. Concepts (in the author's own terms)
+
+| Requirement | How it is realised |
+|---|---|
+| Traditional norms | Ordinary layers, ordinary forward pass, ordinary backpropagation. The architecture is not reinvented; the divergence is in the descent. |
+| A gradient is an XY coordinate plane with weights as depth | **One gradient is a single plane.** `(i, j)` are the X and Y coordinates, and the weight at that point is the depth. |
+| Multiple gradients (multiple layers) | `L` gradients, so `L` planes, one per layer — rather than every layer sharing one surface. |
+| This adds another dimension | The planes stack: `G` is an `L × m × n` volume. The stack index `k` is a third axis, and descent moves *through* it as well as across each plane. |
+| Each layer directly connected to each other vertically | All-to-all along `k`: every layer is one hop from every other, `L(L-1)/2` vertical connection sets, each with its own weights. |
+| The cross-layer step moves through the stack via the vertical weights | `V[k, k']` is the medium the step travels through, not a static coupling sitting between the planes. |
+| Layers are accessed based on depth perception | At `(i, j)`, the column down the `k` axis holds one depth per plane; reading those depths is what selects the layer to access. |
+| Depth perception is the human eye's | The analogy is literal: perception is comparative, never absolute, so the accessed layer is unchanged by a constant shift of the whole column. |
+| Occlusion and parallax, for images | Both cues are monocular, so no second viewpoint is needed. `(i, j)` is a pixel and `k` is the viewing axis: occlusion is the instantaneous read (nearest plane wins), parallax the temporal one (near planes shift more between reads). |
+| A light radial blur on the input, for focus | The blur's centre is the point in focus and sharpness falls off with radius — the retina's foveal profile. Moving the centre changes focus, so preprocessing is dynamic rather than one-time. |
+| Focus is attentional; parallax comes from the descent | Two motions on two axes: the blur centre moves across `(i, j)` and carries attention only, while the descent moves depths along `k` and is the sole source of parallax. |
+
+---
+
+## 2. Notation and geometry (settled)
+
+```
+L                 number of layers = number of gradients = number of planes
+k, k'             layer indices, 0 <= k < L
+G_k               layer k's gradient - a single plane, an m_k x n_k grid
+G_k[i, j]         the depth at (i, j) on that plane: the weight there
+G                 the full volume - the L planes stacked along the k axis
+V[k, k']          the vertical connection between layers k and k'
+```
+
+**One gradient is one plane.** The two words name the same object. Layer `k` has
+exactly one gradient, that gradient *is* a single plane, and the weights are the
+depth on it — `L` layers, `L` gradients, `L` planes, and the three counts never
+diverge. A gradient is not a field laid over a plane; there is nothing to hold
+apart.
+
+Two axes are horizontal (`i`, `j`, within a plane) and one is vertical (`k`,
+through the stack).
+
+**Horizontal descent** is conventional: it moves across plane `G_k`, from `(i, j)`
+toward lower depth, by the usual step.
+
+**Vertical descent** is the new part. It moves along `k` — between planes — rather
+than across any single plane. Section 4 defines that step.
+
+The two are not the same operation. A single gradient answers *which way is
+downhill from here*; the stack must also answer *which layer is the right one to
+be descending in*, and the pair is optimised together.
+
+---
+
+## 3. Vertical connectivity (settled)
+
+Every layer connects **directly to every other layer**, not only to its immediate
+neighbours. Layer 0 reaches layer 5 in one hop, exactly as it reaches layer 1.
+
+```
+connection sets   L(L-1)/2
+reachability      any layer from any other in one hop, no propagation through
+                  the layers in between
+```
+
+Three consequences follow, and they are properties of the design rather than
+choices still to be made:
+
+1. **The stack index is not a distance.** Layer 0 is no further from layer 5 than
+   from layer 1, since both are a single connection away. How far apart two
+   layers are is the *learned weight* on `V[k, k']`, not `|k - k'|`. The vertical
+   axis carries no metric of its own; the network supplies one.
+
+2. **Parameters grow quadratically in `L`.** `L = 4` is 6 connection sets and
+   `L = 8` is 28, both negligible. `L = 64` is 2,016, at which point the vertical
+   weights dominate the model. Whatever `V[k, k']` is made of, its size is
+   multiplied by `L(L-1)/2`.
+
+3. **Dense connectivity outranks depth.** In a conventional stack, information
+   crosses the layers in order and depth is what separates them. Here nothing is
+   separated by more than one hop, so ordering the layers `0 … L-1` is a labelling
+   convention, not a structural claim.
+
+---
+
+## 4. The cross-layer step (settled)
+
+The operation that moves along the vertical axis. Two statements fix it.
+
+**It travels via the vertical weights.** `V[k, k']` is not a static coupling
+sitting between the planes; it is the medium the step moves through. Because
+every layer is one hop from every other (section 3), the step reaches any plane
+from any other directly, and `V[k, k']` is what it travels along to get there.
+
+**Layers are accessed by depth perception.** Which layer the step reaches is
+decided by perceiving depth through the stack. At a position `(i, j)`, the column
+running down the `k` axis holds one depth per plane; reading those depths is what
+selects the layer to access.
+
+The two halves compose: **depth perception chooses the layer, the vertical weights
+carry the step there.** Selection and transport are separate mechanisms doing
+separate jobs, and neither substitutes for the other.
+
+Four consequences follow.
+
+1. **The access rule presupposes columns.** Perceiving depth "through the stack"
+   is only defined if there is a column to look down — a fixed `(i, j)` with one
+   depth per plane. This is independent evidence for the column-wise reading in
+   6.1, which until now rested only on the word "vertical".
+
+2. **`V[k, k']` carries two jobs at once.** Section 3 made it the learned
+   separation between two layers; this section makes it the medium the step
+   travels through. They are the same object, so a layer that has learned to be
+   close is by that fact easier to reach. The metric and the transport are one.
+
+3. **The descent shapes its own path.** The step travels via `V`, and `V` is
+   itself learned (6.6). The route is therefore modified by the traffic on it.
+   This is the design's most powerful property and its least stable one: the
+   network can learn its own optimisation path, and it can also reinforce a path
+   until nothing else is reachable. Whatever rule 6.6 settles on has to be read
+   with this in mind.
+
+4. **Depth is doing double duty.** `G_k[i, j]` is the weight being learned
+   (section 2) and also the quantity perception reads to choose a layer. Changing
+   a weight therefore changes which layers are reachable from it.
+
+### 4.1 Depth perception is the eye's
+
+The analogy is literal rather than decorative: depth perception here means what
+the **human eye** does, and the mechanism is imported, not merely named.
+
+That settles the first axis of 6.2. **Perception is comparative, never absolute.**
+The eye does not read a distance off a single view; it derives depth from the
+difference between views. So the access rule compares depths across the column and
+never reads one plane's depth on its own. The consequence is concrete and
+testable: **adding a constant to every depth in a column must leave the accessed
+layer unchanged.** Depth perception is shift-invariant.
+
+It also puts the eye's actual cues on the table. Section 4.2 picks from them:
+
+| Cue | What it would mean down a column |
+|---|---|
+| Binocular disparity (stereopsis) | Depth from the difference between two views of the same column. The primary cue — and the one needing a second view the design does not yet have. |
+| Occlusion | A nearer plane hides those behind it: the shallowest depth at `(i, j)` wins and the rest are not reachable from there. Gives hard selection for free, and biologically. |
+| Convergence | The eye points at a chosen depth and the plane there is the one accessed. Makes access an active aim rather than a passive read. |
+| Motion parallax | Depth from how the column shifts between successive reads rather than between simultaneous views — a second view in time instead of in space. |
+
+Two further consequences are properties of the eye, not choices:
+
+1. **Stereopsis needs two views.** Depth from disparity is undefined from one
+   viewpoint, and the design has one column per position. Section 4.2 closes this
+   by choosing monocular cues, so no second viewpoint is needed; stereopsis is set
+   aside rather than solved.
+
+2. **The eye's depth range is finite.** Stereo acuity falls off with distance;
+   past a certain separation the disparity is too small to resolve and everything
+   reads as equally far. Carried over, perception could not tell apart layers
+   beyond some depth separation even though section 3 connects every layer to
+   every other. **Connectivity and resolvability come apart:** `V[k, k']` still
+   reaches a layer that perception can no longer distinguish from its neighbours.
+   Whether to import that limit or drop it is a decision — and it is the one place
+   where the eye and the dense stack actively disagree.
+
+### 4.2 The cues: occlusion and parallax
+
+The cues in use are **occlusion** and **motion parallax**. Both are monocular, so
+the gap opened by consequence 1 of 4.1 closes: one column per position is enough
+as the design stands, and stereopsis is set aside.
+
+They are chosen **for images**, and there the geometry stops being a metaphor.
+`(i, j)` is a pixel position, the `k` axis is the viewing axis running away from
+the eye, and a column is one pixel seen through all `L` planes. Perceiving depth
+down a column is precisely what an eye does looking into a scene along one
+direction.
+
+**Occlusion** is the instantaneous read: at `(i, j)` the nearest plane hides those
+behind it, so the shallowest depth in the column wins and the rest are unreachable
+from that position. This settles the hard/soft axis of 6.2 toward **hard** —
+selection is a single layer, discrete, not differentiable.
+
+**Motion parallax** is the temporal read: between successive views, near planes
+shift more than far ones, and depth follows from how much each moved. It needs two
+reads separated in *time* rather than two viewpoints separated in space.
+
+The two are not alternatives but a division of labour, and the second is what makes
+the first survivable:
+
+1. **Parallax is what keeps occlusion from freezing the stack.** Occlusion alone is
+   a hard minimum over the column: the nearest plane always wins and the layers
+   behind it are permanently unreachable at that position, so nothing would ever
+   change which layer is accessed. Motion breaks the deadlock — as the view shifts,
+   what was hidden comes out from behind, and parallax is the cue that reads it.
+   Occlusion without parallax is a stack that locks on the first read.
+
+2. **The descent supplies the motion.** Parallax needs the column to differ between
+   reads, and the only thing changing depths between reads is the descent itself.
+   The training step *is* the viewpoint motion: the model moves its own eye by
+   learning. Consequence 3 of section 4 said the descent shapes its own path; this
+   is that same loop seen from perception's side.
+
+3. **Scheduling becomes a perceptual parameter.** The gap between two reads is the
+   parallax baseline, and the baseline sets how finely depth can be resolved — too
+   short and nothing has moved enough to measure, too long and the correspondence
+   between reads is lost. 6.5 is therefore no longer only a question of how often
+   to take the vertical step.
+
+---
+
+## 5. Input preprocessing: focus (settled)
+
+Images are preprocessed with a **light radial blur** before they reach the stack.
+Its purpose is **focus**. The blur's centre is the point in focus, sharpness falls
+away with distance from it, and **moving the centre is how focus changes**.
+
+The centre is therefore not a fixed constant of the filter. It is the model's focal
+point, and relocating it re-focuses on a different part of the image.
+
+**It is the retina's own profile.** The eye is sharp only at the fovea and degrades
+steadily into the periphery. A radial blur about a movable centre is that profile
+exactly, with the centre playing the fovea. Having committed to the eye in 4.1,
+this is the eye's optics applied to the input rather than a generic smoothing
+filter — and moving the fovea is what an eye spends its time doing.
+
+**Radial is the right shape of blur, not an arbitrary one.** Radial flow is the
+flow field of motion *along the viewing axis*: move toward a scene and the image
+streams outward from the point being approached, near things sweeping further than
+far ones. The `k` axis **is** that viewing axis. A radial smear is the optical
+signature of travelling along the stack, so the blur's geometry and the stack's
+geometry are the same geometry.
+
+**Focus makes the preprocessing dynamic.** Because the centre moves, the image
+reaching the stack is not fixed — it changes whenever focus changes. Preprocessing
+here is a step that runs repeatedly with a different centre, not a one-time
+transform applied before training starts. What that motion is *worth* is settled in
+5.1: it is attentional, not a depth cue.
+
+"Light" is load-bearing in the instruction: enough blur to establish the gradient
+and the radial structure, not enough to destroy the content being learned.
+
+### 5.1 Focus is attentional
+
+Focus **chooses where to look** and carries no depth information. Parallax takes
+its change between reads from **the descent** instead (consequence 2 of 4.2). This
+closes the first and largest question of 6.3.
+
+The system therefore has two motions, and they run on different axes:
+
+| Motion | What moves | Axis | What it carries |
+|---|---|---|---|
+| Focus | the blur centre | across `(i, j)` | where to look — attention, no depth |
+| Descent | the depths themselves | along `k` | parallax, and so depth |
+
+Three consequences follow.
+
+1. **The two motions cannot be mistaken for one another.** Focus displaces the
+   centre across `(i, j)` and never in a depth-dependent way; the descent changes
+   depths along `k` and never displaces anything laterally. Attention and depth ride
+   on separate axes. This is worth dwelling on, because in biological vision it is a
+   hard problem: an eye must separate retinal motion caused by its own movement from
+   motion caused by the world, and does it with *efference copy* — an internal record
+   of the motor command, subtracted from what is seen. Here the separation is free.
+   Nothing needs subtracting, because the two motions never meet on one axis.
+
+2. **Parallax has a single source, and convergence silences it.** Nothing but the
+   descent changes depths between reads, so the parallax signal is exactly the size
+   of the step just taken. As training converges that step shrinks, the columns stop
+   differing between reads, and the cue goes quiet — at which point occlusion stands
+   alone and, by consequence 1 of 4.2, the stack locks on whatever it last saw.
+
+   Whether that is a failure or the intended end state is a genuine question. A stack
+   that freezes its routing once the depths settle has committed to a layout it can
+   no longer revise; one that keeps routing live needs the descent never to fully
+   quiet. The choice belongs to 6.5 and 6.6, which between them set the step sizes.
+
+3. **It settles what "shift" means for parallax.** 6.2 asked whether parallax
+   measures a lateral sweep across `(i, j)` or a change in depth over time. The
+   descent moves depths, not positions, so it is the second: parallax here reads how
+   far a depth moved between reads. The analogy bends at exactly this point — real
+   parallax is lateral — and this is the one place the design knowingly departs from
+   the eye.
+
+---
+
+## 6. Open decisions
+
+None of these are settled. They are written as decisions with their trade-offs
+rather than left as questions, so each can be closed by picking a branch.
+
+### 6.1 What `V[k, k']` connects
+
+"Vertically" is read geometrically here — along `k`, perpendicular to the planes.
+Two readings remain, though three independent lines now point at the first: the
+geometric sense of the word, consequence 1 of section 4 (depth perception needs a
+column to look down), and the choice of images in 4.2 (`(i, j)` is a pixel). It is
+open only because it has not been said outright.
+
+- **Column-wise.** `G_k[i, j]` connects to `G_k'[i, j]`: the same `(i, j)`
+  position through the stack, so each position owns a column of `L` cells,
+  densely connected within the column. `V[k, k']` is then one weight per
+  position, `m x n` per connection set. This is the literal reading of
+  "vertical", and the one depth perception needs.
+- **Plane-wise.** Every cell of plane `k` connects to every cell of plane `k'`.
+  `V[k, k']` is then `(m x n) x (m x n)`, which at any realistic width is far
+  larger than the network it is attached to.
+
+Column-wise is the assumed reading, and choosing images (4.2) largely dissolves
+the constraint that came with it. Image-shaped planes share `m x n` naturally,
+`(i, j)` is a pixel, and a column is that pixel through the stack — the ragged
+shapes of a conventional network (`784 -> 128 -> 10`) never arise.
+
+It returns only if a plane is reshaped mid-stack: any pooling or stride step that
+changes resolution breaks the correspondence between columns. So either the stack
+holds one resolution throughout, or a rule is needed for reading a column across
+planes of different sizes.
+
+### 6.2 How occlusion and parallax combine
+
+Section 4.2 settles the cues and settles selection as hard; 5.1 settles that
+parallax reads change in depth over time. What remains is how the two compose:
+
+- **How the cues compose.** Whether parallax only decides what becomes visible next
+  — feeding occlusion's hard selection on the following read — or runs as a separate
+  graded channel alongside it.
+- **The parallax baseline.** How many steps apart the two reads are. Consequence 3
+  of 4.2 makes this a perceptual parameter rather than a scheduling convenience, and
+  it may need to adapt rather than sit fixed.
+
+### 6.3 What moves the focus centre
+
+Section 5.1 settles that focus is attentional, which makes this an attention
+question rather than a perceptual one: what decides where to look next?
+
+- **The driver.** A saliency rule read off the image, a policy the model learns, a
+  fixed scan path, or an ordinary learned parameter. Attention in the eye is partly
+  stimulus-driven and partly task-driven, and the two need not be the same mechanism
+  here either.
+- **Strength and falloff.** How fast sharpness decays with radius, and what "light"
+  is numerically. This sets how much periphery survives each read, and so how much
+  the model can see outside its current focus to decide where to look next — the
+  driver and the falloff are not independent choices.
+
+### 6.4 What travels once a layer is accessed
+
+Perception picks the layer and `V[k, k']` carries the step, but what is carried
+is not yet fixed — the depth itself, its local slope, or something derived from
+the accessed plane.
+
+### 6.5 Scheduling the two descents
+
+Whether the horizontal and vertical steps alternate, run simultaneously, or run
+at different rates — and whether the vertical step is taken every batch, every
+epoch, or on a schedule of its own. Consequence 3 of 4.2 couples this to
+perception: the interval between reads is the parallax baseline, so the schedule
+sets how finely depth can be resolved.
+
+### 6.6 Training the vertical weights
+
+`V[k, k']` is not part of any single plane's surface, so the horizontal rule does
+not obviously apply to it. Either the same rule is extended to cover it, or the
+vertical weights get a rule of their own. Consequence 3 of section 4 makes this
+the decision the stability of the whole scheme rests on.
+
+### 6.7 What each layer's gradient is *of*
+
+Conventionally every layer descends one shared scalar loss, and the gradient is a
+separate object derived from it. Here the gradient *is* the plane and the depth on
+it is the weight, so the array descended and the array learned are the same one.
+
+What stays open is what drives that descent: per-layer losses, or one loss read
+differently per layer.
+
+### 6.8 Tooling
+
+`RadixCyclicNN` is deliberately standard-library only. Traditional backpropagation
+over an `L x m x n` volume is the case where `numpy` earns its place. Whether this
+model keeps the zero-dependency rule or takes the dependency is a decision about
+the repository's conventions, not just this directory.
+
+---
+
+## 7. Package layout (provisional)
+
+Depends on 6.8; the shape below assumes a Python package in the style of
+`radixnet`, with the package name still to be confirmed.
+
+```
+MultiGradientNN/
+  DESIGN.md                 this file
+  README.md                 the idea, in short
+  pyproject.toml            console script `mgradnet = mgradnet.cli:main`
+  mgradnet/
+    __init__.py             exports MultiGradientNet, TrainConfig, __version__
+    volume.py               the L x m x n volume: the planes, their columns, indexing
+    vertical.py             V[k, k'] - the dense vertical connections (section 3)
+    focus.py                the light radial blur and its movable centre (section 5)
+    perception.py           depth perception down a column: occlusion and parallax (section 4.2)
+    descent.py              the horizontal step, the cross-layer step (section 4), the schedule (6.5)
+    model.py                MultiGradientNet - forward, backward, train, predict
+    cli.py                  argparse CLI
+  tests/
+    test_volume.py          geometry and indexing invariants
+    test_vertical.py        all-to-all connectivity, L(L-1)/2 sets, one-hop reachability
+    test_focus.py           sharpness falls off with radius; moving the centre re-focuses
+    test_perception.py      occlusion selects the nearest plane; shift-invariance (4.1); parallax
+                            across successive reads
+    test_descent.py         the two steps and their scheduling
+```
