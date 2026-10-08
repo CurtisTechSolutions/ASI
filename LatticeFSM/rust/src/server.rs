@@ -1,10 +1,13 @@
 //! The HTTP API and the page that uses it.
 //!
 //! `latticefsm serve` holds one machine behind a lock and answers JSON under
-//! `/api/`; anything else is the single-page frontend (`frontend/index.html`,
-//! compiled into the binary), which draws the matrix one symbol-slice at a
-//! time, runs strings at a stimulation of your choosing, rewards and
-//! punishes them, teaches a language, and lets time pass.
+//! `/api/`; anything else is served from the prebuilt React frontend
+//! (`../frontend/dist`, the directory `Service::frontend` is given), which
+//! draws the matrix one symbol-slice at a time, runs strings at a stimulation
+//! of your choosing, rewards and punishes them, teaches a language, and lets
+//! time pass.  An unknown path under it is one of the single-page app's own
+//! routes and gets `index.html`; without a frontend directory the root
+//! answers a JSON 404 that says so.
 //!
 //! | route | does |
 //! |---|---|
@@ -24,6 +27,7 @@
 //! | `POST /api/save` | `{path}`: write the machine |
 //! | `POST /api/load` | `{path}`: read a machine in place of the old |
 
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::experiment::teach_language;
@@ -34,17 +38,25 @@ use crate::machine::{load_machine, Machine, Settings};
 use crate::rng::Rng;
 use crate::VERSION;
 
-pub const FRONTEND: &str = include_str!("../frontend/index.html");
-
-/// The machine behind the server.
+/// The machine behind the server, and where the prebuilt frontend lives.
 pub struct Service {
     pub machine: Mutex<Machine>,
+    pub frontend: Option<PathBuf>,
 }
 
 impl Service {
     pub fn new(machine: Machine) -> Arc<Service> {
         Arc::new(Service {
             machine: Mutex::new(machine),
+            frontend: None,
+        })
+    }
+
+    /// The same, serving the static files of `dir` (the built frontend) at every path outside `/api/`.
+    pub fn with_frontend(machine: Machine, dir: Option<PathBuf>) -> Arc<Service> {
+        Arc::new(Service {
+            machine: Mutex::new(machine),
+            frontend: dir,
         })
     }
 
@@ -56,10 +68,7 @@ impl Service {
 
     pub fn route(&self, req: &Request) -> Response {
         if !req.path.starts_with("/api/") {
-            return match (req.method.as_str(), req.path.as_str()) {
-                ("GET", "/") | ("GET", "/index.html") => Response::html(FRONTEND),
-                _ => Response::error(404, "not found"),
-            };
+            return self.serve_static(req);
         }
         let mut m = match self.machine.lock() {
             Ok(m) => m,
@@ -139,6 +148,74 @@ impl Service {
             Err(msg) if msg == "no such route" => Response::error(404, &msg),
             Err(msg) => Response::error(400, &msg),
         }
+    }
+}
+
+impl Service {
+    fn serve_static(&self, req: &Request) -> Response {
+        let Some(root) = &self.frontend else {
+            return Response::error(
+                404,
+                "no frontend directory is being served: build ../frontend (make frontend-build) or pass --frontend-dir",
+            );
+        };
+        if req.method != "GET" && req.method != "HEAD" {
+            return Response::error(405, "method not allowed");
+        }
+        let relative = req.path.trim_start_matches('/');
+        let mut file = safe_join(root, relative);
+        if file.as_ref().is_none_or(|p| p.is_dir()) {
+            file = safe_join(root, "index.html");
+        }
+        match file.and_then(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes))) {
+            Some((path, bytes)) => Response {
+                status: 200,
+                content_type: content_type(&path),
+                body: bytes,
+            },
+            // a single-page app: an unknown path is one of its routes, not a missing file
+            None => match std::fs::read(root.join("index.html")) {
+                Ok(bytes) => Response {
+                    status: 200,
+                    content_type: "text/html; charset=utf-8",
+                    body: bytes,
+                },
+                Err(_) => Response::error(404, "not found"),
+            },
+        }
+    }
+}
+
+/// `root/relative`, or `None` when the path tries to leave the directory.
+pub fn safe_join(root: &Path, relative: &str) -> Option<PathBuf> {
+    if relative.is_empty() {
+        return Some(root.join("index.html"));
+    }
+    let candidate = Path::new(relative);
+    for part in candidate.components() {
+        match part {
+            Component::Normal(_) => {}
+            // "..", a root, a prefix: anything that could climb out
+            _ => return None,
+        }
+    }
+    Some(root.join(candidate))
+}
+
+pub fn content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "map" => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
     }
 }
 
@@ -321,8 +398,22 @@ pub fn new_machine(body: &Json) -> Result<Machine, String> {
     Machine::new(states, &alphabet, &accepting, settings)
 }
 
-/// Serve `machine` on `addr`.
-pub fn serve(machine: Machine, addr: &str, max_requests: Option<usize>) -> Result<(), String> {
-    let service = Service::new(machine);
+/// Serve `machine` on `addr`, with the frontend built at `frontend` when there is one.
+pub fn serve(
+    machine: Machine,
+    addr: &str,
+    frontend: Option<PathBuf>,
+    max_requests: Option<usize>,
+) -> Result<(), String> {
+    let service = Service::with_frontend(machine, frontend);
     http::serve(addr, service.handler(), max_requests)
+}
+
+/// Where the built frontend is, when nothing was asked for: `frontend/dist` under the working directory, or
+/// `../frontend/dist` (the checkout's layout, run from `rust/`), whichever holds an `index.html`.
+pub fn default_frontend_dir() -> Option<PathBuf> {
+    ["frontend/dist", "../frontend/dist"]
+        .iter()
+        .map(PathBuf::from)
+        .find(|dir| dir.join("index.html").is_file())
 }

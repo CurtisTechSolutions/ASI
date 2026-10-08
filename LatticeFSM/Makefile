@@ -2,9 +2,11 @@
 #
 # Two ports of one model: the Rust crate in rust/ (the CLI and the HTTP server;
 # `cargo` is the whole dependency list, no crates) and the Python reference
-# package in latticefsm/ (standard library only).  The Rust targets are the
-# default; the Python ones are prefixed py-.  Every target is deterministic
-# given SEED.
+# package in latticefsm/ (standard library only) - and the React frontend in
+# frontend/ (Vite; `npm` only for rebuilding it, frontend/dist is committed and
+# served as it is).  The Rust targets are the default; the Python ones are
+# prefixed py-, the frontend's frontend-.  Every target is deterministic given
+# SEED.
 #
 # Override any variable on the command line, e.g. `make demo LANGUAGE=ends-ab STATES=3`.
 
@@ -35,7 +37,8 @@ RESULTS   ?= results
 MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseline $(BASELINE) --seed $(SEED) --language $(LANGUAGE)
 
 .PHONY: help build test check demo train run teach accuracy table stats tick stimulate serve experiments \
-        py-test py-demo py-train py-run py-experiments parity clean
+        py-test py-demo py-train py-run py-experiments parity \
+        frontend-install frontend-build frontend-dev frontend-test clean
 
 help: ## Show this help
 	@echo "LatticeFSM make targets  (override like: make demo LANGUAGE=ends-ab STATES=3)"
@@ -47,10 +50,11 @@ help: ## Show this help
 build: ## Build the Rust crate (release) into rust/target/release/latticefsm
 	cd rust && $(CARGO) build --release
 
-test: ## The Rust tests, clippy and the formatter check; then the Python tests, parity included
+test: ## The Rust tests, clippy and the formatter check; the Python tests, parity included; the frontend's tests
 	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 	$(MAKE) --no-print-directory build
 	$(PY) -m unittest tests.test_latticefsm
+	cd frontend && npm test
 
 check: test ## The same
 
@@ -82,8 +86,8 @@ tick: build ## Let TICKS pass in MODEL, and save it
 stimulate: build ## Raise MODEL's stimulation by AMOUNT, and save it
 	$(BIN) stimulate --load $(MODEL) --amount $(AMOUNT) --save $(MODEL)
 
-serve: build ## The HTTP API and the page on http://HOST:PORT/ (MODEL if it exists, else a fresh machine)
-	$(BIN) serve $(MACHINE_OPTS) --host $(HOST) --port $(PORT) $(if $(wildcard $(MODEL)),--load $(MODEL),)
+serve: build ## The HTTP API and the frontend on http://HOST:PORT/ (MODEL if it exists, else a fresh machine)
+	$(BIN) serve $(MACHINE_OPTS) --host $(HOST) --port $(PORT) --frontend-dir frontend/dist $(if $(wildcard $(MODEL)),--load $(MODEL),)
 
 ##@ The experiments README.md quotes
 experiments: build ## Learning, stimulation and adaptation, written to RESULTS/ - a second
@@ -110,7 +114,21 @@ py-run: ## Read TEXT from MODEL with the Python package
 parity: build ## The two ports held to each other: the deterministic experiments and a machine file, both ways
 	$(PY) -m unittest tests.test_latticefsm.TestRustParity -v
 
-clean: ## Remove build output, __pycache__ and saved machines (results are kept)
+##@ The frontend (React, Vite; frontend/dist is committed, so none of this is needed to run `make serve`)
+frontend-install: ## Install the frontend's dependencies (npm ci)
+	cd frontend && npm ci --no-audit --no-fund
+
+frontend-build: ## Rebuild frontend/dist, which `make serve` serves
+	cd frontend && npm run build
+
+frontend-dev: ## Vite dev server with hot reload on http://localhost:5173, proxying /api to VITE_PROXY_TARGET (default :8000)
+	cd frontend && npm run dev
+
+frontend-test: ## The frontend's unit tests (node --test; no npm install needed)
+	cd frontend && npm test
+
+clean: ## Remove build output, __pycache__, node_modules and saved machines (results and frontend/dist are kept)
 	cd rust && $(CARGO) clean
+	rm -rf frontend/node_modules
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 	rm -f machine.json machine.json.gz

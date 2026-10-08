@@ -226,8 +226,18 @@ The Rust crate has no dependencies: JSON, gzip (the module from
 `RadixCyclicNN/rust`), the generator (xoshiro256** seeded by splitmix64) and
 the HTTP/1.1 server are written out in `src/`. The server (`server.rs`)
 holds one machine behind a mutex, answers JSON under `/api/` (the routes are
-in `rust/README.md`) and serves `frontend/index.html`, compiled into the
-binary, at `/`.
+in `rust/README.md`) and serves the built frontend (`frontend/dist`) at
+every other path, the way the ModelKit servers serve theirs: a path that
+would climb out of the directory is refused, and an unknown path is one of
+the single-page app's own routes and gets `index.html`.
+
+The frontend (`frontend/`) is `../ModelKit/frontend`'s shape — Vite, React,
+plain JSX, one stylesheet (ModelKit's, with a block for the matrix), no UI
+or chart libraries, panel settings remembered in `localStorage` under
+`latticefsm.v1.`, plain `node --test` tests for the pure modules — with this
+model's panels: the matrix slice, runs and credit, training, time and
+stimulation, the machine. `dist/` is built and committed, so a checkout
+serves it with no `npm`.
 
 ## 10. Decisions
 

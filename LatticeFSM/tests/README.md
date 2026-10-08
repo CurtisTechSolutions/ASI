@@ -37,4 +37,8 @@ this model is specifically about:
 
 The Rust crate's own tests (`rust/tests/machine.rs`, `rust/tests/server.rs`,
 and the unit tests in `json.rs` and `gzip.rs`) cover the same rules from the
-other side, and every HTTP route over a real socket.
+other side, every HTTP route over a real socket, and the frontend's static
+files (served from their directory, an unknown path answered as the app's
+own route, a path that climbs out refused). The frontend's tests
+(`frontend/test/*.test.mjs`, `make frontend-test`, plain `node --test`) cover
+its pure modules: the settings store and the matrix helpers.

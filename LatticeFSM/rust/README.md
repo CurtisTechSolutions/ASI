@@ -2,8 +2,9 @@
 
 The Rust port: crate `latticefsm` — the model (`edge.rs`, `lattice.rs`,
 `machine.rs`), the four languages and the three experiments, the HTTP/1.1
-server and its page, and the `latticefsm` binary. No dependencies: JSON,
-gzip, the generator and HTTP are written out in `src/`.
+server that serves the React frontend (`../frontend/dist`) and the JSON API,
+and the `latticefsm` binary. No dependencies: JSON, gzip, the generator and
+HTTP are written out in `src/`.
 
 `../DESIGN.md` is the specification; `../README.md` the manual for both
 ports; `../tests/test_latticefsm.py` holds this crate to the Python reference.
@@ -21,9 +22,13 @@ rust/target/release/latticefsm --help
 
 ## The API
 
-`latticefsm serve [--port 8000] [--host 127.0.0.1] [--load FILE | machine options]`
-holds one machine behind a lock. `GET /` is the page; everything else is
-JSON under `/api/`, one request per connection:
+`latticefsm serve [--port 8000] [--host 127.0.0.1] [--frontend-dir DIR] [--load FILE | machine options]`
+holds one machine behind a lock. Everything under `/api/` is JSON, one
+request per connection; every other path is served from the frontend
+directory (`--frontend-dir`, or `frontend/dist` under the working directory,
+or `../frontend/dist` when run from `rust/`), an unknown path there getting
+`index.html` as a single-page app's route; without a frontend directory the
+root answers a JSON 404 that says so and the API still works:
 
 | route | body / query | returns |
 |---|---|---|
@@ -56,8 +61,7 @@ or 405. `tests/server.rs` exercises every route over a real socket.
 | `src/languages.rs` | the four regular languages and their examples |
 | `src/experiment.rs` | learning, stimulation, adaptation; the tables; `run` |
 | `src/http.rs` | the HTTP/1.1 server and a test client |
-| `src/server.rs` | the routes above, `Service`, `new_machine` |
-| `frontend/index.html` | the page, compiled in with `include_str!` |
+| `src/server.rs` | the routes above, `Service`, `new_machine`, the static files (`safe_join`, `content_type`) |
 | `src/json.rs`, `src/gzip.rs`, `src/rng.rs` | written out, no crates |
 | `src/bin/latticefsm.rs` | the CLI |
 | `tests/machine.rs`, `tests/server.rs` | the integration tests |

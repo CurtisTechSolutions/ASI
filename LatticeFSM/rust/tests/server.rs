@@ -7,13 +7,31 @@ use std::thread;
 use latticefsm::http::{self, request};
 use latticefsm::json::{parse, Json};
 use latticefsm::machine::{Machine, Settings};
-use latticefsm::server::{Service, FRONTEND};
+use latticefsm::server::{content_type, safe_join, Service};
+
+/// A stand-in for the built frontend: an index and one asset, in a directory of this test's own.
+fn fake_dist() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("latticefsm-dist-{}-{}", std::process::id(), rand_suffix()));
+    std::fs::create_dir_all(dir.join("assets")).unwrap();
+    std::fs::write(dir.join("index.html"), "<!doctype html><title>LatticeFSM</title>").unwrap();
+    std::fs::write(dir.join("assets/app.js"), "console.log('hi')").unwrap();
+    dir
+}
+
+fn rand_suffix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos() as u64
+}
 
 fn serve(requests: usize) -> String {
+    serve_with(requests, Some(fake_dist()))
+}
+
+fn serve_with(requests: usize, frontend: Option<std::path::PathBuf>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let m = Machine::over(4, "ab", &[0], Settings::default()).unwrap();
-    let service = Service::new(m);
+    let service = Service::with_frontend(m, frontend);
     let handler = service.handler();
     thread::spawn(move || http::serve_on(listener, Arc::clone(&handler), Some(requests)));
     addr
@@ -28,7 +46,7 @@ fn every_route_answers() {
 
     let (status, page) = request(&addr, "GET", "/", None).unwrap();
     assert_eq!(status, 200);
-    assert_eq!(page.as_str().unwrap(), FRONTEND);
+    assert!(page.as_str().unwrap().contains("<title>LatticeFSM</title>"));
 
     let body = parse(r#"{"text":"abab","stimulation":2}"#).unwrap();
     let (status, run) = request(&addr, "POST", "/api/run", Some(&body)).unwrap();
@@ -130,7 +148,52 @@ fn errors_are_reported() {
     assert_eq!(status, 400);
     assert!(err.str_or("error", "").contains("not in the alphabet"));
     let (status, _) = request(&addr, "GET", "/elsewhere", None).unwrap();
+    assert_eq!(status, 200); // a single-page app's own route: index.html
+}
+
+#[test]
+fn the_frontend_is_served_from_its_directory() {
+    let addr = serve(4);
+    let (status, asset) = request(&addr, "GET", "/assets/app.js", None).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(asset.as_str().unwrap(), "console.log('hi')");
+    let (status, _) = request(&addr, "GET", "/index.html", None).unwrap();
+    assert_eq!(status, 200);
+    let (status, climbed) = request(&addr, "GET", "/../Cargo.toml", None).unwrap();
+    assert_eq!(status, 200); // refused as a path, answered as the app's index
+    assert!(climbed.as_str().unwrap().contains("<title>LatticeFSM</title>"));
+
+    let without = serve_with(2, None);
+    let (status, err) = request(&without, "GET", "/", None).unwrap();
     assert_eq!(status, 404);
+    assert!(err.str_or("error", "").contains("no frontend directory"));
+    let (status, _) = request(&without, "GET", "/api/health", None).unwrap();
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn static_paths_are_safe_and_typed() {
+    let root = std::path::Path::new("/srv/dist");
+    assert_eq!(safe_join(root, ""), Some(root.join("index.html")));
+    assert_eq!(safe_join(root, "assets/app.js"), Some(root.join("assets/app.js")));
+    assert_eq!(safe_join(root, "../Cargo.toml"), None);
+    assert_eq!(safe_join(root, "/etc/passwd"), None);
+    assert_eq!(
+        content_type(std::path::Path::new("a/index.html")),
+        "text/html; charset=utf-8"
+    );
+    assert_eq!(
+        content_type(std::path::Path::new("a/app.js")),
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(
+        content_type(std::path::Path::new("a/app.css")),
+        "text/css; charset=utf-8"
+    );
+    assert_eq!(
+        content_type(std::path::Path::new("a/x.bin")),
+        "application/octet-stream"
+    );
 }
 
 #[test]

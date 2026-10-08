@@ -37,8 +37,9 @@ the same machine files:
 
 | port | where | what |
 |---|---|---|
-| Rust | `rust/` | crate `latticefsm`: the model, the `latticefsm` CLI, and the HTTP server with its page (`make serve`) |
+| Rust | `rust/` | crate `latticefsm`: the model, the `latticefsm` CLI, and the HTTP server (`make serve`) |
 | Python | `latticefsm/` | the reference: the same model and CLI, and the experiments |
+| JavaScript | `frontend/` | the React single-page app the server serves, in the shape of `../ModelKit/frontend` |
 
 `DESIGN.md` is the specification both are written to. `make parity` holds
 them to each other: the two deterministic experiments agree number for
@@ -65,7 +66,7 @@ number, and a machine file written by either reads in the other.
 cd LatticeFSM
 make test                      # cargo test + clippy + fmt, then the Python tests with parity
 make demo                      # learn a language, be stimulated, let time pass (Rust)
-make serve                     # http://127.0.0.1:8000/ - the matrix, runs, credit, training, time
+make serve                     # http://127.0.0.1:8000/ - the React frontend: the matrix, runs, credit, training, time
 make train LANGUAGE=ends-ab STATES=3 && make run TEXT=aab STIM=3 CREDIT=1
 make experiments               # the three tables below, a second
 python3 -m latticefsm demo     # the same from the Python reference
@@ -95,18 +96,31 @@ stimulated by +3: level 4.00; a life of silence later:
   four more lives: level 1.09, widest 1.59; accuracy 1.000 - the verdicts never fade, the widths and traces do
 ```
 
-## The web server
+## The web server and the frontend
 
 `make serve` (or `latticefsm serve --port 8000`) holds one machine behind a
-lock and serves a single page that draws the matrix one symbol-slice at a
-time — each row a state, each cell the probability of moving to that
-column's state, shaded by it, with the edge's width and `seen` beneath; click
-a cell for every field of the edge. From the page you run strings at a
-stimulation of your choosing (traversing them, or asking quietly), reward or
-punish the last run, teach a language for some episodes and watch the
-accuracy curve and the greedy table, let time pass, stimulate, make a fresh
-machine, and save or load one. The API under `/api/` is JSON; `rust/README.md`
-lists every route, and `curl` works as well as the page:
+lock, answers JSON under `/api/`, and serves the React frontend from
+`frontend/dist` at every other path. The frontend is the ModelKit one's
+shape — Vite, plain JSX, one stylesheet, no UI or chart libraries, settings
+remembered in the browser — with five tabs for this model:
+
+| tab | what it does |
+|---|---|
+| **Matrix** | the matrix one symbol-slice at a time: each row a state, each cell the probability of moving to that column's state, shaded by it, with the channel's width and `seen` beneath; click a cell for every field of the edge and its weighting function |
+| **Run** | read a string at a stimulation of your choosing, traversing it or asking quietly; reward or punish the last run |
+| **Train** | teach a language for some episodes, with the accuracy curve and the greedy table it ends in |
+| **Time** | let ticks pass; raise or set the stimulation |
+| **Machine** | a fresh machine of any shape; save and load; teach one edge deliberately |
+
+The status bar polls the machine every two seconds: shape, how much of the
+matrix is touched, the clock, the stimulation, the state, credits, and the
+widest and narrowest channel.
+
+`frontend/dist` is committed, so a checkout serves it with no build; `make
+frontend-install` and `make frontend-build` rebuild it, `make frontend-dev`
+runs Vite with hot reload against a running server, and `make frontend-test`
+runs the frontend's own tests. `rust/README.md` lists every API route, and
+`curl` works as well as the page:
 
 ```bash
 curl -s localhost:8000/api/stats
@@ -115,9 +129,6 @@ curl -s -X POST localhost:8000/api/credit -d '{"amount":1}'
 curl -s -X POST localhost:8000/api/train -d '{"language":"even-b","episodes":800}'
 curl -s "localhost:8000/api/matrix?symbol=b"
 ```
-
-No frontend build: the page is one HTML file, `rust/frontend/index.html`,
-compiled into the binary.
 
 ## What it measured
 
@@ -228,12 +239,13 @@ stays at zero probability on its record alone.
 | `rust/src/lattice.rs` | `Lattice` and `State`: the dense matrix and its persistence |
 | `rust/src/machine.rs` | `Machine`: the walk, the clock, credit, stimulation, the quiet measurements, the file |
 | `rust/src/languages.rs`, `experiment.rs` | the four languages; the three experiments and their tables |
-| `rust/src/http.rs`, `server.rs`, `frontend/index.html` | the HTTP/1.1 server, the JSON routes, the page |
+| `rust/src/http.rs`, `server.rs` | the HTTP/1.1 server, the JSON routes, the static files of the frontend |
+| `frontend/` | the React app: `src/App.jsx`, the five panels in `src/components/`, `src/api.js`, `src/matrix.js`; `dist/` built and committed |
 | `rust/src/json.rs`, `gzip.rs`, `rng.rs` | JSON, gzip and the generator, written out: no dependencies |
 | `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, experiment, serve |
 | `rust/tests/` | the machine and the server over a real socket |
 | `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `languages.py`, `experiment.py`, `cli.py` |
-| `tests/test_latticefsm.py` | 35 tests, parity with the Rust crate among them (`tests/README.md`) |
+| `tests/test_latticefsm.py` | 35 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
 | `results/` | the measured numbers from both ports, with a README |
 
 ## Limits

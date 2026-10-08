@@ -10,7 +10,7 @@
 //!     tick        let time pass
 //!     stimulate   raise the stimulation
 //!     experiment  the learning, stimulation and adaptation experiments
-//!     serve       the HTTP API and the page on --port
+//!     serve       the HTTP API and the React frontend (frontend/dist) on --port
 //!
 //! Every command but `train`, `demo`, `experiment` and `serve` takes `--load` (a machine file written by
 //! `train` or by any command's `--save`); `serve` and `train` take it too, and start fresh without it.
@@ -98,7 +98,8 @@ commands
   tick        let --ticks pass
   stimulate   raise the stimulation by --amount (or set --level)
   experiment  --which learning|stimulation|adaptation|all, --out DIR
-  serve       the HTTP API and the page on --port (default 8000)
+  serve       the HTTP API and the frontend on --port (default 8000); --frontend-dir DIR (default: frontend/dist
+              under the working directory, or ../frontend/dist)
 
 machine options (train, demo, serve without --load)
   --states N (4)  --alphabet ab  --accepting 0,2  --start 0  --life 1000  --baseline 1  --calm LIFE
@@ -203,11 +204,19 @@ fn main() {
         }
         "serve" => machine(&a).and_then(|m| {
             let addr = format!("{}:{}", a.str("host", "127.0.0.1"), a.num("port", 8000.0) as u16);
+            let frontend = match a.get("frontend-dir") {
+                Some(dir) => Some(std::path::PathBuf::from(dir)),
+                None => server::default_frontend_dir(),
+            };
             eprintln!(
-                "latticefsm serving http://{addr}/  (machine {:?})",
-                m.stats().get("shape").map(Json::dump)
+                "latticefsm serving http://{addr}/  (machine {}; frontend {})",
+                m.stats().get("shape").map(Json::dump).unwrap_or_default(),
+                frontend
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "none: /api/ only".to_string())
             );
-            server::serve(m, &addr, None)
+            server::serve(m, &addr, frontend, None)
         }),
         other => Err(format!("unknown command {other:?}; try --help")),
     };
