@@ -4,9 +4,9 @@ The Python package: everything around a model — how it is taught, talked to,
 served and seen. It was RadixCyclicNN's (`../../RadixCyclicNN/radixnet`), and
 is a package of its own so other directories and repositories can use it.
 
-**Standard library only.** Pillow, diffusers and a speech-to-text package are
-optional extras for images and speech (`modelkit[images]`, `[diffusion]`,
-`[speech]`, `[whisper]`).
+**Standard library only.** Pillow, diffusers (with torch and transformers) and a
+speech-to-text package are optional extras for images and speech
+(`modelkit[images]`, `[diffusion]`, `[speech]`, `[whisper]`).
 
 Two layers, held apart by `../tests/test_layers.py`: the **model-free** modules
 load with no model installed; the **model layer** is built on the `radixnet`
@@ -31,6 +31,7 @@ says how to use either from another project.
 | module | what it is |
 |---|---|
 | `vision.py` | images as text — the Stable Diffusion image encoder (image generation run backwards) plus base64 |
+| `codec.py` | the diffusion codec — the whole generator run backwards as an image compressor: the encoder sends only the quantised difference between what the generator predicts and the truth, step by step; a Pillow-only stand-in runs the same algorithm without torch |
 | `speech.py` | speech as text — what was said *and* the waveform that said it, both behind one unique token |
 | `media.py` | what the two share: repairing the base64 payload a network predicted |
 

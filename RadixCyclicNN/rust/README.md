@@ -121,8 +121,10 @@ same marks, and the same model afterwards.  The frontend runs against
 * **the torch backend** (`backend_torch.py`) - it is torch on a GPU; the
   sine model trains with Python's own CPU learning rule instead, and
   `--backend torch` says so;
-* **the Stable Diffusion image encoder** - it needs torch; images go through the
-  Go port's thumbnail encoder, as they do against the Go server;
+* **the Stable Diffusion image encoder** and **the diffusion codec** (`image
+  compress`, `/api/images/compress`) - they need torch; images go through the
+  Go port's thumbnail encoder, as they do against the Go server, and the codec
+  is not served;
 * **local Whisper** (`faster-whisper`, `whisper`) - Python packages; speech is
   transcribed from a given transcript or by an OpenAI-compatible transcription
   server.

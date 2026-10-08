@@ -1787,6 +1787,52 @@ original; train on it; save as upload; ask it for the picture back and blame wha
 pasted text such as a prediction).
 Dependencies: `pip install modelkit[images]` (pillow) or `modelkit[diffusion]` (pillow, torch, diffusers).
 
+### 21.1 The diffusion codec (`codec.py`) — the whole generator run backwards
+
+`encode(data, process="auto", step=4.0, size=None, steps=10, prompt="", seed=0) -> {"bytes", "process", "width",
+"height", "step", "size", "header_bytes", "bits_per_pixel", "blocks", "source_size", ...}` and `decode(blob,
+process=None) -> {"png", "image", "process", "width", "height", "step", "blocks", "blocks_decoded", "truncated",
+"source_size", "prompt"}`; `encode_text` / `decode_text` wrap the stream as `img:rdc:<w>x<h>:<base64>` (repaired
+like any media text). A *process* is the generator seen as steps: `blocks(w, h)` (one `Block` per step: `count`
+numbers in rows of `width`, quantised at `max(floor, step * scale)`), `truths(image, w, h)` (what is true at each
+step - the encoder's side only), `start(w, h)`, `predict(state, block)` (the generator's guess), `advance(state,
+block, corrected)` and `finish(state, w, h)`. Both sides run the same loop: the encoder quantises `(truth - guess)
+/ delta` (nearest, with a dead zone of `DEADZONE` = 0.3 around zero), writes the symbols and advances on `guess + q
+* delta`; the decoder reads the symbols and does the same, and once the stream runs out it advances on the bare
+`guess` (`truncated`). Every block is entropy-coded on its own - an adaptive binary arithmetic coder
+(Witten-Neal-Cleary, 32-bit registers, two-count models halved past 4 096): a zero flag, a sign and unary
+magnitude bins up to `_MAG_CAP` = 16 then an Exp-Golomb escape, each conditioned on the larger of the left and
+upper neighbours' magnitudes (four classes) - and framed as varint length + bytes, so a stream cut anywhere
+decodes its complete blocks. Stream: `RDC\x01`, u16 header length, a JSON header (`process`, `width`, `height`,
+`step`, `source_size`, and the process's own fields), then the blocks.
+
+* `DiffusionProcess` (`"sd"`) - `UNet2DConditionModel` + `DDIMScheduler` from `$RADIXNET_SD_MODEL` (default
+  `stable-diffusion-v1-5/stable-diffusion-v1-5`), the VAE through `vision.SDVaeEncoder`, CLIP's tokenizer and text
+  encoder when `transformers` is there (else a zero embedding), loaded once per process on first use. Truth: the
+  VAE latent mean x scaling factor, in units of 1/16 latent so `step` means the same as the stand-in's. Start:
+  `torch.randn` from a CPU generator seeded with `seed`. Predict at timestep `t`: the UNet's noise (or `v`, or
+  sample) turned into an `x0` estimate. Advance: the DDIM move to the next timestep with the *corrected* `x0` and
+  the noise consistent with it (`eps = (x - sqrt(a) x0) / sqrt(1 - a)`); the last move lands on `x0` itself, which
+  `finish` decodes. Block `k`'s scale is `max(1, ntsr(t_{k+1}) / step)` with `ntsr = sqrt((1 - a) / a)` the next
+  state's noise-to-signal ratio: a correction finer than what the next step's noise drowns is not sent yet.
+  Header: `steps`, `seed`, `prompt`, `model`. Sizes are multiples of 8 (`coded_size`); `size` caps the long side.
+* `PyramidProcess` (`"pyramid"`) - Pillow only. Levels: the size halved (ceiling) until two pixels across,
+  coarsest first; three blocks per level (YCbCr), chroma at `CHROMA_STEP` = 2 times the step, every level below
+  the finest at `LEVEL_GAIN` = 0.5 of the step above it (a coarse error spreads into every finer level, so coarse
+  levels are cheap to get right) and a floor of one pixel unit (the states are integers). Truth: each channel
+  resized to the level with Lanczos. Predict: the previous level's channel enlarged bicubically (mid-grey at the
+  coarsest). Advance: the corrected values clamped and rounded into an `L` image; `finish` merges the finest level
+  to RGB. Any size.
+* `compare_images(original, decoded, coded_size)` - PSNR, bits per pixel, and JPEG's at the largest file Pillow
+  makes within the same byte budget; `truncate(blob, blocks)` / `iter_blocks` for progressive previews;
+  `describe()`.
+
+API: `GET /api/images/codec`, `POST /api/images/compress` (a binary route like `/encode`; options `process`,
+`step`, `size`, `steps`, `prompt`, `seed`), `POST /api/images/decompress` (`content_base64` or `text`). CLI: `image
+codec | compress | decompress`. The frontend has no tab for it, and the Go and Rust servers do not serve it.
+Dependencies: `modelkit[images]` for the stand-in, `modelkit[diffusion]` (pillow, torch, diffusers, transformers)
+for `sd`.
+
 ## 22. The model conversing with itself (`dialogue.py`) — replies are predictions picking up the last words
 
 `converse(model, opening="", turns=6, mode="beam", max_length=60, context=12, temperature=1.0, k=5, beam=None,

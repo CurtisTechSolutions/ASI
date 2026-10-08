@@ -1879,6 +1879,114 @@ def cmd_image_decode(args: argparse.Namespace, console: Console) -> dict:
     return result
 
 
+def cmd_image_codec(args: argparse.Namespace, console: Console) -> dict:
+    from .codec import describe
+
+    info = describe()
+    console.pairs([
+        ("pillow", info["pillow"]),
+        ("torch", info["torch"]),
+        ("diffusers", info["diffusers"]),
+        ("transformers", info["transformers"]),
+        ("sd model", info["sd_model"] + (" (loaded)" if info["sd_loaded"] else "")),
+        ("sd vae", info["sd_vae"]),
+        ("sd error", info["sd_error"] or "-"),
+        ("auto picks", info["auto"] or "nothing: pip install pillow"),
+        ("default step", info["default_step"]),
+        ("default steps", info["default_steps"]),
+        ("format", info["format"]),
+        ("text format", info["text_format"]),
+    ])
+    return info
+
+
+def cmd_image_compress(args: argparse.Namespace, console: Console) -> dict:
+    """Compress an image with the diffusion codec: the generator run backwards, its predictions corrected step by step."""
+    from .codec import CodecError, compare_images, decode, encode_text
+
+    if not os.path.isfile(args.file):
+        raise CliError(f"image file not found: {args.file}")
+    with open(args.file, "rb") as fh:
+        data = fh.read()
+    try:
+        result = encode_text(data, process=args.process, step=args.step, size=args.size, steps=args.steps,
+                             prompt=args.prompt or "", seed=args.seed)
+    except CodecError as exc:
+        raise CliError(str(exc)) from exc
+    blob = result.pop("bytes")
+    if args.out:
+        with open(args.out, "wb") as fh:
+            fh.write(blob)
+        result["out"] = args.out
+    if args.text_out:
+        with open(args.text_out, "w", encoding="utf-8") as fh:
+            fh.write(result["text"] + "\n")
+        result["text_out"] = args.text_out
+    if args.compare:
+        try:
+            back = decode(blob)
+            result["compare"] = compare_images(data, back["image"], len(blob))
+        except CodecError as exc:
+            raise CliError(str(exc)) from exc
+    pairs = [
+        ("file", args.file),
+        ("process", result["process"]),
+        ("size", f"{result['width']}x{result['height']} (source {result['source_size'][0]}x{result['source_size'][1]})"),
+        ("step", result["step"]),
+        ("blocks", len(result["blocks"])),
+        ("bytes", f"{result['size']} ({result['bits_per_pixel']:.3f} bits per pixel, header {result['header_bytes']})"),
+    ]
+    if result.get("prompt"):
+        pairs.append(("prompt", result["prompt"]))
+    if "compare" in result:
+        cmp = result["compare"]
+        pairs.append(("psnr", f"{cmp['psnr']:.2f} dB"))
+        if "jpeg" in cmp:
+            j = cmp["jpeg"]
+            pairs.append(("jpeg at that budget", f"quality {j['quality']}, {j['bytes']} bytes, {j['psnr']:.2f} dB"))
+    if args.out:
+        pairs.append(("written", args.out))
+    if args.text_out:
+        pairs.append(("text written", args.text_out))
+    console.pairs(pairs)
+    if not args.out and not args.text_out:
+        console.say(result["text"])  # nowhere else to put it: the text form on stdout
+    else:
+        result.pop("text")
+    return result
+
+
+def cmd_image_decompress(args: argparse.Namespace, console: Console) -> dict:
+    """Decompress an rdc stream (bytes, or the text form) back to a PNG."""
+    from .codec import CodecError, decode, decode_text
+
+    try:
+        if args.text is not None:
+            result = decode_text(args.text, process=args.process)
+        else:
+            if not os.path.isfile(args.file):
+                raise CliError(f"file not found: {args.file}")
+            with open(args.file, "rb") as fh:
+                blob = fh.read()
+            if blob.lstrip().startswith(b"img:"):
+                result = decode_text(blob.decode("utf-8", "replace"), process=args.process)
+            else:
+                result = decode(blob, process=args.process)
+    except CodecError as exc:
+        raise CliError(str(exc)) from exc
+    with open(args.out, "wb") as fh:
+        fh.write(result.pop("png"))
+    result.pop("image", None)
+    result["out"] = args.out
+    console.pairs([
+        ("process", result["process"]),
+        ("size", f"{result['width']}x{result['height']}"),
+        ("blocks", f"{result['blocks_decoded']} of {result['blocks']}" + (" (truncated: the generator ran the rest free)" if result["truncated"] else "")),
+        ("written", args.out),
+    ])
+    return result
+
+
 _WEIGHT_OPTIONS = {
     "count": ("count_scale", "global_scale", "window_scale", "reward_scale", "path_scale", "window"),
     "resonant": ("buckets", "period", "kick_scale", "resonance_scale", "amp_scale", "reward_scale", "concentration"),
@@ -4647,6 +4755,7 @@ def _float_in(low: float, high: float, low_open: bool, high_open: bool) -> Calla
 
 nonneg_int = _int_at_least(0)
 pos_int = _int_at_least(1)
+pos_float = _float_in(0.0, math.inf, True, False)
 nonneg_float = _float_at_least(0.0)
 unit_interval_open_low = _float_in(0.0, 1.0, True, False)    # (0, 1]
 unit_interval_open_high = _float_in(0.0, 1.0, False, True)   # [0, 1)
@@ -5261,13 +5370,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     # image ----------------------------------------------------------------
     p = command(
-        "image", "images as text: the Stable Diffusion VAE run backwards, quantised, base64-encoded",
+        "image", "images as text (the Stable Diffusion VAE run backwards) and the diffusion codec (the whole generator run backwards)",
         "Encode an image into a text the network can train on and predict: the Stable Diffusion VAE's\n"
         "encoder (the inverse of image generation) turns it into a 4 x H/8 x W/8 latent, every number\n"
         "becomes one signed byte and the bytes become base64 - `img:sd:128x128:AAAA...`.  `decode` runs the\n"
         "forward process again (text -> latent -> VAE decoder -> PNG).  Needs pillow; the sd encoder also\n"
         "needs torch + diffusers and the VAE weights ($RADIXNET_SD_VAE, default stabilityai/sd-vae-ft-mse);\n"
-        "without them a thumbnail stand-in with the same 8x reduction is used (--encoder tiny / auto).",
+        "without them a thumbnail stand-in with the same 8x reduction is used (--encoder tiny / auto).\n"
+        "`compress` / `decompress` are the diffusion codec: the generator's steps are run on both sides and\n"
+        "the encoder sends only the quantised difference between what the generator predicts and the\n"
+        "truth at each step (--process sd: the UNet by DDIM, $RADIXNET_SD_MODEL; pyramid: the Pillow-only\n"
+        "stand-in with resolution for noise and enlargement for the model).  The stream is progressive.",
     )
     actions = p.add_subparsers(dest="action", metavar="<action>", title="actions", required=True)
     a = actions.add_parser("info", help="which encoders are available", description="Report the image encoders and their dependencies.",
@@ -5315,6 +5428,41 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--encoder", choices=("sd", "tiny"), help="override the encoder named in the text")
     a.add_argument("--out", required=True, metavar="PNG", help="where to write the image")
     a.set_defaults(handler=cmd_image_decode)
+
+    a = actions.add_parser("codec", help="which codec processes are available",
+                           description="Report the diffusion codec's processes and their dependencies.", formatter_class=_HelpFormatter)
+    a.set_defaults(handler=cmd_image_codec)
+    a = actions.add_parser(
+        "compress", help="compress an image file with the diffusion codec",
+        description="Compress FILE: the generator is run step by step and only the quantised corrections to its\n"
+                    "predictions are kept.  --out writes the rdc bytes, --text-out the `img:rdc:<w>x<h>:<base64>`\n"
+                    "text form (with neither, the text goes to stdout); --compare decodes it again and reports the\n"
+                    "PSNR, with JPEG at the same byte budget beside it.",
+        formatter_class=_HelpFormatter,
+    )
+    a.add_argument("file", metavar="FILE", help="image file (PNG, JPEG, WebP, ... whatever Pillow reads)")
+    a.add_argument("--process", choices=("auto", "sd", "pyramid"), default="auto", help="the generator (auto = sd when it loads)")
+    a.add_argument("--step", type=pos_float, default=4.0, help="quantisation step of the last block: smaller is better and bigger")
+    a.add_argument("--size", type=pos_int, help="cap the long side at SIZE pixels before compressing (sd codes multiples of 8)")
+    a.add_argument("--steps", type=pos_int, default=10, help="DDIM steps of the sd process")
+    a.add_argument("--prompt", metavar="TEXT", help="a caption the sd process conditions on (stored in the header)")
+    a.add_argument("--seed", type=nonneg_int, default=0, help="the seed of the noise the sd process starts from")
+    a.add_argument("--out", metavar="PATH", help="write the compressed bytes to this file")
+    a.add_argument("--text-out", metavar="PATH", help="write the text form to this file")
+    a.add_argument("--compare", action="store_true", help="decode it again and report PSNR, with JPEG at the same size")
+    a.set_defaults(handler=cmd_image_compress)
+    a = actions.add_parser(
+        "decompress", help="decompress an rdc file (or its text form) back to a PNG",
+        description="Turn the compressed bytes - or `img:rdc:<w>x<h>:<base64>` - back into an image.  A stream cut\n"
+                    "off after any block still decodes: the generator runs the remaining steps uncorrected.",
+        formatter_class=_HelpFormatter,
+    )
+    source = a.add_mutually_exclusive_group(required=True)
+    source.add_argument("file", nargs="?", metavar="FILE", help="the compressed file (rdc bytes, or a file holding the text form)")
+    source.add_argument("--text", metavar="TEXT", help="the text form")
+    a.add_argument("--process", choices=("sd", "pyramid"), help="override the process named in the stream")
+    a.add_argument("--out", required=True, metavar="PNG", help="where to write the image")
+    a.set_defaults(handler=cmd_image_decompress)
 
     # speech ---------------------------------------------------------------
     p = command(
