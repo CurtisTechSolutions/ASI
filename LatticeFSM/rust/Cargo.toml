@@ -1,0 +1,28 @@
+# latticefsm (Rust) - a finite state machine over a dense 3D matrix of adaptive edges.
+#
+# No dependencies, on purpose, like the other crates in this repository: the
+# Python implementation beside it is pure standard library, and so is this one.
+# Everything it needs - JSON, the RNG, the HTTP/1.1 server - is written out in
+# src/.
+[package]
+name = "latticefsm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A finite state machine over a dense 3D matrix of adaptive edges, with a CLI and an HTTP server"
+license = "LicenseRef-ASI"
+publish = false
+
+[lib]
+name = "latticefsm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "latticefsm"
+path = "src/bin/latticefsm.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

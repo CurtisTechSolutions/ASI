@@ -1,0 +1,683 @@
+{
+ "experiment": "adaptation",
+ "settings": {
+  "uses": 20,
+  "life": 1000,
+  "waits": [
+   0,
+   1,
+   4
+  ],
+  "prototype": [
+   0,
+   0,
+   0,
+   1,
+   0,
+   0,
+   0.1
+  ]
+ },
+ "stages": [
+  {
+   "stage": "fresh",
+   "clock": 0,
+   "probabilities": [
+    0.3333333333333333,
+    0.3333333333333333,
+    0.3333333333333333
+   ],
+   "edges": {
+    "rewarded": {
+     "source": 0,
+     "symbol": 0,
+     "target": 1,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    },
+    "punished": {
+     "source": 0,
+     "symbol": 0,
+     "target": 2,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    },
+    "untouched": {
+     "source": 0,
+     "symbol": 0,
+     "target": 0,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    }
+   }
+  },
+  {
+   "stage": "after 1 uses each",
+   "clock": 2,
+   "probabilities": [
+    0.2724767074969698,
+    0.6016626797085761,
+    0.125860612794454
+   ],
+   "edges": {
+    "rewarded": {
+     "source": 0,
+     "symbol": 0,
+     "target": 1,
+     "seen": 1,
+     "first_seen": 0,
+     "last_seen": 0,
+     "recent": 0.9986146661010289,
+     "age": 0.9986146661010289,
+     "rewarded": 1,
+     "punished": 0,
+     "net": 0.5,
+     "last_rewarded": 1,
+     "last_punished": -1,
+     "width": 1.211844794591303,
+     "weighting": [
+      0.1,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0.7921438221791888
+    },
+    "punished": {
+     "source": 0,
+     "symbol": 0,
+     "target": 2,
+     "seen": 1,
+     "first_seen": 1,
+     "last_seen": 1,
+     "recent": 0.9993070929904525,
+     "age": 0.9993070929904525,
+     "rewarded": 0,
+     "punished": 1,
+     "net": -0.5,
+     "last_rewarded": -1,
+     "last_punished": 2,
+     "width": 0.8416608924415871,
+     "weighting": [
+      -0.1,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": -0.7723780864297607
+    },
+    "untouched": {
+     "source": 0,
+     "symbol": 0,
+     "target": 0,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    }
+   }
+  },
+  {
+   "stage": "after 5 uses each",
+   "clock": 10,
+   "probabilities": [
+    0.00013302808773004622,
+    0.999866951700274,
+    0.000000020211996010984275
+   ],
+   "edges": {
+    "rewarded": {
+     "source": 0,
+     "symbol": 0,
+     "target": 1,
+     "seen": 5,
+     "first_seen": 0,
+     "last_seen": 8,
+     "recent": 4.979258334657807,
+     "age": 0.9986146661010289,
+     "rewarded": 5,
+     "punished": 0,
+     "net": 0.8333333333333334,
+     "last_rewarded": 9,
+     "last_punished": -1,
+     "width": 2.608756415465538,
+     "weighting": [
+      0.5,
+      0.4787491742782046,
+      0.9972322093322455,
+      1.2716666666666667,
+      0.3994458664404116,
+      0.19194259165185557,
+      0.1
+     ],
+     "features": [
+      1.6094379124341003,
+      3.986165839220771,
+      0.8,
+      0.9986146661010289,
+      0.7674037575507472
+     ],
+     "log_weight": 8.924817208947498
+    },
+    "punished": {
+     "source": 0,
+     "symbol": 0,
+     "target": 2,
+     "seen": 5,
+     "first_seen": 1,
+     "last_seen": 9,
+     "recent": 4.982710889960009,
+     "age": 0.9993070929904525,
+     "rewarded": 0,
+     "punished": 5,
+     "net": -0.8333333333333334,
+     "last_rewarded": -1,
+     "last_punished": 10,
+     "width": 0.42368270508893435,
+     "weighting": [
+      -0.5,
+      -0.4787491742782046,
+      -0.9972322093322455,
+      1.2716666666666667,
+      -0.3994458664404116,
+      0.1719369546376317,
+      0.1
+     ],
+     "features": [
+      1.6094379124341003,
+      3.986165839220771,
+      -0.8,
+      0.9986146661010289,
+      -0.6870698627932403
+     ],
+     "log_weight": -8.792039280776617
+    },
+    "untouched": {
+     "source": 0,
+     "symbol": 0,
+     "target": 0,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    }
+   }
+  },
+  {
+   "stage": "after 20 uses each",
+   "clock": 40,
+   "probabilities": [
+    0.000000000000000000000000000000000000000000000000000000000000000000000000000000000019282284585959295,
+    1,
+    0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008575587094928215
+   ],
+   "edges": {
+    "rewarded": {
+     "source": 0,
+     "symbol": 0,
+     "target": 1,
+     "seen": 20,
+     "first_seen": 0,
+     "last_seen": 38,
+     "recent": 19.711616513302186,
+     "age": 0.9986146661010289,
+     "rewarded": 20,
+     "punished": 0,
+     "net": 0.9523809523809523,
+     "last_rewarded": 39,
+     "last_punished": -1,
+     "width": 19.986834766818596,
+     "weighting": [
+      2.0000000000000004,
+      4.23356164607535,
+      8,
+      2.640226034285632,
+      1.8973678655919555,
+      3.496254871602708,
+      0.1
+     ],
+     "features": [
+      2.995732273553991,
+      18.738961565889902,
+      0.95,
+      0.9986146661010289,
+      2.9950737951455912
+     ],
+     "log_weight": 190.45796103421506
+    },
+    "punished": {
+     "source": 0,
+     "symbol": 0,
+     "target": 2,
+     "seen": 20,
+     "first_seen": 1,
+     "last_seen": 39,
+     "recent": 19.72528430105971,
+     "age": 0.9993070929904525,
+     "rewarded": 0,
+     "punished": 20,
+     "net": -0.9523809523809523,
+     "last_rewarded": -1,
+     "last_punished": 40,
+     "width": 0.050000000000000044,
+     "weighting": [
+      -2.0000000000000004,
+      -4.23356164607535,
+      -8,
+      2.640226034285632,
+      -1.8973678655919555,
+      3.1793597759596923,
+      0.1
+     ],
+     "features": [
+      2.995732273553991,
+      18.738961565889902,
+      -0.95,
+      0.9986146661010289,
+      -2.9826529488727833
+     ],
+     "log_weight": -189.62224494620733
+    },
+    "untouched": {
+     "source": 0,
+     "symbol": 0,
+     "target": 0,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    }
+   }
+  },
+  {
+   "stage": "1 life later",
+   "clock": 1040,
+   "probabilities": [
+    0.000000000000000000000000000000000000000000000015752695857656053,
+    1,
+    0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006186271260361928
+   ],
+   "edges": {
+    "rewarded": {
+     "source": 0,
+     "symbol": 0,
+     "target": 1,
+     "seen": 20,
+     "first_seen": 0,
+     "last_seen": 38,
+     "recent": 9.855808256651093,
+     "age": 0.49930733305051445,
+     "rewarded": 20,
+     "punished": 0,
+     "net": 0.9523809523809523,
+     "last_rewarded": 39,
+     "last_punished": -1,
+     "width": 10.4934173834093,
+     "weighting": [
+      2.0000000000000004,
+      4.23356164607535,
+      8,
+      2.640226034285632,
+      1.8973678655919555,
+      3.496254871602708,
+      0.1
+     ],
+     "features": [
+      2.995732273553991,
+      18.738961565889902,
+      0.95,
+      0.9986146661010289,
+      2.9950737951455912
+     ],
+     "log_weight": 107.76707294752424
+    },
+    "punished": {
+     "source": 0,
+     "symbol": 0,
+     "target": 2,
+     "seen": 20,
+     "first_seen": 1,
+     "last_seen": 39,
+     "recent": 9.862642150529854,
+     "age": 0.4996535464952263,
+     "rewarded": 0,
+     "punished": 20,
+     "net": -0.9523809523809523,
+     "last_rewarded": -1,
+     "last_punished": 40,
+     "width": 0.525,
+     "weighting": [
+      -2.0000000000000004,
+      -4.23356164607535,
+      -8,
+      2.640226034285632,
+      -1.8973678655919555,
+      3.1793597759596923,
+      0.1
+     ],
+     "features": [
+      2.995732273553991,
+      18.738961565889902,
+      -0.95,
+      0.9986146661010289,
+      -2.9826529488727833
+     ],
+     "log_weight": -99.94583799094349
+    },
+    "untouched": {
+     "source": 0,
+     "symbol": 0,
+     "target": 0,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    }
+   }
+  },
+  {
+   "stage": "4 lives later",
+   "clock": 4040,
+   "probabilities": [
+    0.00000000000003820928729793097,
+    0.9999999999999618,
+    0.0000000000000000000000000378434599525275
+   ],
+   "edges": {
+    "rewarded": {
+     "source": 0,
+     "symbol": 0,
+     "target": 1,
+     "seen": 20,
+     "first_seen": 0,
+     "last_seen": 38,
+     "recent": 1.2319760320813868,
+     "age": 0.06241341663131432,
+     "rewarded": 20,
+     "punished": 0,
+     "net": 0.9523809523809523,
+     "last_rewarded": 39,
+     "last_punished": -1,
+     "width": 2.186677172926162,
+     "weighting": [
+      2.0000000000000004,
+      4.23356164607535,
+      8,
+      2.640226034285632,
+      1.8973678655919555,
+      3.496254871602708,
+      0.1
+     ],
+     "features": [
+      2.995732273553991,
+      18.738961565889902,
+      0.95,
+      0.9986146661010289,
+      2.9950737951455912
+     ],
+     "log_weight": 30.895697785865234
+    },
+    "punished": {
+     "source": 0,
+     "symbol": 0,
+     "target": 2,
+     "seen": 20,
+     "first_seen": 1,
+     "last_seen": 39,
+     "recent": 1.2328302688162316,
+     "age": 0.06245669331190327,
+     "rewarded": 0,
+     "punished": 20,
+     "net": -0.9523809523809523,
+     "last_rewarded": -1,
+     "last_punished": 40,
+     "width": 0.940625,
+     "weighting": [
+      -2.0000000000000004,
+      -4.23356164607535,
+      -8,
+      2.640226034285632,
+      -1.8973678655919555,
+      3.1793597759596923,
+      0.1
+     ],
+     "features": [
+      2.995732273553991,
+      18.738961565889902,
+      -0.95,
+      0.9986146661010289,
+      -2.9826529488727833
+     ],
+     "log_weight": -27.640641548592757
+    },
+    "untouched": {
+     "source": 0,
+     "symbol": 0,
+     "target": 0,
+     "seen": 0,
+     "first_seen": -1,
+     "last_seen": -1,
+     "recent": 0,
+     "age": 0,
+     "rewarded": 0,
+     "punished": 0,
+     "net": 0,
+     "last_rewarded": -1,
+     "last_punished": -1,
+     "width": 1,
+     "weighting": [
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0.1
+     ],
+     "features": [
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "log_weight": 0
+    }
+   }
+  }
+ ]
+}

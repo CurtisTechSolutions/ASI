@@ -1,0 +1,52 @@
+learning: 4000 episodes, strings up to 6 symbols, 5 seeds, 300 held-out strings; the quiet arm runs the same strings without traversing
+
+| language | states (min) | before | after: mean | min | max | solved | quiet after |
+|---|---|---|---|---|---|---|---|
+| even-b (an even number of b's) | 3 (2) | 0.57 | **1.00** | 1.00 | 1.00 | 5/5 | 0.56 |
+| even-b (an even number of b's) | 4 (2) | 0.56 | **1.00** | 1.00 | 1.00 | 5/5 | 0.55 |
+| even-b (an even number of b's) | 6 (2) | 0.55 | **1.00** | 1.00 | 1.00 | 5/5 | 0.55 |
+| contains-aa (two a's in a row somewhere) | 3 (3) | 0.61 | **1.00** | 1.00 | 1.00 | 5/5 | 0.61 |
+| contains-aa (two a's in a row somewhere) | 4 (3) | 0.63 | **1.00** | 1.00 | 1.00 | 5/5 | 0.62 |
+| contains-aa (two a's in a row somewhere) | 6 (3) | 0.64 | **0.87** | 0.62 | 1.00 | 3/5 | 0.63 |
+| ends-ab (ends with ab) | 3 (3) | 0.64 | **0.92** | 0.77 | 1.00 | 3/5 | 0.66 |
+| ends-ab (ends with ab) | 4 (3) | 0.69 | **0.95** | 0.74 | 1.00 | 4/5 | 0.71 |
+| ends-ab (ends with ab) | 6 (3) | 0.74 | **0.96** | 0.79 | 1.00 | 4/5 | 0.73 |
+| mod3-a (a multiple of three a's) | 3 (3) | 0.61 | **1.00** | 1.00 | 1.00 | 5/5 | 0.63 |
+| mod3-a (a multiple of three a's) | 4 (3) | 0.65 | **1.00** | 1.00 | 1.00 | 5/5 | 0.65 |
+| mod3-a (a multiple of three a's) | 6 (3) | 0.67 | **0.79** | 0.63 | 1.00 | 1/5 | 0.68 |
+
+stimulation: a fork of 3 channels; probability of each by stimulation level
+
+| stimulation | width 4 | width 1 | width 0.25 |
+|---|---|---|---|
+| 0 | 0.333 | 0.333 | 0.333 |
+| 0.5 | 0.571 | 0.286 | 0.143 |
+| 1 | 0.762 | 0.190 | 0.048 |
+| 2 | 0.938 | 0.059 | 0.004 |
+| 4 | 0.996 | 0.004 | 0.000 |
+
+a surge of +3 over the baseline 1, relaxing on the clock
+
+| lives since | stimulation | width 4 | width 1 | width 0.25 |
+|---|---|---|---|---|
+| 0 | 4.00 | 0.996 | 0.004 | 0.000 |
+| 0.5 | 3.12 | 0.970 | 0.028 | 0.003 |
+| 1 | 2.50 | 0.883 | 0.089 | 0.028 |
+| 2 | 1.75 | 0.611 | 0.229 | 0.160 |
+| 4 | 1.19 | 0.387 | 0.315 | 0.298 |
+
+adaptation: two edges from one prototype, one rewarded on every use and one punished
+
+| stage | clock | P(rewarded) | P(punished) | P(untouched) | width + | width − | net + | net − | recent + | bias + | bias − |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| fresh | 0 | 0.333 | 0.333 | 0.333 | 1.00 | 1.00 | +0.00 | +0.00 | 0.00 | +0.00 | +0.00 |
+| after 1 uses each | 2 | 0.602 | 0.126 | 0.272 | 1.21 | 0.84 | +0.50 | -0.50 | 1.00 | +0.10 | -0.10 |
+| after 5 uses each | 10 | 1.000 | 0.000 | 0.000 | 2.61 | 0.42 | +0.83 | -0.83 | 4.98 | +0.50 | -0.50 |
+| after 20 uses each | 40 | 1.000 | 0.000 | 0.000 | 19.99 | 0.05 | +0.95 | -0.95 | 19.71 | +2.00 | -2.00 |
+| 1 life later | 1040 | 1.000 | 0.000 | 0.000 | 10.49 | 0.53 | +0.95 | -0.95 | 9.86 | +2.00 | -2.00 |
+| 4 lives later | 4040 | 1.000 | 0.000 | 0.000 | 2.19 | 0.94 | +0.95 | -0.95 | 1.23 | +2.00 | -2.00 |
+
+the two weighting functions at the end (bias, seen, recent, net, age, width, rate):
+  rewarded: [2.000, 4.234, 8.000, 2.640, 1.897, 3.496, 0.100]
+  punished: [-2.000, -4.234, -8.000, 2.640, -1.897, 3.179, 0.100]
+

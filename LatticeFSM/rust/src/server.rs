@@ -1,0 +1,328 @@
+//! The HTTP API and the page that uses it.
+//!
+//! `latticefsm serve` holds one machine behind a lock and answers JSON under
+//! `/api/`; anything else is the single-page frontend (`frontend/index.html`,
+//! compiled into the binary), which draws the matrix one symbol-slice at a
+//! time, runs strings at a stimulation of your choosing, rewards and
+//! punishes them, teaches a language, and lets time pass.
+//!
+//! | route | does |
+//! |---|---|
+//! | `GET /api/health` | the version and the machine's shape |
+//! | `GET /api/stats` | [`Machine::stats`] |
+//! | `GET /api/matrix?symbol=a` | the `S × S` slice for one symbol: probabilities and a summary of every edge |
+//! | `GET /api/edge?source=&symbol=&target=` | one edge, every field |
+//! | `GET /api/table` | the greedy transition table |
+//! | `GET /api/languages` | the languages `train` knows |
+//! | `POST /api/run` | `{text, stimulation?, temperature?, quiet?}`: a run, traversed unless quiet |
+//! | `POST /api/credit` | `{amount}`: reward (positive) or punish (negative) the last run |
+//! | `POST /api/teach` | `{source, symbol, target, amount}`: one edge, traversed and credited |
+//! | `POST /api/train` | `{language, episodes?}`: random strings credited by the language's verdict |
+//! | `POST /api/tick` | `{ticks}`: time passes |
+//! | `POST /api/stimulate` | `{amount}` or `{level}`: raise the stimulation, or set it |
+//! | `POST /api/new` | `{states, alphabet, accepting?, life?, ...}`: a fresh machine in place of the old |
+//! | `POST /api/save` | `{path}`: write the machine |
+//! | `POST /api/load` | `{path}`: read a machine in place of the old |
+
+use std::sync::{Arc, Mutex};
+
+use crate::experiment::teach_language;
+use crate::http::{self, Handler, Request, Response};
+use crate::json::Json;
+use crate::languages::{examples, language, LANGUAGES};
+use crate::machine::{load_machine, Machine, Settings};
+use crate::rng::Rng;
+use crate::VERSION;
+
+pub const FRONTEND: &str = include_str!("../frontend/index.html");
+
+/// The machine behind the server.
+pub struct Service {
+    pub machine: Mutex<Machine>,
+}
+
+impl Service {
+    pub fn new(machine: Machine) -> Arc<Service> {
+        Arc::new(Service {
+            machine: Mutex::new(machine),
+        })
+    }
+
+    /// The handler the HTTP server calls.
+    pub fn handler(self: &Arc<Service>) -> Arc<Handler> {
+        let service = Arc::clone(self);
+        Arc::new(move |req: &Request| service.route(req))
+    }
+
+    pub fn route(&self, req: &Request) -> Response {
+        if !req.path.starts_with("/api/") {
+            return match (req.method.as_str(), req.path.as_str()) {
+                ("GET", "/") | ("GET", "/index.html") => Response::html(FRONTEND),
+                _ => Response::error(404, "not found"),
+            };
+        }
+        let mut m = match self.machine.lock() {
+            Ok(m) => m,
+            Err(_) => return Response::error(500, "the machine's lock is poisoned"),
+        };
+        let result = match (req.method.as_str(), &req.path[5..]) {
+            ("GET", "health") => Ok(Json::object()
+                .with("ok", true.into())
+                .with("version", VERSION.into())
+                .with("shape", m.stats().get("shape").cloned().unwrap_or(Json::Null))),
+            ("GET", "stats") => Ok(m.stats()),
+            ("GET", "matrix") => matrix(&m, req.param("symbol")),
+            ("GET", "edge") => edge(&m, req),
+            ("GET", "table") => Ok(table(&m)),
+            ("GET", "languages") => Ok(Json::Array(
+                LANGUAGES
+                    .iter()
+                    .map(|l| {
+                        Json::object()
+                            .with("name", l.name.into())
+                            .with("description", l.description.into())
+                            .with(
+                                "accepting",
+                                Json::Array(l.accepting.iter().map(|&s| s.into()).collect()),
+                            )
+                            .with("min_states", l.min_states.into())
+                    })
+                    .collect(),
+            )),
+            ("POST", "run") => run(&mut m, &req.body),
+            ("POST", "credit") => {
+                let amount = req.body.num("amount", 1.0);
+                let credited = m.credit(amount);
+                Ok(Json::object()
+                    .with("credited", credited.into())
+                    .with("amount", amount.into())
+                    .with("stats", m.stats()))
+            }
+            ("POST", "teach") => teach(&mut m, &req.body),
+            ("POST", "train") => train(&mut m, &req.body),
+            ("POST", "tick") => {
+                m.tick(req.body.num("ticks", 1.0) as i64);
+                Ok(m.stats())
+            }
+            ("POST", "stimulate") => {
+                let r = match req.body.get("level").and_then(Json::as_f64) {
+                    Some(level) => m.set_stimulation(level).map(|_| level),
+                    None => Ok(m.stimulate(req.body.num("amount", 1.0))),
+                };
+                r.map(|level| {
+                    Json::object()
+                        .with("stimulation", level.into())
+                        .with("stats", m.stats())
+                })
+            }
+            ("POST", "new") => new_machine(&req.body).map(|fresh| {
+                *m = fresh;
+                m.stats()
+            }),
+            ("POST", "save") => {
+                let path = req.body.str_or("path", "machine.json.gz").to_string();
+                m.save(&path)
+                    .map(|_| Json::object().with("saved", path.as_str().into()))
+            }
+            ("POST", "load") => {
+                let path = req.body.str_or("path", "machine.json.gz").to_string();
+                load_machine(&path).map(|loaded| {
+                    *m = loaded;
+                    m.stats()
+                })
+            }
+            ("GET", _) | ("POST", _) => Err("no such route".to_string()),
+            _ => return Response::error(405, "method not allowed"),
+        };
+        match result {
+            Ok(v) => Response::ok(&v),
+            Err(msg) if msg == "no such route" => Response::error(404, &msg),
+            Err(msg) => Response::error(400, &msg),
+        }
+    }
+}
+
+fn matrix(m: &Machine, symbol: Option<&str>) -> Result<Json, String> {
+    let a = match symbol {
+        Some(s) => m.symbol(s)?,
+        None => 0,
+    };
+    let (clock, life, stim) = (m.clock, m.life, m.stimulation());
+    let rows: Vec<Json> = (0..m.n_states())
+        .map(|s| {
+            let probs = m.probabilities(s, a, None, None);
+            let edges: Vec<Json> = m
+                .lattice
+                .row(s, a)
+                .iter()
+                .zip(probs.iter())
+                .map(|(e, p)| {
+                    Json::object()
+                        .with("target", e.target.into())
+                        .with("probability", (*p).into())
+                        .with("seen", (e.seen as f64).into())
+                        .with("width", e.width_at(clock, life).into())
+                        .with("net", e.net().into())
+                        .with("recent", e.recent_at(clock, life).into())
+                        .with("log_weight", e.log_weight(clock, life, stim).into())
+                })
+                .collect();
+            Json::object()
+                .with("source", s.into())
+                .with("edges", Json::Array(edges))
+        })
+        .collect();
+    Ok(Json::object()
+        .with("symbol", m.alphabet()[a].as_str().into())
+        .with("symbol_index", a.into())
+        .with("stimulation", stim.into())
+        .with("state", m.state.into())
+        .with(
+            "accepting",
+            Json::Array(m.accepting().into_iter().map(Json::from).collect()),
+        )
+        .with("rows", Json::Array(rows)))
+}
+
+fn edge(m: &Machine, req: &Request) -> Result<Json, String> {
+    let n = |k: &str| {
+        req.param(k)
+            .and_then(|v| v.parse::<usize>().ok())
+            .ok_or(format!("{k} is required"))
+    };
+    let (source, target) = (n("source")?, n("target")?);
+    let symbol = match req.param("symbol") {
+        Some(s) => match s.parse::<usize>() {
+            Ok(i) => i,
+            Err(_) => m.symbol(s)?,
+        },
+        None => return Err("symbol is required".to_string()),
+    };
+    m.lattice.offset(source, symbol, target)?;
+    Ok(m.edge(source, symbol, target)
+        .describe(m.clock, m.life, m.stimulation()))
+}
+
+fn table(m: &Machine) -> Json {
+    let t = m.transition_table();
+    Json::object()
+        .with("alphabet", Json::strings(m.alphabet()))
+        .with(
+            "accepting",
+            Json::Array(m.accepting().into_iter().map(Json::from).collect()),
+        )
+        .with(
+            "table",
+            Json::Array(
+                t.iter()
+                    .map(|row| Json::Array(row.iter().map(|&t| t.into()).collect()))
+                    .collect(),
+            ),
+        )
+}
+
+fn run(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    let text = body.str_or("text", "");
+    let stimulation = body.get("stimulation").and_then(Json::as_f64);
+    let temperature = body.get("temperature").and_then(Json::as_f64);
+    let quiet = body.bool_or("quiet", false);
+    let run = m.run_text(text, stimulation, temperature, quiet)?;
+    Ok(run.to_json().with("quiet", quiet.into()).with("stats", m.stats()))
+}
+
+fn teach(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    let source = body.num("source", 0.0) as usize;
+    let target = body.num("target", 0.0) as usize;
+    let symbol = match body.get("symbol") {
+        Some(Json::String(s)) => m.symbol(s)?,
+        Some(Json::Number(n)) => *n as usize,
+        _ => return Err("symbol is required".to_string()),
+    };
+    let amount = body.num("amount", 1.0);
+    let (clock, life, stim) = (m.clock + 1, m.life, m.stimulation());
+    let e = m.teach(source, symbol, target, amount)?.describe(clock, life, stim);
+    Ok(Json::object().with("edge", e).with("stats", m.stats()))
+}
+
+fn train(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    let lang = language(body.str_or("language", "even-b"))?;
+    let episodes = body.num("episodes", 500.0).max(0.0) as usize;
+    let max_length = body.num("max_length", 6.0) as usize;
+    for &s in lang.accepting {
+        if s >= m.n_states() {
+            return Err(format!(
+                "{} needs an accepting state {s}; the machine has {} states",
+                lang.name,
+                m.n_states()
+            ));
+        }
+    }
+    if body.bool_or("set_accepting", true) {
+        for st in m.lattice.states.iter_mut() {
+            st.accepting = lang.accepting.contains(&st.index);
+        }
+    }
+    let mut rng = Rng::new(m.seed ^ (m.clock as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let test = examples(&lang, 200, &mut rng, max_length);
+    let before = m.accuracy(&test, 0.0);
+    let every = (episodes / 10).max(1);
+    let curve = teach_language(m, &lang, episodes, &mut rng, max_length, false, 1.0, Some(&test), every);
+    let after = m.accuracy(&test, 0.0);
+    Ok(Json::object()
+        .with("language", lang.name.into())
+        .with("episodes", episodes.into())
+        .with("before", before.into())
+        .with("after", after.into())
+        .with(
+            "curve",
+            Json::Array(
+                curve
+                    .iter()
+                    .map(|(ep, acc)| Json::numbers(&[*ep as f64, *acc]))
+                    .collect(),
+            ),
+        )
+        .with("table", table(m))
+        .with("stats", m.stats()))
+}
+
+/// A machine from `{states, alphabet, accepting?, start?, life?, baseline?, temperature?, discount?, seed?}`.
+pub fn new_machine(body: &Json) -> Result<Machine, String> {
+    let states = body.num("states", 4.0) as usize;
+    let alphabet: Vec<String> = match body.get("alphabet") {
+        Some(Json::String(s)) => s
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| c.to_string())
+            .collect(),
+        Some(Json::Array(items)) => items.iter().filter_map(|s| s.as_str().map(str::to_string)).collect(),
+        _ => vec!["a".to_string(), "b".to_string()],
+    };
+    let accepting: Vec<usize> = body
+        .get("accepting")
+        .and_then(Json::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_f64().map(|n| n as usize)).collect())
+        .unwrap_or_default();
+    let d = Settings::default();
+    let settings = Settings {
+        start: body.num("start", 0.0) as usize,
+        life: body.num("life", d.life),
+        baseline: body.num("baseline", d.baseline),
+        calm: body.get("calm").and_then(Json::as_f64),
+        temperature: body.num("temperature", d.temperature),
+        discount: body.num("discount", d.discount),
+        trace: body.num("trace", d.trace),
+        use_widening: body.num("use_widening", d.use_widening),
+        reward_widening: body.num("reward_widening", d.reward_widening),
+        punish_narrowing: body.num("punish_narrowing", d.punish_narrowing),
+        prototype: d.prototype,
+        seed: body.num("seed", 1.0) as u64,
+    };
+    Machine::new(states, &alphabet, &accepting, settings)
+}
+
+/// Serve `machine` on `addr`.
+pub fn serve(machine: Machine, addr: &str, max_requests: Option<usize>) -> Result<(), String> {
+    let service = Service::new(machine);
+    http::serve(addr, service.handler(), max_requests)
+}
