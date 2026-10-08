@@ -11,7 +11,7 @@ import { api } from "../api.js";
  */
 export default function HearButton({ text, label, compact = false, disabled }) {
   const [busy, setBusy] = useState(false);
-  const [spoken, setSpoken] = useState(null); // {src, seconds, decoder, encoding}
+  const [spoken, setSpoken] = useState(null); // {src, seconds, decoder, vocoder, encoding}
   const [error, setError] = useState(null);
   const empty = !String(text ?? "").trim();
 
@@ -27,6 +27,7 @@ export default function HearButton({ text, label, compact = false, disabled }) {
         src: `data:audio/wav;base64,${data.wav_base64}`,
         seconds: Number(data.seconds) || 0,
         decoder: data.decoder,
+        vocoder: data.vocoder || null,
         encoding: data.encoding,
       });
     } catch (err) {
@@ -37,8 +38,9 @@ export default function HearButton({ text, label, compact = false, disabled }) {
     }
   }
 
+  const through = spoken ? `${spoken.decoder}${spoken.vocoder ? ` (${spoken.vocoder})` : ""}` : "";
   const title = spoken
-    ? `spoken through the ${spoken.decoder} (${spoken.encoding}): ${spoken.seconds.toFixed(2)} s`
+    ? `spoken through the ${through} (${spoken.encoding}): ${spoken.seconds.toFixed(2)} s`
     : "Hear: the text spoken through the model's voice (the output decoder, POST /api/say)";
   return (
     <span className="hear">
@@ -55,7 +57,7 @@ export default function HearButton({ text, label, compact = false, disabled }) {
       {spoken ? <audio controls autoPlay src={spoken.src} aria-label={`${label}, spoken`} /> : null}
       {spoken && !compact ? (
         <span className="muted">
-          {spoken.seconds.toFixed(2)} s · {spoken.decoder}
+          {spoken.seconds.toFixed(2)} s · {through}
         </span>
       ) : null}
       {error ? <span className="error-text">{error}</span> : null}

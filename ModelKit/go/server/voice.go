@@ -22,7 +22,7 @@ func init() {
 		"content_base64} and / or transcript, history: [[speaker, text], ...], answer: auto (the model, Ollama "+
 		"when it has nothing to say) | model | ollama | none, train (default on), epochs, learn_reply (teach the "+
 		"model a reply Ollama wrote), persona, topic, url, ollama_model, timeout, mode, max_length, context, k, "+
-		"beam, temperature, seed, explore, learn, guard, speak, voice_rate, pitch, tempo, gain, polish, rate, "+
+		"beam, temperature, seed, explore, learn, guard, speak, voice_rate, pitch, tempo, gain, polish, vocoder, rate, "+
 		"codec, pair, unique, normalise, waveform} -> {transcript, line, token, texts, audio, units, asr, "+
 		"trained, reply: {by, text, spelled, turn, ollama_error}, by, spoken, taught, history, encoding, rate, "+
 		"wav_base64}: the utterance is heard and learned (the transcript and the waveform behind one token, or "+
@@ -149,6 +149,10 @@ func voiceOptionsFrom(rq *request) (kit.VoiceOptions, error) {
 		return o, err
 	}
 	if o.Polish, _, err = f.integer("polish", 0, nil); err != nil {
+		return o, err
+	}
+	auto := "auto"
+	if o.Vocoder, err = f.text("vocoder", &auto); err != nil {
 		return o, err
 	}
 	if err := o.Validate(); err != nil {

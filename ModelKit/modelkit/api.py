@@ -142,6 +142,7 @@ from .speech import teach as teach_speech
 from .voicechat import SPEAKERS as VOICE_SPEAKERS
 from .voicechat import Outcome as VoiceOutcome
 from .voicechat import VoiceOptions
+from .voice import VOCODERS
 from .voicechat import describe as describe_voice
 from .voicechat import history_pairs as voice_history_pairs
 from .voicechat import turn as voice_chat_turn
@@ -3892,6 +3893,7 @@ def _voice_options(f: Fields, q: dict) -> VoiceOptions:
         tempo=number("tempo", 1.0, float),
         gain=number("gain", 0.5, float),
         polish=number("polish", 0, int),
+        vocoder=str(_option(f, q, "vocoder", "auto") or "auto"),
     )
     try:
         options.validate()
@@ -3974,11 +3976,14 @@ def _voice_fields(f: Fields) -> dict:
         tempo=f.number("tempo", 1.0, minimum=0.0),
         gain=f.number("gain", 0.5, minimum=0.0),
         polish=f.integer("polish", 0, minimum=0),
+        vocoder=f.text("vocoder", "auto") or "auto",
     )
     if out["pitch"] <= 0:
         raise ApiError(400, "'pitch' must be above 0 Hz")
     if out["tempo"] <= 0:
         raise ApiError(400, "'tempo' must be above 0")
+    if out["vocoder"] not in VOCODERS:
+        raise ApiError(400, f"'vocoder' must be one of {', '.join(VOCODERS)}")
     return out
 
 
@@ -5091,7 +5096,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "when it has nothing to say) | model | ollama | none, train (default on), epochs, lr, batch_size, learn_reply "
      "(teach the model a reply Ollama wrote), persona, topic, url, ollama_model, timeout, mode, max_length, "
      "context, k, beam, temperature, seed, explore, learn, guard, speak, voice_rate, pitch, tempo, gain, polish, "
-     "rate, codec, pair, unique, normalise, waveform, backend, language} -> {transcript, line, token, texts, "
+     "vocoder (acoustic units: auto | neural | centroid), rate, codec, pair, unique, normalise, waveform, backend, "
+     "language} -> {transcript, line, token, texts, "
      "audio, units, asr, trained, reply: {by, text, spelled, turn, ollama_error}, by, spoken, taught, history, "
      "encoding, rate, wav_base64}: the utterance is heard and learned (the transcript and the waveform behind one "
      "token, or a model of acoustic units' units), answered, spoken through the model's voice, and the reply "
@@ -5104,8 +5110,10 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "the output decoder: texts in the model's units - predictions, samples, turns; sounds, syllables, acoustic "
      "units, words or letters - spoken through the model's voice, one utterance each, closed by the END sentinel: "
      "{texts | text (one per line), rate, pitch, tempo, gain, polish (acoustic units: Griffin-Lim iterations over "
-     "each whole utterance)} -> {wav_base64, rate, samples, seconds, encoding, decoder: voice | vocoder, count, "
-     "utterances: [{text, spelled, tokens, samples, seconds}]}"),
+     "each whole utterance through the centroid vocoder), vocoder (acoustic units: auto | neural | centroid - the "
+     "codebook's neural vocoder when it has one, that or nothing, or its own)} -> {wav_base64, rate, samples, "
+     "seconds, encoding, decoder: voice | vocoder, vocoder: neural | centroid | null, count, utterances: [{text, "
+     "spelled, tokens, samples, seconds}]}"),
     ("GET", "/api/ollama/models", _r_ollama_models, "models installed in Ollama (?url= overrides the server default); never fails"),
     ("POST", "/api/ollama/corpus", _r_ollama_corpus,
      "training lines from a prompt: {prompt, lines, style: good|garbage, model, url, save_as, train, epochs, lr, batch_size}"),

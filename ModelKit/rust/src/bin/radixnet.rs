@@ -93,8 +93,9 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      --seed.  \
      say: the output decoder - every TEXT (and every line of --data FILE, - for stdin) spoken in the model's \
      units, one\n\
-     utterance each, through the same voice; --polish N polishes acoustic units; the model file need not exist \
-     (--encoding\n\
+     utterance each, through the same voice; acoustic units go through the codebook's neural vocoder when it \
+     has one\n\
+     (--vocoder auto|neural|centroid), else --polish N polishes them; the model file need not exist (--encoding\n\
      says how a text is read).  predict / generate --speak FILE write their outputs as speech the same way.  \
      ../SPEC-SearchAndTraining.md has the rules.";
 
@@ -551,16 +552,18 @@ fn run() -> Result<(), String> {
                 tempo: args.float("tempo", 1.0)?,
                 gain: args.float("gain", 0.5)?,
                 polish: args.usize("polish", 0)?,
+                vocoder: args.str("vocoder", "auto"),
             };
             // acoustic units are spoken at their codebook's rate
             let rate = radixnet::phonetic::output_rate(enc, opts.rate)?;
+            let vocoder = modelkit::voice::vocoder_name(enc, &opts.vocoder)?;
             let wav_path = args.str("out", "speech.wav");
             let play = args.on("play");
             let raw = args.on("raw");
             let mut said: Vec<Json> = Vec::new();
             let mut record = |_i: usize, u: Utterance| said.push(u.to_json());
-            // polishing needs the whole utterance, so it is not streamed
-            let polished = opts.polish > 0 && decoder_name(enc) == "vocoder";
+            // the learned vocoder and the polish need the whole utterance, so it is not streamed
+            let polished = vocoder == Some("neural") || (opts.polish > 0 && decoder_name(enc) == "vocoder");
             let mut run = |emit_pcm: &mut dyn FnMut(&[u8])| -> Result<(), String> {
                 if polished {
                     let spoken = say(enc, &texts, &opts)?;
@@ -632,6 +635,13 @@ fn run() -> Result<(), String> {
                     ("sink", Json::str(&sink)),
                     ("encoding", Json::str(enc.to_string())),
                     ("decoder", Json::str(decoder_name(enc))),
+                    (
+                        "vocoder",
+                        match vocoder {
+                            Some(v) => Json::str(v),
+                            None => Json::Null,
+                        },
+                    ),
                     ("polish", Json::Int(opts.polish as i64)),
                 ]));
             }

@@ -3890,6 +3890,67 @@ only for a model of sounds. `../ModelKit/tests/test_teaching_in_words.py`, `../M
 
 # Part XXII — Structure
 
+### D-090 — The neural vocoder: acoustic units heard back through a filter learned from the recordings
+
+**Status** Accepted · 2026-09-28 · **Layer** output · **Extends** D-082, D-088, D-089
+
+**Context** D-082 gives a model of acoustic units a voice by holding each unit's centroid - the average of
+thousands of frames - and lending it the phases of a pulse train; polished or not, what comes back is
+speech-like and blurred, and the Voice tab (D-089) made the blur audible in every reply. The tokenizer's design
+had rejected a neural vocoder ("weights to ship, a framework to run them, nothing a Go or Rust port could
+reproduce"); all three objections were about the shape of the usual vocoder, not about learning as such.
+
+**Decision** The tokenizer package learns the vocoder's other half (`phonetok.neural`, D-090's counterpart in
+`../PhoneticTokenizer/DESIGN.md` section 5.5): the same excitation the centroid vocoder uses - a pulse train at
+the voice's pitch, each pulse spread into a short chirp so the waveform peaks where a recording's does, and the
+same deterministic noise - runs on under the utterance, and a small network (an
+embedding of the unit codes, residual blocks of dilated convolutions at the frame rate, a head, and every
+unit's own spectral template) writes per frame and per bin how loud the pulse train and how loud the noise
+should be; the frames are overlap-added exactly as the centroid vocoder's are. A source and a filter, as the
+formant synthesizer is, with the filter learned from recordings: the network is trained in numpy by hand-written
+gradients on a multi-resolution spectral loss, and the weights are one JSON file beside the codebook
+(`<stem>.vocoder.json`, or `PHONETOK_VOCODER`) that the Go and Rust ports read and run with their own excitation
+and inverse transform, bit for bit the same samples. The bundled codebook ships its vocoder, trained on the
+synthesizer's speech in four voices; a codebook learned from a person's recordings gets one from
+`phonetok vocoder train`. In this project the output decoder (D-088) speaks acoustic units through the neural
+vocoder whenever the codebook has one - `say`, `POST /api/say`, the Hear buttons and the Voice tab's replies -
+each utterance rendered whole once it is known, and says so (`vocoder: "neural" | "centroid" | null` in every
+`Spoken` record, `vocoder` in `GET /api/voice`); `--vocoder centroid` (`vocoder` on the API, a setting in the
+Voice tab) keeps the codebook's own, `neural` insists on the learned one. `speak` still streams a walk through
+the centroid vocoder as it walks: the network hears a frame's neighbours on both sides, so it waits for the
+utterance.
+
+**Alternatives rejected**
+* **Predicting the waveform's phases outright** (an iSTFT-style network with a phase head). Tried first: within
+  a run of one unit the network's input is the same frame after frame, so it cannot make a phase advance at the
+  voice's pitch, the frames cancel in the overlap-add, and the pitch collapses onto the frame rate. The
+  excitation carries the pitch, and the network need only shape it.
+* **Predicting log-mel frames for the centroid vocoder to render.** A better-than-centroid frame is still
+  rendered with the same blur; the filter has to be learned at the transform's own resolution.
+* **A framework** (torch) for training. The network is small enough that its gradients fit in a few hundred
+  lines of numpy, which every laptop has and which the ports never need.
+* **The radix graph as the vocoder** (raised while this was built). A count graph replays waveform texts it has
+  heard and cannot regress a continuous spectrum for a sequence it has not; a second discrete stage of finer
+  units over the first, learned the same way, could one day sit between the units and this vocoder.
+
+**Consequences** Held-out synthesizer speech comes back nearer the original than through the centroid vocoder
+(the log-mel distance over the speech roughly halved; the numbers are in the vocoder file's `trained` report,
+`phonetok vocoder info`). The round trip - hearing the output again as the same units - stays the centroid
+vocoder's by construction: its frames *are* the centroids, and the codebook hears every frame against the
+utterance's mean, so a vocoder whose silences are a little louder than the recording's moves every unit. A
+reply's audio is no longer streamed chunk by chunk while it is made (the Voice tab already played the reply
+only once its first chunk arrived; a whole utterance takes a few hundred milliseconds with numpy, a few
+seconds without it). `polish` applies to the centroid vocoder alone. `tests/test_acoustic_units.py`,
+`tests/test_voice.py`, `tests/test_voicechat.py`, the say parity of the Go and Rust suites.
+
+**Lives in** `../PhoneticTokenizer/phonetok/neural.py` (the model, the trainer, the file), `../PhoneticTokenizer/rust/src/neural.rs`,
+`../PhoneticTokenizer/go/phonetok/neural.go`, `radixnet/voice.py` (`say`, `VOCODERS`, `vocoder_name`, `Spoken.vocoder`),
+`radixnet/voicechat.py`, `radixnet/api.py`, `radixnet/cli.py`, `frontend/src/components/VoicePanel.jsx`,
+`frontend/src/components/HearButton.jsx`, `go/radixnet/voice.go`, `go/server/media.go`, `go/server/voice.go`,
+`rust/src/voice.rs`, `rust/src/voicechat.rs`, `rust/src/service.rs`
+
+---
+
 ### D-087 — The dynamic window: nodes halved down a binary ladder, and grown back at the top
 
 **Status** Research claim · 2026-09-25 · **Layer** representation · **Extends** D-007 ·

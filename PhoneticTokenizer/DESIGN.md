@@ -121,9 +121,12 @@ an utterance ends the moment the walk reaches its END.
 * **IPA as the representation.** Diphthongs and affricates are two code points
   each, stress marks are prefixes, and the text stops being something a graph can
   slice by symbol.
-* **A neural vocoder.** Weights to ship, a framework to run them, and nothing a
-  Go or Rust port could reproduce. The formant synthesizer is a hundred lines of
-  arithmetic on a table, and it speaks the moment a token arrives.
+* **A neural vocoder for the voice.** Weights to ship, a framework to run them,
+  and nothing a Go or Rust port could reproduce. The formant synthesizer is a
+  hundred lines of arithmetic on a table, and it speaks the moment a token
+  arrives. (The acoustic units later got one all the same - section 5.5 - once
+  each objection had an answer: a small file beside the codebook, a network
+  small enough to run in any language, and the ports' own transforms under it.)
 
 ## 4. Costs
 
@@ -221,3 +224,102 @@ speech, which `learn` does from nothing but WAV files.
 * Pure Python hears at about ten times real time and learns a 64-unit codebook
   from three minutes of audio in about three minutes; the ports do both in
   seconds.
+
+### 5.5 The neural vocoder: the filter learned, the source kept
+
+#### 5.5.1 The claim
+
+A centroid vocoder is bounded by its centroids: every unit is the average of
+thousands of frames, and an average of spectra is a blur. The units are worth
+keeping - a small inventory the graph can count - so what has to change is the
+way back: a decoder that reads a run of units *with its context* and writes
+each frame's spectrum from what the recordings actually did there. That is a
+network, and it can be small, portable and trained without a framework.
+
+#### 5.5.2 What was decided
+
+**The source stays, the filter is learned.** The centroid vocoder is a source
+and a filter: a pulse train at the voice's pitch mixed with the package's own
+noise, and per-frame magnitudes spread from the centroid. The neural vocoder
+keeps exactly that excitation - the same pulse train from phase zero, the same
+xorshift noise - with one change, and replaces the magnitudes with two learned
+log gains per bin,
+one on the pulse train and one on the noise: `S_t(k) = P_t(k) e^{lp} + N_t(k)
+e^{ln}`. The gains come from a network over the codes: an embedding, residual
+blocks of dilated convolutions at the frame rate (kernel 5, dilations 1 2 4 8 1
+2: 36 frames of context either side), a linear head, and a per-unit template
+added to the head's output - every unit's own typical spectrum, read off the
+recordings before training starts. Frames are overlap-added by the same inverse
+transform the centroid vocoder uses. Pitch remains a parameter, since the
+excitation carries it, and the units still carry none. The one change: every
+pulse is spread into a 64-sample chirp of unit energy (a Hann-windowed sweep
+from zero to the Nyquist frequency, the same in every port). An impulse's
+harmonics are all in phase at the pulse, and a filter that only scales them
+rings symmetrically around it, so the first vocoder trained this way peaked
+three times higher than the recordings at the same loudness and clipped;
+dispersed, its peaks land near where a glottal pulse's do, and `synthesize`
+keeps three decibels of headroom (`HEADROOM`) for the rest.
+
+**One JSON file beside the codebook.** `<stem>.vocoder.json` holds the
+architecture, the analysis it was trained under, the codebook's fingerprint (so
+the two are never mixed up), the training report and the tensors as base64
+little-endian float32 - about a megabyte for 64 channels. A codebook's vocoder
+is found beside it, or through `PHONETOK_VOCODER`, and the bundled codebook's
+ships with the package. Inference is a few hundred multiply-adds per frame per
+channel in plain loops: the Go and Rust ports read the same file and produce
+the same 16-bit samples as Python, bit for bit, through their own FFT and
+overlap-add.
+
+**Training in numpy, gradients by hand.** The loss is the one the ear agrees
+with - spectral convergence and log-magnitude distance at three transform sizes
+(256, 512, 1024) plus the distance between the log-mel frames the analysis
+itself hears - and every adjoint (the inverse transform's, the forward
+transform's, the log-mel's, the network's) is a few lines, checked against
+finite differences by `gradient_check`. Random two-second segments with the
+network's context either side, Adam with a cosine schedule, a few minutes on a
+laptop for a few minutes of audio. Recordings are pitch-tracked (normalised
+autocorrelation, the first clear peak, a median, continuity) so the pulse train
+follows the voice during training; at inference the pitch is whatever is asked
+for.
+
+**The bundled vocoder is the bootstrap, like the codebook.** It is trained on
+the synthesizer's speech of the codebook's corpus in four voices (the last
+sentence of each held out), so everything works out of the box and the parity
+fixture can hold every port to the same samples. A codebook learned from a
+person's recordings gets its vocoder from `phonetok vocoder train` on the same
+recordings, and that pair gives the person's voice back.
+
+#### 5.5.3 Alternatives rejected
+
+* **Predicting the phases too** (an iSTFT-style head of magnitude and phasor).
+  This was built first and failed for a plain reason: within a run of one unit
+  the network's input is the same frame after frame, so its output is the same
+  frame after frame, the phase cannot advance at the voice's pitch, and the
+  overlap-add cancels what should have added - the pitch collapses onto the
+  frame rate. The excitation already has coherent phase at any pitch; the
+  network only needs to shape it.
+* **Predicting better log-mel frames for the centroid vocoder.** The blur is in
+  the rendering as much as in the centroid; the filter has to be learned at the
+  transform's resolution, per bin.
+* **A framework** (torch). Nothing here needs one, and the ports could not have
+  followed it; numpy is the whole dependency, and only for training.
+* **Adversarial training** (HiFi-GAN and its kin). A discriminator would sharpen
+  the result further at the cost of a training recipe nobody can check by
+  finite differences; the spectral losses get most of the way, and the door is
+  open.
+
+#### 5.5.4 Costs
+
+* The whole utterance is rendered at once (a frame hears 360 ms either side),
+  so a walk still streams through the centroid vocoder; the network could stream
+  with that much delay, and does not yet.
+* Inference is a few hundred milliseconds per utterance in Python with numpy
+  and a few seconds without it; the ports take milliseconds.
+* The round trip - hearing the output again as the same units - belongs to the
+  centroid vocoder by construction (its frames are the centroids), and the
+  codebook's per-utterance mean makes it hang on the silences, which the
+  vocoder renders from a unit that means different levels in different
+  utterances. The neural vocoder is judged by the log-mel distance to the
+  original, over every frame and over the speech alone.
+* One more data file to keep in step with the codebook: the fingerprint
+  refuses a mismatch, and `make vocoder` retrains it.

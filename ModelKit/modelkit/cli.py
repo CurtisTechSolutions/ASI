@@ -40,6 +40,7 @@ from radixnet.encoding import (
     CHARS, WINDOW, WORDS, Encoding, hear_audio, is_audio_file, parse_encoding, spelled_prediction, spelled_thought,
     spelled_turn, word_rows,
 )
+from .voice import VOCODERS
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from radixnet.model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
 from radixnet.training import ORDERS
@@ -1085,7 +1086,7 @@ def _deliver_speech(args: argparse.Namespace, stream: Iterable[bytes], rate: int
 
 def cmd_say(args: argparse.Namespace, console: Console) -> dict:
     """Say: the output decoder - texts in the model's units are spoken, one utterance each."""
-    from .voice import Utterance, decoder_name, output_rate, say, speak_texts
+    from .voice import Utterance, decoder_name, output_rate, say, speak_texts, vocoder_name
 
     # the model file need not exist: its encoding is what matters, and a fresh model of
     # --encoding reads a text the way a trained one would
@@ -1101,10 +1102,11 @@ def cmd_say(args: argparse.Namespace, console: Console) -> dict:
     rate = output_rate(enc, args.rate)  # acoustic units are spoken at their codebook's rate
     said: list[Utterance] = []
     try:
-        if args.polish > 0 and decoder_name(enc) == "vocoder":
-            # polishing needs the whole utterance, so it is not streamed
+        vocoder = vocoder_name(enc, args.vocoder)
+        if vocoder == "neural" or (args.polish > 0 and decoder_name(enc) == "vocoder"):
+            # the learned vocoder and the polish need the whole utterance, so it is not streamed
             spoken = say(enc, texts, rate=args.rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain,
-                         polish=args.polish)
+                         polish=args.polish, vocoder=args.vocoder)
             said = spoken.utterances
             stream: Iterable[bytes] = [spoken.pcm]
         else:
@@ -1117,7 +1119,7 @@ def cmd_say(args: argparse.Namespace, console: Console) -> dict:
     if not args.raw:
         console.pairs([
             ("model", kind_label(model)),
-            ("decoder", f"{decoder_name(enc)} ({enc})"),
+            ("decoder", f"{decoder_name(enc)} ({enc})" + (f", the {vocoder} vocoder" if vocoder else "")),
             ("utterances", len(said)),
             ("speech", f"{seconds:.2f} s at {rate} Hz -> {sink}"),
         ])
@@ -1126,7 +1128,7 @@ def cmd_say(args: argparse.Namespace, console: Console) -> dict:
                       [[i + 1, quote(clip(u.text, 60)), quote(clip(u.spelled, 40))] for i, u in enumerate(said)])
     return {"texts": texts, "utterances": [u.to_dict() for u in said], "count": len(said),
             "seconds": seconds, "rate": rate, "sink": sink, "encoding": str(enc),
-            "decoder": decoder_name(enc), "polish": args.polish}
+            "decoder": decoder_name(enc), "vocoder": vocoder, "polish": args.polish}
 
 
 def cmd_think(args: argparse.Namespace, console: Console) -> dict:
@@ -2181,6 +2183,7 @@ def cmd_speech_talk(args: argparse.Namespace, console: Console) -> dict:
         max_length=args.max_length, context=args.context, k=args.k, beam=args.beam, temperature=args.temperature,
         seed=getattr(args, "seed", None), explore=args.explore, learn=not args.no_learn, speak=not args.no_speak,
         voice_rate=args.voice_rate, pitch=args.pitch, tempo=args.tempo, gain=args.gain, polish=args.polish,
+        vocoder=args.vocoder,
     )
     try:
         options.validate()
@@ -5139,8 +5142,9 @@ def build_parser() -> argparse.ArgumentParser:
         "Speak every TEXT (and every line of --data FILE; - reads stdin) through the model's voice, one\n"
         "utterance each: a text is fed whole to the same voice `speak` walks with and closed by the END\n"
         "sentinel.  A model of sounds speaks a text of sounds as it is and reads words through the tokenizer\n"
-        "first; a model of acoustic units speaks them through its codebook's vocoder (--polish N runs\n"
-        "Griffin-Lim over each whole utterance); a model of words or letters is read word by word.  The model\n"
+        "first; a model of acoustic units speaks them through its codebook's neural vocoder when it has one\n"
+        "(--vocoder), else its centroid vocoder (--polish N runs Griffin-Lim over each whole utterance); a\n"
+        "model of words or letters is read word by word.  The model\n"
         "file need not exist: --encoding says how a text is read.  --out writes a WAV (default speech.wav);\n"
         "--play streams to a player (aplay, paplay, ffplay, play or afplay); --raw streams 16-bit PCM to stdout.",
     )
@@ -5154,8 +5158,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tempo", type=nonneg_float, default=1.0, help="the voice's pace (default 1)")
     p.add_argument("--gain", type=nonneg_float, default=0.5, help="peak level as a share of full scale (default 0.5)")
     p.add_argument("--polish", type=nonneg_int, default=0, metavar="N",
-                   help="acoustic units: Griffin-Lim iterations over each whole utterance (default 0: the "
-                        "streaming vocoder's output as it is)")
+                   help="acoustic units through the centroid vocoder: Griffin-Lim iterations over each whole "
+                        "utterance (default 0: the streaming vocoder's output as it is)")
+    p.add_argument("--vocoder", choices=VOCODERS, default="auto",
+                   help="acoustic units: the codebook's neural vocoder when it has one (auto, the default), that "
+                        "or nothing (neural), or the codebook's own centroid vocoder (centroid)")
     p.set_defaults(handler=cmd_say)
 
     # converse -------------------------------------------------------------
@@ -5592,7 +5599,11 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--tempo", type=nonneg_float, default=1.0, help="the voice's pace (default 1)")
     group.add_argument("--gain", type=nonneg_float, default=0.5, help="peak level as a share of full scale (default 0.5)")
     group.add_argument("--polish", type=nonneg_int, default=0, metavar="N",
-                       help="acoustic units: Griffin-Lim iterations over the whole reply (default 0)")
+                       help="acoustic units through the centroid vocoder: Griffin-Lim iterations over the whole "
+                            "reply (default 0)")
+    group.add_argument("--vocoder", choices=VOCODERS, default="auto",
+                       help="acoustic units: the codebook's neural vocoder when it has one (auto), that or nothing "
+                            "(neural), or the codebook's own centroid vocoder (centroid)")
     a.set_defaults(handler=cmd_speech_talk)
 
     a = actions.add_parser(

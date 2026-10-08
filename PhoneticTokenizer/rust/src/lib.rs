@@ -10,6 +10,7 @@ pub mod g2p;
 pub mod json;
 pub mod lexicon;
 pub mod mt;
+pub mod neural;
 pub mod numbers;
 pub mod phones;
 pub mod phonotactics;

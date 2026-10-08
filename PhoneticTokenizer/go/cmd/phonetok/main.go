@@ -46,13 +46,17 @@ commands:
   hear WAV...             the acoustic units of recordings: sounds learned, nothing written down (--frames)
   learn WAV...            learn a codebook of acoustic units from recordings (--units, --seed, --iterations,
                           --note, --out FILE)
-  replay UNIT...          units spoken back through the vocoder (--out, --play, --raw, --polish, --pitch, --gain);
-                          units on stdin when none are given
+  replay UNIT...          units spoken back through the vocoder (--out, --play, --raw, --polish, --pitch, --gain,
+                          --use auto|neural|centroid); units on stdin when none are given
   codebook [FILE]         what a codebook holds (the bundled one when no file is named)
+  vocoder info [FILE]     what a neural vocoder file holds (the codebook's when no file is named); training one
+                          is the Python package's (phonetok vocoder train, with numpy)
 
 options (after the command):
   --level L  --no-stress  --no-boundaries  --no-pauses  --core  --lexicon FILE  --json
-  --codebook FILE         the codebook of acoustic units (hear, replay; the bundled one otherwise)`)
+  --codebook FILE         the codebook of acoustic units (hear, replay; the bundled one otherwise)
+  --vocoder FILE          the neural vocoder (replay, vocoder; else $PHONETOK_VOCODER, else the .vocoder.json
+                          beside the codebook, else none)`)
 }
 
 func main() {
@@ -92,6 +96,8 @@ func run(args []string) int {
 	iterations := fs.Int("iterations", 50, "Lloyd iterations at most (learn)")
 	note := fs.String("note", "", "a line to keep in the codebook about where the audio came from (learn)")
 	polish := fs.Int("polish", 0, "Griffin-Lim iterations over the whole utterance (replay; 0 = streamed)")
+	vocoderPath := fs.String("vocoder", "", "the neural vocoder file (replay, vocoder)")
+	use := fs.String("use", "auto", "which vocoder replay uses: auto (the neural one when there is one), neural or centroid")
 	// options may follow the positional arguments, as in the Python CLI
 	var positional []string
 	var flags []string
@@ -475,15 +481,21 @@ func run(args []string) int {
 			[]string{fmt.Sprintf("%d units learned from %d frames (%.1f s of audio), inertia %.1f: written to %s",
 				book.K(), total, seconds, book.Inertia, *out)})
 	case "replay":
-		book, err := loadBook(*codebookPath)
+		tok, err := loadTokenizer(*codebookPath, *vocoderPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
 			return 1
 		}
-		tok, err := phonetok.NewAcousticTokenizer(book, true)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
-			return 1
+		book := tok.Book
+		var neural *bool
+		switch *use {
+		case "auto":
+		case "neural", "centroid":
+			choice := *use == "neural"
+			neural = &choice
+		default:
+			fmt.Fprintf(os.Stderr, "phonetok: --use takes auto, neural or centroid, not %q\n", *use)
+			return 2
 		}
 		var units []string
 		if len(positional) > 0 {
@@ -550,7 +562,12 @@ func run(args []string) int {
 				return 1
 			}
 		default:
-			pcm, err := tok.Synthesize(units, *polish, *gain, *pitch)
+			vocoder, err := tok.VocoderName(neural)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			pcm, err := tok.SynthesizeWith(units, *polish, *gain, *pitch, neural)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
 				return 1
@@ -560,9 +577,79 @@ func run(args []string) int {
 				return 1
 			}
 			seconds := float64(len(pcm)) / 2 / float64(rate)
-			emit(map[string]any{"path": *out, "seconds": seconds, "rate": rate, "bytes": len(pcm) + 44, "polish": *polish},
-				[]string{fmt.Sprintf("%.2f s of speech written to %s (%d Hz)", seconds, *out, rate)})
+			emit(map[string]any{"path": *out, "seconds": seconds, "rate": rate, "bytes": len(pcm) + 44, "polish": *polish,
+				"vocoder": vocoder},
+				[]string{fmt.Sprintf("%.2f s of speech written to %s (%d Hz, the %s vocoder)", seconds, *out, rate, vocoder)})
 		}
+	case "vocoder":
+		action := ""
+		if len(positional) > 0 {
+			action = positional[0]
+		}
+		if action != "info" {
+			fmt.Fprintf(os.Stderr, "phonetok: `vocoder %s` is not this port's; `vocoder info [FILE]` is, and training is the "+
+				"Python package's (phonetok vocoder train, with numpy)\n", action)
+			return 2
+		}
+		tok, err := loadTokenizer(*codebookPath, *vocoderPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+			return 1
+		}
+		var vocoder *phonetok.UnitVocoder
+		path := ""
+		if len(positional) > 1 {
+			path = positional[1]
+			if vocoder, err = phonetok.LoadVocoder(path); err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+		} else {
+			if vocoder, err = tok.Neural(); err != nil {
+				fmt.Fprintf(os.Stderr, "phonetok: %v\n", err)
+				return 1
+			}
+			if vocoder == nil {
+				fmt.Fprintln(os.Stderr, "phonetok: no vocoder for this codebook")
+				return 1
+			}
+			switch {
+			case *vocoderPath != "":
+				path = *vocoderPath
+			case os.Getenv("PHONETOK_VOCODER") != "":
+				path = os.Getenv("PHONETOK_VOCODER")
+			case tok.Source != "":
+				path = phonetok.VocoderPathFor(tok.Source)
+			default:
+				path = "(bundled)"
+			}
+		}
+		d := vocoder.Describe()
+		matches := vocoder.Matches(tok.Book)
+		dilations := make([]string, 0, len(vocoder.Spec.Dilations))
+		for _, dil := range vocoder.Spec.Dilations {
+			dilations = append(dilations, strconv.Itoa(dil))
+		}
+		which := "for"
+		if !matches {
+			which = "NOT for"
+		}
+		lines := []string{
+			fmt.Sprintf("a vocoder of %d parameters over %d units: %d channels, kernel %d, dilations %s (%.0f ms of context "+
+				"either side): %s", vocoder.Spec.Parameters(), vocoder.Spec.Units, vocoder.Spec.Channels, vocoder.Spec.Kernel,
+				strings.Join(dilations, " "), d["context_seconds"].(float64)*1000, path),
+			which + " this codebook",
+		}
+		if vocoder.Note != "" {
+			lines = append(lines, vocoder.Note)
+		}
+		if vocoder.Trained != nil {
+			trained, _ := json.Marshal(vocoder.Trained)
+			lines = append(lines, "trained: "+string(trained))
+		}
+		d["path"] = path
+		d["matches"] = matches
+		emit(d, lines)
 	case "codebook":
 		path := ""
 		if len(positional) > 0 {
@@ -656,12 +743,29 @@ func loadBook(path string) (*phonetok.Codebook, error) {
 	return phonetok.LoadCodebook(path)
 }
 
+// loadTokenizer is the acoustic tokenizer over the codebook at path (or the bundled one), its neural vocoder
+// the file named (or found beside the codebook, or the bundled one).
+func loadTokenizer(path, vocoder string) (*phonetok.AcousticTokenizer, error) {
+	var tok *phonetok.AcousticTokenizer
+	var err error
+	if path == "" {
+		tok, err = phonetok.NewAcousticTokenizer(nil, true)
+	} else {
+		tok, err = phonetok.LoadAcousticTokenizer(path, true)
+	}
+	if err != nil {
+		return nil, err
+	}
+	tok.VocoderPath = vocoder
+	return tok, nil
+}
+
 var valueGiven = map[string]bool{}
 
 func takesValue(flag string) bool {
 	switch strings.TrimLeft(flag, "-") {
 	case "level", "lexicon", "limit", "count", "seed", "syllables", "out", "rate", "pitch", "tempo", "gain",
-		"codebook", "units", "iterations", "note", "polish":
+		"codebook", "units", "iterations", "note", "polish", "vocoder", "use":
 		return true
 	}
 	return false

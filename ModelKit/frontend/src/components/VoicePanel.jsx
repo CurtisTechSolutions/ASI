@@ -75,6 +75,7 @@ export default function VoicePanel({ status }) {
   const [pitch, setPitch] = useStoredState("voice.pitch", "120");
   const [tempo, setTempo] = useStoredState("voice.tempo", "1");
   const [gain, setGain] = useStoredState("voice.gain", "0.5");
+  const [vocoder, setVocoder] = useStoredState("voice.vocoder", "auto");
   const [silenceMs, setSilenceMs] = useStoredState("voice.silenceMs", "700");
   const [threshold, setThreshold] = useStoredState("voice.threshold", "0.02");
   const [mode, setMode] = useStoredState("voice.mode", "beam");
@@ -113,7 +114,8 @@ export default function VoicePanel({ status }) {
 
   useEffect(() => {
     settings.current = {
-      answer, ollamaModel, url, persona, train, epochs, learnReply, wordsOnly, speak, pitch, tempo, gain, mode, maxLength,
+      answer, ollamaModel, url, persona, train, epochs, learnReply, wordsOnly, speak, pitch, tempo, gain, vocoder, mode,
+      maxLength,
     };
   });
 
@@ -148,6 +150,7 @@ export default function VoicePanel({ status }) {
       pitch: parseNumber(s.pitch, 120),
       tempo: parseNumber(s.tempo, 1),
       gain: parseNumber(s.gain, 0.5),
+      vocoder: s.vocoder,
       mode: s.mode,
       max_length: Math.max(0, parseInteger(s.maxLength, 60)),
       ...(s.persona.trim() ? { persona: s.persona.trim() } : {}),
@@ -427,12 +430,24 @@ export default function VoicePanel({ status }) {
             <NumberField label="Pitch (Hz)" value={pitch} onChange={setPitch} step="1" min="1" />
             <NumberField label="Tempo" value={tempo} onChange={setTempo} step="0.1" min="0.1" />
             <NumberField label="Gain" value={gain} onChange={setGain} step="0.05" min="0" max="1" />
+            {info && info.acoustic ? (
+              <SelectField
+                label="Vocoder (acoustic units)"
+                value={vocoder}
+                onChange={setVocoder}
+                options={[
+                  ["auto", `auto (${info.vocoder || "the codebook's"})`],
+                  ["neural", "neural (the learned one, or nothing)"],
+                  ["centroid", "centroid (the codebook's own)"],
+                ]}
+              />
+            ) : null}
             <NumberField label="Silence that ends an utterance (ms)" value={silenceMs} onChange={setSilenceMs} step="50" min="200" hint="takes effect when listening is started again" />
             <NumberField label="Sensitivity (level)" value={threshold} onChange={setThreshold} step="0.005" min="0.001" max="0.5" hint="lower hears quieter speech; takes effect when listening is started again" />
           </div>
           <p className="muted">
             {info
-              ? `The model speaks ${info.encoding} through its ${info.decoder}${info.ollama ? `; Ollama: ${info.ollama.model} at ${info.ollama.url}` : ""}.`
+              ? `The model speaks ${info.encoding} through its ${info.decoder}${info.vocoder ? ` (the ${info.vocoder} vocoder)` : ""}${info.ollama ? `; Ollama: ${info.ollama.model} at ${info.ollama.url}` : ""}.`
               : ""}
           </p>
         </div>

@@ -108,6 +108,8 @@ pub struct VoiceOptions {
     pub tempo: f64,
     pub gain: f64,
     pub polish: i64,
+    /// How acoustic units are spoken ([`crate::voice::VOCODERS`]).
+    pub vocoder: String,
     pub chunk: i64,
 }
 
@@ -143,6 +145,7 @@ impl Default for VoiceOptions {
             tempo: 1.0,
             gain: 0.5,
             polish: 0,
+            vocoder: "auto".to_string(),
             chunk: CHUNK_SAMPLES as i64,
         }
     }
@@ -177,6 +180,7 @@ impl VoiceOptions {
                 "'chunk' and 'k' must be at least 1; 'polish', 'max_length' and 'context' at least 0".to_string(),
             );
         }
+        crate::voice::vocoder_choice(&self.vocoder)?;
         Ok(())
     }
 
@@ -188,6 +192,7 @@ impl VoiceOptions {
             tempo: self.tempo,
             gain: self.gain,
             polish: self.polish.max(0) as usize,
+            vocoder: self.vocoder.clone(),
         }
     }
 }
@@ -570,8 +575,22 @@ pub fn describe(encoding: Encoding, ollama: Option<&OllamaClient>) -> Json {
     Json::obj([
         ("speakers", Json::strs([SPEAKERS.0, SPEAKERS.1])),
         ("answers", Json::strs(ANSWERS)),
+        ("vocoders", Json::strs(crate::voice::VOCODERS)),
         ("encoding", Json::str(encoding.to_string())),
         ("decoder", Json::str(decoder_name(encoding))),
+        (
+            "vocoder",
+            if encoding.unit == Unit::Acoustic {
+                // a vocoder file that is not the codebook's: the tab says so, the turn fails
+                match crate::voice::vocoder_name(encoding, "auto") {
+                    Ok(Some(name)) => Json::str(name),
+                    Ok(None) => Json::Null,
+                    Err(e) => Json::str(format!("error: {e}")),
+                }
+            } else {
+                Json::Null
+            },
+        ),
         ("acoustic", Json::Bool(encoding.unit == Unit::Acoustic)),
         ("default_rate", Json::Int(DEFAULT_RATE)),
         ("chunk", Json::Int(CHUNK_SAMPLES as i64)),
@@ -724,6 +743,7 @@ pub(crate) fn voice_options(form: &Form) -> Result<VoiceOptions, ApiError> {
         tempo: float_option(form, "tempo", 1.0)?,
         gain: float_option(form, "gain", 0.5)?,
         polish: int_option(form, "polish", 0)?,
+        vocoder: form.text("vocoder", "auto"),
         chunk: CHUNK_SAMPLES as i64,
     };
     options.validate().map_err(ApiError::bad_request)?;
@@ -1059,6 +1079,7 @@ pub fn talk_cli(ctx: &Ctx) -> Result<(), String> {
         tempo: a.float("tempo", 1.0)?,
         gain: a.float("gain", 0.5)?,
         polish: a.int("polish", 0)?,
+        vocoder: a.str("vocoder", "auto"),
         ..defaults
     };
     options.validate()?;

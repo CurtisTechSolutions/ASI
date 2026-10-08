@@ -2090,7 +2090,8 @@ class TestGoServer(unittest.TestCase):
         self.assertEqual(status, 200, info)
         self.assertEqual((info["speakers"], info["answers"], info["encoding"], info["decoder"], info["acoustic"]),
                          (["You", "Model"], ["auto", "model", "ollama", "none"], "char:3:1", "voice", False))
-        self.assertEqual(set(info), {"speakers", "answers", "encoding", "decoder", "acoustic", "default_rate", "chunk",
+        self.assertEqual(set(info), {"speakers", "answers", "vocoders", "encoding", "decoder", "vocoder", "acoustic",
+                                     "default_rate", "chunk",
                                      "transcription", "ollama"})
         status, doc, _ = self.client.post("/api/train", {"texts": _VOICE_CORPUS, "epochs": 2})
         self.assertEqual(status, 202, doc)

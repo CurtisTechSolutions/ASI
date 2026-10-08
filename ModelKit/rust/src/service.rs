@@ -1747,7 +1747,9 @@ pub(crate) fn voice_options(r: &Request) -> Result<crate::voice::SayOptions, Api
         tempo: r.number("tempo", 1.0)?,
         gain: r.number("gain", 0.5)?,
         polish: r.usize("polish", 0)?,
+        vocoder: r.text("vocoder", "auto"),
     };
+    crate::voice::vocoder_choice(&o.vocoder).map_err(ApiError::bad_request)?;
     if o.rate == 0 {
         return Err(ApiError::bad_request("'rate' must be at least 1"));
     }
@@ -1783,8 +1785,8 @@ pub(crate) fn say_texts(svc: &Arc<Service>, texts: Vec<String>, o: &crate::voice
     Ok(doc)
 }
 
-/// `POST /api/say`: `{texts | text, rate, pitch, tempo, gain, polish}` ->
-/// `{wav_base64, rate, samples, seconds, encoding, decoder, count, utterances}`.
+/// `POST /api/say`: `{texts | text, rate, pitch, tempo, gain, polish, vocoder}` ->
+/// `{wav_base64, rate, samples, seconds, encoding, decoder, vocoder, count, utterances}`.
 fn say(svc: &Arc<Service>, r: &Request) -> Answer {
     let form = crate::multipart::Form::json(r)?;
     if form.field("texts").is_none() && form.field("text").is_none() {

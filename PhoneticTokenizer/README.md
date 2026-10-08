@@ -204,8 +204,11 @@ that trains it on phones.
 phonetok hear speech.wav                                   # q2 q28 q55 q5 q60 q3 ...
 phonetok learn recordings/*.wav --units 64 --out mine.tsv  # a codebook of your own, unsupervised
 phonetok hear speech.wav --codebook mine.tsv
-phonetok replay q2 q28 q55 q5 --out back.wav               # units spoken back; --play, --raw, --polish 32
+phonetok replay q2 q28 q55 q5 --out back.wav               # units spoken back through the neural vocoder
+phonetok replay q2 q28 q55 q5 --use centroid --polish 32   # ... or the codebook's own, polished; --play, --raw stream it
 phonetok codebook                                          # what the bundled codebook holds
+phonetok vocoder train recordings/*.wav --codebook mine.tsv # a neural vocoder for a codebook of your own (needs numpy)
+phonetok vocoder info                                      # what the bundled vocoder is, and how it measured
 ```
 
 **Learning** is unsupervised: the frames of any number of recordings, k-means++
@@ -230,13 +233,59 @@ recordings. It is the synthesizer's voice, not a person's: for real speech, lear
 a codebook from real recordings - a few minutes of audio is enough, and `learn`
 needs nothing but the WAV files.
 
+### The neural vocoder
+
+A centroid is the average of thousands of frames, and a voice made of averages
+is blurred. `neural.py` learns the vocoder's other half from recordings: the
+same excitation - the pulse train at the voice's pitch, each pulse spread into a
+four-millisecond chirp so the waveform peaks where a recording's does, and the
+same deterministic noise - runs on under the utterance, and a small network (an
+embedding of the
+unit codes, six residual blocks of dilated convolutions at the frame rate, a
+head, and every unit's own spectral template) writes, for every frame and every
+bin of the transform, how loud the pulse train and how loud the noise should be
+there. A source and a filter, as the formant synthesizer is; the filter is the
+units' own, and a frame hears the units 360 ms either side of it. The frames
+are overlap-added exactly as the centroid vocoder's are, so the Go and Rust
+ports run the same weights through the same excitation and hear the same
+samples, to the last bit.
+
+Training needs `numpy` (`pip install "phonetok[vocoder]"`) and recordings,
+nothing else: the recordings become codes under the codebook, their pitch is
+tracked so the pulse train can follow it, and the network is fitted by gradient
+descent - the gradients written out by hand - on a multi-resolution spectral
+loss (spectral convergence and log-magnitude distance at three transform sizes)
+plus the distance between the log-mel frames the analysis hears in the original
+and in the output. A few minutes of audio trains in a few minutes on a laptop.
+The weights are one JSON file beside the codebook (`mine.vocoder.json` for
+`mine.tsv`, or wherever `PHONETOK_VOCODER` points), the tensors as base64
+float32 with the codebook's fingerprint, and running one needs nothing but the
+standard library (`numpy` makes it fast when it is there). `replay` uses it
+whenever the codebook has one; `--use centroid` keeps the codebook's own.
+
+**The bundled vocoder** (`data/acoustic.vocoder.json`, `tests/make_vocoder.py`)
+is trained on the synthesizer's speech in four voices, the last sentence of each
+held out. Over the held-out speech its log-mel distance to the original is about
+half the centroid vocoder's (`phonetok vocoder info` prints the report). The
+round trip - a frame heard again as the same unit - stays the centroid vocoder's
+by construction: its frames *are* the centroids, and the codebook hears every
+frame against the utterance's mean, so a vocoder whose silences are a little
+louder than the recording's moves every unit; the neural vocoder is measured by
+what it sounds like, not by that.
+
 ```python
 from phonetok import AcousticTokenizer
 tok = AcousticTokenizer()                                  # the bundled codebook, or a path to one
 units = tok.hear(open("speech.wav", "rb").read())          # ['q2', 'q28', 'q55', ...]
 tok.text("q2 q2 q28")                                      # 'q2 q28': the text form, idempotent
-pcm = tok.synthesize(units, polish=8)                      # 16-bit PCM at 16 kHz
-for chunk in tok.stream(units): ...                        # as the units come
+pcm = tok.synthesize(units)                               # 16-bit PCM at 16 kHz, the neural vocoder when there is one
+pcm = tok.synthesize(units, neural=False, polish=8)        # the codebook's own, Griffin-Lim polished
+for chunk in tok.stream(units): ...                        # as the units come (the codebook's own)
+tok.neural                                                 # the UnitVocoder found for the codebook, or None
+
+from phonetok.neural import train
+vocoder, report = train(tok.codebook, recordings, hold_out=2)  # recordings: samples at 16 kHz; needs numpy
+vocoder.dump("mine.vocoder.json")
 ```
 
 ## In RadixCyclicNN
@@ -262,9 +311,10 @@ sounds through this package. See `../RadixCyclicNN/README.md`, *The encoding*.
 | `phonetok/tokenizer.py` | the four levels, the text form, the ids, the way back |
 | `phonetok/synth.py` | the voice |
 | `phonetok/acoustic.py` | the acoustic units: log-mel frames, the k-means codebook, the vocoder |
+| `phonetok/neural.py` | the neural vocoder: the model, its file, the numpy trainer |
 | `phonetok/cli.py` | the command line |
-| `phonetok/data/` | `core.dict`, `rules.lts`, `voice.tsv`, `acoustic.tsv`, the CMU licence |
-| `tests/` | the suite, `make_parity.py` and `parity.json`, `make_codebook.py` |
+| `phonetok/data/` | `core.dict`, `rules.lts`, `voice.tsv`, `acoustic.tsv`, `acoustic.vocoder.json`, the CMU licence |
+| `tests/` | the suite, `make_parity.py` and `parity.json`, `make_codebook.py`, `make_vocoder.py` |
 | `go/`, `rust/` | the ports |
 
 Licensed under the repository's source-available licence (`../LICENSE`); the

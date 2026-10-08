@@ -15,6 +15,9 @@ dependencies = []
 [project.optional-dependencies]
 # The full 135 000-word CMU Pronouncing Dictionary; without it the core lexicon and the rules do the work.
 cmudict = ["cmudict"]
+# Training a neural vocoder for the acoustic units (`phonetok vocoder train`), and fast inference with one;
+# a trained vocoder runs on the standard library alone.
+vocoder = ["numpy"]
 
 [project.scripts]
 phonetok = "phonetok.cli:main"

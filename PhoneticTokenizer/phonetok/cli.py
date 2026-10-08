@@ -17,17 +17,22 @@
     phonetok learn *.wav --units 64 --out c.tsv  learn a codebook of acoustic units from recordings (unsupervised)
     phonetok replay q3 q17 q4 --out back.wav     units spoken back through the vocoder (units on stdin when none given)
     phonetok codebook [FILE]                     what a codebook holds (the bundled one when no file is named)
+    phonetok vocoder train *.wav --out v.json    train a neural vocoder for the codebook from recordings (needs numpy)
+    phonetok vocoder info [FILE]                 what a vocoder file holds; `vocoder eval *.wav` measures one
 
 Every command takes ``--json`` for one JSON document on stdout, and the
 tokenizer options ``--level``, ``--no-stress``, ``--no-boundaries``,
 ``--no-pauses``, ``--core`` (the bundled lexicon only) and ``--lexicon FILE``.
-The acoustic commands take ``--codebook FILE`` (the bundled codebook otherwise).
+The acoustic commands take ``--codebook FILE`` (the bundled codebook otherwise)
+and ``--vocoder FILE`` (the neural vocoder; otherwise ``$PHONETOK_VOCODER``, or
+the ``.vocoder.json`` beside the codebook, or none).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 
@@ -239,7 +244,13 @@ def cmd_say(args: argparse.Namespace) -> int:
 
 
 def _acoustic(args: argparse.Namespace, collapse: bool = True) -> AcousticTokenizer:
-    return AcousticTokenizer(args.codebook, collapse=collapse)
+    return AcousticTokenizer(args.codebook, collapse=collapse, vocoder=getattr(args, "vocoder", None))
+
+
+def _neural_choice(args: argparse.Namespace) -> bool | None:
+    """``--use auto|neural|centroid`` as :meth:`AcousticTokenizer.synthesize` takes it."""
+    choice = getattr(args, "use", "auto")
+    return None if choice == "auto" else choice == "neural"
 
 
 def cmd_hear(args: argparse.Namespace) -> int:
@@ -316,12 +327,14 @@ def cmd_replay(args: argparse.Namespace) -> int:
             out.write(chunk)
             out.flush()
         return 0
-    pcm = tok.synthesize(list(units), polish=args.polish, gain=args.gain, pitch=args.pitch)
+    neural = _neural_choice(args)
+    vocoder = tok.vocoder_name(neural)
+    pcm = tok.synthesize(list(units), polish=args.polish, gain=args.gain, pitch=args.pitch, neural=neural)
     path = args.out or "replay.wav"
     write_wav(path, pcm, rate)
     doc = {"path": path, "seconds": duration(pcm, rate), "rate": rate, "bytes": len(wav_bytes(pcm, rate)),
-           "polish": args.polish}
-    _emit(args, doc, [f"{doc['seconds']:.2f} s of speech written to {path} ({rate} Hz)"])
+           "polish": args.polish, "vocoder": vocoder}
+    _emit(args, doc, [f"{doc['seconds']:.2f} s of speech written to {path} ({rate} Hz, the {vocoder} vocoder)"])
     return 0
 
 
@@ -346,6 +359,84 @@ def cmd_codebook(args: argparse.Namespace) -> int:
         lines.append(f"{book.name(i):6s} {book.counts[i]:7d} {book.counts[i] / total * 100 if total else 0:5.1f}% "
                      f"{book.runs[i]:5.1f}")
     _emit(args, doc, lines)
+    return 0
+
+
+def _recordings(paths: list[str], rate: int) -> tuple[list[list[float]], float]:
+    recordings = []
+    seconds = 0.0
+    for path in paths:
+        with open(path, "rb") as fh:
+            samples, src = read_wav(fh.read())
+        samples = resample(samples, src, rate)
+        seconds += len(samples) / rate
+        recordings.append(samples)
+    return recordings, seconds
+
+
+def cmd_vocoder(args: argparse.Namespace) -> int:
+    """The neural vocoder: train one for the codebook, say what one holds, or measure one against recordings."""
+    from . import neural
+
+    tok = _acoustic(args)
+    book = tok.codebook
+    if args.action == "train":
+        recordings, seconds = _recordings(args.wav, tok.analysis.rate)
+        continued = neural.UnitVocoder.load(args.resume) if args.resume else None
+        note = args.note or f"trained on {len(args.wav)} recording(s), {seconds:.0f} s"
+        say = (lambda line: sys.stderr.write(line + "\n")) if not args.quiet else None
+        vocoder, report = neural.train(
+            book, recordings, steps=args.steps, segment=args.segment, batch=args.batch, lr=args.lr, seed=args.seed,
+            channels=args.channels, kernel=args.kernel, dilations=tuple(args.dilations), hold_out=args.hold_out,
+            mel_weight=args.mel_weight, note=note, log=say, vocoder=continued, polish=args.polish,
+        )
+        out = args.out or (neural.vocoder_path_for(tok.source) if tok.source else "codebook.vocoder.json")
+        vocoder.dump(out)
+        doc = {"path": out, "recordings": len(args.wav), "seconds": seconds, "loss": report["loss"],
+               "held_out": report.get("held_out"), "elapsed": report["elapsed"], **vocoder.describe()}
+        lines = [f"a vocoder of {doc['parameters']} parameters trained on {seconds:.1f} s of audio in "
+                 f"{report['elapsed']:.0f} s (loss {report['loss']:.3f}): written to {out}"]
+        if report.get("held_out"):
+            h = report["held_out"]
+            lines.append(f"held out {h['recordings']} recording(s): log-mel distance {h['neural_logmel']:.3f} neural vs "
+                         f"{h['griffin_logmel']:.3f} centroid, round trip {h['neural_round_trip'] * 100:.0f}% vs "
+                         f"{h['griffin_round_trip'] * 100:.0f}%")
+        _emit(args, doc, lines)
+        return 0
+    if args.action == "info":
+        if args.wav:
+            vocoder = neural.UnitVocoder.load(args.wav[0])
+            path = args.wav[0]
+        else:
+            vocoder = tok.neural
+            path = tok.vocoder_path or os.environ.get("PHONETOK_VOCODER") or (
+                neural.vocoder_path_for(tok.source) if tok.source else "")
+            if vocoder is None:
+                sys.stderr.write("phonetok: no vocoder for this codebook\n")
+                return 1
+        d = vocoder.describe()
+        doc = {"path": path, "matches": vocoder.matches(book), **d}
+        lines = [f"a vocoder of {d['parameters']} parameters over {d['units']} units: {d['channels']} channels, kernel "
+                 f"{d['kernel']}, dilations {' '.join(map(str, d['dilations']))} ({d['context_seconds'] * 1000:.0f} ms of "
+                 f"context either side): {path}",
+                 f"{'for' if doc['matches'] else 'NOT for'} this codebook"]
+        if d["note"]:
+            lines.append(d["note"])
+        if d["trained"]:
+            lines.append("trained: " + json.dumps(d["trained"], sort_keys=True))
+        _emit(args, doc, lines)
+        return 0
+    # eval
+    vocoder = tok.neural
+    if vocoder is None:
+        sys.stderr.write("phonetok: no vocoder for this codebook\n")
+        return 1
+    recordings, seconds = _recordings(args.wav, tok.analysis.rate)
+    doc = neural.evaluate(vocoder, book, recordings, polish=args.polish)
+    doc["seconds"] = seconds
+    _emit(args, doc, [f"{doc['recordings']} recording(s), {seconds:.1f} s: log-mel distance {doc['neural_logmel']:.3f} "
+                      f"neural vs {doc['griffin_logmel']:.3f} centroid ({args.polish} Griffin-Lim iterations); round trip "
+                      f"{doc['neural_round_trip'] * 100:.0f}% vs {doc['griffin_round_trip'] * 100:.0f}%"])
     return 0
 
 
@@ -459,6 +550,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     acoustic = argparse.ArgumentParser(add_help=False)
     acoustic.add_argument("--codebook", metavar="FILE", help="the codebook of acoustic units (default: the bundled one)")
+    acoustic.add_argument("--vocoder", metavar="FILE", help="the neural vocoder (default: $PHONETOK_VOCODER, or the "
+                                                             ".vocoder.json beside the codebook, or none)")
     acoustic.add_argument("--json", action="store_true", help="one JSON document on stdout")
     p = sub.add_parser("hear", parents=[acoustic], help="the acoustic units of recordings (WAV): sounds learned, nothing written")
     p.add_argument("wav", nargs="+", metavar="WAV")
@@ -477,13 +570,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", metavar="FILE", help="the WAV file to write (default replay.wav)")
     p.add_argument("--play", action="store_true", help="play through aplay / paplay / ffplay / play / afplay as it is made")
     p.add_argument("--raw", action="store_true", help="16-bit mono PCM on stdout, streamed")
-    p.add_argument("--polish", type=int, default=0, help="Griffin-Lim iterations over the whole utterance (default 0: streamed)")
+    p.add_argument("--polish", type=int, default=0, help="Griffin-Lim iterations over the whole utterance with the "
+                                                        "centroid vocoder (default 0: streamed)")
     p.add_argument("--pitch", type=float, default=PITCH, help=f"the voice's pitch in Hz (default {PITCH:g})")
     p.add_argument("--gain", type=float, default=1.0, help="a multiplier on the level (default 1)")
+    p.add_argument("--use", choices=("auto", "neural", "centroid"), default="auto",
+                   help="which vocoder: the neural one when the codebook has one (auto, the default), the neural one "
+                        "or nothing, or the codebook's own centroid vocoder (--play and --raw always stream through it)")
     p.set_defaults(func=cmd_replay)
     p = sub.add_parser("codebook", parents=[acoustic], help="what a codebook holds")
     p.add_argument("file", nargs="?", metavar="FILE", help="the codebook (default: the bundled one)")
     p.set_defaults(func=cmd_codebook)
+    p = sub.add_parser("vocoder", parents=[acoustic], help="the neural vocoder: train, info or eval")
+    p.add_argument("action", choices=("train", "info", "eval"), help="train one from recordings (WAV, needs numpy); "
+                   "what a vocoder file holds (FILE, or the codebook's); measure the codebook's against recordings")
+    p.add_argument("wav", nargs="*", metavar="WAV|FILE")
+    p.add_argument("--out", metavar="FILE", help="the vocoder file to write (default: beside the codebook)")
+    p.add_argument("--steps", type=int, default=2000, help="training steps (default 2000)")
+    p.add_argument("--batch", type=int, default=8, help="segments per step (default 8)")
+    p.add_argument("--segment", type=int, default=200, help="frames per segment (default 200: two seconds)")
+    p.add_argument("--lr", type=float, default=2e-3, help="the learning rate (default 0.002)")
+    p.add_argument("--seed", type=int, default=1, help="the seed of the weights and the draws (default 1)")
+    p.add_argument("--channels", type=int, default=64, help="the network's width (default 64)")
+    p.add_argument("--kernel", type=int, default=5, help="the convolutions' width in frames, odd (default 5)")
+    p.add_argument("--dilations", type=int, nargs="+", default=[1, 2, 4, 8, 1, 2], help="one per block (default 1 2 4 8 1 2)")
+    p.add_argument("--hold-out", type=int, default=0, help="recordings (the last ones) kept back and measured (default 0)")
+    p.add_argument("--mel-weight", type=float, default=1.0, help="the weight of the log-mel term (default 1)")
+    p.add_argument("--polish", type=int, default=32, help="Griffin-Lim iterations of the centroid vocoder the measure "
+                                                         "compares against (default 32)")
+    p.add_argument("--resume", metavar="FILE", help="continue training this vocoder instead of starting fresh")
+    p.add_argument("--note", default="", help="a line to keep in the file about where the audio came from")
+    p.add_argument("--quiet", action="store_true", help="no progress on stderr")
+    p.set_defaults(func=cmd_vocoder)
     return parser
 
 

@@ -132,6 +132,13 @@ class TestPythonHoldsToTheAcousticFixture(unittest.TestCase):
             self.assertEqual(len(values), spec["samples"], key)
             got = values[spec["at"]:spec["at"] + len(spec["values"])]
             self.assertLessEqual(max(abs(g - w) for g, w in zip(got, spec["values"])), 2, key)
+        # the bundled neural vocoder: the same units through the learned filter over the same excitation
+        spec = doc["neural"]
+        pcm = AcousticTokenizer(book).synthesize(spec["units"], pitch=spec["pitch"], neural=True)
+        values = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+        self.assertEqual(len(values), spec["samples"], "neural")
+        got = values[spec["at"]:spec["at"] + len(spec["values"])]
+        self.assertLessEqual(max(abs(g - w) for g, w in zip(got, spec["values"])), 2, "neural")
 
 
 def _build_go():
@@ -298,13 +305,24 @@ class PortParity(unittest.TestCase):
             back = os.path.join(tmp, "back.wav")
             units = heard.units[:15]
             for polish in (0, 2):
-                self.run_cli("replay", *units, "--out", back, "--polish", str(polish))
+                self.run_cli("replay", *units, "--out", back, "--polish", str(polish), "--use", "centroid")
                 with open(back, "rb") as fh:
                     samples, rate = read_wav(fh.read())
                 pcm = synthesize(units, book, polish=polish)
                 want = struct.unpack(f"<{len(pcm) // 2}h", pcm)
                 self.assertEqual((rate, len(samples)), (16000, len(want)), polish)
                 self.assertLessEqual(max(abs(s * 32768 - w) for s, w in zip(samples, want)), 2, polish)
+            # the bundled neural vocoder is the port's default over the bundled codebook, as it is here
+            doc = json.loads(self.run_cli("replay", *units, "--out", back, "--json"))
+            self.assertEqual(doc["vocoder"], "neural")
+            with open(back, "rb") as fh:
+                samples, rate = read_wav(fh.read())
+            pcm = ours.synthesize(units)
+            want = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+            self.assertEqual((rate, len(samples)), (16000, len(want)), "neural")
+            self.assertLessEqual(max(abs(s * 32768 - w) for s, w in zip(samples, want)), 2, "neural")
+            info = json.loads(self.run_cli("vocoder", "info", "--json"))
+            self.assertEqual((info["matches"], info["units"]), (True, book.k))
             # and the port's codebook file is read back the same
             self.assertEqual(Codebook.loads(theirs_book.dumps()).centroids, theirs_book.centroids)
 

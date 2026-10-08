@@ -146,20 +146,44 @@ func TestSayIsTheWalkHeardAfterTheFact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spoken.Decoder != "vocoder" || spoken.Rate != 16000 || len(spoken.Utterances) != 2 || spoken.Samples() == 0 {
-		t.Fatalf("units: decoder %q, rate %d, %d utterances, %d samples", spoken.Decoder, spoken.Rate, len(spoken.Utterances), spoken.Samples())
+	// the bundled codebook has its neural vocoder, so that is what speaks unless the centroid vocoder is asked for
+	if spoken.Decoder != "vocoder" || spoken.Vocoder != "neural" || spoken.Rate != 16000 || len(spoken.Utterances) != 2 || spoken.Samples() == 0 {
+		t.Fatalf("units: decoder %q (%q), rate %d, %d utterances, %d samples", spoken.Decoder, spoken.Vocoder, spoken.Rate,
+			len(spoken.Utterances), spoken.Samples())
+	}
+	if doc := spoken.Dict(); doc["vocoder"] != "neural" {
+		t.Errorf("the record says the vocoder was %v", doc["vocoder"])
 	}
 	if !reflect.DeepEqual(spoken.Utterances[1].Tokens, []string{"q1", "q2", "</s>"}) || spoken.Utterances[1].Spelled != "q1 q2" {
 		t.Errorf("units: %v spells %q", spoken.Utterances[1].Tokens, spoken.Utterances[1].Spelled)
 	}
+	centroid := DefaultSayOptions()
+	centroid.Vocoder = "centroid"
+	streamed, err := Say(acoustic, units, centroid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if streamed.Vocoder != "centroid" || streamed.Samples() != spoken.Samples() || bytes.Equal(streamed.PCM, spoken.PCM) {
+		t.Errorf("centroid: %q, %d samples against %d, same audio %v", streamed.Vocoder, streamed.Samples(), spoken.Samples(),
+			bytes.Equal(streamed.PCM, spoken.PCM))
+	}
 	o := DefaultSayOptions()
 	o.Polish = 4
+	o.Vocoder = "centroid"
 	polished, err := Say(acoustic, units, o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if polished.Samples() != spoken.Samples() || bytes.Equal(polished.PCM, spoken.PCM) {
-		t.Errorf("polished: %d samples against %d, same audio %v", polished.Samples(), spoken.Samples(), bytes.Equal(polished.PCM, spoken.PCM))
+	if polished.Vocoder != "centroid" || polished.Samples() != spoken.Samples() || bytes.Equal(polished.PCM, streamed.PCM) {
+		t.Errorf("polished: %d samples against %d, same audio %v", polished.Samples(), spoken.Samples(), bytes.Equal(polished.PCM, streamed.PCM))
+	}
+	bad := DefaultSayOptions()
+	bad.Vocoder = "nope"
+	if _, err := Say(acoustic, units, bad); err == nil || !strings.Contains(err.Error(), "'vocoder'") {
+		t.Errorf("a vocoder that is not one: %v", err)
+	}
+	if said, err := Say(phones, []string{"K AE1 T"}, DefaultSayOptions()); err != nil || said.Vocoder != "" || said.Dict()["vocoder"] != nil {
+		t.Errorf("the voice has no vocoder: %v %v", said, err)
 	}
 	for _, opts := range []SayOptions{DefaultSayOptions(), o} {
 		if _, err := Say(acoustic, []string{"q2 nope"}, opts); err == nil || !strings.Contains(err.Error(), "not a unit") {
