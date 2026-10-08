@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radixpair"
+version = "0.1.0"
+description = "Two primed radix trees connected at every equal node: a count tree written by reading and a reward tree written by outcomes, over a codec of characters, bytes, GPT-2 tokens, byte-pair tokens or the phonetic tokenizer's phonemes and syllables. Standard library only."
+readme = "README.md"
+requires-python = ">=3.11"
+# Licensed under the custom source-available license in ../LICENSE (repository root).
+dependencies = []
+
+[project.optional-dependencies]
+# the phonetic codecs read the sibling PhoneticTokenizer checkout, or the installed package
+phonetic = ["phonetok"]
+# a published tokenizer other than GPT-2's own files
+external = ["tiktoken", "tokenizers"]
+
+[project.scripts]
+radixpair = "radixpair.cli:main"
+
+[tool.setuptools]
+packages = ["radixpair"]

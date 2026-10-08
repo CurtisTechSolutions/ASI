@@ -1,0 +1,6 @@
+target/
+*.json.gz
+*.json.gz.tmp
+!testdata/*.json.gz
+web/node_modules/
+checkpoints/

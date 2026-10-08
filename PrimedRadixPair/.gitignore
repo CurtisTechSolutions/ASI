@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+# model files and checkpoints made while trying it
+*.json.gz
+model.json
+checkpoints/
+# GPT-2's vocabulary files are fetched, not committed (data/gpt2/README.md)
+data/gpt2/encoder.json
+data/gpt2/vocab.bpe
+data/gpt2/vocab.json
+data/gpt2/merges.txt

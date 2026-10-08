@@ -1,0 +1,26 @@
+[package]
+name = "latentpair"
+version = "0.1.0"
+edition = "2021"
+description = "A trained context tokenizer under a primed radix pair: Rust port with a web frontend"
+license = "MIT"
+
+[lib]
+name = "latentpair"
+path = "src/lib.rs"
+
+[[bin]]
+name = "latentpair"
+path = "src/bin/latentpair.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
+rayon = "1"
+base64 = "0.22"
+tiny_http = "0.12"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
