@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LatticeFSM</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#ddd; --accent:#2457c5; --cell:#e9eef8; --good:#1d8a4b; --bad:#b4312b; --panel:#f6f7fa; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#121417; --fg:#e8e8e8; --muted:#9a9a9a; --line:#333; --accent:#7aa2ff; --cell:#1c2230; --good:#4cc27a; --bad:#ff6b63; --panel:#1a1d22; } }
+  :root[data-theme="dark"] { --bg:#121417; --fg:#e8e8e8; --muted:#9a9a9a; --line:#333; --accent:#7aa2ff; --cell:#1c2230; --good:#4cc27a; --bad:#ff6b63; --panel:#1a1d22; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; }
+  h1 { font-size:20px; margin:0 0 4px; } h2 { font-size:15px; margin:0 0 8px; color:var(--muted); font-weight:600; }
+  .sub { color:var(--muted); margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns: 1fr; gap:16px; } @media (min-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:6px 0 2px; }
+  input, select, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
+  input[type=range] { width:100%; padding:0; }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.good { color:var(--good); } button.bad { color:var(--bad); }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
+  .row > * { flex: 1 1 120px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  td, th { border:1px solid var(--line); padding:4px 6px; text-align:center; }
+  td.cell { cursor:pointer; min-width:44px; }
+  td.cell:hover { outline:2px solid var(--accent); }
+  th.acc { color:var(--good); } th.here { outline:2px solid var(--accent); }
+  pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; overflow:auto; font-size:12px; max-height:300px; }
+  .stats { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap:6px; }
+  .stat { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  .stat b { display:block; font-size:12px; color:var(--muted); font-weight:500; }
+  .path { font-family: ui-monospace, monospace; }
+  .path .acc { color:var(--good); font-weight:600; } .path .rej { color:var(--bad); font-weight:600; }
+  .tabs button { margin-right:4px; } .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .err { color:var(--bad); }
+  .curve { height:80px; width:100%; }
+</style>
+</head>
+<body>
+<h1>LatticeFSM</h1>
+<div class="sub">A finite state machine over a dense <span id="shape">?</span> matrix of adaptive edges. Pick a symbol to see its slice: each row is a state, each cell the probability of moving to that column's state on that symbol, under the current stimulation.</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>The matrix</h2>
+    <div class="tabs" id="tabs"></div>
+    <div id="matrix" style="margin-top:8px; overflow:auto"></div>
+    <div id="edge" style="margin-top:8px"></div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>Run a string</h2>
+      <div class="row">
+        <div><label>string (symbols of the alphabet)</label><input id="text" value="abab"></div>
+        <div><label>stimulation <span id="stimv"></span></label><input id="stim" type="range" min="0" max="5" step="0.1"></div>
+        <div><label>temperature</label><input id="temp" type="number" step="0.1" value="1"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" onclick="run(false)">run (traverse)</button>
+        <button onclick="run(true)">ask quietly</button>
+        <button class="good" onclick="credit(1)">reward last run</button>
+        <button class="bad" onclick="credit(-1)">punish last run</button>
+      </div>
+      <div id="run" class="path" style="margin-top:8px"></div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>Teach a language</h2>
+      <div class="row">
+        <div><label>language</label><select id="lang"></select></div>
+        <div><label>episodes</label><input id="episodes" type="number" value="500"></div>
+        <div><button class="primary" onclick="train()">train</button></div>
+      </div>
+      <div id="train" style="margin-top:8px"></div>
+      <svg id="curve" class="curve" viewBox="0 0 400 80" preserveAspectRatio="none"></svg>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>Time, stimulation and the machine</h2>
+      <div class="row">
+        <div><label>ticks</label><input id="ticks" type="number" value="1000"></div>
+        <div><button onclick="tick()">let time pass</button></div>
+        <div><label>surge</label><input id="surge" type="number" step="0.5" value="2"></div>
+        <div><button onclick="stimulate()">stimulate</button></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>states</label><input id="nstates" type="number" value="4"></div>
+        <div><label>alphabet</label><input id="alpha" value="ab"></div>
+        <div><label>accepting (comma-separated)</label><input id="acc" value="0"></div>
+        <div><button onclick="fresh()">new machine</button></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>file</label><input id="file" value="machine.json.gz"></div>
+        <div><button onclick="save()">save</button></div>
+        <div><button onclick="load()">load</button></div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>Stats</h2>
+      <div id="stats" class="stats"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let symbol = null, stats = null;
+async function api(path, body) {
+  const r = await fetch('/api/' + path, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)} : {});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+function fmt(x, d=3) { return typeof x === 'number' ? x.toFixed(d) : x; }
+function showStats(s) {
+  stats = s;
+  $('shape').textContent = s.shape.join(' × ');
+  $('stim').value = s.stimulation; $('stimv').textContent = fmt(s.stimulation, 2);
+  const keys = ['clock','runs','credits','state','stimulation','touched','traversed','total_seen','total_rewarded','total_punished','widest','narrowest','life','temperature'];
+  $('stats').innerHTML = keys.map(k => `<div class="stat"><b>${k}</b>${fmt(s[k], 2)}</div>`).join('');
+}
+async function refresh() {
+  showStats(await api('stats'));
+  const tabs = $('tabs'); tabs.innerHTML = '';
+  if (symbol === null || !stats.alphabet.includes(symbol)) symbol = stats.alphabet[0];
+  for (const a of stats.alphabet) {
+    const b = document.createElement('button'); b.textContent = 'symbol ' + a; b.className = a === symbol ? 'on' : '';
+    b.onclick = () => { symbol = a; refresh(); }; tabs.appendChild(b);
+  }
+  const m = await api('matrix?symbol=' + encodeURIComponent(symbol));
+  const S = m.rows.length;
+  let h = '<table><tr><th>from \\ to</th>' + [...Array(S).keys()].map(t => `<th class="${m.accepting.includes(t)?'acc':''}">${t}${m.accepting.includes(t)?' ✓':''}</th>`).join('') + '</tr>';
+  for (const row of m.rows) {
+    h += `<tr><th class="${row.source===m.state?'here':''}">${row.source}${row.source===m.state?' ←':''}</th>`;
+    for (const e of row.edges) {
+      const a = Math.min(1, e.probability);
+      h += `<td class="cell" title="seen ${e.seen}, width ${fmt(e.width,2)}, net ${fmt(e.net,2)}" style="background: color-mix(in srgb, var(--accent) ${Math.round(a*85)}%, var(--cell))" onclick="showEdge(${row.source},${e.target})">${fmt(e.probability,2)}<br><small>w ${fmt(e.width,1)} · ${e.seen}</small></td>`;
+    }
+    h += '</tr>';
+  }
+  $('matrix').innerHTML = h + '</table>';
+}
+async function showEdge(s, t) {
+  const e = await api(`edge?source=${s}&symbol=${encodeURIComponent(symbol)}&target=${t}`);
+  $('edge').innerHTML = `<b>edge (${s}, ${symbol}, ${t})</b><pre>${JSON.stringify(e, null, 1)}</pre>`;
+}
+async function run(quiet) {
+  try {
+    const r = await api('run', {text: $('text').value, stimulation: +$('stim').value, temperature: +$('temp').value, quiet});
+    const steps = r.transitions.map(t => `${t.source} —${t.symbol}(${fmt(t.probability,2)})→ ${t.target}`).join('  ');
+    $('run').innerHTML = `${quiet ? 'asked quietly: ' : ''}${steps || '(empty string)'} &nbsp; <span class="${r.accepted?'acc':'rej'}">${r.accepted ? 'accepted' : 'rejected'}</span> &nbsp; log p ${fmt(r.log_probability,2)}`;
+    showStats(r.stats); refresh();
+  } catch (e) { $('run').innerHTML = `<span class="err">${e.message}</span>`; }
+}
+async function credit(amount) {
+  const r = await api('credit', {amount}); $('run').innerHTML += ` &nbsp; · credited ${r.credited} edges with ${amount}`; refresh();
+}
+async function train() {
+  $('train').textContent = 'training…';
+  try {
+    const r = await api('train', {language: $('lang').value, episodes: +$('episodes').value});
+    $('train').innerHTML = `<b>${r.language}</b>: accuracy ${fmt(r.before,2)} → <b>${fmt(r.after,2)}</b> after ${r.episodes} episodes. Greedy table: ` +
+      r.table.table.map((row, s) => `${s}:[${row.map((t, a) => r.table.alphabet[a] + '→' + t).join(' ')}]`).join(' ');
+    const pts = r.curve.map(([ep, acc], i) => `${(i/(r.curve.length-1||1))*400},${80 - acc*78}`).join(' ');
+    $('curve').innerHTML = `<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2"/><line x1="0" y1="41" x2="400" y2="41" stroke="var(--line)" stroke-dasharray="4"/>`;
+    refresh();
+  } catch (e) { $('train').innerHTML = `<span class="err">${e.message}</span>`; }
+}
+async function tick() { showStats(await api('tick', {ticks: +$('ticks').value})); refresh(); }
+async function stimulate() { await api('stimulate', {amount: +$('surge').value}); refresh(); }
+async function fresh() {
+  try {
+    await api('new', {states: +$('nstates').value, alphabet: $('alpha').value, accepting: $('acc').value.split(',').map(s => s.trim()).filter(Boolean).map(Number)});
+    symbol = null; $('run').textContent = ''; $('train').textContent = ''; $('edge').textContent = ''; refresh();
+  } catch (e) { $('run').innerHTML = `<span class="err">${e.message}</span>`; }
+}
+async function save() { try { const r = await api('save', {path: $('file').value}); $('run').textContent = 'saved ' + r.saved; } catch (e) { $('run').innerHTML = `<span class="err">${e.message}</span>`; } }
+async function load() { try { await api('load', {path: $('file').value}); symbol = null; refresh(); } catch (e) { $('run').innerHTML = `<span class="err">${e.message}</span>`; } }
+$('stim').oninput = () => { $('stimv').textContent = fmt(+$('stim').value, 2); };
+(async () => {
+  const langs = await api('languages');
+  $('lang').innerHTML = langs.map(l => `<option value="${l.name}">${l.name} — ${l.description} (accepts at ${l.accepting.join(',')})</option>`).join('');
+  refresh();
+})();
+</script>
+</body>
+</html>

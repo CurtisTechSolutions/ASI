@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+machine.json
+machine.json.gz
+rust/target/
