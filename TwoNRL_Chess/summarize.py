@@ -21,6 +21,10 @@ ORDER = ["2nrl", "2nrl-worst", "2nrl-random", "positive", "repulsion"]
 
 DEFAULT_SCHEDULE = "phased"
 DEFAULT_NEG_FRACTION = 0.3
+DEFAULT_INVERT = "complement"
+INVERTING = ("2nrl", "2nrl-worst", "2nrl-random")
+INVERT_LABEL = {"unit": "per-unit flip", "negate": "sign flip",
+                "readout": "read-out flip", "complement": "complement"}
 
 
 def label_of(run: dict) -> str:
@@ -39,8 +43,14 @@ def label_of(run: dict) -> str:
         return f"{label} (no rule heads)"
     if cfg.get("schedule", DEFAULT_SCHEDULE) != DEFAULT_SCHEDULE:
         return f"{label} (per-round)"
-    if cfg.get("invert_mode", "unit") != "unit":
-        return f"{label} (read-out flip)"
+    # Name the operator whenever it is not the default, so runs that differ
+    # only in how they invert never pool into one row - the three-way operator
+    # comparison is exactly three rows of the arm called `2nrl`.  Only for arms
+    # that actually invert: `positive` and `repulsion` never flip, and giving
+    # them an operator label would claim a difference they do not have.
+    mode = cfg.get("invert_mode", DEFAULT_INVERT)
+    if run["arm"] in INVERTING and mode != DEFAULT_INVERT:
+        return f"{label} ({INVERT_LABEL.get(mode, mode)})"
     # neg_fraction only means anything under the `schedule` trigger; under the
     # default it is inert, and labelling by it alone would name two identical runs
     # as if they were different arms.
