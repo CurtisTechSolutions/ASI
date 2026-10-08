@@ -21,6 +21,7 @@ class Evidence:
         self.name = name
         self.declared = {}
         self.codes = {}            # refusal code -> count
+        self.first_seen = {}       # refusal code -> the probe that discovered it
         self.legal = 0
         self.illegal = 0
         self.probes = 0
@@ -33,6 +34,8 @@ class Evidence:
         elif verdict.outcome.name == "ILLEGAL":
             self.illegal += 1
             if verdict.reason_code:
+                if verdict.reason_code not in self.codes:
+                    self.first_seen[verdict.reason_code] = self.probes
                 self.codes[verdict.reason_code] = self.codes.get(verdict.reason_code, 0) + 1
 
     # ------------------------------------------------------------- measured
@@ -50,6 +53,18 @@ class Evidence:
             p = c / tot
             if p > 0: h -= p * math.log2(p)
         return h
+
+    @property
+    def settled(self):
+        """How long since a NEW refusal kind turned up, as a fraction of the run.
+
+        A taxonomy still growing at the end of probing has not been explored;
+        one whose last discovery was long ago has. This is the honest measure of
+        `do we know what this game is like`, and it is a different question from
+        `which known game is this` -- a genuinely novel game is FAR from every
+        neighbour and that is a confident answer, not an uncertain one."""
+        if not self.first_seen or self.probes <= 0: return 0.0
+        return max(0.0, 1.0 - (max(self.first_seen.values()) / self.probes))
 
     def measured(self, min_share=0.005):
         """A code seen once in a thousand probes is noise, not a rule. The
@@ -71,6 +86,7 @@ class Evidence:
 
     def to_dict(self):
         return {"name": self.name, "declared": self.declared, "codes": self.codes,
+                "first_seen": self.first_seen, "settled": round(self.settled, 3),
                 "legal": self.legal, "illegal": self.illegal, "probes": self.probes,
                 "signature": sorted(self.signature())}
 

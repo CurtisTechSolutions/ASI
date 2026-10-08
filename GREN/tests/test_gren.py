@@ -226,6 +226,228 @@ def test_one_network_grows_across_every_game():
     assert net.ni > 30 and net.no > 8, net.shape()
     assert all(c in net.outputs for c in ("LEGAL", "OCCUPIED_TARGET")), net.outputs
 
+def test_auc_is_symmetric_and_calibrated():
+    from gren.vocabulary import _auc, _signed
+    assert abs(_auc([1,2,3],[1,2,3]) - 0.5) < 1e-9, "identical samples must be 0.5"
+    assert _auc([4,5,6],[1,2,3]) == 1.0
+    assert _auc([1,2,3],[4,5,6]) == 0.0
+    assert abs(_auc([1,1,1],[1,1,1]) - 0.5) < 1e-9, "all ties must be 0.5"
+    assert _signed([4,5,6],[1,2,3]) == 1.0 and _signed([1,2,3],[4,5,6]) == -1.0
+
+def test_legality_comes_from_is_legal_not_from_why():
+    """`why` is a DIAGNOSIS -- it assumes refusal and falls through to a default
+    code, so reading legality off it labels every move illegal. That mistake gave
+    chess a zero-size legal class and every feature a separation of 0.000."""
+    import random
+    from gren.oracle import build_all
+    from gren import vocabulary as V
+    o = build_all()["chess"]
+    rows, blocks = V.sample(o, o.game, random.Random(1), states=20, k=8)
+    assert rows and blocks
+    legal = sum(1 for c, _ in rows if c is None)
+    assert legal > 0.1 * len(rows), f"only {legal}/{len(rows)} legal -- why() misread"
+    for mv_code, _ in rows: assert mv_code is None or mv_code in CODES
+
+def test_derived_vocabulary_beats_its_own_noise_floor():
+    """Every assignment must clear the separation the SAME column reaches on
+    shuffled labels. Without the floor, finite samples give every column a score
+    above zero and the layout is noise with a threshold on it."""
+    import random
+    from gren.oracle import build_all
+    from gren import vocabulary as V
+    o = build_all()["sudoku"]
+    rows, blocks = V.sample(o, o.game, random.Random(0), states=40, k=10)
+    assert len(rows) > 200
+    assoc = V.associate(rows, V.columns(rows, blocks), seed=0)
+    detail = V.explains(assoc)
+    for key, (code, sep, floor) in detail.items():
+        if code is not None: assert abs(sep) - floor >= V.MARGIN, (key, code, sep, floor)
+    # sudoku's three uniqueness features must separate to three DIFFERENT codes:
+    # the block I wrote as one 3-wide unit is really row, column and box.
+    got = {code: k for k, (code, _, _) in detail.items()
+           if k[0] == "CONSTRAINT_UNIQUE" and code}
+    assert set(got) == {"CONSTRAINT_ROW", "CONSTRAINT_COL", "CONSTRAINT_BOX"}, got
+    assert len({k[1] for k in got.values()}) == 3, "must be three distinct indices"
+
+def test_alignment_never_puts_two_dims_of_one_game_in_a_slot():
+    """A slot is one quantity. Two dimensions of the SAME game are by
+    construction not the same quantity, so a slot holding both would be an
+    aliasing bug of exactly the kind alignment exists to prevent."""
+    from gren.oracle import build_all, CODES
+    from gren import vocabulary as V
+    lay, slots, priv, _ = V.build_aligned(build_all(), CODES, seed=0, states=60, k=12)
+    assert slots, "nothing matched at all"
+    for sl in slots:
+        assert len(sl["dims"]) >= 2, sl
+        assert len(set(sl["dims"])) == len(sl["dims"])
+        for g, (b, i, sg) in sl["dims"].items(): assert sg in (1, -1), sl
+    for g, keys in priv.items():
+        placed = {k for sl in slots for gg, (b, i, _) in sl["dims"].items()
+                  if gg == g for k in [(b, i)]}
+        assert not (set(keys) & placed), f"{g}: a dim is both shared and private"
+
+def test_export_round_trips_the_vocabulary():
+    import tempfile, os
+    from gren import package as pkg
+    from gren.oracle import build_all, CODES
+    from gren import vocabulary as V
+    oc = build_all()
+    # 60/12 is what the CLI exports at. Below it checkers produces fewer than
+    # min_class OCCUPIED_TARGET refusals and NOTHING matches -- the floor
+    # declining to align on too little evidence, which is correct behaviour.
+    lay, slots, _, _ = V.build_aligned({k: oc[k] for k in ("chess", "checkers")},
+                                       CODES, seed=0, states=60, k=12)
+    lay = {n: {c: [list(t) for t in d] for c, d in l.items()} for n, l in lay.items()}
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "h.json")
+        pkg.export([], p, vocabulary=lay, slots=slots)
+        doc = pkg.load(p)
+    assert doc["slots"] and doc["vocabulary"]["chess"]
+    for sl in doc["slots"]:
+        assert len(sl["games"]) >= 2
+        for g in sl["games"]: assert len(doc["vocabulary"][g][sl["name"]]) == 1
+    for code, dims in doc["vocabulary"]["chess"].items():
+        for b, i, sg in dims:
+            assert isinstance(b, str) and isinstance(i, int) and sg in (1, -1)
+
+def test_the_tree_asks_about_the_goal_first():
+    """The insertion order IS the order the tree asks about tokens, so it decides
+    what sits at the root. Alphabetical put `adversarial=` there because "a"
+    sorts first, which discriminates nothing among four board-ish games."""
+    from gren.radix import goal_first
+    sig = ["refuses=OFF_BOARD", "adversarial=competitive", "players=2",
+           "goal_type=reach-target", "category=board"]
+    got = goal_first(sig)
+    assert got[0] == "goal_type=reach-target", got
+    assert got[-1] == "refuses=OFF_BOARD", "refusal codes come after the declared axes"
+    assert sorted(got) == sorted(sig), "reordering must not add or drop a token"
+    assert goal_first(sig) == goal_first(list(reversed(sig))), "must be deterministic"
+
+
+def test_goal_first_identifies_a_game_sooner():
+    """Measured over the handoff corpus: one token against alphabetical's 2.5.
+
+    Small N -- four games and one perfectly-discriminating axis makes this nearly
+    free, and goal_type would not stay a unique key at four hundred games. The
+    argument that does not depend on N is knowability: the goal is the one thing
+    you can state about an unfamiliar game before you can play it."""
+    import json, os
+    from gren.radix import goal_first
+    h = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "CyclicCortex", "data", "gren_packages.json")
+    if not os.path.exists(h): return
+    sigs = {n: p["signature"] for n, p in json.load(open(h))["packages"].items()}
+
+    def depth(order):
+        tot = 0
+        for name in sigs:
+            toks = order(sigs[name])
+            for k in range(len(toks) + 1):
+                if len([m for m in sigs if set(toks[:k]) <= set(sigs[m])]) == 1:
+                    tot += k; break
+            else: tot += len(toks)
+        return tot / len(sigs)
+
+    assert depth(goal_first) < depth(sorted), (depth(goal_first), depth(sorted))
+
+
+# --------------------------------------------------------- goal regression
+def test_a_refusal_code_is_a_precondition_violation():
+    """The whole reason regression is implementable here without hand-writing
+    operators: `why()` already answers 'what blocks this action?'."""
+    from gren.regress import blocker
+    from gren.oracle import build_all
+    from cortex import sudoku as sud
+    o = build_all()["sudoku"]
+    s = sud.generate(clues=30, seed=3)
+    x, y = next((x, y) for y in range(9) for x in range(9) if s.at(x, y))
+    b = blocker(o, s, (x, y, 5))
+    assert b is not None and b.code == "OCCUPIED_TARGET", b
+    ex, ey = next((x, y) for y in range(9) for x in range(9) if not s.at(x, y))
+    good = s.candidates(ex, ey)
+    assert good, "test fixture has no playable cell"
+    assert blocker(o, s, (ex, ey, good[0])) is None, "an applicable move has no blocker"
+    bad = [v for v in range(1, 10) if v not in good]
+    if bad:
+        b2 = blocker(o, s, (ex, ey, bad[0]))
+        assert b2 is not None and b2.code.startswith("CONSTRAINT"), b2
+
+
+def test_blocker_histogram_is_regression_as_a_measurement():
+    from gren.regress import blocker_histogram
+    from gren.oracle import build_all
+    from cortex import sudoku as sud
+    o = build_all()["sudoku"]
+    s = sud.generate(clues=30, seed=3)
+    allm = [(x, y, v) for y in range(9) for x in range(9) for v in range(1, 10)]
+    h = blocker_histogram(o, s, allm)
+    assert sum(h.values()) == len(allm)
+    assert "APPLICABLE" in h and h["APPLICABLE"] > 0
+    assert "OCCUPIED_TARGET" in h
+    assert any(k.startswith("CONSTRAINT") for k in h), h
+
+
+def test_most_constrained_finds_the_forced_move():
+    """A cell with exactly one clearing value is forced. Nobody coded 'naked
+    single'; it falls out of asking what blocks each action."""
+    from gren.regress import most_constrained
+    from gren.oracle import build_all
+    from cortex import sudoku as sud
+    o = build_all()["sudoku"]
+    s = sud.generate(clues=30, seed=3)
+    allm = [(x, y, v) for y in range(9) for x in range(9) for v in range(1, 10)]
+    groups = most_constrained(o, s, allm, key=lambda m: (m[0], m[1]))
+    assert groups, "no cell is playable"
+    counts = [len(v) for _, v in groups]
+    assert counts == sorted(counts), "must be ordered fewest-achievers first"
+    (x, y), moves = groups[0]
+    assert len(moves) == len(s.candidates(x, y)), "disagrees with the game itself"
+
+
+def test_regression_pays_in_proportion_to_selectivity():
+    """A subgoal prunes exactly what it excludes -- that is the whole law.
+
+    On chess mate-in-1, `gives check` clears ~4% of moves in positions from real
+    play and ~60% with pieces scattered at random, and the work avoided tracks
+    it. This asserts the RELATIONSHIP, not the speedup, because a timing is not
+    a property of the design."""
+    import random as _r
+    from gren.regress import selectivity
+    from gren.oracle import build_all
+    from cortex.board_games import random_chess
+    from cortex import engine
+    o = build_all()["chess"]
+    rng = _r.Random(7)
+    scattered = []
+    while len(scattered) < 8:
+        st = random_chess(rng)
+        if engine.legal_moves(st): scattered.append(st)
+    played = []
+    while len(played) < 8:
+        st = engine.start_position()
+        for _ in range(rng.randrange(10, 40)):
+            ms = engine.legal_moves(st)
+            if not ms: break
+            st = engine.apply_move(st, rng.choice(ms))
+        if engine.legal_moves(st): played.append(st)
+    gives_check = lambda st, mv: engine.apply_move(st, mv).in_check()
+    s_scatter = selectivity(o, scattered, engine.legal_moves, gives_check)
+    s_played = selectivity(o, played, engine.legal_moves, gives_check)
+    assert s_played < s_scatter, (s_played, s_scatter)
+    assert s_played < 0.25, f"checks should be rare in real positions, got {s_played}"
+
+
+def test_conjunctive_goals_order_the_cheap_selective_part_first():
+    """Regression over a conjunctive goal IS a short-circuiting `and` with the
+    cheap conjunct first. Measuring against a baseline that already does this
+    scores 1.0x -- which is how the first attempt here went."""
+    from gren.regress import conjunctive, expected_work
+    parts = [(100.0, 0.9, "no_escape"), (1.0, 0.04, "gives_check")]
+    best = conjunctive(parts)
+    assert best[0][2] == "gives_check", best
+    assert expected_work(best) < expected_work(list(reversed(best)))
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for f in fns:

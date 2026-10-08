@@ -11,7 +11,7 @@ from gren.oracle import build_all
 from gren.explorer import Explorer
 from gren.axis import distance
 from gren.probe import POLICIES
-from gren.radix import RadixGameTree
+from gren.radix import RadixGameTree, goal_first
 from gren import package as pkg
 
 def _explore(budget, policy="eig", seed=0):
@@ -56,7 +56,7 @@ def cmd_policies(a):
 def cmd_tree(a):
     ev = _explore(a.budget, a.policy, a.seed)
     t = RadixGameTree()
-    for n, (e, _) in ev.items(): t.insert(sorted(e.signature()), n)
+    for n, (e, _) in ev.items(): t.insert(goal_first(e.signature()), n)
     merged = t.compress()
     print(f"\n  radix tree over discovered signatures: {len(t.terminals())} terminals, "
           f"{merged} unary chains compressed\n")
@@ -86,13 +86,173 @@ def cmd_grow(a):
     print(f"  hidden grew {len(grew)} time(s) on a loss plateau")
 
 def cmd_package(a):
+    """Build a GamePackage per game, and optionally write the handoff file that
+    CyclicCortex consumes in place of its hard-coded mechanics."""
+    from gren.oracle import build_all as _oracles
     ev = _explore(a.budget, a.policy, a.seed)
     corpus = {n: e.signature() for n, (e, _) in ev.items()}
+    built = []
     print()
     for n, (e, _) in ev.items():
-        p = pkg.build(e, corpus)
-        print(f"  {n}: {p.to_dict()}")
-        print(f"     accepted by the player network: {p.accepted()}\n")
+        p = pkg.build(e, corpus); built.append(p)
+        print(f"  {n:>9}: {len(p.signature)} tokens, {len(p.mechanics)} codes | "
+              f"identify {p.confidence:.3f} | characterise {p.characterisation:.3f} "
+              f"| placeable={p.placeable()}")
+        print(f"             nearest: {[(round(d,3), g) for d, g in p.candidates[:2]]}")
+    if a.out:
+        rng = random.Random(a.seed)
+        feats = {}
+        for n, o in _oracles().items():
+            g = o.game
+            names = set()
+            for _ in range(12):
+                st = (g.random_state(rng) if hasattr(g, "random_state")
+                      else g.new(seed=rng.randrange(10**6)))
+                for mv in o.candidates(st, rng, 6):
+                    try: names |= set(o.features(st, mv))
+                    except Exception: pass
+            feats[n] = sorted(names)
+        from gren import vocabulary as voc
+        from gren.oracle import CODES
+        lay, slots, priv, det = voc.build_aligned(_oracles(), CODES, seed=a.seed)
+        print("\n  input slots matched ACROSS games by legality signature:")
+        for sl in slots:
+            print(f"    {sl['name']:<20} {sl['strength']:.2f}  " + ", ".join(
+                f"{g}:{'+' if sg > 0 else '-'}{b}[{i}]"
+                for g, (b, i, sg) in sorted(sl["dims"].items())))
+        for n in sorted(det):
+            expl = sum(1 for c, _, _ in det[n].values() if c)
+            print(f"    {n:>9}: {expl} of {len(det[n])} dims explain a refusal, "
+                  f"{len(priv[n])} stay private")
+        lay = {n: {c: [list(t) for t in d] for c, d in l.items()}
+               for n, l in lay.items()}
+        size = pkg.export(built, a.out, feats, vocabulary=lay, slots=slots)
+        print(f"\n  wrote {size} bytes -> {a.out}")
+        print(f"  feature languages: " +
+              ", ".join(f"{k}={len(v)}" for k, v in feats.items()))
+
+def cmd_regress(a):
+    """Goal regression: work backwards from the end goal to subgoals."""
+    import time, statistics as stat
+    from gren.oracle import build_all as _oracles
+    from gren.regress import blocker_histogram, most_constrained, selectivity
+    from cortex import sudoku as sud
+    from cortex.board_games import random_chess
+    from cortex import engine
+
+    oc = _oracles()
+    print("\nGoal regression asks what would have to be TRUE for the goal to hold,")
+    print("and keeps asking until the answer is something already true. Its usual")
+    print("cost is writing every operator's preconditions by hand -- which is where")
+    print("domain knowledge smuggles itself in. GREN does not need them written:\n")
+    print("    A REFUSAL CODE IS A PRECONDITION VIOLATION.\n")
+    print("`why()` already answers 'what blocks this action?', which is the")
+    print("regression step. The preconditions are measured, not authored.\n")
+
+    o = oc["sudoku"]
+    s = sud.generate(clues=30, seed=3)
+    allm = [(x, y, v) for y in range(9) for x in range(9) for v in range(1, 10)]
+    print(f"SUDOKU -- goal: every cell filled.  ({s.empties()} empty)\n")
+    print("  what stands between here and every conceivable move:")
+    for code, n in blocker_histogram(o, s, allm).items():
+        print(f"    {code:<20} {n:>5}")
+    print("\n  the most constrained subgoals, attacked first:")
+    for cell, mv in most_constrained(o, s, allm, key=lambda m: (m[0], m[1]))[:4]:
+        print(f"    cell {cell}: {len(mv)} value(s) clear every precondition "
+              f"-> {[m[2] for m in mv]}")
+    print("\n  A cell with one clearing value is forced. Nobody coded 'naked")
+    print("  single' -- that heuristic IS constraint propagation, regressed.\n")
+
+    def solve(s0, guided, budget=400000):
+        work = [0]; nodes = [0]
+        def rec(st):
+            nodes[0] += 1
+            if st.solved(): return st
+            if work[0] >= budget: return None
+            cells = [(x, y) for y in range(9) for x in range(9) if not st.at(x, y)]
+            if guided:
+                best = None
+                for (x, y) in cells:
+                    c = st.candidates(x, y); work[0] += 1
+                    if not c: return None
+                    if best is None or len(c) < len(best[2]): best = (x, y, c)
+                x, y, cand = best
+            else:
+                x, y = cells[0]; cand = st.candidates(x, y); work[0] += 1
+                if not cand: return None
+            for v in cand:
+                r = rec(st.apply((x, y, v)))
+                if r is not None: return r
+            return None
+        return rec(s0), work[0], nodes[0]
+
+    print(f"  {'clues':>6}{'guided nodes':>14}{'control nodes':>15}{'x':>9}"
+          f"{'guided calls':>14}{'control calls':>15}{'x':>8}")
+    for clues in (30, 26, 22):
+        gn, un, gc, uc = [], [], [], []
+        for seed in range(a.trials):
+            p = sud.generate(clues=clues, seed=seed)
+            _, wa, na = solve(p, True); _, wb, nb = solve(p, False)
+            gn.append(na); un.append(nb); gc.append(wa); uc.append(wb)
+        g, u = stat.mean(gn), stat.mean(un)
+        gg, uu = stat.mean(gc), stat.mean(uc)
+        print(f"  {clues:>6}{g:>14.0f}{u:>15.0f}{u/max(1,g):>8.1f}x"
+              f"{gg:>14.0f}{uu:>15.0f}{uu/max(1,gg):>7.1f}x")
+    print("\n  By NODES -- what regression reduces -- guidance wins everywhere.")
+    print("  By raw work it loses on easy puzzles: scanning 51 cells to save a few")
+    print("  nodes is not worth it when almost any order solves the puzzle.\n")
+
+    print("CHESS -- goal: mate.  mate <== check AND no-escape.\n")
+    CALLS = {"escape": 0}
+    def search(st, regress):
+        for mv in engine.legal_moves(st):
+            nxt = engine.apply_move(st, mv)
+            if regress:
+                if not nxt.in_check(): continue
+                CALLS["escape"] += 1
+                if not engine.legal_moves(nxt): return mv
+            else:
+                CALLS["escape"] += 1
+                if engine.legal_moves(nxt): continue
+                if nxt.in_check(): return mv
+        return None
+
+    def played(n, seed=3):
+        rng = random.Random(seed); out = []
+        while len(out) < n:
+            st = engine.start_position()
+            for _ in range(rng.randrange(10, 60)):
+                ms = engine.legal_moves(st)
+                if not ms: break
+                st = engine.apply_move(st, engine.choose(st, depth=1, rng=rng) or rng.choice(ms))
+            if engine.legal_moves(st): out.append(st)
+        return out
+
+    rng = random.Random(7)
+    scattered = []
+    while len(scattered) < a.trials * 4:
+        st = random_chess(rng)
+        if engine.legal_moves(st): scattered.append(st)
+    real = played(a.trials * 4)
+    print(f"  {'positions':<20}{'% moves giving check':>22}{'expensive tests saved':>23}{'speedup':>10}")
+    for lab, states in (("pieces scattered", scattered), ("from actual play", real)):
+        sel = selectivity(o, states, engine.legal_moves,
+                          lambda st, mv: engine.apply_move(st, mv).in_check())
+        res = {}
+        for reg in (True, False):
+            CALLS["escape"] = 0; t0 = time.time()
+            for st in states: search(st, reg)
+            res[reg] = (CALLS["escape"], time.time() - t0)
+        saved = 100 * (1 - res[True][0] / max(1, res[False][0]))
+        print(f"  {lab:<20}{100*sel:>21.1f}%{saved:>22.1f}%{res[False][1]/max(1e-9,res[True][1]):>9.1f}x")
+    print("\n  A subgoal prunes exactly what it excludes. That is the whole law:")
+    print("  regression pays in proportion to how SELECTIVE the cheap subgoal is.\n")
+    print("  Worth naming: the first attempt at this measured 1.0x, because the")
+    print("  baseline had regressed all along -- is_mate() is `in_check() and not")
+    print("  legal_moves()`, and `and` short-circuits. Goal regression over a")
+    print("  conjunctive goal IS a short-circuiting `and` with the cheap, selective")
+    print("  conjunct written first, which is why it is easy to have done already.")
+
 
 def _spearman(a, b):
     def rk(v):
@@ -110,12 +270,15 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn in (("explore", cmd_explore), ("similar", cmd_similar),
                      ("policies", cmd_policies), ("tree", cmd_tree),
-                     ("package", cmd_package), ("grow", cmd_grow)):
+                     ("package", cmd_package), ("grow", cmd_grow),
+                     ("regress", cmd_regress)):
         q = sub.add_parser(name); q.set_defaults(fn=fn)
         q.add_argument("--budget", type=int, default=1200)
         q.add_argument("--policy", default="eig", choices=list(POLICIES))
         q.add_argument("--seed", type=int, default=0)
         q.add_argument("--hidden", type=int, default=24)
+        q.add_argument("--out", default=None, help="write the handoff file here")
+        q.add_argument("--trials", type=int, default=6)
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__": main()

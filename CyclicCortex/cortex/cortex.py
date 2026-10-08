@@ -54,6 +54,7 @@ class Cortex:
     def __init__(self, tau=0.75, tau_new=0.60, seed=0, nh=24):
         self.graph = SimilarityGraph(tau=tau)
         self.regions = []; self.route_of = {}
+        self.adapter = {}                # name -> the object actually admitted
         self.tau_new, self.seed, self.nh = tau_new, seed, nh
         self.log = []
 
@@ -76,13 +77,24 @@ class Cortex:
                              "distance": round(bd, 3)})
         grew = best.admit(game)
         self.route_of[game.name] = best.id
+        self.adapter[game.name] = game
         self.log[-1]["inputs_grown"] = grew
         return best
 
     def region_for(self, game): return self.regions[self.route_of[game.name]]
 
+    def adapt(self, game):
+        """The adapter that was ADMITTED under this name.
+
+        A discovered game and its hand-written twin share a name and differ in
+        which keys `generalise` emits and `spec` declares. Encoding one through
+        the other's vocabulary produces an all-zero input and a coverage of
+        zero -- silently, and looking like a training failure rather than a
+        wiring failure."""
+        return self.adapter.get(game.name, game)
+
     def encode(self, region, game, state, mv):
-        return region.vocab.encode(game.generalise(state, mv))
+        return region.vocab.encode(self.adapt(game).generalise(state, mv))
 
     # ----------------------------------------------------------------- train
     @staticmethod

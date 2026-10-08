@@ -11,11 +11,13 @@ every game in that region.
 
 ```bash
 cd CyclicCortex
+python3 -m cortex.cli serve --train 300   # the browser front end: train it, then play it
 python3 -m cortex.cli demo          # build, train, play chess, add sudoku
 python3 -m cortex.cli map           # the similarity graph and its regions
 python3 -m cortex.cli play          # chess against the engine
 python3 -m cortex.cli sudoku        # solve puzzles by the network's own ranking
 python3 -m tests.test_v1            # 20 tests
+python3 -m tests.test_server        # 19 more, for the arena, the jobs and the API
 ```
 
 Pure standard library, no dependencies. **Stockfish is optional** — install it
@@ -38,6 +40,10 @@ a real engine; everything degrades to the built-in opponents without it.
 | `cortex/routing.py` | the region-level **auction** (uniform price, so truthful bidding is dominant) and **congestion** settlement |
 | `cortex/cortex.py` | regions, routing, supervised training, **self-play with outcome credit**, **distillation from a teacher**, evaluation |
 | `cortex/stockfish.py` | Stockfish as opponent *and* teacher — persistent UCI process, FEN/UCI conversion, `evaluate`, and `score_moves` (MultiPV: every legal move scored in one search). Optional |
+| `cortex/arena.py` | one match, any two players, any of the four games. `human`, `cortex`, `bot` and `stockfish`, every pairing legal; boards and moves as JSON; `analyse`, which scores **every** legal move in a position |
+| `cortex/trainer.py` | training you can watch and stop — the same calls, in a loop over chunks, with a measurement after each one. `train`, `selfplay`, `rehearse`, `distill`, `evaluate`, `benchmark`, `credit`, `transfer` |
+| `cortex/server.py` | the HTTP API and the static page. `http.server`, because the package has no dependencies and this is not the place to acquire one |
+| `cortex/frontend/` | the page itself: the graph drawn, the curve while it is learning, and a board you can sit down at |
 
 ## What it does
 
@@ -258,6 +264,96 @@ the graph earns its place by *placing* games correctly — the wrong region is
 measurably worse, per the negative Shapley values — and not by regions teaching
 each other, which barely happens.
 
+## Mechanics from GREN, not from me
+
+The `mechanics` frozenset in `cortex/games.py` is what decides which games share
+a region. I wrote it. So every number above was partly a result of my **naming**:
+chess and checkers land together in part because I typed `GRID_BOARD` twice.
+
+GREN never sees those names. It fires moves at a game, records what comes back
+when the game refuses, buckets a few declared axes, and emits a signature. That
+is a measurement. `cortex/discovered.py` reads it from a JSON handoff and
+substitutes it, so the geography is something the system found:
+
+```bash
+cd ../GREN && python3 -m gren.cli package --out ../CyclicCortex/data/gren_packages.json
+cd ../CyclicCortex && python3 -m cortex.cli discovered           # the comparison
+python3 -m cortex.cli map --discovered                            # any command
+```
+
+GREN imports CyclicCortex's adapters to probe them, so the handoff is a file and
+never an import — the reverse direction would close the cycle.
+
+**The regions come out identical.** Same three regions, same members, same zero
+triangle-inequality violations, and `--discovered` is bit-for-bit the same run as
+the baseline, because routing lands in the same place:
+
+| | chess–checkers | chess–go | checkers–go | go–sudoku | chess–sudoku | checkers–sudoku |
+|---|---|---|---|---|---|---|
+| hand-written | 0.529 | 0.684 | 0.667 | 0.778 | 0.905 | 0.900 |
+| GREN | **0.368** | **0.579** | **0.632** | **0.800** | **0.840** | **0.880** |
+
+The absolute distances move — GREN's signature has different cardinality — but
+the structure does not: chess is nearest checkers, sudoku is the outlier, and
+sudoku is nearer go than either board game. Playing strength is unchanged
+(chess 0.866 → 0.866, checkers 0.938 → 0.938, over three seeds).
+
+The gate is **characterisation**, not identification confidence. Sudoku's
+identification confidence is 0.350 because it sits 0.80 away from everything GREN
+has seen — which is *confidently novel*, not uncertain, and novelty is a reason
+to found a region rather than a reason to refuse one. The handoff exposed that
+the two questions had been conflated; `GamePackage.placeable()` is the split.
+
+## The derived vocabulary, and why it is off by default
+
+The same handoff can also replace the *input* vocabulary. `gren/vocabulary.py`
+asks, for every feature dimension, whether it separates the moves a game refuses
+with code C from the moves it accepts — then matches dimensions **across** games
+by their whole legality signature, so a shared slot holds one quantity rather
+than one name. It recovers real correspondences: chess's and checkers'
+`OCCUPANCY[0]` are matched to each other, and go's and sudoku's `GRID_PLACE[2]`
+are matched to both with a sign flip. Sudoku's `CONSTRAINT_UNIQUE`, which I wrote
+as one 3-wide block, is separated into row, column and box.
+
+It also makes chess-to-checkers transfer **catastrophically worse**, and chasing
+that produced the more interesting result.
+
+Train chess alone in the shared region, then evaluate checkers, which has been
+admitted but never trained:
+
+| shared slots | | after chess | vs. majority |
+|---|---|---|---|
+| 8 | hand-written, all blocks | 0.772 | **+0.023** |
+| 4 | hand-written, `GRID_MOVE` only | 0.749 | +0.000 |
+| 0 | hand-written, nothing shared | 0.749 | +0.000 |
+| 3 | hand-written, `OCCUPANCY` only | 0.317 | **−0.432** |
+| 3 | GREN, aligned slots | 0.340 | **−0.409** |
+
+Two things fall out, and the first one is a correction to my own arithmetic.
+
+**The untrained network is the wrong baseline.** Measured against it, the
+hand-written vocabulary "transfers" +0.286. But with *nothing* shared at all,
+checkers still reaches 0.749 — its majority class — because training chess moves
+the region's shared hidden layer and output bias, and that needs no transfer
+whatsoever. Against the majority baseline the real figure is **+0.023**. The
+shared vocabulary was doing almost nothing all along, which matches the
+independent cross-region result above: 0.025, same order.
+
+**A shared refusal code is not a shared rule.** GREN's alignment is *correct* —
+it reproduces my own hand-written occupancy-only ablation to within noise
+(−0.409 against −0.432), which is what a correct measurement of a bad idea looks
+like. Chess and checkers both refuse `OCCUPIED_TARGET`, but chess refuses only a
+target holding your *own* piece, because taking an enemy piece is a capture,
+while checkers refuses *any* occupied target for a simple move. Same code,
+opposite rule. Sharing a weight across them teaches chess's exception into
+checkers. The hand-written vocabulary escaped this only by *diluting* those three
+slots with five harmless ones — `GRID_MOVE` alone contributes exactly zero.
+
+Refusals identify the rule's shape but not its arguments. That is enough to place
+a game and not enough to share a weight, so `--discovered` (mechanics) is the
+half worth having and `--discovered-vocab` stays opt-in with the measurement
+attached.
+
 ## Replay on join
 
 `rehearse` interleaves every game in a region when one of them is new. Growth is
@@ -282,10 +378,49 @@ losses are close (35–46) where they were 0–81. Chess has excellent legality
 consistently: it is the hardest of the three and has no search, so the engine
 takes free pieces the cortex cannot see coming.
 
+## The front end
+
+`python3 -m cortex.cli serve --train 300` puts all of the above behind a page:
+the similarity graph drawn instead of printed, training as a curve you can watch
+and stop, the credit and transfer tables recomputed on the model that is loaded
+rather than quoted, and **a board you can sit down at**. Four kinds of player —
+human, cortex, the built-in engine, and Stockfish where it is installed — in
+every pairing, in all four games, so *human vs model*, *model vs model* and *bot
+vs model* are three rows of one table rather than three features. `cortex/arena.py`
+is that table and holds no HTTP; `cortex/trainer.py` runs the jobs; `cortex/server.py`
+is `http.server` and the static files. Details in `cortex/frontend/README.md`.
+
+Nothing there is a new capability. What the browser adds is the part that only
+works live: **`p_valid` and `grade` for every legal move while it is your turn.**
+The cortex's pick is still not filtered to legal ones — it ranks its own
+candidate set as `cli.play` does, an illegal pick is counted and the best legal
+alternative substituted — so the illegal rate under the board is the same
+honest number, and the scores beside it say *why* it lost rather than only that
+it did.
+
 ## What is not here yet
 
-Grade is a hand-supplied heuristic rather than a learned value, there is no
-search, no replay when a game joins a region, no region-level auction or Shapley
-credit (`DESIGN.md` §9.2), and no frontend. Regions do not yet transfer anything
-between each other — which is `DESIGN.md` §15.1, the open question that decides
-whether the graph is doing real work or only routing.
+**There is no search.** Chess is the clearest case: its legality is excellent
+(0.0–0.013 illegal in play) and it still loses material consistently, because
+the engine takes free pieces a one-ply ranking cannot see coming, and no amount
+of training on move legality fixes that.
+
+**Chess has an unexplained gap.** `information.py` measures 0.977 as reachable
+with these features under balanced sampling; the network reaches 0.856. Roughly
+0.12 is unaccounted for and is the first thing to chase.
+
+**Distillation does not work**, and the diagnostic above says why: the function
+is not in the student's hypothesis class. A teacher cannot teach what the
+vocabulary cannot express.
+
+**The graph is never repartitioned.** Regions are grown by the `tau_new`
+threshold and then left alone; modularity-based repartitioning, and a benchmark
+harness that could say whether a repartition helped, are both still missing.
+
+**Cross-region transfer is real but tiny** — one case out of four gains 0.025,
+and the within-region shared vocabulary is +0.023 against its proper baseline.
+`DESIGN.md` §15.1 asked whether the graph is doing real work or only routing,
+and the answer is now measured: it is **routing**. The graph earns its place by
+*placing* games correctly — the wrong region is measurably worse, per the
+negative Shapley values — rather than by regions or games teaching each other,
+which barely happens.

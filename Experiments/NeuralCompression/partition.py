@@ -90,11 +90,18 @@ if __name__ == "__main__":
         v=[dust(slots,[0,2,4,6],seed=s) for s in range(4)]
         print(f"  {lbl:>26} {1/slots:>11.4f} {'x'+str(slots):>14} {sum(v)/len(v):>10.5f}")
 
-    print("\n\nEXPERIMENT 5 - damage to already-learned games when 4 more are added\n")
-    print(f"  {'act':>9} {'layout':>12} {'old before':>11} {'old after':>10} {'new':>8} {'damage':>9} {'dust':>6}")
-    dust = {"one_over_N":"0%", "static_pow2":"50%", "adaptive":"0%"}
+    print("\n\nEXPERIMENT 5 - damage to already-learned games when 4 more are added (seeds 0-3)\n")
+    print("  'damage' is the mean of the four per-seed ratios, and those ratios range from")
+    print("  0.6x to 3.7x -- so read the LAYOUT ORDER, which is stable, not the exact number.\n")
+    print(f"  {'act':>9} {'layout':>12} {'old before':>11} {'old after':>10} {'new':>8} {'damage':>9} {'worst':>7} {'dust':>6}")
+    dust_pct = {"one_over_N":"0%", "static_pow2":"50%", "adaptive":"0%"}
     for act, bb, lbl in (("tanh", 1/3, "tanh"), ("sine", 1.0, "sine b=1")):
         for s in ("one_over_N", "static_pow2", "adaptive"):
-            b0, a, n = run(s, act=act, b=bb)
-            print(f"  {lbl:>9} {s:>12} {b0:>11.5f} {a:>10.5f} {n:>8.5f} {a/b0:>8.1f}x {dust[s]:>6}")
+            r = [run(s, act=act, b=bb, seed=sd) for sd in range(4)]
+            b0 = sum(x[0] for x in r)/len(r); a = sum(x[1] for x in r)/len(r)
+            n = sum(x[2] for x in r)/len(r)
+            ratios = [x[1]/x[0] for x in r]
+            dmg = sum(ratios)/len(ratios)
+            print(f"  {lbl:>9} {s:>12} {b0:>11.5f} {a:>10.5f} {n:>8.5f} {dmg:>8.2f}x "
+                  f"{max(ratios):>6.2f}x {dust_pct[s]:>6}")
         print()

@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CyclicCortex — the graph, the training, the games</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>◉</text></svg>">
+</head>
+<body>
+
+<header>
+  <div class="head-row">
+    <div>
+      <h1>CyclicCortex</h1>
+      <p class="tagline">A cyclic graph over games where <b>distance is similarity</b>, partitioned
+        into regions, each region owning <b>one self-building network</b> that reads the common
+        denominators. Watch it learn, then sit down and play it.</p>
+    </div>
+    <div class="head-right">
+      <div class="field compact">
+        <label for="model">Model</label>
+        <select id="model"></select>
+      </div>
+      <div class="badges">
+        <span class="badge" id="badge-regions">…</span>
+        <span class="badge" id="badge-metric">…</span>
+        <span class="badge" id="badge-sf">…</span>
+        <span class="badge" id="badge-jobs">idle</span>
+      </div>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="cortex" class="on">1 · The cortex</button>
+    <button data-tab="train">2 · Training</button>
+    <button data-tab="play">3 · Play</button>
+    <button data-tab="credit">4 · Credit</button>
+  </nav>
+</header>
+
+<main>
+
+<!-- ============================================================ 1. CORTEX -->
+<div class="tab" id="tab-cortex">
+
+  <section class="panel">
+    <h2>Distance <em>is</em> similarity</h2>
+    <p class="hint">Jaccard distance over mechanic sets — a proper metric, so the geometry is
+      consistent rather than a figure of speech. The map places the games by that distance alone
+      (classical multidimensional scaling of the matrix); the matrix beside it is the raw numbers.
+      <b id="metric-note"></b></p>
+    <div class="split">
+      <div class="half"><div id="graph-map" class="viz"></div></div>
+      <div class="half"><div id="graph-matrix" class="viz"></div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Regions</h2>
+    <p class="hint">A game is routed to the nearest region, or founds a new one when nothing is
+      close enough. Each region owns one network and one vocabulary; a slot index, once given, is
+      permanent — extension only appends, which is why growth can be an identity.</p>
+    <div id="regions" class="cards"></div>
+  </section>
+
+  <section class="panel">
+    <h2>How each game was routed</h2>
+    <div id="routing" class="viz"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Build, fork and checkpoint</h2>
+    <div class="row wrap">
+      <div class="field">
+        <label>Games, in order</label>
+        <div class="checks" id="build-games"></div>
+      </div>
+      <div class="field compact"><label for="build-tau">τ new region</label>
+        <input type="number" id="build-tau" value="0.60" step="0.01" min="0" max="1"></div>
+      <div class="field compact"><label for="build-seed">Seed</label>
+        <input type="number" id="build-seed" value="0"></div>
+      <div class="field compact"><label for="build-nh">Hidden units</label>
+        <input type="number" id="build-nh" value="24" min="2"></div>
+      <div class="field compact"><label for="build-name">Name</label>
+        <input type="text" id="build-name" value="main"></div>
+      <div class="field end"><button id="do-build">Build</button></div>
+    </div>
+    <p class="hint">Order matters: each game is routed against the regions that already exist.
+      Admitting a game to a trained model grows the vocabulary and the network's inputs — an
+      identity at the moment it happens, which is the invariant the whole design rests on.</p>
+    <div class="row wrap">
+      <div class="field compact"><label for="add-game">Admit a game</label>
+        <select id="add-game"></select></div>
+      <div class="field end"><label class="inline"><input type="checkbox" id="add-rehearse" checked>
+        rehearse the region afterwards</label></div>
+      <div class="field end"><button id="do-add" class="secondary">Admit</button></div>
+      <div class="field compact"><label for="fork-name">Fork as</label>
+        <input type="text" id="fork-name" placeholder="rival"></div>
+      <div class="field end"><button id="do-fork" class="secondary">Fork</button></div>
+    </div>
+    <div class="row wrap">
+      <div class="field compact"><label for="ckpt-name">Checkpoint file</label>
+        <input type="text" id="ckpt-name" placeholder="main.json.gz"></div>
+      <div class="field end"><button id="do-save" class="secondary">Save</button></div>
+      <div class="field compact"><label for="ckpt-list">On disk</label>
+        <select id="ckpt-list"></select></div>
+      <div class="field end"><button id="do-load" class="secondary">Load into model</button></div>
+    </div>
+    <div id="build-msg" class="msg"></div>
+  </section>
+</div>
+
+<!-- ============================================================= 2. TRAIN -->
+<div class="tab" id="tab-train" hidden>
+  <section class="panel">
+    <h2>Run something and watch it</h2>
+    <p class="hint">Every job here is the call the command line makes, in a loop over chunks, with a
+      measurement after each one. Three end points at 400, 1200 and 3000 episodes is a claim about a
+      curve; this draws the curve.</p>
+    <div class="row wrap">
+      <div class="field compact"><label for="job-kind">Job</label>
+        <select id="job-kind">
+          <option value="train">train — validity from the rules, grade from the reward</option>
+          <option value="selfplay">selfplay — grade from what actually happened</option>
+          <option value="rehearse">rehearse — interleave a region's games</option>
+          <option value="distill">distil — grade from Stockfish's per-move score</option>
+          <option value="evaluate">evaluate — measure, change nothing</option>
+          <option value="benchmark">benchmark — N matches of one pairing</option>
+        </select></div>
+      <div class="field compact"><label for="job-game">Game</label><select id="job-game"></select></div>
+      <div class="field compact"><label for="job-n" id="job-n-label">Episodes</label>
+        <input type="number" id="job-n" value="400" min="1"></div>
+      <div class="field compact"><label for="job-chunk">Chunk</label>
+        <input type="number" id="job-chunk" value="50" min="1"></div>
+      <div class="field compact"><label for="job-opp">Opponent</label>
+        <select id="job-opp">
+          <option value="bot:1">built-in engine, depth 1</option>
+          <option value="bot:2">built-in engine, depth 2</option>
+          <option value="bot:0">random legal (the control)</option>
+          <option value="none">none — random positions only</option>
+          <option value="stockfish">stockfish</option>
+        </select></div>
+      <div class="field compact"><label for="job-k">Candidates k</label>
+        <input type="number" id="job-k" value="12" min="1"></div>
+      <div class="field compact"><label for="job-lr">Learning rate</label>
+        <input type="number" id="job-lr" value="0.05" step="0.01" min="0.001"></div>
+      <div class="field compact"><label for="job-seed">Seed</label>
+        <input type="number" id="job-seed" value="0"></div>
+      <div class="field end"><button id="do-job">Start</button></div>
+      <div class="field end"><button id="do-stop" class="secondary" disabled>Stop</button></div>
+    </div>
+    <div id="job-msg" class="msg"></div>
+  </section>
+
+  <section class="panel">
+    <h2>The curve</h2>
+    <div class="progress"><div id="job-bar"></div><span id="job-progress">no job yet</span></div>
+    <div id="job-chart" class="viz"></div>
+    <div class="split">
+      <div class="half"><h3>Log</h3><pre id="job-log" class="log"></pre></div>
+      <div class="half"><h3>Result</h3><pre id="job-result" class="log"></pre></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Jobs</h2>
+    <div id="job-list" class="viz"></div>
+  </section>
+</div>
+
+<!-- ============================================================== 3. PLAY -->
+<div class="tab" id="tab-play" hidden>
+  <section class="panel">
+    <h2>Sit down against it</h2>
+    <div class="row wrap">
+      <div class="field compact"><label for="play-game">Game</label><select id="play-game"></select></div>
+      <div class="field compact"><label id="lab-a" for="play-a">Side A</label>
+        <select id="play-a" class="who"></select></div>
+      <div class="field compact"><label for="play-a-opt">&nbsp;</label><select id="play-a-opt"></select></div>
+      <div class="field compact"><label id="lab-b" for="play-b">Side B</label>
+        <select id="play-b" class="who"></select></div>
+      <div class="field compact"><label for="play-b-opt">&nbsp;</label><select id="play-b-opt"></select></div>
+      <div class="field compact"><label for="play-seed">Seed</label>
+        <input type="number" id="play-seed" value="1"></div>
+      <div class="field end"><button id="do-new">New game</button></div>
+    </div>
+    <div class="presets">
+      <button class="chip" data-preset="human-model">human vs model</button>
+      <button class="chip" data-preset="model-model">model vs model</button>
+      <button class="chip" data-preset="bot-model">bot vs model</button>
+      <button class="chip" data-preset="human-bot">human vs bot</button>
+    </div>
+    <div id="play-msg" class="msg"></div>
+  </section>
+
+  <section class="panel">
+    <div class="board-wrap">
+      <div class="board-col">
+        <div id="board" class="board"></div>
+        <div class="board-bar">
+          <button id="do-step" class="secondary">Step one ply</button>
+          <button id="do-run" class="secondary">Run to the end</button>
+          <button id="do-pass" class="secondary" hidden>Pass</button>
+          <label class="inline"><input type="checkbox" id="heat" checked> heat map</label>
+          <label class="inline"><input type="checkbox" id="auto"> auto-play</label>
+        </div>
+        <div id="digits" class="digits" hidden></div>
+        <div id="play-status" class="status"></div>
+      </div>
+      <div class="board-side">
+        <h3>What the model thinks</h3>
+        <div id="think" class="think"></div>
+        <h3>Moves</h3>
+        <div id="moves" class="moves"></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ============================================================ 4. CREDIT -->
+<div class="tab" id="tab-credit" hidden>
+  <section class="panel">
+    <h2>Regions as players</h2>
+    <p class="hint">Coverage is what a region bids with: the fraction of a game's mechanics its
+      vocabulary can encode at all. Shapley divides the ensemble's log-likelihood among the regions —
+      exact below twelve of them — and the auction sells seats at the highest losing bid, so bidding
+      true value is dominant.</p>
+    <div class="row wrap">
+      <div class="field compact"><label for="credit-states">Positions per game</label>
+        <input type="number" id="credit-states" value="12" min="2"></div>
+      <div class="field compact"><label for="credit-k">Candidates each</label>
+        <input type="number" id="credit-k" value="4" min="1"></div>
+      <div class="field end"><button id="do-credit">Measure</button></div>
+    </div>
+    <div class="progress"><div id="credit-bar"></div><span id="credit-progress">press Measure — it plays positions and enumerates coalitions, so it takes a moment</span></div>
+    <div id="coverage" class="viz"></div>
+    <div id="shapley" class="viz"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Cross-region transfer — real, and small</h2>
+    <p class="hint">Regions share no weights, so an ensemble is the <b>only</b> channel by which
+      one region's learning can reach another's game (<code>DESIGN.md</code> §15.1). Each game is
+      answered four ways: by its own region, by the two regions that win the auction, by every
+      region at once, and by the majority baseline. The question is whether any column beats the
+      first — and the honest answer measured so far is <b>one case does and the rest are flat</b>,
+      which is what it means for the graph to earn its place by <em>placing</em> games rather than
+      by regions teaching each other.</p>
+    <div class="row wrap">
+      <div class="field compact"><label for="tr-states">Positions per game</label>
+        <input type="number" id="tr-states" value="20" min="4"></div>
+      <div class="field compact"><label for="tr-k">Candidates each</label>
+        <input type="number" id="tr-k" value="6" min="1"></div>
+      <div class="field end"><button id="do-transfer">Measure transfer</button></div>
+    </div>
+    <div class="progress"><div id="tr-bar"></div><span id="tr-progress">not run</span></div>
+    <div id="transfer" class="viz"></div>
+  </section>
+</div>
+
+</main>
+
+<footer>
+  <span>Pure standard library, no dependencies, no build step — the page is served as it is.</span>
+  <span id="foot-info"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

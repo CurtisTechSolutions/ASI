@@ -4,21 +4,41 @@
   python3 -m cortex.cli map         the similarity graph and its regions
   python3 -m cortex.cli play        play chess against the engine
   python3 -m cortex.cli sudoku      solve a puzzle with the sudoku region
+  python3 -m cortex.cli serve       the browser front end: the graph drawn, training
+                                    watched, and a board you can sit down at
 """
-import argparse, random, sys
+import argparse, os, random, sys
 from cortex import checkpoint
 from cortex.cortex import Cortex
 from cortex.games import ALL
 from cortex.graph import distance
 from cortex import engine
 
-def build(names, tau_new=0.60, seed=0, nh=24):
+def registry(a=None):
+    """The game adapters to build from.
+
+    `--discovered` swaps in GREN's measured signature for the hand-written
+    `mechanics` frozenset, and `--discovered-vocab` also swaps the input
+    vocabulary for the one GREN derived. Default is off so every earlier number
+    in this repo stays reproducible.
+    """
+    if a is None or not getattr(a, "discovered", False): return ALL, []
+    from cortex import discovered as disc
+    return disc.registry(ALL, vocabulary=getattr(a, "discovered_vocab", False))
+
+def build(names, tau_new=0.60, seed=0, nh=24, a=None):
+    reg, _ = registry(a)
     c = Cortex(tau_new=tau_new, seed=seed, nh=nh)
-    for n in names: c.add_game(ALL[n])
+    for n in names: c.add_game(reg[n])
     return c
 
 def cmd_map(a):
-    c = build(a.games)
+    c = build(a.games, a=a)
+    reg, rep = registry(a)
+    if rep:
+        print("\nMechanics from GREN's handoff (cortex/discovered.py)\n")
+        for n, st, ch in rep:
+            print(f"  {n:>9}: {st}" + (f"   characterisation {ch:.3f}" if ch else ""))
     print(f"\nSimilarity graph -- distance IS similarity (Jaccard over mechanics)\n")
     names = c.graph.names
     print("       " + "".join(f"{n[:8]:>10}" for n in names))
@@ -149,7 +169,7 @@ def cmd_sudoku(a):
                 if not legal: break
                 r = c.region_for(g)
                 mv = max(legal, key=lambda m: r.net.predict(c.encode(r, g, s, m))[1])
-            s = g.apply(mv); placed += 1
+            s = g.apply(s, mv); placed += 1
         print(f"    puzzle {i}: filled {placed}/{start}, solved={s.solved()}, "
               f"illegal picks {bad}")
 
@@ -215,7 +235,7 @@ def cmd_credit(a):
     print("  " + " "*28 + "".join(f"{g:>10}" for g in a.games))
     for r in c.regions:
         nm = ",".join(g.name for g in r.games)
-        print(f"  {nm:>28}" + "".join(f"{credit.coverage(r, ALL[g]):>10.2f}" for g in a.games))
+        print(f"  {nm:>28}" + "".join(f"{credit.coverage(r, c.adapt(ALL[g])):>10.2f}" for g in a.games))
     print("\n  shapley\n")
     for n in a.games:
         game = ALL[n]; rr = random.Random(3); S = []
@@ -227,12 +247,100 @@ def cmd_credit(a):
               f"eff.err={out['efficiency_error']:.1e}  {out['method']}")
         print(f"  {'':>9}  auction: {routing.allocate(c, game, m=2).to_dict()}")
 
+def cmd_serve(a):
+    """Put the whole of V1 behind a page.
+
+    Nothing here is a new capability -- the routes call `Cortex.train`,
+    `Cortex.selfplay` and `cortex/arena.py`, which is what the other
+    subcommands call. What the browser adds is watching it happen.
+
+    `--train` gives the models something to be before the first game: a page
+    whose first match is against an untrained region shows a network ranking
+    moves from its random initialisation, which is honest and useless."""
+    from cortex import server
+    app = server.App(checkpoint_dir=a.checkpoints, games=a.games, seed=a.seed,
+                     nh=a.nh, tau_new=a.tau_new)
+    if a.load:
+        from cortex import trainer
+        trainer.load(app.reg, "main", os.path.abspath(a.load))
+        print(f"  loaded {a.load} into 'main'")
+    if a.train:
+        rng = random.Random(a.seed)
+        c = app.reg.require("main")
+        for n in a.games:
+            opp = OPPONENT.get(n)
+            print(f"  training {n} for {a.train} episodes...", end=" ", flush=True)
+            r = c.train(ALL[n], episodes=a.train, rng=rng, k=12, opponent=opp)
+            e = c.evaluate(ALL[n], n=30, rng=random.Random(7), k=12, opponent=opp)
+            print(f"legality {e['legality_acc']} (baseline {e['majority_baseline']}), "
+                  f"top pick legal {e['top_choice_legal']}, rule {r['rule']}")
+    server.run_server(a.host, a.port, app=app, frontend=a.frontend,
+                      quiet=a.quiet, open_browser=a.open)
+
+
+def cmd_discovered(a):
+    """Compare the cortex built from GREN's measurement against the one built
+    from the hand-written mechanics, and measure what the shared vocabulary is
+    actually worth."""
+    import statistics as stat
+    from cortex import discovered as disc
+    from cortex.graph import distance
+
+    games, report = disc.registry(ALL)
+    mech_only, _ = disc.registry(ALL, vocabulary=False)
+    doc = disc.load()
+    print("\nGREN handoff\n")
+    for n, st, ch in report:
+        p = doc["packages"][n]
+        print(f"  {n:>9}: {st:<12} {p['probes']} probes, {len(p['signature'])} tokens, "
+              f"characterise {ch:.3f}, identify {p['confidence']:.3f}")
+
+    print("\nRegions\n")
+    print(f"  {'regime':<22}{'layout':<44}{'metric violations':>18}")
+    for label, reg in (("hand-written", ALL), ("discovered mechanics", mech_only),
+                       ("+ derived vocabulary", games)):
+        c = Cortex(tau_new=0.60)
+        for n in a.games: c.add_game(reg[n])
+        lay = " | ".join("+".join(sorted(g.name for g in r.games)) for r in c.regions)
+        print(f"  {label:<22}{lay:<44}{c.graph.check_metric():>18}")
+
+    print("\nInput slots matched across games by legality signature\n")
+    for sl in doc["slots"]:
+        print(f"  {sl['name']:<20} strength {sl['strength']:.2f}  "
+              f"{', '.join(sl['games'])}")
+        for g in sl["games"]:
+            b, i, sg = doc["vocabulary"][g][sl["name"]][0]
+            print(f"      {g:>9}  {'+' if sg > 0 else '-'}{b}[{i}]")
+
+    if a.games_n < 1: return
+    print("\nWhat the shared vocabulary is worth: train chess, evaluate checkers\n")
+    print("  The untrained network is the WRONG baseline -- training chess alone moves")
+    print("  the region's shared hidden layer and bias, and that takes checkers to its")
+    print("  majority class with no transfer at all. The baseline is that majority.\n")
+    print(f"  {'regime':<24}{'shared':>8}{'majority':>10}{'after chess':>13}{'gain':>9}")
+    for label, reg in (("hand-written", ALL), ("GREN, aligned slots", games)):
+        acc, nsl, maj = [], 0, 0.0
+        for seed in range(a.games_n):
+            c = Cortex(tau_new=0.60, seed=seed)
+            c.add_game(reg["chess"]); c.add_game(reg["checkers"])
+            r = c.regions[0]
+            nsl = sum(r.vocab.slot[k][1]
+                      for k in set(reg["chess"].spec) & set(reg["checkers"].spec))
+            c.train(reg["chess"], episodes=a.episodes, rng=random.Random(seed), k=12)
+            e = c.evaluate(reg["checkers"], n=60, rng=random.Random(99), k=12)
+            acc.append(e["legality_acc"]); maj = e["majority_baseline"]
+        m = stat.mean(acc)
+        print(f"  {label:<24}{nsl:>8}{maj:>10.3f}{m:>9.3f}±{stat.pstdev(acc):.3f}"
+              f"{m - maj:>+9.3f}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="cortex")
     sub = p.add_subparsers(dest="cmd", required=True)
     for name, fn in (("demo", cmd_demo), ("map", cmd_map),
                      ("play", cmd_play), ("sudoku", cmd_sudoku),
-                     ("transfer", cmd_transfer), ("credit", cmd_credit)):
+                     ("transfer", cmd_transfer), ("credit", cmd_credit),
+                     ("serve", cmd_serve), ("discovered", cmd_discovered)):
         q = sub.add_parser(name); q.set_defaults(fn=fn)
         q.add_argument("--episodes", type=int, default=400)
         q.add_argument("--seed", type=int, default=0)
@@ -242,7 +350,25 @@ def main(argv=None):
         q.add_argument("--rounds", type=int, default=40)
         q.add_argument("--save", default=None, help="write a checkpoint here")
         q.add_argument("--load", default=None, help="resume from a checkpoint")
+        q.add_argument("--discovered", action="store_true",
+                       help="use GREN's measured signature as the mechanics")
+        q.add_argument("--discovered-vocab", action="store_true",
+                       help="also use GREN's derived input vocabulary")
         q.add_argument("--games", nargs="*", default=["chess","checkers","go","sudoku"])
+        if name != "serve": continue
+        from cortex.server import DEFAULT_HOST, DEFAULT_PORT
+        q.add_argument("--host", default=DEFAULT_HOST,
+                       help="127.0.0.1 by default; anything else serves training "
+                            "on demand to whoever can reach the port")
+        q.add_argument("--port", type=int, default=DEFAULT_PORT)
+        q.add_argument("--train", type=int, default=0,
+                       help="episodes to train each game for before serving")
+        q.add_argument("--nh", type=int, default=24)
+        q.add_argument("--tau-new", type=float, default=0.60)
+        q.add_argument("--checkpoints", default=None)
+        q.add_argument("--frontend", default=None)
+        q.add_argument("--open", action="store_true", help="open a browser")
+        q.add_argument("--quiet", action="store_true", help="no request log")
     a = p.parse_args(argv); a.fn(a)
 
 if __name__ == "__main__": main()
