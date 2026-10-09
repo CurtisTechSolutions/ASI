@@ -7,7 +7,7 @@ python3 -m latticefsm test         # the same, through the CLI
 make parity                        # TestRustParity alone (needs make build)
 ```
 
-Plain `unittest`, standard library, a second, deterministic (35 tests; the
+Plain `unittest`, standard library, a second, deterministic (36 tests; the
 parity ones need `rust/target/release/latticefsm` and skip without it). Each
 test names the rule it protects; the ones that hold the line on something
 this model is specifically about:
@@ -15,6 +15,7 @@ this model is specifically about:
 | test | what it holds the line on |
 |---|---|
 | `TestLattice.test_the_matrix_is_dense_and_three_dimensional` | `S · A · S` edges from the start, each knowing its place; `row`, `leaving`, `arriving` |
+| `TestLattice.test_the_default_matrix_is_13_by_13_by_13` | a machine made without a shape is 13 states over `a` to `m`, 2 197 edges, and can still be taught every language |
 | `TestLattice.test_every_edge_has_its_own_weighting` | the prototype is copied, not shared: adapting one edge's function moves no other's |
 | `TestEdge.test_traversal_writes_the_history_and_the_trace` | a traversal writes `seen`, `first_seen`, `last_seen`, the trace, and the features of that moment |
 | `TestEdge.test_credit_writes_the_verdict_and_adapts_the_weighting` | reward and punishment are kept apart, stamped, and move the bias by `rate · credit` |

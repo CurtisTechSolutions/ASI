@@ -51,10 +51,19 @@ export default function MatrixPanel({ stats, tick }) {
       <div className="card wide">
         <div className="toolbar">
           <h2>The matrix</h2>
-          <div className="tabs sub">
+          <div className="tabs sub symbols" role="tablist" aria-label="Symbol">
+            <span className="muted">symbol</span>
             {alphabet.map((a) => (
-              <button key={a} type="button" className={a === active ? "active" : ""} onClick={() => setSymbol(a)}>
-                symbol {a}
+              <button
+                key={a}
+                type="button"
+                role="tab"
+                aria-selected={a === active}
+                title={`the slice for symbol ${a}`}
+                className={a === active ? "active" : ""}
+                onClick={() => setSymbol(a)}
+              >
+                {a}
               </button>
             ))}
           </div>
@@ -66,7 +75,7 @@ export default function MatrixPanel({ stats, tick }) {
           traversed. ✓ marks an accepting state, ← the state the machine is in.
         </p>
         <Alert message={error} onDismiss={() => setError(null)} />
-        <div className="table-wrap">
+        <div className="table-wrap matrix-wrap">
           <table className="matrix">
             <thead>
               <tr>

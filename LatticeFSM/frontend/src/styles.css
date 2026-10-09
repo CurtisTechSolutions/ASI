@@ -2208,3 +2208,23 @@ pre.code.wrap {
   margin-right: 0.75em;
   white-space: nowrap;
 }
+
+/* thirteen symbols fit on one line: the letter alone, the word once before them */
+.tabs.sub.symbols {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+}
+.tabs.sub.symbols > .muted {
+  margin-right: 6px;
+}
+.tabs.sub.symbols button {
+  padding: 4px 0;
+  min-width: 2.1em;
+  font-family: var(--mono, ui-monospace, monospace);
+}
+/* the whole slice, every row of a 13-state machine, without a scroll box */
+.table-wrap.matrix-wrap {
+  max-height: none;
+}

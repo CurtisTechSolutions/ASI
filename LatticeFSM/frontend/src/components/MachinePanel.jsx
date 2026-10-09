@@ -7,8 +7,8 @@ import { NumberField, TextField } from "./Fields.jsx";
 
 /** A fresh machine, a saved one, a loaded one, and a lesson for one edge. */
 export default function MachinePanel({ stats, onMoved }) {
-  const [states, setStates] = useStoredState("machine.states", "4");
-  const [alphabet, setAlphabet] = useStoredState("machine.alphabet", "ab");
+  const [states, setStates] = useStoredState("machine.states", "13");
+  const [alphabet, setAlphabet] = useStoredState("machine.alphabet", "abcdefghijklm");
   const [accepting, setAccepting] = useStoredState("machine.accepting", "0");
   const [life, setLife] = useStoredState("machine.life", "1000");
   const [baseline, setBaseline] = useStoredState("machine.baseline", "1");
@@ -38,7 +38,8 @@ export default function MachinePanel({ stats, onMoved }) {
         <h2>A fresh machine</h2>
         <p className="note">
           Replaces the served machine with a new one: a dense matrix of states × symbols × states, every edge at the
-          prototype, nothing traversed. The current machine is {stats && stats.shape ? stats.shape.join(" × ") : "–"}.
+          prototype, nothing traversed. 13 states over the thirteen symbols a to m is a 13 × 13 × 13 matrix, the
+          default. The current machine is {stats && stats.shape ? stats.shape.join(" × ") : "–"}.
         </p>
         <div className="row">
           <NumberField label="States" value={states} onChange={setStates} min="1" step="1" />
@@ -55,7 +56,7 @@ export default function MachinePanel({ stats, onMoved }) {
               act(
                 () =>
                   api.newMachine({
-                    states: parseInteger(states, 4),
+                    states: parseInteger(states, 13),
                     alphabet,
                     accepting: parseStateList(accepting),
                     life: parseNumber(life, 1000),

@@ -17,8 +17,8 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
 from latticefsm import (  # noqa: E402
-    COEFFICIENT_LIMIT, FEATURES, WIDTH_MAX, WIDTH_MIN, WIDTH_REST, Edge, Machine, Weighting, examples, language,
-    load_machine,
+    COEFFICIENT_LIMIT, DEFAULT_ALPHABET, DEFAULT_STATES, FEATURES, LANGUAGES, WIDTH_MAX, WIDTH_MIN, WIDTH_REST, Edge,
+    Machine, Weighting, examples, language, load_machine,
 )
 from latticefsm import experiment  # noqa: E402
 from latticefsm.lattice import Lattice  # noqa: E402
@@ -42,6 +42,17 @@ class TestLattice(unittest.TestCase):
         self.assertEqual(len(lat.leaving(1)), 12)
         self.assertEqual(sum(1 for _ in lat.arriving(3)), 12)
         self.assertTrue(all(e.target == 3 for e in lat.arriving(3)))
+
+    def test_the_default_matrix_is_13_by_13_by_13(self):
+        self.assertEqual((DEFAULT_STATES, len(DEFAULT_ALPHABET)), (13, 13))
+        m = Machine()
+        self.assertEqual(m.lattice.shape, (13, 13, 13))
+        self.assertEqual(len(m.lattice), 13 ** 3)
+        self.assertEqual("".join(m.alphabet), "abcdefghijklm")
+        self.assertEqual(m.stats()["shape"], [13, 13, 13])
+        for lang in LANGUAGES.values():           # every language is over a and b, which the default alphabet holds
+            self.assertTrue(all(s < DEFAULT_STATES for s in lang.accepting))
+        self.assertEqual(len(m.run("abm").transitions), 3)
 
     def test_every_edge_has_its_own_weighting(self):
         lat = Lattice(2, "a", prototype=Weighting(bias=0.5))
@@ -407,6 +418,7 @@ class TestCLI(unittest.TestCase):
             self.assertIn("stimulation 3.000", self.run_cli("stimulate", "--amount", "2", "--load", path))
             self.assertIn("| stimulation |", self.run_cli("experiment", "--which", "stimulation"))
             self.assertIn("stimulation prefers the wide channel", self.run_cli("demo", "--episodes", "200"))
+            self.assertIn("shape: [13, 13, 13]", self.run_cli("stats"))
 
 
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
@@ -426,8 +438,8 @@ class TestRustParity(unittest.TestCase):
     def test_a_machine_file_crosses(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "m.json.gz")
-            subprocess.run([RUST, "train", "--language", "even-b", "--states", "3", "--episodes", "500", "--save", path],
-                           check=True, capture_output=True)
+            subprocess.run([RUST, "train", "--language", "even-b", "--states", "3", "--alphabet", "ab", "--episodes", "500",
+                            "--save", path], check=True, capture_output=True)
             m = load_machine(path)
             out = subprocess.run([RUST, "table", "--load", path], check=True, capture_output=True, text=True).stdout
             for (s, sym), t in m.transition_table().items():

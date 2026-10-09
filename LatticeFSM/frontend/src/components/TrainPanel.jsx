@@ -15,7 +15,7 @@ import LineChart from "./LineChart.jsx";
 export default function TrainPanel({ onMoved }) {
   const [languages, setLanguages] = useState([]);
   const [language, setLanguage] = useStoredState("train.language", "even-b");
-  const [episodes, setEpisodes] = useStoredState("train.episodes", "500");
+  const [episodes, setEpisodes] = useStoredState("train.episodes", "4000");
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -30,7 +30,7 @@ export default function TrainPanel({ onMoved }) {
   async function train() {
     setBusy(true);
     try {
-      setResult(await api.train({ language, episodes: parseInteger(episodes, 500) }));
+      setResult(await api.train({ language, episodes: parseInteger(episodes, 4000) }));
       setError(null);
       if (onMoved) onMoved();
     } catch (err) {

@@ -21,7 +21,7 @@ use std::process;
 use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
 use latticefsm::languages::{examples, language, LANGUAGES};
-use latticefsm::machine::{load_machine, Machine, Settings};
+use latticefsm::machine::{load_machine, Machine, Settings, DEFAULT_ALPHABET, DEFAULT_STATES};
 use latticefsm::rng::Rng;
 use latticefsm::server;
 
@@ -102,7 +102,8 @@ commands
               under the working directory, or ../frontend/dist)
 
 machine options (train, demo, serve without --load)
-  --states N (4)  --alphabet ab  --accepting 0,2  --start 0  --life 1000  --baseline 1  --calm LIFE
+  --states N (13)  --alphabet abcdefghijklm  (a 13 x 13 x 13 matrix)  --accepting 0,2  --start 0  --life 1000
+  --baseline 1  --calm LIFE
   --temperature 1  --discount 0.8  --seed 1  --use-widening 0.01  --reward-widening 0.2  --punish-narrowing 0.2
 common options
   --load FILE  --save FILE (.json or .json.gz)  --stimulation X (run)  --temperature T (run, accuracy)
@@ -128,8 +129,12 @@ fn settings(a: &Args) -> Settings {
 }
 
 fn fresh(a: &Args) -> Result<Machine, String> {
-    let states = a.num("states", 4.0) as usize;
-    let alphabet: Vec<String> = a.str("alphabet", "ab").chars().map(|c| c.to_string()).collect();
+    let states = a.num("states", DEFAULT_STATES as f64) as usize;
+    let alphabet: Vec<String> = a
+        .str("alphabet", DEFAULT_ALPHABET)
+        .chars()
+        .map(|c| c.to_string())
+        .collect();
     let accepting: Vec<usize> = match a.get("accepting") {
         Some(list) => list
             .split(',')
@@ -236,7 +241,7 @@ fn train(a: &Args) -> Result<(), String> {
     let mut rng = Rng::new(a.num("seed", 1.0) as u64);
     let max_length = a.num("max-length", 6.0) as usize;
     let test = examples(&lang, a.num("tests", 300.0) as usize, &mut rng, max_length);
-    let episodes = a.num("episodes", 2000.0) as usize;
+    let episodes = a.num("episodes", 4000.0) as usize;
     let before = m.accuracy(&test, 0.0);
     let curve = teach_language(
         &mut m,
@@ -351,18 +356,31 @@ fn table(a: &Args) -> Result<(), String> {
 fn print_table(m: &Machine) {
     let t = m.transition_table();
     let acc = m.accepting();
+    // a symbol no edge was ever traversed on is a row of ties: listed once, not thirteen times
+    let used: Vec<usize> = (0..m.alphabet().len())
+        .filter(|&a| m.lattice.edges.iter().any(|e| e.symbol == a && e.touched()))
+        .collect();
+    let unused: Vec<&str> = (0..m.alphabet().len())
+        .filter(|a| !used.contains(a))
+        .map(|a| m.alphabet()[a].as_str())
+        .collect();
     println!("  greedy table (accepting: {:?}):", acc);
     for (s, row) in t.iter().enumerate() {
-        let cells: Vec<String> = row
+        let cells: Vec<String> = used
             .iter()
-            .enumerate()
-            .map(|(a, t)| format!("{} -> {}", m.alphabet()[a], t))
+            .map(|&a| format!("{} -> {}", m.alphabet()[a], row[a]))
             .collect();
         println!(
-            "    {}{}: {}",
+            "    {:>2}{}: {}",
             s,
             if acc.contains(&s) { "*" } else { " " },
             cells.join("   ")
+        );
+    }
+    if !unused.is_empty() && !used.is_empty() {
+        println!(
+            "    (never traversed on {}: every next state still ties)",
+            unused.join(" ")
         );
     }
 }
@@ -389,7 +407,7 @@ fn demo(a: &Args) -> Result<(), String> {
         lang.name, lang.description
     );
     println!("  accuracy before: {:.3}", m.accuracy(&test, 0.0));
-    let episodes = a.num("episodes", 2000.0) as usize;
+    let episodes = a.num("episodes", 4000.0) as usize;
     for (ep, acc) in teach_language(
         &mut m,
         &lang,

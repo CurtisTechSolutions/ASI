@@ -39,7 +39,7 @@ fn serve_with(requests: usize, frontend: Option<std::path::PathBuf>) -> String {
 
 #[test]
 fn every_route_answers() {
-    let addr = serve(16);
+    let addr = serve(17);
     let (status, health) = request(&addr, "GET", "/api/health", None).unwrap();
     assert_eq!(status, 200);
     assert_eq!(health.get("shape").unwrap().dump(), "[4,2,4]");
@@ -125,6 +125,11 @@ fn every_route_answers() {
     )
     .unwrap();
     assert_eq!(stim.num("stimulation", 0.0), 0.5);
+
+    let (status, default) = request(&addr, "POST", "/api/new", Some(&Json::object())).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(default.get("shape").unwrap().dump(), "[13,13,13]");
+    assert_eq!(default.num("edges", 0.0), 2197.0);
 
     let (status, fresh) = request(
         &addr,

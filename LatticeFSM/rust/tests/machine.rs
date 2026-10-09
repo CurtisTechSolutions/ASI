@@ -5,7 +5,7 @@ use latticefsm::experiment::{self, teach_language, LearningOptions, StimulationO
 use latticefsm::json::parse;
 use latticefsm::languages::{examples, language};
 use latticefsm::lattice::Lattice;
-use latticefsm::machine::{load_machine, Machine, Settings};
+use latticefsm::machine::{load_machine, Machine, Settings, DEFAULT_ALPHABET, DEFAULT_STATES};
 use latticefsm::rng::Rng;
 
 fn close(a: f64, b: f64) -> bool {
@@ -42,6 +42,25 @@ fn the_matrix_is_dense_and_three_dimensional() {
     assert!(lat.symbol_index("z").is_err());
     assert!(Lattice::new(0, &alphabet, Weighting::default()).is_err());
     assert!(Lattice::new(2, &["a".to_string(), "a".to_string()], Weighting::default()).is_err());
+}
+
+#[test]
+fn the_default_matrix_is_13_by_13_by_13() {
+    assert_eq!((DEFAULT_STATES, DEFAULT_ALPHABET.chars().count()), (13, 13));
+    let m = Machine::default_shape(&[0], Settings::default()).unwrap();
+    assert_eq!(m.lattice.shape(), (13, 13, 13));
+    assert_eq!(m.lattice.len(), 13 * 13 * 13);
+    assert_eq!(m.alphabet().concat(), "abcdefghijklm");
+    assert!(m.lattice.row(12, 12).iter().all(|e| !e.touched()));
+    // every language is over a and b, which the default alphabet holds
+    for lang in latticefsm::languages::LANGUAGES {
+        assert!(lang.accepting.iter().all(|&s| s < DEFAULT_STATES));
+    }
+    let mut m = m;
+    let s = m.tokenize("abm").unwrap();
+    let r = m.run(&s, None, None, false);
+    assert_eq!(r.transitions.len(), 3);
+    assert_eq!(m.stats().get("shape").unwrap().dump(), "[13,13,13]");
 }
 
 #[test]

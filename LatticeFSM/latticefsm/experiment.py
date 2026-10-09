@@ -66,7 +66,7 @@ def teach_language(machine: Machine, name: str, episodes: int, rng: random.Rando
     return curve
 
 
-def learning(episodes: int = 4000, sizes: Sequence[int] = (3, 4, 6), seeds: Sequence[int] = (1, 2, 3, 4, 5),
+def learning(episodes: int = 4000, sizes: Sequence[int] = (3, 4, 6, 13), seeds: Sequence[int] = (1, 2, 3, 4, 5),
              life: float = LIFE, discount: float = DISCOUNT, max_length: int = 6, tests: int = 300) -> dict:
     rows = []
     for name, lang in LANGUAGES.items():
@@ -247,7 +247,7 @@ def run(which: Sequence[str], out: str | None = None, **kw) -> list[dict]:
     records = []
     for name in names:
         if name == "learning":
-            rec = learning(episodes=kw.get("episodes", 4000), sizes=kw.get("sizes", (3, 4, 6)),
+            rec = learning(episodes=kw.get("episodes", 4000), sizes=kw.get("sizes", (3, 4, 6, 13)),
                            seeds=kw.get("seeds", (1, 2, 3, 4, 5)), life=kw.get("life", LIFE),
                            discount=kw.get("discount", DISCOUNT))
         elif name == "stimulation":

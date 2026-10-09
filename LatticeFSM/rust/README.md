@@ -41,10 +41,10 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/run` | `{text, stimulation?, temperature?, quiet?}` | the run, traversed unless quiet, and the stats |
 | `POST /api/credit` | `{amount}` | reward (positive) or punish (negative) the last run |
 | `POST /api/teach` | `{source, symbol, target, amount}` | one edge, traversed and credited |
-| `POST /api/train` | `{language, episodes?, max_length?}` | accuracy before and after, the curve, the table |
+| `POST /api/train` | `{language, episodes? (4000), max_length?}` | accuracy before and after, the curve, the table |
 | `POST /api/tick` | `{ticks}` | time passes |
 | `POST /api/stimulate` | `{amount}` or `{level}` | raise the stimulation, or set it |
-| `POST /api/new` | `{states, alphabet, accepting?, life?, baseline?, …}` | a fresh machine in place of the old |
+| `POST /api/new` | `{states?, alphabet?, accepting?, life?, baseline?, …}` | a fresh machine in place of the old; 13 × 13 × 13 without `states` and `alphabet` |
 | `POST /api/save` | `{path}` | write the machine (`.json` or `.json.gz`) |
 | `POST /api/load` | `{path}` | read a machine in place of the old |
 

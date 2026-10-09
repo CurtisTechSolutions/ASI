@@ -18,10 +18,10 @@ __version__ = "0.1.0"
 from .edge import COEFFICIENT_LIMIT, FEATURES, WIDTH_MAX, WIDTH_MIN, WIDTH_REST, Edge, Weighting
 from .languages import ALPHABET, LANGUAGES, Language, examples, language
 from .lattice import Lattice, State
-from .machine import BASELINE, DISCOUNT, LIFE, Machine, Run, Transition, load_machine
+from .machine import BASELINE, DEFAULT_ALPHABET, DEFAULT_STATES, DISCOUNT, LIFE, Machine, Run, Transition, load_machine
 
 __all__ = [
     "__version__", "Machine", "Run", "Transition", "Lattice", "State", "Edge", "Weighting", "Language",
     "load_machine", "examples", "language", "LANGUAGES", "ALPHABET",
-    "LIFE", "BASELINE", "DISCOUNT", "FEATURES", "WIDTH_REST", "WIDTH_MIN", "WIDTH_MAX", "COEFFICIENT_LIMIT",
+    "LIFE", "BASELINE", "DISCOUNT", "DEFAULT_STATES", "DEFAULT_ALPHABET", "FEATURES", "WIDTH_REST", "WIDTH_MIN", "WIDTH_MAX", "COEFFICIENT_LIMIT",
 ]

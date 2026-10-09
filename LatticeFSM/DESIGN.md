@@ -18,7 +18,13 @@ The five requirements, in the author's words, and where each is realised:
 
 `Lattice(states, alphabet)` holds `S · A · S` edges, one for every
 `(source, symbol, target)`, created when the matrix is: dense, never added
-to or removed from. Storage is one flat vector in row-major order,
+to or removed from. A machine made without a shape — the CLIs, the server's
+`serve` and `/api/new`, `Machine()` in Python, `Machine::default_shape` in
+Rust — is **13 × 13 × 13**: `DEFAULT_STATES = 13` states over
+`DEFAULT_ALPHABET = "abcdefghijklm"`, 2 197 edges. The four languages are
+over `a` and `b`, which that alphabet holds, so a default machine can be
+taught any of them; the slices for `c` to `m` stay at the prototype until
+something is run over them. Storage is one flat vector in row-major order,
 `edges[(s · A + a) · S + t]`, so the `S` edges the machine chooses among when
 it is in `s` and reads `a` — the **row** `row(s, a)` — are one contiguous
 slice. `leaving(s)` is every edge out of `s`; `arriving(t)` every edge into
@@ -241,6 +247,10 @@ serves it with no `npm`.
 
 ## 10. Decisions
 
+* **13 × 13 × 13 by default.** Asked for. It is four to six times the
+  states the languages need, which costs learning reliability (README,
+  the learning table) and is why training defaults to 4 000 episodes; a
+  smaller machine is one flag away.
 * **Dense, not sparse.** The request was a matrix, and a record on every
   cell is the point: an edge never traversed still has a width, a prototype
   weighting and a place in the row, so it can be drawn and can then begin

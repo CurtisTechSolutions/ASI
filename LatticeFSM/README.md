@@ -1,7 +1,9 @@
 # LatticeFSM
 
 **A finite state machine over a dense 3D matrix of adaptive edges.** The
-matrix is `states × symbols × states`, and every cell of it is an edge: *in
+matrix is `states × symbols × states` — **13 × 13 × 13** unless asked
+otherwise: 13 states over the 13 symbols `a` to `m`, 2,197 edges — and every
+cell of it is an edge: *in
 this state, reading this symbol, the machine may move to that state*. An edge
 is not a number. It is a dense record of its own life — how often and when it
 was traversed, a trace of recent traversals that fades, what it has been
@@ -49,7 +51,7 @@ number, and a machine file written by either reads in the other.
 
 | Rule | Implementation |
 |---|---|
-| The matrix is dense and three-dimensional | `Lattice`: `S · A · S` edges from the moment it is made, row-major, none ever added or removed; `row(s, a)` is the fibre the machine chooses among |
+| The matrix is dense and three-dimensional | `Lattice`: `S · A · S` edges from the moment it is made, row-major, none ever added or removed; `row(s, a)` is the fibre the machine chooses among. The default is 13 × 13 × 13 (`DEFAULT_STATES`, `DEFAULT_ALPHABET`); `--states` and `--alphabet` give any other shape |
 | An edge is a record | `Edge`: `seen`, `first_seen`, `last_seen`, `recent` (a trace), `rewarded`, `punished`, `last_rewarded`, `last_punished`, `width`, `width_stamp`, `weighting`, `features` |
 | The machine is a finite state machine | `Machine`: a state, a start, accepting states; `step(symbol)` draws the next state from the row and traverses the edge; `run(string)` from the start; the run is accepted or not |
 | Traversal is by an adaptive weighting function per edge | `log_weight = bias + Σ kᵢ·fᵢ + stimulation·log(width)`; the five `f` are the edge's features and the `k` are its own `Weighting`, adapted by `rate · credit · fᵢ` at every credit |
@@ -76,15 +78,18 @@ rust/target/release/latticefsm --help
 The demo, abridged:
 
 ```
-a machine of 4 states over ["a", "b"]: 32 edges, each a record of its own; life 1000 ticks, baseline stimulation 1
+a machine of 13 states over ["a", "b", ... "m"]: 2197 edges, each a record of its own; life 1000 ticks, baseline stimulation 1
 
 learning "even-b" (an even number of b's) by reward and punishment over random strings:
-  accuracy before: 0.570
-  after   500 episodes: 1.000
+  accuracy before: 0.567
+  after  2000 episodes: 0.507
+  after  3000 episodes: 1.000
   greedy table (accepting: [0]):
-    0*: a -> 0   b -> 3
-    3 : a -> 3   b -> 0
-  clock 5950, 31 of 32 edges touched, widest channel 20.00, narrowest 0.99
+     0*: a -> 0   b -> 5
+     5 : a -> 5   b -> 0
+     ...
+    (never traversed on c d e f g h i j k l m: every next state still ties)
+  clock 11900, 335 of 2197 edges touched, widest channel 20.00, narrowest 0.98
 
 stimulation prefers the wide channel.  A fresh fork of three edges, widths 4, 1 and 0.25:
   stimulation 0   : [0.333, 0.333, 0.333]
@@ -95,6 +100,13 @@ stimulated by +3: level 4.00; a life of silence later:
   level 2.50, the widest channel now 10.50; accuracy still 1.000
   four more lives: level 1.09, widest 1.59; accuracy 1.000 - the verdicts never fade, the widths and traces do
 ```
+
+The languages are over `a` and `b`, so a default machine traverses 2 of its
+13 symbol-slices while it learns one; the other eleven wait at the
+prototype, uniform, for whatever is run over them. The machine settles on a
+two-state cycle (0 and 5 above) out of thirteen states, and leaves the
+others as routes it once tried.
+
 
 ## The web server and the frontend
 
@@ -142,7 +154,7 @@ stimulation 1, discount 0.8, temperature 1, strings of up to six symbols.
 
 ### A language is learned by credit, and not quietly
 
-For each of four regular languages and three machine sizes, five machines
+For each of four regular languages and four machine sizes (13, the default, among them), five machines
 (one per seed) run 4 000 random strings, are rewarded when they end in a
 state of the right kind and punished when they do not, and are scored on 300
 held-out strings by their greedy walk. The control runs the same strings
@@ -154,24 +166,36 @@ Rust:
 | language | states (min) | before | after: mean | min | max | solved | quiet after |
 |---|---|---|---|---|---|---|---|
 | even-b (an even number of b's) | 3 (2) | 0.57 | **1.00** | 1.00 | 1.00 | 5/5 | 0.56 |
-| even-b | 6 (2) | 0.55 | **1.00** | 1.00 | 1.00 | 5/5 | 0.55 |
+| even-b (an even number of b's) | 6 (2) | 0.55 | **1.00** | 1.00 | 1.00 | 5/5 | 0.55 |
+| even-b (an even number of b's) | 13 (2) | 0.55 | **0.93** | 0.64 | 1.00 | 4/5 | 0.55 |
 | contains-aa (two a's in a row somewhere) | 3 (3) | 0.61 | **1.00** | 1.00 | 1.00 | 5/5 | 0.61 |
-| contains-aa | 6 (3) | 0.64 | **0.87** | 0.62 | 1.00 | 3/5 | 0.63 |
+| contains-aa (two a's in a row somewhere) | 6 (3) | 0.64 | **0.87** | 0.62 | 1.00 | 3/5 | 0.63 |
+| contains-aa (two a's in a row somewhere) | 13 (3) | 0.65 | **0.81** | 0.64 | 1.00 | 1/5 | 0.65 |
 | ends-ab (ends with ab) | 3 (3) | 0.64 | **0.92** | 0.77 | 1.00 | 3/5 | 0.66 |
-| ends-ab | 6 (3) | 0.74 | **0.96** | 0.79 | 1.00 | 4/5 | 0.73 |
+| ends-ab (ends with ab) | 6 (3) | 0.74 | **0.96** | 0.79 | 1.00 | 4/5 | 0.73 |
+| ends-ab (ends with ab) | 13 (3) | 0.79 | **0.92** | 0.81 | 1.00 | 1/5 | 0.78 |
 | mod3-a (a multiple of three a's) | 3 (3) | 0.61 | **1.00** | 1.00 | 1.00 | 5/5 | 0.63 |
-| mod3-a | 6 (3) | 0.67 | **0.79** | 0.63 | 1.00 | 1/5 | 0.68 |
+| mod3-a (a multiple of three a's) | 6 (3) | 0.67 | **0.79** | 0.63 | 1.00 | 1/5 | 0.68 |
+| mod3-a (a multiple of three a's) | 13 (3) | 0.70 | **0.76** | 0.69 | 0.85 | 0/5 | 0.70 |
 
 Python, the same experiment on its own strings: every language is solved
-5/5 at three states; at six states `contains-aa` 0.93 (3/5), `ends-ab` 0.93
-(2/5), `mod3-a` 0.82 (2/5). `results/*/experiments.log` has the full tables.
+5/5 at three states; at thirteen states `even-b` 0.92 (4/5), `contains-aa`
+0.80 (1/5), `ends-ab` 0.95 (0/5), `mod3-a` 0.80 (0/5).
+`results/*/experiments.log` has the full tables, the four-state rows
+included.
 
 A machine of the minimal size solves every language on every seed. More
 states than needed give the credit more ways to be wrong, and a run of seeds
 settles into a table that is right on most strings and wrong on a few; there
 is no baseline, no entropy bonus and no annealing to pull it out, because
-the model is the edge records and nothing else. The quiet arm never moves
-from chance, and its machines have not a single edge touched.
+the model is the edge records and nothing else. **The default 13-state
+machine is four to six times the size these languages need**, and it shows:
+`even-b` is solved on four seeds of five, `ends-ab` reaches 0.92 to 0.95 on
+average, and `mod3-a`, which needs a three-state cycle found among thirteen,
+is never solved outright. Pass `--states 3` (or `STATES=3`) to teach these
+languages more reliably; the default is sized for the matrix, not for them. The
+quiet arm never moves from chance, and its machines have not a single edge
+touched.
 
 ### Stimulation prefers the wide channel
 
@@ -245,7 +269,7 @@ stays at zero probability on its record alone.
 | `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, experiment, serve |
 | `rust/tests/` | the machine and the server over a real socket |
 | `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `languages.py`, `experiment.py`, `cli.py` |
-| `tests/test_latticefsm.py` | 35 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
+| `tests/test_latticefsm.py` | 36 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
 | `results/` | the measured numbers from both ports, with a README |
 
 ## Limits
@@ -253,6 +277,9 @@ stays at zero probability on its record alone.
 * Credit is a discounted trace back from a run's end, with no baseline: a
   machine larger than the language needs can settle into a partly wrong
   table and stay there (the learning table above).
+* The default 13 × 13 × 13 machine is larger than any of the four languages
+  needs, so it learns them less reliably than a machine of three or four
+  states (the learning table); training defaults to 4 000 episodes for it.
 * The matrix is dense by design, `S · A · S` records: a thousand states over
   a hundred symbols is a hundred million edges. The model is meant for
   machines of tens of states, where every edge's record is the point.

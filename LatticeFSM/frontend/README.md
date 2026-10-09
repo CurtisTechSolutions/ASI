@@ -6,9 +6,9 @@ in `../rust/README.md`). It is the ModelKit frontend's shape
 (`../../ModelKit/frontend`): the same stylesheet, form fields, alert, SVG
 line chart, settings store and status-bar pattern, with this model's panels.
 
-Tabs: **Matrix** (one symbol-slice of the matrix at a time, each cell shaded
-by its probability, a click opening the edge's record and weighting
-function), **Run** (a string at a stimulation of your choosing, traversed or
+Tabs: **Matrix** (one symbol-slice of the matrix at a time — on the default
+13 × 13 × 13 machine, thirteen slices of 13 × 13 — each cell shaded by its
+probability, a click opening the edge's record and weighting function), **Run** (a string at a stimulation of your choosing, traversed or
 asked quietly; reward or punish the last run), **Train** (a language for
 some episodes, with the accuracy curve and the greedy table), **Time**
 (ticks; raise or set the stimulation), **Machine** (a fresh machine, save

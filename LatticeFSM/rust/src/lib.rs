@@ -1,6 +1,7 @@
 //! latticefsm - a finite state machine over a dense 3D matrix of adaptive edges.
 //!
-//! The matrix is `states × symbols × states`, and every cell is an [`edge::Edge`]:
+//! The matrix is `states × symbols × states` - 13 × 13 × 13 unless asked otherwise
+//! ([`machine::DEFAULT_STATES`], [`machine::DEFAULT_ALPHABET`]) - and every cell is an [`edge::Edge`]:
 //! a dense record of how often and when the transition was traversed, what it
 //! was rewarded and punished, how wide the channel is, and the coefficients of
 //! its own adaptive weighting function.  A [`machine::Machine`] walks it as a
@@ -33,6 +34,6 @@ pub mod server;
 
 pub use edge::{Edge, Weighting};
 pub use lattice::{Lattice, State};
-pub use machine::{load_machine, Machine, Run, Settings, Transition};
+pub use machine::{load_machine, Machine, Run, Settings, Transition, DEFAULT_ALPHABET, DEFAULT_STATES};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

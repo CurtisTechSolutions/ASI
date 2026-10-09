@@ -38,7 +38,8 @@ from dataclasses import dataclass
 from .edge import Edge, Weighting
 from .lattice import Lattice
 
-__all__ = ["BASELINE", "DISCOUNT", "LIFE", "Machine", "Run", "Transition", "load_machine"]
+__all__ = ["BASELINE", "DEFAULT_ALPHABET", "DEFAULT_STATES", "DISCOUNT", "LIFE", "Machine", "Run", "Transition",
+           "load_machine"]
 
 LIFE = 1_000
 """Ticks for a trace, an age, a width's excess or the stimulation's excess to fade by a half."""
@@ -48,6 +49,13 @@ BASELINE = 1.0
 
 DISCOUNT = 0.8
 """How much of a run's credit each step further back from its end receives."""
+
+DEFAULT_STATES = 13
+"""The states of a machine made without saying how many: with :data:`DEFAULT_ALPHABET`, a 13 x 13 x 13 matrix."""
+
+DEFAULT_ALPHABET = "abcdefghijklm"
+"""The alphabet of a machine made without saying which: thirteen symbols, ``a`` to ``m``.  The languages are over
+``a`` and ``b``, so a default machine can be taught any of them; the other eleven symbols' edges wait unused."""
 
 _FORMAT = "latticefsm-machine"
 _FORMAT_VERSION = 1
@@ -93,8 +101,8 @@ class Machine:
 
     def __init__(
         self,
-        states: int,
-        alphabet: Sequence[str],
+        states: int = DEFAULT_STATES,
+        alphabet: Sequence[str] = DEFAULT_ALPHABET,
         accepting: Iterable[int] = (),
         start: int = 0,
         life: float = LIFE,

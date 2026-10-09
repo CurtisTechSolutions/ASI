@@ -4,7 +4,7 @@ The numbers in `../README.md`, committed beside the code that produced them.
 
 | file | what it is |
 |---|---|
-| `learning_results.json` | four languages × three machine sizes × five seeds: accuracy before and after 4 000 credited episodes, the curve every 500, and the quiet control |
+| `learning_results.json` | four languages × four machine sizes (3, 4, 6 and the default 13) × five seeds: accuracy before and after 4 000 credited episodes, the curve every 500, and the quiet control |
 | `stimulation_results.json` | a fork of widths 4, 1, 0.25: the probabilities by stimulation level; a surge of +3 relaxing over four lives |
 | `adaptation_results.json` | two edges from one prototype, one rewarded and one punished on every use: every field at six stages, and the two weighting functions |
 | `experiments.log` | the three tables as `make experiments` printed them |

@@ -23,7 +23,7 @@
 //! | `POST /api/train` | `{language, episodes?}`: random strings credited by the language's verdict |
 //! | `POST /api/tick` | `{ticks}`: time passes |
 //! | `POST /api/stimulate` | `{amount}` or `{level}`: raise the stimulation, or set it |
-//! | `POST /api/new` | `{states, alphabet, accepting?, life?, ...}`: a fresh machine in place of the old |
+//! | `POST /api/new` | `{states?, alphabet?, accepting?, life?, ...}`: a fresh machine (13 × 13 × 13 by default) |
 //! | `POST /api/save` | `{path}`: write the machine |
 //! | `POST /api/load` | `{path}`: read a machine in place of the old |
 
@@ -34,7 +34,7 @@ use crate::experiment::teach_language;
 use crate::http::{self, Handler, Request, Response};
 use crate::json::Json;
 use crate::languages::{examples, language, LANGUAGES};
-use crate::machine::{load_machine, Machine, Settings};
+use crate::machine::{load_machine, Machine, Settings, DEFAULT_ALPHABET, DEFAULT_STATES};
 use crate::rng::Rng;
 use crate::VERSION;
 
@@ -323,7 +323,7 @@ fn teach(m: &mut Machine, body: &Json) -> Result<Json, String> {
 
 fn train(m: &mut Machine, body: &Json) -> Result<Json, String> {
     let lang = language(body.str_or("language", "even-b"))?;
-    let episodes = body.num("episodes", 500.0).max(0.0) as usize;
+    let episodes = body.num("episodes", 4000.0).max(0.0) as usize;
     let max_length = body.num("max_length", 6.0) as usize;
     for &s in lang.accepting {
         if s >= m.n_states() {
@@ -363,9 +363,10 @@ fn train(m: &mut Machine, body: &Json) -> Result<Json, String> {
         .with("stats", m.stats()))
 }
 
-/// A machine from `{states, alphabet, accepting?, start?, life?, baseline?, temperature?, discount?, seed?}`.
+/// A machine from `{states?, alphabet?, accepting?, start?, life?, baseline?, temperature?, discount?, seed?}`;
+/// without `states` and `alphabet`, the default 13 × 13 × 13.
 pub fn new_machine(body: &Json) -> Result<Machine, String> {
-    let states = body.num("states", 4.0) as usize;
+    let states = body.num("states", DEFAULT_STATES as f64) as usize;
     let alphabet: Vec<String> = match body.get("alphabet") {
         Some(Json::String(s)) => s
             .chars()
@@ -373,7 +374,7 @@ pub fn new_machine(body: &Json) -> Result<Machine, String> {
             .map(|c| c.to_string())
             .collect(),
         Some(Json::Array(items)) => items.iter().filter_map(|s| s.as_str().map(str::to_string)).collect(),
-        _ => vec!["a".to_string(), "b".to_string()],
+        _ => DEFAULT_ALPHABET.chars().map(|c| c.to_string()).collect(),
     };
     let accepting: Vec<usize> = body
         .get("accepting")

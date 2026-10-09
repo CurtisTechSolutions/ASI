@@ -24,12 +24,13 @@ import sys
 
 from . import experiment
 from .languages import LANGUAGES, examples, language
-from .machine import BASELINE, DISCOUNT, LIFE, Machine, load_machine
+from .machine import BASELINE, DEFAULT_ALPHABET, DEFAULT_STATES, DISCOUNT, LIFE, Machine, load_machine
 
 
 def _add_machine_options(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--states", type=int, default=4, help="how many states (default 4)")
-    p.add_argument("--alphabet", default="ab", help="one character per symbol (default ab)")
+    p.add_argument("--states", type=int, default=DEFAULT_STATES,
+                   help=f"how many states (default {DEFAULT_STATES}: with the default alphabet, a 13 x 13 x 13 matrix)")
+    p.add_argument("--alphabet", default=DEFAULT_ALPHABET, help=f"one character per symbol (default {DEFAULT_ALPHABET})")
     p.add_argument("--accepting", default=None, help="accepting states, comma-separated (default: the language's, or 0)")
     p.add_argument("--start", type=int, default=0)
     p.add_argument("--life", type=float, default=LIFE, help="ticks for a trace, a width or the stimulation to fade by half")
@@ -69,10 +70,15 @@ def _save(m: Machine, args) -> None:
 def _table(m: Machine) -> None:
     table = m.transition_table()
     acc = m.accepting
+    # a symbol no edge was ever traversed on is a row of ties: listed once, not thirteen times
+    used = [sym for a, sym in enumerate(m.alphabet) if any(e.symbol == a and e.touched for e in m.lattice)]
+    unused = [sym for sym in m.alphabet if sym not in used]
     print(f"  greedy table (accepting: {acc}):")
     for s in range(m.n_states):
-        cells = "   ".join(f"{sym} -> {table[(s, sym)]}" for sym in m.alphabet)
-        print(f"    {s}{'*' if s in acc else ' '}: {cells}")
+        cells = "   ".join(f"{sym} -> {table[(s, sym)]}" for sym in used)
+        print(f"    {s:>2}{'*' if s in acc else ' '}: {cells}")
+    if unused and used:
+        print(f"    (never traversed on {' '.join(unused)}: every next state still ties)")
 
 
 def cmd_train(args) -> int:
@@ -218,10 +224,10 @@ def build_parser() -> argparse.ArgumentParser:
         return q
 
     q = add("demo", cmd_demo, "learn a language, be stimulated, let time pass", load=False)
-    q.add_argument("--episodes", type=int, default=2000)
+    q.add_argument("--episodes", type=int, default=4000)
     q.add_argument("--save")
     q = add("train", cmd_train, "teach a language by credit over random strings")
-    q.add_argument("--episodes", type=int, default=2000)
+    q.add_argument("--episodes", type=int, default=4000)
     q.add_argument("--max-length", type=int, default=6)
     q.add_argument("--tests", type=int, default=300)
     q.add_argument("--quiet", action="store_true", help="run the strings without traversing: the control")

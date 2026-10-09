@@ -5,15 +5,19 @@ learning: 4000 episodes, strings up to 6 symbols, 5 seeds, 300 held-out strings;
 | even-b (an even number of b's) | 3 (2) | 0.59 | **1.00** | 1.00 | 1.00 | 5/5 | 0.59 |
 | even-b (an even number of b's) | 4 (2) | 0.59 | **1.00** | 1.00 | 1.00 | 5/5 | 0.59 |
 | even-b (an even number of b's) | 6 (2) | 0.60 | **1.00** | 1.00 | 1.00 | 5/5 | 0.59 |
+| even-b (an even number of b's) | 13 (2) | 0.59 | **0.92** | 0.61 | 1.00 | 4/5 | 0.59 |
 | contains-aa (two a's in a row somewhere) | 3 (3) | 0.62 | **1.00** | 1.00 | 1.00 | 5/5 | 0.60 |
 | contains-aa (two a's in a row somewhere) | 4 (3) | 0.62 | **0.89** | 0.68 | 1.00 | 3/5 | 0.61 |
 | contains-aa (two a's in a row somewhere) | 6 (3) | 0.62 | **0.93** | 0.79 | 1.00 | 3/5 | 0.63 |
+| contains-aa (two a's in a row somewhere) | 13 (3) | 0.66 | **0.80** | 0.65 | 1.00 | 1/5 | 0.66 |
 | ends-ab (ends with ab) | 3 (3) | 0.67 | **1.00** | 1.00 | 1.00 | 5/5 | 0.65 |
 | ends-ab (ends with ab) | 4 (3) | 0.69 | **0.82** | 0.65 | 1.00 | 2/5 | 0.71 |
 | ends-ab (ends with ab) | 6 (3) | 0.74 | **0.93** | 0.85 | 1.00 | 2/5 | 0.74 |
+| ends-ab (ends with ab) | 13 (3) | 0.78 | **0.95** | 0.92 | 0.99 | 0/5 | 0.78 |
 | mod3-a (a multiple of three a's) | 3 (3) | 0.62 | **1.00** | 1.00 | 1.00 | 5/5 | 0.62 |
 | mod3-a (a multiple of three a's) | 4 (3) | 0.65 | **0.94** | 0.69 | 1.00 | 4/5 | 0.64 |
 | mod3-a (a multiple of three a's) | 6 (3) | 0.67 | **0.82** | 0.67 | 1.00 | 2/5 | 0.66 |
+| mod3-a (a multiple of three a's) | 13 (3) | 0.69 | **0.80** | 0.69 | 0.86 | 0/5 | 0.69 |
 
 stimulation: a fork of 3 channels; probability of each by stimulation level
 

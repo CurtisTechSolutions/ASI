@@ -26,6 +26,11 @@ pub const LIFE: f64 = 1_000.0;
 pub const BASELINE: f64 = 1.0;
 /// How much of a run's credit each step further back from its end receives.
 pub const DISCOUNT: f64 = 0.8;
+/// The states of a machine made without saying how many: with [`DEFAULT_ALPHABET`], a 13 × 13 × 13 matrix.
+pub const DEFAULT_STATES: usize = 13;
+/// The alphabet of a machine made without saying which: thirteen symbols, `a` to `m`.  The languages are over
+/// `a` and `b`, so a default machine can be taught any of them; the other eleven symbols' edges wait unused.
+pub const DEFAULT_ALPHABET: &str = "abcdefghijklm";
 
 const FORMAT: &str = "latticefsm-machine";
 const FORMAT_VERSION: f64 = 1.0;
@@ -218,6 +223,11 @@ impl Machine {
             runs: 0,
             credits: 0,
         })
+    }
+
+    /// The default machine: [`DEFAULT_STATES`] states over [`DEFAULT_ALPHABET`], a 13 × 13 × 13 matrix.
+    pub fn default_shape(accepting: &[usize], settings: Settings) -> Result<Machine, String> {
+        Machine::over(DEFAULT_STATES, DEFAULT_ALPHABET, accepting, settings)
     }
 
     /// A machine over a one-character-per-symbol alphabet, e.g. `"ab"`.

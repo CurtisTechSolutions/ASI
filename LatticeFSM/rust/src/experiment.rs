@@ -75,7 +75,7 @@ impl Default for LearningOptions {
     fn default() -> LearningOptions {
         LearningOptions {
             episodes: 4000,
-            sizes: vec![3, 4, 6],
+            sizes: vec![3, 4, 6, 13],
             seeds: vec![1, 2, 3, 4, 5],
             life: LIFE,
             discount: DISCOUNT,
