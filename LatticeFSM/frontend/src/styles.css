@@ -2228,3 +2228,34 @@ pre.code.wrap {
 .table-wrap.matrix-wrap {
   max-height: none;
 }
+
+/* the central node, ringed wherever its slice is shown */
+.matrix td.cell.center {
+  outline: 3px double var(--accent-2, #b8862b);
+  outline-offset: -4px;
+}
+.shells td {
+  position: relative;
+}
+.shells .shell-bar {
+  display: inline-block;
+  height: 0.7em;
+  margin-right: 0.5em;
+  background: var(--accent);
+  border-radius: 2px;
+  vertical-align: middle;
+  max-width: 8em;
+}
+.compress-stats {
+  margin: 0.75rem 0;
+}
+.shells td {
+  white-space: nowrap;
+}
+.shells .shell-bar {
+  max-width: 5em;
+}
+.shells button.link {
+  font-size: 0.85rem;
+  padding: 0;
+}

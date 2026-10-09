@@ -5,3 +5,5 @@ machine.json.gz
 rust/target/
 frontend/node_modules/
 frontend/.vite/
+core.json
+core.json.gz

@@ -9,7 +9,10 @@
     stats       size, memory, clock and stimulation
     tick        let time pass
     stimulate   raise the stimulation
-    experiment  the learning, stimulation and adaptation experiments
+    compress    fold the matrix into its central node (exact, float32 or float16) and save the code
+    expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
+    core-run    walk a string straight from a code, decoding only the cells the walk reaches
+    experiment  the learning, stimulation, adaptation and compression experiments
     test        run the test suite
 
 The Rust binary (``../rust``) has the same commands and ``serve`` besides; the
@@ -23,6 +26,7 @@ import random
 import sys
 
 from . import experiment
+from .compress import PRECISIONS, compress, fidelity, load_core
 from .languages import LANGUAGES, examples, language
 from .machine import BASELINE, DEFAULT_ALPHABET, DEFAULT_STATES, DISCOUNT, LIFE, Machine, load_machine
 
@@ -40,6 +44,11 @@ def _add_machine_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--discount", type=float, default=DISCOUNT, help="credit each step back from a run's end receives")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--language", default="even-b", choices=sorted(LANGUAGES), help="the language train / demo / accuracy use")
+    p.add_argument("--compress-every", type=int, default=0,
+                   help="fold the matrix into its central node every N transitions (0: never)")
+    p.add_argument("--compress-precision", choices=list(PRECISIONS), default="exact")
+    p.add_argument("--compress-rebuild", action="store_true",
+                   help="rebuild the matrix from the code after each automatic compression, applying its loss")
 
 
 def _add_load_save(p: argparse.ArgumentParser) -> None:
@@ -54,7 +63,8 @@ def _fresh(args) -> Machine:
         accepting = list(language(args.language).accepting)
     return Machine(args.states, list(args.alphabet), accepting=accepting, start=args.start, life=args.life,
                    baseline=args.baseline, calm=args.calm, temperature=args.temperature, discount=args.discount,
-                   seed=args.seed)
+                   seed=args.seed, compress_every=args.compress_every, compress_precision=args.compress_precision,
+                   compress_rebuild=args.compress_rebuild)
 
 
 def _machine(args) -> Machine:
@@ -102,7 +112,8 @@ def cmd_train(args) -> int:
 def cmd_run(args) -> int:
     m = _machine(args)
     for _ in range(max(1, args.times)):
-        r = m.run(args.text, stimulation=args.stimulation, temperature=args.temperature_run, quiet=args.quiet)
+        r = m.run(args.text, stimulation=args.stimulation, temperature=args.temperature_run, quiet=args.quiet,
+                  from_middle=args.from_middle)
         steps = "  ".join(f"{t.source} -{t.symbol}({t.probability:.2f})-> {t.target}" for t in r.transitions)
         print(f"{'quietly: ' if args.quiet else ''}{steps or '(empty)'}  => {r.final} "
               f"({'accepted' if r.accepted else 'rejected'}), log p {r.log_probability:.3f}, "
@@ -111,6 +122,52 @@ def cmd_run(args) -> int:
             n = m.credit(args.credit)
             print(f"  credited {n} edges with {args.credit:+}")
     _save(m, args)
+    return 0
+
+
+def _print_core(core, m) -> None:
+    s = core.summary()
+    f = fidelity(m, core.decompress())
+    print(f"the {s['shape'][0]} x {s['shape'][1]} x {s['shape'][2]} matrix folded into its central node "
+          f"({s['center_label'][0]}, {s['center_label'][1]}, {s['center_label'][2]}), {s['precision']}:")
+    print(f"  {s['bytes']} bytes for {s['touched']} touched edges of {s['cells']} "
+          f"(the dense matrix is {s['dense_bytes']} bytes: {s['ratio']:.1f}x smaller), plus a "
+          f"{s['record_bytes']}-byte record of the rest")
+    print(f"  loss: {'none - every field of every edge comes back bit for bit' if f['lossless'] else 'lossy'}; "
+          f"largest relative error {f['max_relative_error']:.2e}; KL mean {f['mean_kl']:.2e}, max {f['max_kl']:.2e}; "
+          f"greedy choices changed {f['greedy_changed']} of {f['rows']}")
+    print("  from the central node outward:")
+    for row in s["shell_table"]:
+        print(f"    shell {row['shell']}: {row['cells']:>4} cells, {row['touched']:>4} touched, {row['bytes']:>6} bytes")
+
+
+def cmd_compress(args) -> int:
+    m = _machine(args)
+    core = compress(m, precision=args.precision, budget=args.budget)
+    _print_core(core, m)
+    if args.core:
+        core.save(args.core)
+        print(f"saved {args.core}", file=sys.stderr)
+    return 0
+
+
+def cmd_expand(args) -> int:
+    core = load_core(args.core)
+    m = core.decompress(shells=args.shells)
+    shown = "every shell" if args.shells is None else f"{args.shells} shell{'s' if args.shells != 1 else ''}"
+    st = m.stats()
+    print(f"rebuilt from the central node outward, {shown}: {st['touched']} of {st['edges']} edges written, "
+          f"clock {st['clock']}")
+    _table(m)
+    _save(m, args)
+    return 0
+
+
+def cmd_core_run(args) -> int:
+    core = load_core(args.core)
+    states, accepted = core.run(args.text, from_middle=args.from_middle)
+    print(f"{'from the middle: ' if args.from_middle else ''}{' -> '.join(map(str, states))}  "
+          f"({'accepted' if accepted else 'rejected'}), read straight from the code")
     return 0
 
 
@@ -198,6 +255,17 @@ def cmd_demo(args) -> int:
     m.tick(int(4 * m.life))
     print(f"  four more lives: level {m.stimulation:.2f}, widest {m.stats()['widest']:.2f}; accuracy {m.accuracy(test):.3f}"
           " - the verdicts never fade, the widths and traces do")
+    core = compress(m)
+    f = fidelity(m, core.decompress())
+    half = compress(m, "float16")
+    fh = fidelity(m, half.decompress())
+    cs, ca, ct = core.center
+    print(f"\nfolded into its central node ({cs}, {m.alphabet[ca]}, {ct}): {core.bytes} bytes exact, "
+          f"{'lossless' if f['lossless'] else 'lossy'} - {core.summary()['ratio']:.1f}x smaller than the dense matrix")
+    print(f"  float16: {half.bytes} bytes, max KL {fh['max_kl']:.1e}, {fh['greedy_changed']} greedy choices changed")
+    states, accepted = core.run("abba", from_middle=True)
+    print(f"  'abba' walked straight from the code, from the middle state outward: {' -> '.join(map(str, states))} "
+          f"({'accepted' if accepted else 'rejected'})")
     _save(m, args)
     return 0
 
@@ -237,6 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--temperature-run", type=float, default=None, help="draw at this temperature (0: greedy)")
     q.add_argument("--quiet", action="store_true", help="ask only: nothing moves")
     q.add_argument("--credit", type=float, default=None, help="credit the run: positive rewards, negative punishes")
+    q.add_argument("--from-middle", action="store_true", help="start from the middle state, the central node's")
     q.add_argument("--times", type=int, default=1)
     q = add("teach", cmd_teach, "traverse one edge deliberately and credit it")
     q.add_argument("source", type=int)
@@ -254,6 +323,17 @@ def build_parser() -> argparse.ArgumentParser:
     q = add("stimulate", cmd_stimulate, "raise the stimulation by --amount, or set --level")
     q.add_argument("--amount", type=float, default=1.0)
     q.add_argument("--level", type=float, default=None)
+    q = add("compress", cmd_compress, "fold the matrix into its central node and save the code")
+    q.add_argument("--precision", choices=list(PRECISIONS), default=None, help="default exact: no loss")
+    q.add_argument("--budget", type=int, default=None, help="bytes: the least lossy precision that fits")
+    q.add_argument("--core", default=None, help="write the code here (.json or .json.gz)")
+    q = add("expand", cmd_expand, "rebuild a machine from a code, from the central node outward", machine=False)
+    q.add_argument("--core", required=True)
+    q.add_argument("--shells", type=int, default=None, help="rebuild only this many shells (0 is the central node)")
+    q = add("core-run", cmd_core_run, "walk a string straight from a code", machine=False, load=False)
+    q.add_argument("text")
+    q.add_argument("--core", required=True)
+    q.add_argument("--from-middle", action="store_true")
     q = add("experiment", cmd_experiment, "the learning, stimulation and adaptation experiments", machine=False, load=False)
     q.add_argument("--which", nargs="+", default=["all"], choices=list(experiment.EXPERIMENTS) + ["all"])
     q.add_argument("--out", default=None, help="write <name>_results.json files here")

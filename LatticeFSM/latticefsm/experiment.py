@@ -19,6 +19,12 @@ is deterministic given the seed.
   different lives: one is used and rewarded, one is used and punished.  Use
   widens, punishment narrows, the verdict never fades, the width and the
   trace do; and the two weighting functions end up different.
+* :func:`compression` - default machines, fresh and taught each language, folded
+  into their central node at each precision: the bytes, and what the rebuilt
+  machine lost; one of them rebuilt from the central node outward, a shell at a
+  time; and every language taught again with the matrix folded into its central
+  node every ``every`` transitions, rebuilt from the code each time, at each
+  precision - what a compression on a clock costs the learning.
 """
 
 from __future__ import annotations
@@ -30,13 +36,14 @@ import random
 import sys
 from collections.abc import Sequence
 
+from .compress import PRECISIONS, compress, fidelity
 from .edge import Weighting
 from .languages import ALPHABET, LANGUAGES, examples, language
 from .machine import BASELINE, DISCOUNT, LIFE, Machine
 
 __all__ = ["EXPERIMENTS", "adaptation", "learning", "main", "run", "stimulation", "tables", "teach_language"]
 
-EXPERIMENTS = ("learning", "stimulation", "adaptation")
+EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression")
 
 
 def _settings(**kw) -> dict:
@@ -167,6 +174,61 @@ def adaptation(uses: int = 20, life: float = LIFE, waits: Sequence[float] = (0.0
     }
 
 
+def compression(episodes: int = 4000, seed: int = 1, life: float = LIFE, tests: int = 300, every: int = 500) -> dict:
+    """Default 13 x 13 x 13 machines folded into their central node: fresh, and taught each language."""
+    rows, expansion, periodic = [], [], []
+    machines = [("fresh", None)] + [(name, name) for name in LANGUAGES]
+    for label, name in machines:
+        lang = language(name) if name else None
+        m = Machine(accepting=lang.accepting if lang else (0,), life=life, seed=seed)
+        rng = random.Random(seed)
+        test = examples(lang, tests, random.Random(seed + 1000)) if lang else []
+        if lang:
+            teach_language(m, name, episodes, rng)
+        for precision in PRECISIONS:
+            core = compress(m, precision)
+            r = core.decompress()
+            f = fidelity(m, r)
+            s = core.summary()
+            rows.append({
+                "machine": label, "precision": precision, "touched": s["touched"], "bytes": s["bytes"],
+                "dense_bytes": s["dense_bytes"], "ratio": s["ratio"], "record_bytes": s["record_bytes"],
+                "lossless": f["lossless"], "max_relative_error": f["max_relative_error"], "mean_kl": f["mean_kl"],
+                "max_kl": f["max_kl"], "greedy_changed": f["greedy_changed"],
+                "accuracy": m.accuracy(test) if test else None, "accuracy_rebuilt": r.accuracy(test) if test else None,
+            })
+            if label == "even-b" and precision == "exact":
+                for row in s["shell_table"]:
+                    k = row["shell"] + 1
+                    part = core.decompress(shells=k)
+                    pf = fidelity(m, part)
+                    expansion.append({
+                        "shells": k, "cells": sum(x["cells"] for x in s["shell_table"][:k]),
+                        "touched": sum(x["touched"] for x in s["shell_table"][:k]),
+                        "greedy_changed": pf["greedy_changed"], "max_kl": pf["max_kl"],
+                        "accuracy": part.accuracy(test),
+                    })
+    for name in LANGUAGES:
+        lang = language(name)
+        test = examples(lang, tests, random.Random(seed + 1000))
+        arms = [("never", None, False)] + [(f"every {every}", p, True) for p in PRECISIONS]
+        for label, precision, rebuild in arms:
+            m = Machine(accepting=lang.accepting, life=life, seed=seed, compress_every=every if precision else 0,
+                        compress_precision=precision or "exact", compress_rebuild=rebuild)
+            teach_language(m, name, episodes, random.Random(seed))
+            periodic.append({
+                "language": name, "compression": label, "precision": precision, "compressions": m.compressions,
+                "bytes": m.core.bytes if m.core is not None else None, "accuracy": m.accuracy(test),
+            })
+    return {
+        "experiment": "compression",
+        "settings": _settings(episodes=episodes, seed=seed, life=life, tests=tests, every=every, shape=[13, 13, 13]),
+        "rows": rows,
+        "expansion": expansion,
+        "periodic": periodic,
+    }
+
+
 def _edge_view(e, m: Machine) -> dict:
     """Every field of an edge by name, the fading ones read at the clock - the Rust crate's ``Edge::describe``."""
     return {
@@ -189,7 +251,35 @@ def tables(record: dict) -> str:
         return _learning_table(record)
     if kind == "stimulation":
         return _stimulation_table(record)
+    if kind == "compression":
+        return _compression_table(record)
     return _adaptation_table(record)
+
+
+def _compression_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"compression: default 13 x 13 x 13 machines, fresh and taught each language for {s['episodes']} episodes, "
+             "folded into the central node (6, g, 6) at each precision", "",
+             "| machine | precision | touched | bytes | smaller than dense | lossless | max relative error | max KL | "
+             "greedy changed | accuracy: original → rebuilt |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        acc = "–" if row["accuracy"] is None else f"{row['accuracy']:.3f} → {row['accuracy_rebuilt']:.3f}"
+        lines.append(f"| {row['machine']} | {row['precision']} | {row['touched']} | {row['bytes']} | {row['ratio']:.1f}× | "
+                     f"{'yes' if row['lossless'] else 'no'} | {row['max_relative_error']:.1e} | {row['max_kl']:.1e} | "
+                     f"{row['greedy_changed']} | {acc} |")
+    lines += ["", "even-b, exact, rebuilt from the central node outward", "",
+              "| shells rebuilt | cells | touched edges restored | greedy changed | accuracy |", "|---|---|---|---|---|"]
+    for row in r["expansion"]:
+        lines.append(f"| {row['shells']} | {row['cells']} | {row['touched']} | {row['greedy_changed']} | "
+                     f"{row['accuracy']:.3f} |")
+    lines += ["", f"every language taught again, the matrix folded into its central node every {s['every']} transitions "
+              "and rebuilt from the code each time", "",
+              "| language | compression | precision | compressions | last code, bytes | accuracy |", "|---|---|---|---|---|---|"]
+    for row in r["periodic"]:
+        lines.append(f"| {row['language']} | {row['compression']} | {row['precision'] or '–'} | {row['compressions']} | "
+                     f"{row['bytes'] if row['bytes'] is not None else '–'} | {row['accuracy']:.3f} |")
+    return "\n".join(lines)
 
 
 def _learning_table(r: dict) -> str:
@@ -254,6 +344,8 @@ def run(which: Sequence[str], out: str | None = None, **kw) -> list[dict]:
             rec = stimulation(life=kw.get("life", LIFE), baseline=kw.get("baseline", BASELINE))
         elif name == "adaptation":
             rec = adaptation(life=kw.get("life", LIFE))
+        elif name == "compression":
+            rec = compression(life=kw.get("life", LIFE))
         else:
             raise ValueError(f"no experiment named {name!r}; choose from {EXPERIMENTS} or all")
         records.append(rec)

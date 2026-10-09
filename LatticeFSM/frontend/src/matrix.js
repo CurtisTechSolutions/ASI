@@ -42,6 +42,20 @@ export function tableRows(table) {
   }));
 }
 
+/** `1234567` -> "1.2 MB" style: bytes as the compress tab shows them. */
+export function fmtSize(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n)) return "–";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/** Whether `(source, symbolIndex, target)` is the matrix's central node, given the stats' `center`. */
+export function isCenter(center, source, symbolIndex, target) {
+  return Array.isArray(center) && center[0] === source && center[1] === symbolIndex && center[2] === target;
+}
+
 /** The stimulation to run at, from the slider's string: blank or invalid means "the machine's own". */
 export function stimulationFrom(text) {
   if (text === "" || text === null || text === undefined) return undefined;

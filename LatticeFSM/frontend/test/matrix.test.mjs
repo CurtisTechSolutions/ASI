@@ -3,7 +3,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { cellStyle, curvePoints, describeRun, shade, stimulationFrom, tableRows } from "../src/matrix.js";
+import {
+  cellStyle,
+  curvePoints,
+  describeRun,
+  fmtSize,
+  isCenter,
+  shade,
+  stimulationFrom,
+  tableRows,
+} from "../src/matrix.js";
 
 test("shade maps a probability onto 0..85 and clips", () => {
   assert.equal(shade(0), 0);
@@ -42,6 +51,20 @@ test("the greedy table is rows of text with accepting states starred", () => {
     { state: 1, accepting: false, cells: ["a -> 1", "b -> 0"] },
   ]);
   assert.deepEqual(tableRows(null), []);
+});
+
+test("sizes read as bytes, kilobytes and megabytes", () => {
+  assert.equal(fmtSize(275), "275 B");
+  assert.equal(fmtSize(48947), "47.8 KB");
+  assert.equal(fmtSize(369096), "360.4 KB");
+  assert.equal(fmtSize(3 * 1024 * 1024), "3.00 MB");
+  assert.equal(fmtSize(undefined), "–");
+});
+
+test("the central node is the cell the stats name", () => {
+  assert.equal(isCenter([6, 6, 6], 6, 6, 6), true);
+  assert.equal(isCenter([6, 6, 6], 6, 5, 6), false);
+  assert.equal(isCenter(undefined, 6, 6, 6), false);
 });
 
 test("the stimulation field is a number or nothing", () => {

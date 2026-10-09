@@ -3,7 +3,7 @@ import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { fmtNum, parseInteger, parseNumber, parseStateList } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 
 /** A fresh machine, a saved one, a loaded one, and a lesson for one edge. */
 export default function MachinePanel({ stats, onMoved }) {
@@ -14,6 +14,9 @@ export default function MachinePanel({ stats, onMoved }) {
   const [baseline, setBaseline] = useStoredState("machine.baseline", "1");
   const [seed, setSeed] = useStoredState("machine.seed", "1");
   const [path, setPath] = useStoredState("machine.path", "machine.json.gz");
+  const [every, setEvery] = useStoredState("compression.every", "0");
+  const [everyPrecision, setEveryPrecision] = useStoredState("compression.precision", "exact");
+  const [rebuild, setRebuild] = useStoredState("compression.rebuild", false);
   const [source, setSource] = useStoredState("teach.source", "0");
   const [symbol, setSymbol] = useStoredState("teach.symbol", "a");
   const [target, setTarget] = useStoredState("teach.target", "1");
@@ -68,6 +71,48 @@ export default function MachinePanel({ stats, onMoved }) {
             }
           >
             New machine
+          </button>
+        </div>
+      </div>
+      <div className="card wide">
+        <h2>Compress every N transitions</h2>
+        <p className="note">
+          Fold the matrix into its central node automatically, every N transitions the machine makes (runs, training
+          and lessons alike); 0 never. With rebuild, the matrix is rebuilt from the code each time, so a lossy
+          precision's rounding is applied to the machine and not only recorded. Now:{" "}
+          {stats && stats.compress_every
+            ? `every ${stats.compress_every}, ${stats.compress_precision}${stats.compress_rebuild ? ", rebuilt" : ""}`
+            : "never"}
+          {stats && stats.compressions ? ` · ${stats.compressions} so far, the last at clock ${stats.last_compressed}` : ""}.
+        </p>
+        <div className="row">
+          <NumberField label="Every N transitions" value={every} onChange={setEvery} min="0" step="100" hint="0: never" />
+          <SelectField
+            label="Precision"
+            value={everyPrecision}
+            onChange={setEveryPrecision}
+            options={[
+              ["exact", "exact - no loss"],
+              ["float32", "float32"],
+              ["float16", "float16"],
+            ]}
+          />
+        </div>
+        <CheckField label="Rebuild the matrix from the code each time" checked={rebuild} onChange={setRebuild} />
+        <div className="actions">
+          <button
+            type="button"
+            onClick={() =>
+              act(
+                () => api.compression({ every: parseInteger(every, 0), precision: everyPrecision, rebuild }),
+                (r) =>
+                  r.compress_every
+                    ? `compressing every ${r.compress_every} transitions, ${r.compress_precision}`
+                    : "automatic compression off",
+              )
+            }
+          >
+            Apply to this machine
           </button>
         </div>
       </div>

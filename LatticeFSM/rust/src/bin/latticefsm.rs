@@ -9,7 +9,10 @@
 //!     stats       the size, the memory, the clock and the stimulation of a machine
 //!     tick        let time pass
 //!     stimulate   raise the stimulation
-//!     experiment  the learning, stimulation and adaptation experiments
+//!     compress    fold the matrix into its central node (exact, float32 or float16) and save the code
+//!     expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
+//!     core-run    walk a string straight from a code, decoding only the cells the walk reaches
+//!     experiment  the learning, stimulation, adaptation and compression experiments
 //!     serve       the HTTP API and the React frontend (frontend/dist) on --port
 //!
 //! Every command but `train`, `demo`, `experiment` and `serve` takes `--load` (a machine file written by
@@ -18,6 +21,7 @@
 use std::env;
 use std::process;
 
+use latticefsm::compress::{compress, expansion, fidelity, load_core, Core, Precision};
 use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
 use latticefsm::languages::{examples, language, LANGUAGES};
@@ -90,14 +94,19 @@ usage: latticefsm <command> [options]
 commands
   demo        learn a language, be stimulated, let time pass: the model in one screen
   train       teach --language over --episodes random strings; --save the machine
-  run TEXT    read TEXT from the start state and traverse it (--quiet: ask only); --credit R rewards (R<0 punishes)
+  run TEXT    read TEXT from the start state and traverse it (--quiet: ask only); --credit R rewards (R<0 punishes);
+              --from-middle starts from the middle state, the central node's
+  compress    fold the matrix into its central node; --precision exact|float32|float16 or --budget BYTES;
+              --core FILE saves the code
+  expand      --core FILE [--shells K]: rebuild a machine from the central node outward; --save it
+  core-run TEXT --core FILE [--from-middle]: the greedy walk read straight from the code
   teach S SYM T [--amount R]   traverse one edge deliberately and credit it
   accuracy    the share of --tests random strings of --language classified right (nothing moves)
   table       the greedy transition table (nothing moves)
   stats       size, memory, clock and stimulation
   tick        let --ticks pass
   stimulate   raise the stimulation by --amount (or set --level)
-  experiment  --which learning|stimulation|adaptation|all, --out DIR
+  experiment  --which learning|stimulation|adaptation|compression|all, --out DIR
   serve       the HTTP API and the frontend on --port (default 8000); --frontend-dir DIR (default: frontend/dist
               under the working directory, or ../frontend/dist)
 
@@ -105,6 +114,7 @@ machine options (train, demo, serve without --load)
   --states N (13)  --alphabet abcdefghijklm  (a 13 x 13 x 13 matrix)  --accepting 0,2  --start 0  --life 1000
   --baseline 1  --calm LIFE
   --temperature 1  --discount 0.8  --seed 1  --use-widening 0.01  --reward-widening 0.2  --punish-narrowing 0.2
+  --compress-every N (0: never)  --compress-precision exact|float32|float16  --compress-rebuild
 common options
   --load FILE  --save FILE (.json or .json.gz)  --stimulation X (run)  --temperature T (run, accuracy)
   --language even-b|contains-aa|ends-ab|mod3-a  --episodes N  --max-length 6  --tests 300
@@ -125,6 +135,15 @@ fn settings(a: &Args) -> Settings {
         punish_narrowing: a.num("punish-narrowing", d.punish_narrowing),
         prototype: d.prototype,
         seed: a.num("seed", 1.0) as u64,
+        compress_every: a.num("compress-every", 0.0).max(0.0) as u64,
+        compress_precision: a
+            .get("compress-precision")
+            .map(Precision::parse)
+            .transpose()
+            .ok()
+            .flatten()
+            .unwrap_or(Precision::Exact),
+        compress_rebuild: a.has("compress-rebuild"),
     }
 }
 
@@ -174,6 +193,9 @@ fn main() {
         "demo" => demo(&a),
         "train" => train(&a),
         "run" => run(&a),
+        "compress" => compress_cmd(&a),
+        "expand" => expand_cmd(&a),
+        "core-run" => core_run(&a),
         "teach" => teach(&a),
         "accuracy" => accuracy(&a),
         "table" => table(&a),
@@ -270,6 +292,133 @@ fn train(a: &Args) -> Result<(), String> {
     save_if_asked(&m, a)
 }
 
+fn print_core(core: &Core, m: &Machine) -> Result<(), String> {
+    let s = core.summary();
+    let f = fidelity(m, &core.decompress(None)?);
+    let label = s
+        .get("center_label")
+        .and_then(Json::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let shape: Vec<String> = s
+        .get("shape")
+        .and_then(Json::as_array)
+        .map(|v| v.iter().map(Json::dump).collect())
+        .unwrap_or_default();
+    println!(
+        "the {} matrix folded into its central node ({}, {}, {}), {}:",
+        shape.join(" x "),
+        label.first().map(Json::dump).unwrap_or_default(),
+        label.get(1).and_then(Json::as_str).unwrap_or("?"),
+        label.get(2).map(Json::dump).unwrap_or_default(),
+        s.str_or("precision", "")
+    );
+    println!(
+        "  {} bytes for {} touched edges of {} (the dense matrix is {} bytes: {:.1}x smaller), plus a {}-byte record of the rest",
+        s.num("bytes", 0.0),
+        s.num("touched", 0.0),
+        s.num("cells", 0.0),
+        s.num("dense_bytes", 0.0),
+        s.num("ratio", 0.0),
+        s.num("record_bytes", 0.0)
+    );
+    println!(
+        "  loss: {}; largest relative error {:.2e}; KL mean {:.2e}, max {:.2e}; greedy choices changed {} of {}",
+        if f.bool_or("lossless", false) {
+            "none - every field of every edge comes back bit for bit"
+        } else {
+            "lossy"
+        },
+        f.num("max_relative_error", 0.0),
+        f.num("mean_kl", 0.0),
+        f.num("max_kl", 0.0),
+        f.num("greedy_changed", 0.0),
+        f.num("rows", 0.0)
+    );
+    println!("  from the central node outward:");
+    for row in s
+        .get("shell_table")
+        .and_then(Json::as_array)
+        .cloned()
+        .unwrap_or_default()
+    {
+        println!(
+            "    shell {}: {:>4} cells, {:>4} touched, {:>6} bytes",
+            row.num("shell", 0.0),
+            row.num("cells", 0.0),
+            row.num("touched", 0.0),
+            row.num("bytes", 0.0)
+        );
+    }
+    Ok(())
+}
+
+fn compress_cmd(a: &Args) -> Result<(), String> {
+    let m = machine(a)?;
+    let precision = a.get("precision").map(Precision::parse).transpose()?;
+    let budget = a
+        .get("budget")
+        .map(|b| b.parse::<usize>().map_err(|_| "bad --budget"))
+        .transpose()?;
+    let core = compress(&m, precision, budget);
+    print_core(&core, &m)?;
+    if a.has("expansion") {
+        println!("  rebuilt from the central node outward, a shell at a time:");
+        for row in expansion(&m, &core)?.as_array().cloned().unwrap_or_default() {
+            println!(
+                "    {} shells: {:>4} cells, {:>4} touched edges restored, {} greedy choices changed",
+                row.num("shells", 0.0),
+                row.num("cells", 0.0),
+                row.num("touched", 0.0),
+                row.num("greedy_changed", 0.0)
+            );
+        }
+    }
+    if let Some(path) = a.get("core") {
+        core.save(path)?;
+        eprintln!("saved {path}");
+    }
+    Ok(())
+}
+
+fn expand_cmd(a: &Args) -> Result<(), String> {
+    let core = load_core(a.get("core").ok_or("expand needs --core FILE")?)?;
+    let shells = a
+        .get("shells")
+        .map(|k| k.parse::<usize>().map_err(|_| "bad --shells"))
+        .transpose()?;
+    let m = core.decompress(shells)?;
+    let st = m.stats();
+    println!(
+        "rebuilt from the central node outward, {}: {} of {} edges written, clock {}",
+        match shells {
+            None => "every shell".to_string(),
+            Some(1) => "1 shell".to_string(),
+            Some(k) => format!("{k} shells"),
+        },
+        st.num("touched", 0.0),
+        st.num("edges", 0.0),
+        st.num("clock", 0.0)
+    );
+    print_table(&m);
+    save_if_asked(&m, a)
+}
+
+fn core_run(a: &Args) -> Result<(), String> {
+    let core = load_core(a.get("core").ok_or("core-run needs --core FILE")?)?;
+    let text = a.positional.first().ok_or("core-run needs a string")?;
+    let from_middle = a.has("from-middle");
+    let (states, accepted) = core.run(text, from_middle)?;
+    let path: Vec<String> = states.iter().map(|s| s.to_string()).collect();
+    println!(
+        "{}{}  ({}), read straight from the code",
+        if from_middle { "from the middle: " } else { "" },
+        path.join(" -> "),
+        if accepted { "accepted" } else { "rejected" }
+    );
+    Ok(())
+}
+
 fn run(a: &Args) -> Result<(), String> {
     let text = a
         .positional
@@ -283,7 +432,12 @@ fn run(a: &Args) -> Result<(), String> {
     let temperature = a.get("temperature").and_then(|v| v.parse().ok());
     let times = a.num("times", 1.0) as usize;
     for _ in 0..times.max(1) {
-        let r = m.run_text(&text, stimulation, temperature, quiet)?;
+        let symbols = m.tokenize(&text)?;
+        let r = if a.has("from-middle") {
+            m.run_from_middle(&symbols, stimulation, temperature, quiet)
+        } else {
+            m.run(&symbols, stimulation, temperature, quiet)
+        };
         let steps: Vec<String> = r
             .transitions
             .iter()
@@ -479,6 +633,36 @@ fn demo(a: &Args) -> Result<(), String> {
     );
     m.tick(4 * m.life as i64);
     println!("  four more lives: level {:.2}, widest {:.2}; accuracy {:.3} - the verdicts never fade, the widths and traces do", m.stimulation(), m.stats().num("widest", 0.0), m.accuracy(&test, 0.0));
+    let core = compress(&m, None, None);
+    let rebuilt = core.decompress(None)?;
+    let f = fidelity(&m, &rebuilt);
+    let half = compress(&m, Some(Precision::Float16), None);
+    let fh = fidelity(&m, &half.decompress(None)?);
+    let (cs, ca, ct) = core.center();
+    println!(
+        "\nfolded into its central node ({cs}, {}, {ct}): {} bytes exact, {} - {:.1}x smaller than the dense matrix",
+        m.alphabet()[ca],
+        core.bytes(),
+        if f.bool_or("lossless", false) {
+            "lossless"
+        } else {
+            "lossy"
+        },
+        core.summary().num("ratio", 0.0)
+    );
+    println!(
+        "  float16: {} bytes, max KL {:.1e}, {} greedy choices changed",
+        half.bytes(),
+        fh.num("max_kl", 0.0),
+        fh.num("greedy_changed", 0.0)
+    );
+    let (from_middle, accepted) = core.run("abba", true)?;
+    let path: Vec<String> = from_middle.iter().map(|s| s.to_string()).collect();
+    println!(
+        "  'abba' walked straight from the code, from the middle state outward: {} ({})",
+        path.join(" -> "),
+        if accepted { "accepted" } else { "rejected" }
+    );
     let other = LANGUAGES
         .iter()
         .find(|l| l.name != lang.name && l.accepting == lang.accepting)

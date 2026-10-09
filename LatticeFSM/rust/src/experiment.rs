@@ -15,13 +15,14 @@
 
 use std::fs;
 
+use crate::compress::{compress, fidelity, Precision};
 use crate::edge::Weighting;
 use crate::json::Json;
 use crate::languages::{examples, language, random_string, Language, ALPHABET, LANGUAGES};
 use crate::machine::{Machine, Settings, BASELINE, DISCOUNT, LIFE};
 use crate::rng::Rng;
 
-pub const EXPERIMENTS: [&str; 3] = ["learning", "stimulation", "adaptation"];
+pub const EXPERIMENTS: [&str; 4] = ["learning", "stimulation", "adaptation", "compression"];
 
 fn alphabet() -> Vec<String> {
     ALPHABET.iter().map(|s| s.to_string()).collect()
@@ -342,10 +343,219 @@ pub fn adaptation(uses: usize, life: f64, waits: &[f64]) -> Json {
 
 // ---- rendering ----------------------------------------------------------------------------------------------------
 
+/// Default 13 × 13 × 13 machines folded into their central node: fresh, and taught each language, at each
+/// precision; one rebuilt from the central node outward, a shell at a time; and every language taught again with
+/// the matrix folded into its central node every `every` transitions, rebuilt from the code each time.
+pub fn compression(episodes: usize, seed: u64, life: f64, tests: usize, every: u64) -> Result<Json, String> {
+    let (mut rows, mut expansion, mut periodic) = (Vec::new(), Vec::new(), Vec::new());
+    let mut labels: Vec<(&str, Option<Language>)> = vec![("fresh", None)];
+    labels.extend(LANGUAGES.iter().map(|l| (l.name, Some(*l))));
+    for (label, lang) in labels {
+        let accepting: &[usize] = lang.as_ref().map(|l| l.accepting).unwrap_or(&[0]);
+        let mut m = Machine::default_shape(
+            accepting,
+            Settings {
+                life,
+                seed,
+                ..Settings::default()
+            },
+        )?;
+        let test = match &lang {
+            Some(l) => examples(l, tests, &mut Rng::new(seed + 1000), 6),
+            None => Vec::new(),
+        };
+        if let Some(l) = &lang {
+            teach_language(&mut m, l, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
+        }
+        for p in Precision::ALL {
+            let core = compress(&m, Some(p), None);
+            let mut r = core.decompress(None)?;
+            let f = fidelity(&m, &r);
+            let s = core.summary();
+            let (acc, acc_r) = if test.is_empty() {
+                (Json::Null, Json::Null)
+            } else {
+                (m.accuracy(&test, 0.0).into(), r.accuracy(&test, 0.0).into())
+            };
+            rows.push(
+                Json::object()
+                    .with("machine", label.into())
+                    .with("precision", p.name().into())
+                    .with("touched", s.get("touched").cloned().unwrap_or(Json::Null))
+                    .with("bytes", s.get("bytes").cloned().unwrap_or(Json::Null))
+                    .with("dense_bytes", s.get("dense_bytes").cloned().unwrap_or(Json::Null))
+                    .with("ratio", s.get("ratio").cloned().unwrap_or(Json::Null))
+                    .with("record_bytes", s.get("record_bytes").cloned().unwrap_or(Json::Null))
+                    .with("lossless", f.get("lossless").cloned().unwrap_or(Json::Null))
+                    .with(
+                        "max_relative_error",
+                        f.get("max_relative_error").cloned().unwrap_or(Json::Null),
+                    )
+                    .with("mean_kl", f.get("mean_kl").cloned().unwrap_or(Json::Null))
+                    .with("max_kl", f.get("max_kl").cloned().unwrap_or(Json::Null))
+                    .with("greedy_changed", f.get("greedy_changed").cloned().unwrap_or(Json::Null))
+                    .with("accuracy", acc)
+                    .with("accuracy_rebuilt", acc_r),
+            );
+            if label == "even-b" && p == Precision::Exact {
+                let table = core.shell_table();
+                let shells = table.as_array().cloned().unwrap_or_default();
+                for k in 1..=shells.len() {
+                    let mut part = core.decompress(Some(k))?;
+                    let pf = fidelity(&m, &part);
+                    expansion.push(
+                        Json::object()
+                            .with("shells", k.into())
+                            .with(
+                                "cells",
+                                shells[..k].iter().map(|x| x.num("cells", 0.0)).sum::<f64>().into(),
+                            )
+                            .with(
+                                "touched",
+                                shells[..k].iter().map(|x| x.num("touched", 0.0)).sum::<f64>().into(),
+                            )
+                            .with(
+                                "greedy_changed",
+                                pf.get("greedy_changed").cloned().unwrap_or(Json::Null),
+                            )
+                            .with("max_kl", pf.get("max_kl").cloned().unwrap_or(Json::Null))
+                            .with("accuracy", part.accuracy(&test, 0.0).into()),
+                    );
+                }
+            }
+        }
+    }
+    for lang in LANGUAGES.iter() {
+        let test = examples(lang, tests, &mut Rng::new(seed + 1000), 6);
+        let mut arms: Vec<(String, Option<Precision>)> = vec![("never".to_string(), None)];
+        arms.extend(Precision::ALL.iter().map(|&p| (format!("every {every}"), Some(p))));
+        for (label, precision) in arms {
+            let settings = Settings {
+                life,
+                seed,
+                compress_every: if precision.is_some() { every } else { 0 },
+                compress_precision: precision.unwrap_or(Precision::Exact),
+                compress_rebuild: precision.is_some(),
+                ..Settings::default()
+            };
+            let mut m = Machine::default_shape(lang.accepting, settings)?;
+            teach_language(&mut m, lang, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
+            periodic.push(
+                Json::object()
+                    .with("language", lang.name.into())
+                    .with("compression", label.into())
+                    .with(
+                        "precision",
+                        precision.map(|p| Json::from(p.name())).unwrap_or(Json::Null),
+                    )
+                    .with("compressions", (m.compressions as f64).into())
+                    .with(
+                        "bytes",
+                        m.core.as_ref().map(|c| Json::from(c.bytes())).unwrap_or(Json::Null),
+                    )
+                    .with("accuracy", m.accuracy(&test, 0.0).into()),
+            );
+        }
+    }
+    Ok(Json::object()
+        .with("experiment", "compression".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("episodes", episodes.into())
+                .with("seed", (seed as f64).into())
+                .with("life", life.into())
+                .with("tests", tests.into())
+                .with("every", (every as f64).into())
+                .with("shape", Json::numbers(&[13.0, 13.0, 13.0])),
+        )
+        .with("rows", Json::Array(rows))
+        .with("expansion", Json::Array(expansion))
+        .with("periodic", Json::Array(periodic)))
+}
+
+fn compression_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let mut lines = vec![
+        format!(
+            "compression: default 13 x 13 x 13 machines, fresh and taught each language for {} episodes, folded into \
+             the central node (6, g, 6) at each precision",
+            s.num("episodes", 0.0)
+        ),
+        String::new(),
+        "| machine | precision | touched | bytes | smaller than dense | lossless | max relative error | max KL | \
+         greedy changed | accuracy: original → rebuilt |"
+            .to_string(),
+        "|---|---|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        let acc = match (
+            row.get("accuracy").and_then(Json::as_f64),
+            row.get("accuracy_rebuilt").and_then(Json::as_f64),
+        ) {
+            (Some(a), Some(b)) => format!("{a:.3} → {b:.3}"),
+            _ => "–".to_string(),
+        };
+        lines.push(format!(
+            "| {} | {} | {} | {} | {:.1}× | {} | {:.1e} | {:.1e} | {} | {} |",
+            row.str_or("machine", ""),
+            row.str_or("precision", ""),
+            row.num("touched", 0.0),
+            row.num("bytes", 0.0),
+            row.num("ratio", 0.0),
+            if row.bool_or("lossless", false) { "yes" } else { "no" },
+            row.num("max_relative_error", 0.0),
+            row.num("max_kl", 0.0),
+            row.num("greedy_changed", 0.0),
+            acc
+        ));
+    }
+    lines.push(String::new());
+    lines.push("even-b, exact, rebuilt from the central node outward".to_string());
+    lines.push(String::new());
+    lines.push("| shells rebuilt | cells | touched edges restored | greedy changed | accuracy |".to_string());
+    lines.push("|---|---|---|---|---|".to_string());
+    for row in arr(r, "expansion") {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {:.3} |",
+            row.num("shells", 0.0),
+            row.num("cells", 0.0),
+            row.num("touched", 0.0),
+            row.num("greedy_changed", 0.0),
+            row.num("accuracy", 0.0)
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "every language taught again, the matrix folded into its central node every {} transitions and rebuilt \
+         from the code each time",
+        s.num("every", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push("| language | compression | precision | compressions | last code, bytes | accuracy |".to_string());
+    lines.push("|---|---|---|---|---|---|".to_string());
+    for row in arr(r, "periodic") {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {:.3} |",
+            row.str_or("language", ""),
+            row.str_or("compression", ""),
+            row.str_or("precision", "–"),
+            row.num("compressions", 0.0),
+            row.get("bytes")
+                .and_then(Json::as_f64)
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "–".to_string()),
+            row.num("accuracy", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
 pub fn tables(record: &Json) -> String {
     match record.str_or("experiment", "") {
         "learning" => learning_table(record),
         "stimulation" => stimulation_table(record),
+        "compression" => compression_table(record),
         _ => adaptation_table(record),
     }
 }
@@ -510,6 +720,7 @@ pub fn run(which: &[String], out: Option<&str>, episodes: usize, life: f64) -> R
                 ..StimulationOptions::default()
             }),
             "adaptation" => adaptation(20, life, &[0.0, 1.0, 4.0]),
+            "compression" => compression(episodes, 1, life, 300, 500)?,
             other => {
                 return Err(format!(
                     "no experiment named {other:?}; choose from {EXPERIMENTS:?} or all"

@@ -14,6 +14,7 @@
 use std::fs;
 use std::io::{Read, Write};
 
+use crate::compress::{compress, Core, Precision};
 use crate::edge::{Edge, Weighting};
 use crate::gzip;
 use crate::json::{parse, Json};
@@ -119,6 +120,12 @@ pub struct Settings {
     pub punish_narrowing: f64,
     pub prototype: Weighting,
     pub seed: u64,
+    /// Fold the matrix into its central node every this many transitions (traversals); 0 never.
+    pub compress_every: u64,
+    /// How the automatic compression packs the edges' numbers.
+    pub compress_precision: Precision,
+    /// Rebuild the matrix from the code after every automatic compression, so a lossy precision's loss is applied.
+    pub compress_rebuild: bool,
 }
 
 impl Default for Settings {
@@ -136,6 +143,9 @@ impl Default for Settings {
             punish_narrowing: 0.2,
             prototype: Weighting::default(),
             seed: 1,
+            compress_every: 0,
+            compress_precision: Precision::Exact,
+            compress_rebuild: false,
         }
     }
 }
@@ -165,6 +175,18 @@ pub struct Machine {
     stimulation_stamp: i64,
     pub runs: u64,
     pub credits: u64,
+    /// Fold the matrix into its central node every this many transitions; 0 never.
+    pub compress_every: u64,
+    pub compress_precision: Precision,
+    pub compress_rebuild: bool,
+    /// The latest code the central node holds, from [`Machine::compress_now`].
+    pub core: Option<Core>,
+    /// How many times the matrix has been folded into its central node.
+    pub compressions: u64,
+    /// Transitions since the last compression.
+    pub since_compression: u64,
+    /// The clock at the last compression; `-1` never.
+    pub last_compressed: i64,
 }
 
 impl Machine {
@@ -214,6 +236,13 @@ impl Machine {
             punish_narrowing: settings.punish_narrowing,
             weight_fn: None,
             seed: settings.seed,
+            compress_every: settings.compress_every,
+            compress_precision: settings.compress_precision,
+            compress_rebuild: settings.compress_rebuild,
+            core: None,
+            compressions: 0,
+            since_compression: 0,
+            last_compressed: -1,
             rng: Rng::new(settings.seed),
             clock: 0,
             state: settings.start,
@@ -244,6 +273,11 @@ impl Machine {
 
     pub fn alphabet(&self) -> &[String] {
         &self.lattice.symbols
+    }
+
+    /// The middle state: the source and target of the matrix's central node (`geometry::center`).
+    pub fn center_state(&self) -> usize {
+        self.n_states() / 2
     }
 
     pub fn accepting(&self) -> Vec<usize> {
@@ -302,6 +336,11 @@ impl Machine {
     }
 
     /// Raise (or, negative, lower) the stimulation by `amount` from where it is now; returns the new level.
+    /// The stimulation as the machine file writes it: `[level, stamp]`.
+    pub fn to_json_stimulation(&self) -> Json {
+        Json::numbers(&[self.stimulation, self.stimulation_stamp as f64])
+    }
+
     pub fn stimulate(&mut self, amount: f64) -> f64 {
         let level = (self.stimulation() + amount).max(0.0);
         self.set_stimulation(level).expect("non-negative");
@@ -399,13 +438,61 @@ impl Machine {
         let s = &mut self.lattice.states[target];
         s.visits += 1;
         s.last_visited = self.clock;
+        self.after_transition();
+    }
+
+    /// Count a transition, and fold the matrix into its central node when `compress_every` of them have passed.
+    fn after_transition(&mut self) {
+        self.since_compression += 1;
+        if self.compress_every > 0 && self.since_compression >= self.compress_every {
+            self.compress_now();
+        }
+    }
+
+    /// Fold the matrix into its central node now, at `compress_precision`; with `compress_rebuild`, rebuild the
+    /// matrix from the code, so the code's loss (none, at `exact`) is applied.  The path's offsets stay valid.
+    pub fn compress_now(&mut self) -> &Core {
+        let core = compress(self, Some(self.compress_precision), None);
+        if self.compress_rebuild {
+            core.rebuild_into(&mut self.lattice)
+                .expect("a code rebuilds the machine it was made from");
+        }
+        self.compressions += 1;
+        self.since_compression = 0;
+        self.last_compressed = self.clock;
+        self.core = Some(core);
+        self.core.as_ref().expect("just set")
     }
 
     /// Read a string from the start state.  Quiet, nothing moves.
     pub fn run(&mut self, symbols: &[usize], stimulation: Option<f64>, temperature: Option<f64>, quiet: bool) -> Run {
+        self.run_from(self.start, symbols, stimulation, temperature, quiet)
+    }
+
+    /// Read a string from the middle state - the central node's - and walk outward from there.
+    pub fn run_from_middle(
+        &mut self,
+        symbols: &[usize],
+        stimulation: Option<f64>,
+        temperature: Option<f64>,
+        quiet: bool,
+    ) -> Run {
+        self.run_from(self.center_state(), symbols, stimulation, temperature, quiet)
+    }
+
+    /// Read a string from `origin`.  Quiet, nothing moves.
+    pub fn run_from(
+        &mut self,
+        origin: usize,
+        symbols: &[usize],
+        stimulation: Option<f64>,
+        temperature: Option<f64>,
+        quiet: bool,
+    ) -> Run {
+        let origin = origin.min(self.n_states() - 1);
         let stim = stimulation.unwrap_or_else(|| self.stimulation());
         if quiet {
-            let mut state = self.start;
+            let mut state = origin;
             let mut transitions = Vec::with_capacity(symbols.len());
             for &sym in symbols {
                 let (target, p) = self.choose(state, sym, Some(stim), temperature);
@@ -426,6 +513,7 @@ impl Machine {
             };
         }
         self.reset();
+        self.state = origin;
         self.runs += 1;
         let transitions = symbols
             .iter()
@@ -492,6 +580,7 @@ impl Machine {
         self.clock += 1;
         let (clock, rw, pn) = (self.clock, self.reward_widening, self.punish_narrowing);
         self.lattice.edges[i].credit(amount, clock, life, rw, pn);
+        self.after_transition();
         Ok(&self.lattice.edges[i])
     }
 
@@ -558,12 +647,35 @@ impl Machine {
             .with("total_punished", touched.iter().map(|e| e.punished).sum::<f64>().into())
             .with("widest", widths.iter().cloned().fold(1.0, f64::max).into())
             .with("narrowest", widths.iter().cloned().fold(1.0, f64::min).into())
+            .with(
+                "center",
+                Json::numbers(&[
+                    self.center_state() as f64,
+                    (self.lattice.n_symbols() / 2) as f64,
+                    self.center_state() as f64,
+                ]),
+            )
+            .with("compress_every", (self.compress_every as f64).into())
+            .with("compress_precision", self.compress_precision.name().into())
+            .with("compress_rebuild", self.compress_rebuild.into())
+            .with("compressions", (self.compressions as f64).into())
+            .with("since_compression", (self.since_compression as f64).into())
+            .with("last_compressed", self.last_compressed.into())
+            .with(
+                "core_bytes",
+                self.core
+                    .as_ref()
+                    .map(|c| c.bytes() as f64)
+                    .map(Json::from)
+                    .unwrap_or(Json::Null),
+            )
     }
 
     // ---- persistence ---------------------------------------------------------------------------------------------
 
-    pub fn to_json(&self) -> Json {
-        let settings = Json::object()
+    /// The settings as the machine file writes them.
+    pub fn settings_json(&self) -> Json {
+        Json::object()
             .with("start", self.start.into())
             .with("life", self.life.into())
             .with("baseline", self.baseline.into())
@@ -574,16 +686,25 @@ impl Machine {
             .with("use_widening", self.use_widening.into())
             .with("reward_widening", self.reward_widening.into())
             .with("punish_narrowing", self.punish_narrowing.into())
-            .with("seed", (self.seed as f64).into());
+            .with("seed", (self.seed as f64).into())
+            .with("compress_every", (self.compress_every as f64).into())
+            .with("compress_precision", self.compress_precision.name().into())
+            .with("compress_rebuild", self.compress_rebuild.into())
+    }
+
+    pub fn to_json(&self) -> Json {
         let state = self.rng.state();
         Json::object()
             .with("format", FORMAT.into())
             .with("version", FORMAT_VERSION.into())
-            .with("settings", settings)
+            .with("settings", self.settings_json())
             .with("clock", self.clock.into())
             .with("state", self.state.into())
             .with("runs", (self.runs as f64).into())
             .with("credits", (self.credits as f64).into())
+            .with("compressions", (self.compressions as f64).into())
+            .with("since_compression", (self.since_compression as f64).into())
+            .with("last_compressed", self.last_compressed.into())
             .with(
                 "stimulation",
                 Json::numbers(&[self.stimulation, self.stimulation_stamp as f64]),
@@ -643,6 +764,13 @@ impl Machine {
             stimulation_stamp: stim[1].as_f64().ok_or("stimulation stamp")? as i64,
             runs: v.num("runs", 0.0) as u64,
             credits: v.num("credits", 0.0) as u64,
+            compress_every: st.num("compress_every", 0.0) as u64,
+            compress_precision: Precision::parse(st.str_or("compress_precision", "exact"))?,
+            compress_rebuild: st.bool_or("compress_rebuild", false),
+            core: None,
+            compressions: v.num("compressions", 0.0) as u64,
+            since_compression: v.num("since_compression", 0.0) as u64,
+            last_compressed: v.num("last_compressed", -1.0) as i64,
             lattice,
         })
     }

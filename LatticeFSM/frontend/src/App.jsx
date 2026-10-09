@@ -7,12 +7,14 @@ import RunPanel from "./components/RunPanel.jsx";
 import TrainPanel from "./components/TrainPanel.jsx";
 import TimePanel from "./components/TimePanel.jsx";
 import MachinePanel from "./components/MachinePanel.jsx";
+import CompressPanel from "./components/CompressPanel.jsx";
 
 const TABS = [
   { id: "matrix", label: "Matrix", Component: MatrixPanel },
   { id: "run", label: "Run", Component: RunPanel },
   { id: "train", label: "Train", Component: TrainPanel },
   { id: "time", label: "Time", Component: TimePanel },
+  { id: "compress", label: "Compress", Component: CompressPanel },
   { id: "machine", label: "Machine", Component: MachinePanel },
 ];
 

@@ -4,7 +4,7 @@ import { useStoredState } from "../hooks/useStoredState.js";
 import { describeRun, stimulationFrom } from "../matrix.js";
 import { fmtNum, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, TextField } from "./Fields.jsx";
 
 /**
  * Read a string from the start state - traversing it, or asking quietly -
@@ -15,6 +15,7 @@ export default function RunPanel({ stats, onMoved }) {
   const [stimulation, setStimulation] = useStoredState("run.stimulation", "");
   const [temperature, setTemperature] = useStoredState("run.temperature", "1");
   const [amount, setAmount] = useStoredState("run.amount", "1");
+  const [fromMiddle, setFromMiddle] = useStoredState("run.fromMiddle", false);
   const [result, setResult] = useState(null);
   const [credited, setCredited] = useState(null);
   const [error, setError] = useState(null);
@@ -30,6 +31,7 @@ export default function RunPanel({ stats, onMoved }) {
         stimulation: level,
         temperature: parseNumber(temperature, 1),
         quiet,
+        from_middle: fromMiddle,
       });
       setResult({ ...r, quiet });
       setError(null);
@@ -79,6 +81,12 @@ export default function RunPanel({ stats, onMoved }) {
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" hint="0 is greedy" />
           <NumberField label="Credit" value={amount} onChange={setAmount} min="0" step="0.5" hint="the size of a reward or punishment" />
         </div>
+        <CheckField
+          label={`Start from the middle state (${stats && stats.center ? stats.center[0] : "the centre"}) and walk outward`}
+          checked={fromMiddle}
+          onChange={setFromMiddle}
+          hint="the central node's state, instead of the start state"
+        />
         <div className="actions">
           <button type="button" disabled={busy || !text} onClick={() => run(false)}>
             Run

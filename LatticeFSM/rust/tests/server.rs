@@ -202,6 +202,73 @@ fn static_paths_are_safe_and_typed() {
 }
 
 #[test]
+fn compression_routes_answer() {
+    let addr = serve(12);
+    let (_, none) = request(&addr, "GET", "/api/core", None).unwrap();
+    assert!(none.str_or("error", "").contains("nothing has been compressed"));
+    request(
+        &addr,
+        "POST",
+        "/api/train",
+        Some(&parse(r#"{"language":"even-b","episodes":400}"#).unwrap()),
+    )
+    .unwrap();
+    let (status, c) = request(&addr, "POST", "/api/compress", Some(&Json::object())).unwrap();
+    assert_eq!(status, 200);
+    assert!(c.get("fidelity").unwrap().bool_or("lossless", false));
+    assert_eq!(c.get("summary").unwrap().str_or("precision", ""), "exact");
+    assert_eq!(c.get("expansion").unwrap().as_array().unwrap().len(), 3); // a 4-state machine has 3 shells
+    let (_, c16) = request(
+        &addr,
+        "POST",
+        "/api/compress",
+        Some(&parse(r#"{"precision":"float16"}"#).unwrap()),
+    )
+    .unwrap();
+    assert!(c16.get("summary").unwrap().num("bytes", 0.0) < c.get("summary").unwrap().num("bytes", 0.0));
+    let (_, walk) = request(
+        &addr,
+        "POST",
+        "/api/core/run",
+        Some(&parse(r#"{"text":"ab","from_middle":true}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(walk.get("states").unwrap().as_array().unwrap()[0].as_f64(), Some(2.0));
+    let (_, run) = request(
+        &addr,
+        "POST",
+        "/api/run",
+        Some(&parse(r#"{"text":"ab","from_middle":true,"quiet":true}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(run.get("states").unwrap().as_array().unwrap()[0].as_f64(), Some(2.0));
+    let (_, sched) = request(
+        &addr,
+        "POST",
+        "/api/compression",
+        Some(&parse(r#"{"every":5,"precision":"float32","rebuild":true}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        (sched.num("compress_every", 0.0), sched.str_or("compress_precision", "")),
+        (5.0, "float32")
+    );
+    let (_, after) = request(
+        &addr,
+        "POST",
+        "/api/run",
+        Some(&parse(r#"{"text":"abababab"}"#).unwrap()),
+    )
+    .unwrap();
+    assert!(after.get("stats").unwrap().num("compressions", 0.0) >= 3.0);
+    let (status, expanded) = request(&addr, "POST", "/api/expand", Some(&parse(r#"{"shells":1}"#).unwrap())).unwrap();
+    assert_eq!(status, 200);
+    assert!(expanded.get("stats").unwrap().num("touched", 99.0) <= 2.0);
+    let (status, _) = request(&addr, "GET", "/api/core", None).unwrap();
+    assert_eq!(status, 200);
+}
+
+#[test]
 fn query_strings_decode() {
     assert_eq!(
         http::parse_query("a=1&b=x%20y&c=p+q&flag"),

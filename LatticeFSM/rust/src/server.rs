@@ -24,12 +24,19 @@
 //! | `POST /api/tick` | `{ticks}`: time passes |
 //! | `POST /api/stimulate` | `{amount}` or `{level}`: raise the stimulation, or set it |
 //! | `POST /api/new` | `{states?, alphabet?, accepting?, life?, ...}`: a fresh machine (13 × 13 × 13 by default) |
+//! | `POST /api/compress` | `{precision?, budget?}`: fold the matrix into its central node; the code, its loss, and its rebuild shell by shell |
+//! | `GET /api/core` | the code the central node holds, measured against the machine now |
+//! | `POST /api/expand` | `{shells?}`: replace the machine with the code's rebuild, from the central node outward |
+//! | `POST /api/core/run` | `{text, from_middle?}`: the greedy walk read straight from the code |
+//! | `POST /api/core/save`, `/api/core/load` | `{path}`: write or read the code |
+//! | `POST /api/compression` | `{every?, precision?, rebuild?}`: compress automatically every N transitions |
 //! | `POST /api/save` | `{path}`: write the machine |
 //! | `POST /api/load` | `{path}`: read a machine in place of the old |
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::compress::{compress, expansion, fidelity, load_core, Precision};
 use crate::experiment::teach_language;
 use crate::http::{self, Handler, Request, Response};
 use crate::json::Json;
@@ -99,6 +106,34 @@ impl Service {
                     .collect(),
             )),
             ("POST", "run") => run(&mut m, &req.body),
+            ("POST", "compress") => compress_route(&mut m, &req.body),
+            ("GET", "core") => core_route(&m),
+            ("POST", "expand") => expand_route(&mut m, &req.body),
+            ("POST", "core/run") => match &m.core {
+                Some(core) => core
+                    .run(req.body.str_or("text", ""), req.body.bool_or("from_middle", false))
+                    .map(|(states, accepted)| {
+                        Json::object()
+                            .with("states", Json::Array(states.into_iter().map(Json::from).collect()))
+                            .with("accepted", accepted.into())
+                            .with("from_middle", req.body.bool_or("from_middle", false).into())
+                    }),
+                None => Err("nothing has been compressed yet: POST /api/compress first".to_string()),
+            },
+            ("POST", "core/save") => match &m.core {
+                Some(core) => {
+                    let path = req.body.str_or("path", "core.json.gz").to_string();
+                    core.save(&path)
+                        .map(|_| Json::object().with("saved", path.as_str().into()))
+                }
+                None => Err("nothing has been compressed yet: POST /api/compress first".to_string()),
+            },
+            ("POST", "core/load") => load_core(req.body.str_or("path", "core.json.gz")).map(|core| {
+                let summary = core.summary();
+                m.core = Some(core);
+                Json::object().with("summary", summary)
+            }),
+            ("POST", "compression") => compression_route(&mut m, &req.body),
             ("POST", "credit") => {
                 let amount = req.body.num("amount", 1.0);
                 let credited = m.credit(amount);
@@ -303,8 +338,92 @@ fn run(m: &mut Machine, body: &Json) -> Result<Json, String> {
     let stimulation = body.get("stimulation").and_then(Json::as_f64);
     let temperature = body.get("temperature").and_then(Json::as_f64);
     let quiet = body.bool_or("quiet", false);
-    let run = m.run_text(text, stimulation, temperature, quiet)?;
-    Ok(run.to_json().with("quiet", quiet.into()).with("stats", m.stats()))
+    let from_middle = body.bool_or("from_middle", false);
+    let symbols = m.tokenize(text)?;
+    let run = if from_middle {
+        m.run_from_middle(&symbols, stimulation, temperature, quiet)
+    } else {
+        m.run(&symbols, stimulation, temperature, quiet)
+    };
+    Ok(run
+        .to_json()
+        .with("quiet", quiet.into())
+        .with("from_middle", from_middle.into())
+        .with("stats", m.stats()))
+}
+
+/// The code the machine holds, measured against the machine: its summary, its loss, its rebuild shell by shell.
+fn core_report(m: &Machine) -> Result<Json, String> {
+    let core = m
+        .core
+        .as_ref()
+        .ok_or("nothing has been compressed yet: POST /api/compress first")?;
+    if core.shape != m.lattice.shape() {
+        return Ok(Json::object()
+            .with("summary", core.summary())
+            .with("fidelity", Json::Null)
+            .with("expansion", Json::Null));
+    }
+    let rebuilt = core.decompress(None)?;
+    Ok(Json::object()
+        .with("summary", core.summary())
+        .with("fidelity", fidelity(m, &rebuilt))
+        .with("expansion", expansion(m, core)?)
+        .with("compressed_at", m.last_compressed.into()))
+}
+
+fn compress_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    let precision = body
+        .get("precision")
+        .and_then(Json::as_str)
+        .map(Precision::parse)
+        .transpose()?;
+    let budget = body.get("budget").and_then(Json::as_f64).map(|b| b.max(0.0) as usize);
+    let core = compress(m, precision, budget);
+    m.core = Some(core);
+    m.compressions += 1;
+    m.since_compression = 0;
+    m.last_compressed = m.clock;
+    Ok(core_report(m)?.with("stats", m.stats()))
+}
+
+fn core_route(m: &Machine) -> Result<Json, String> {
+    Ok(core_report(m)?.with("stats", m.stats()))
+}
+
+fn expand_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    let core = m
+        .core
+        .take()
+        .ok_or("nothing has been compressed yet: POST /api/compress first")?;
+    let shells = body.get("shells").and_then(Json::as_f64).map(|k| k.max(0.0) as usize);
+    let rebuilt = core.decompress(shells);
+    match rebuilt {
+        Ok(mut fresh) => {
+            fresh.core = Some(core);
+            *m = fresh;
+            Ok(Json::object()
+                .with("shells", shells.map(Json::from).unwrap_or(Json::Null))
+                .with("stats", m.stats()))
+        }
+        Err(e) => {
+            m.core = Some(core);
+            Err(e)
+        }
+    }
+}
+
+fn compression_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    if let Some(every) = body.get("every").and_then(Json::as_f64) {
+        m.compress_every = every.max(0.0) as u64;
+    }
+    if let Some(p) = body.get("precision").and_then(Json::as_str) {
+        m.compress_precision = Precision::parse(p)?;
+    }
+    if let Some(r) = body.get("rebuild").and_then(Json::as_bool) {
+        m.compress_rebuild = r;
+    }
+    Ok(m.stats())
 }
 
 fn teach(m: &mut Machine, body: &Json) -> Result<Json, String> {
@@ -395,6 +514,9 @@ pub fn new_machine(body: &Json) -> Result<Machine, String> {
         punish_narrowing: body.num("punish_narrowing", d.punish_narrowing),
         prototype: d.prototype,
         seed: body.num("seed", 1.0) as u64,
+        compress_every: body.num("compress_every", 0.0).max(0.0) as u64,
+        compress_precision: Precision::parse(body.str_or("compress_precision", "exact"))?,
+        compress_rebuild: body.bool_or("compress_rebuild", false),
     };
     Machine::new(states, &alphabet, &accepting, settings)
 }

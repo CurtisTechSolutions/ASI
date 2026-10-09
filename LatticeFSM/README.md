@@ -34,6 +34,16 @@ beyond the edge's own, no gradient through the machine, no sweep. Time is the
 clock of traversals; traces, ages, widths and stimulation fade on it; the
 verdicts never do.
 
+**The central node.** The 13 × 13 × 13 cube has a centre, the cell
+`(6, g, 6)`, and the whole matrix folds into a code that cell holds — laid
+out from the centre outward, shell by shell, so it is rebuilt from the
+middle outward too. By default the code is **exact**: every field of every
+edge comes back bit for bit, at 7.5 to 11 times smaller than the dense
+matrix on a taught machine. `float32` and `float16` make it 13 to 29 times
+smaller with the behaviour still preserved. The machine can fold itself into
+its central node every N transitions, and can walk from the middle state as
+well as from the start state.
+
 Two ports of one model, standard library only in each, reading and writing
 the same machine files:
 
@@ -60,6 +70,9 @@ number, and a machine file written by either reads in the other.
 | Credit is discounted back from the end | `credit(r)`: the last edge of the run receives `r`, each earlier one `discount` times the next |
 | The clock | every traversal is a tick; `tick(k)` lets time pass; everything that fades reads through elapsed ticks and writes nothing |
 | Measurements are quiet | `run(quiet=True)`, `accepts`, `accuracy`, `transition_table`, `stats` move nothing |
+| The matrix folds into its central node | `compress(machine)` → `Core`, held at `(6, g, 6)`: a bitmap of touched edges and their fields, centre-out, exact by default (`compress.py`, `compress.rs`; `DESIGN.md` §11) |
+| Traversal from the middle outward | the code is laid out and rebuilt shell by shell from the centre (`geometry.center_out`, `decompress(shells=k)`); `run(…, from_middle=True)` starts from the middle state |
+| Compression every N transitions | `compress_every`, `compress_precision`, `compress_rebuild`: the code kept current, or the matrix rebuilt from it so a lossy precision is applied |
 | A different function altogether | `weight_fn(edge, clock, life, stimulation)` replaces every edge's own weighting |
 
 ## Quick start
@@ -70,7 +83,11 @@ make test                      # cargo test + clippy + fmt, then the Python test
 make demo                      # learn a language, be stimulated, let time pass (Rust)
 make serve                     # http://127.0.0.1:8000/ - the React frontend: the matrix, runs, credit, training, time
 make train LANGUAGE=ends-ab STATES=3 && make run TEXT=aab STIM=3 CREDIT=1
-make experiments               # the three tables below, a second
+make experiments               # the four sections below, a second
+make train && make compress    # fold the taught machine into its central node, exact; CORE=core.json.gz
+make expand SHELLS=6           # rebuild it from the middle outward, six shells of seven
+make core-run TEXT=abba FROM_MIDDLE=1   # walk straight from the code, from the middle state
+make demo EVERY=500 PRECISION=float16   # fold into the central node every 500 transitions
 python3 -m latticefsm demo     # the same from the Python reference
 rust/target/release/latticefsm --help
 ```
@@ -99,6 +116,10 @@ stimulation prefers the wide channel.  A fresh fork of three edges, widths 4, 1 
 stimulated by +3: level 4.00; a life of silence later:
   level 2.50, the widest channel now 10.50; accuracy still 1.000
   four more lives: level 1.09, widest 1.59; accuracy 1.000 - the verdicts never fade, the widths and traces do
+
+folded into its central node (6, g, 6): 48515 bytes exact, lossless - 7.6x smaller than the dense matrix
+  float16: 18365 bytes, max KL 3.8e-8, 0 greedy choices changed
+  'abba' walked straight from the code, from the middle state outward: 6 -> 0 -> 5 -> 0 -> 0 (accepted)
 ```
 
 The languages are over `a` and `b`, so a default machine traverses 2 of its
@@ -122,7 +143,11 @@ remembered in the browser — with five tabs for this model:
 | **Run** | read a string at a stimulation of your choosing, traversing it or asking quietly; reward or punish the last run |
 | **Train** | teach a language for some episodes, with the accuracy curve and the greedy table it ends in |
 | **Time** | let ticks pass; raise or set the stimulation |
-| **Machine** | a fresh machine of any shape; save and load; teach one edge deliberately |
+| **Compress** | fold the matrix into its central node at a precision or a budget; the code's size, its loss in state and behaviour, and its rebuild shell by shell from the centre outward; rebuild the machine to any shell; walk straight from the code, from the start or the middle; save and load codes |
+| **Machine** | a fresh machine of any shape; compress every N transitions (precision, rebuild); save and load; teach one edge deliberately |
+
+The Run tab can start the walk from the middle state, and the Matrix tab
+rings the central node on its slice.
 
 The status bar polls the machine every two seconds: shape, how much of the
 matrix is touched, the clock, the stimulation, the state, credits, and the
@@ -144,7 +169,7 @@ curl -s "localhost:8000/api/matrix?symbol=b"
 
 ## What it measured
 
-Three experiments, deterministic given the seed, from both ports;
+Four experiments, deterministic given the seed, from both ports;
 `results/` holds the Rust records and `results/python/` the Python ones.
 The stimulation and adaptation records are identical to the last digit
 across the ports (the parity test checks it); the learning rows draw their
@@ -254,6 +279,64 @@ punished one narrow when punished. Four lives later the widths and traces
 have relaxed and the verdicts and coefficients have not: the punished edge
 stays at zero probability on its record alone.
 
+### Folded into the central node
+
+Default 13 × 13 × 13 machines, fresh and taught each language for 4 000
+episodes, folded into the central node `(6, g, 6)` at each precision. The
+dense matrix is 369 096 bytes: 2 197 edges of six 8-byte integers and
+fifteen 8-byte numbers. Rust; the Python port writes the same codes byte
+for byte.
+
+| machine | precision | touched | code, bytes | smaller | lossless | max relative error | max KL | greedy changed | accuracy kept |
+|---|---|---|---|---|---|---|---|---|---|
+| fresh | any | 0 | 275 | 1 342× | yes | 0 | 0 | 0 | – |
+| even-b | exact | 338 | 48 947 | 7.5× | **yes** | 0 | 0 | 0 | yes |
+| even-b | float32 | 338 | 28 667 | 12.9× | no | 5.8 × 10⁻⁸ | 4.3 × 10⁻¹² | 0 | yes |
+| even-b | float16 | 338 | 18 527 | 19.9× | no | 4.8 × 10⁻⁴ | 1.8 × 10⁻⁴ | 0 | yes |
+| ends-ab | exact | 230 | 33 395 | 11.1× | **yes** | 0 | 0 | 0 | yes |
+| ends-ab | float16 | 230 | 12 695 | 29.1× | no | 4.8 × 10⁻⁴ | 2.6 × 10⁻¹³ | 0 | yes |
+| mod3-a | exact | 316 | 45 779 | 8.1× | **yes** | 0 | 0 | 0 | yes |
+| mod3-a | float16 | 316 | 17 339 | 21.3× | no | 3.3 × 10⁻³ | 1.5 × 10⁻⁵ | 0 | yes |
+
+Exact is the default: **no loss at all**, every field of every edge back bit
+for bit. Even float16 changed no greedy choice and no language's accuracy on
+any machine. A fresh matrix is its 275-byte bitmap. Low-rank codes were
+measured against this one while designing it and lost: the smallest Tucker
+decomposition that kept the behaviour was larger than storing the touched
+edges exactly (`DESIGN.md` §11.3).
+
+**From the middle outward.** The code is laid out shell by shell from the
+central node, so a rebuild can stop at any shell. For `even-b`:
+
+| shells rebuilt | cells | touched edges restored | greedy changed | accuracy |
+|---|---|---|---|---|
+| 1 (the central node) | 1 | 0 | 25 | 0.550 |
+| 5 | 729 | 0 | 25 | 0.550 |
+| 6 | 1 331 | 121 | 23 | 0.557 |
+| 7 (all) | 2 197 | 338 | 0 | 0.580 |
+
+The languages are over `a` and `b`, the outermost two layers of the symbol
+axis, so a taught machine's edges all sit in shells 5 and 6 and come back
+only at the end of an outward rebuild. A language over the middle symbols
+would come back first.
+
+**Every N transitions.** Each language taught again with the matrix folded
+into its central node every 500 transitions and rebuilt from the code each
+time (23 compressions per run):
+
+| language | never | exact | float32 | float16 |
+|---|---|---|---|---|
+| even-b | 0.580 | 0.580 | 0.580 | 0.820 |
+| contains-aa | 0.660 | 0.660 | 0.660 | 0.647 |
+| ends-ab | 1.000 | 1.000 | 1.000 | 1.000 |
+| mod3-a | 0.870 | 0.870 | 0.870 | 0.727 |
+
+An exact rebuild on a clock changes nothing, edge for edge; float32 changed
+nothing measurable. Float16 rounds the machine's numbers to three digits 23
+times and so sends training down another path: better on one language,
+worse on two, on one seed. That is a perturbation, not a method; the
+Python port's run moves the same way on two of the three.
+
 ## The pieces
 
 | file | what it holds |
@@ -262,14 +345,15 @@ stays at zero probability on its record alone.
 | `rust/src/edge.rs` | `Edge` and `Weighting`: the record, the features, the weight, traversal, credit, width |
 | `rust/src/lattice.rs` | `Lattice` and `State`: the dense matrix and its persistence |
 | `rust/src/machine.rs` | `Machine`: the walk, the clock, credit, stimulation, the quiet measurements, the file |
-| `rust/src/languages.rs`, `experiment.rs` | the four languages; the three experiments and their tables |
+| `rust/src/languages.rs`, `experiment.rs` | the four languages; the four experiments and their tables |
+| `rust/src/geometry.rs`, `compress.rs` | the cube's centre and shells, the centre-out order; the code the central node holds, its precisions, the outward rebuild, the walk from the code, `fidelity` |
 | `rust/src/http.rs`, `server.rs` | the HTTP/1.1 server, the JSON routes, the static files of the frontend |
 | `frontend/` | the React app: `src/App.jsx`, the five panels in `src/components/`, `src/api.js`, `src/matrix.js`; `dist/` built and committed |
 | `rust/src/json.rs`, `gzip.rs`, `rng.rs` | JSON, gzip and the generator, written out: no dependencies |
 | `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, experiment, serve |
 | `rust/tests/` | the machine and the server over a real socket |
-| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `languages.py`, `experiment.py`, `cli.py` |
-| `tests/test_latticefsm.py` | 36 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
+| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `compress.py`, `languages.py`, `experiment.py`, `cli.py` |
+| `tests/test_latticefsm.py` | 54 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
 | `results/` | the measured numbers from both ports, with a README |
 
 ## Limits
@@ -288,6 +372,12 @@ stays at zero probability on its record alone.
   seed; everything else agrees. A file written by one port reseeds the
   other's generator from the seed.
 * Stimulation is one level for the whole machine, not per state.
+* A partial rebuild from the middle outward gives back nothing a taught
+  machine learned until the last two shells, because the languages use the
+  outermost symbols (`DESIGN.md` §11.4).
+* A lossy precision with `compress_rebuild` on changes what the machine
+  learns afterwards; the code's own loss is measured, the downstream effect
+  only on one seed.
 
 ## Where it sits
 

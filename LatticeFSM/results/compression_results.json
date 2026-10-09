@@ -1,0 +1,445 @@
+{
+ "experiment": "compression",
+ "settings": {
+  "episodes": 4000,
+  "seed": 1,
+  "life": 1000,
+  "tests": 300,
+  "every": 500,
+  "shape": [
+   13,
+   13,
+   13
+  ]
+ },
+ "rows": [
+  {
+   "machine": "fresh",
+   "precision": "exact",
+   "touched": 0,
+   "bytes": 275,
+   "dense_bytes": 369096,
+   "ratio": 1342.1672727272728,
+   "record_bytes": 615,
+   "lossless": true,
+   "max_relative_error": 0,
+   "mean_kl": 0,
+   "max_kl": 0,
+   "greedy_changed": 0,
+   "accuracy": null,
+   "accuracy_rebuilt": null
+  },
+  {
+   "machine": "fresh",
+   "precision": "float32",
+   "touched": 0,
+   "bytes": 275,
+   "dense_bytes": 369096,
+   "ratio": 1342.1672727272728,
+   "record_bytes": 615,
+   "lossless": true,
+   "max_relative_error": 0,
+   "mean_kl": 0,
+   "max_kl": 0,
+   "greedy_changed": 0,
+   "accuracy": null,
+   "accuracy_rebuilt": null
+  },
+  {
+   "machine": "fresh",
+   "precision": "float16",
+   "touched": 0,
+   "bytes": 275,
+   "dense_bytes": 369096,
+   "ratio": 1342.1672727272728,
+   "record_bytes": 615,
+   "lossless": true,
+   "max_relative_error": 0,
+   "mean_kl": 0,
+   "max_kl": 0,
+   "greedy_changed": 0,
+   "accuracy": null,
+   "accuracy_rebuilt": null
+  },
+  {
+   "machine": "even-b",
+   "precision": "exact",
+   "touched": 338,
+   "bytes": 48947,
+   "dense_bytes": 369096,
+   "ratio": 7.540727725907614,
+   "record_bytes": 697,
+   "lossless": true,
+   "max_relative_error": 0,
+   "mean_kl": 0,
+   "max_kl": 0,
+   "greedy_changed": 0,
+   "accuracy": 0.58,
+   "accuracy_rebuilt": 0.58
+  },
+  {
+   "machine": "even-b",
+   "precision": "float32",
+   "touched": 338,
+   "bytes": 28667,
+   "dense_bytes": 369096,
+   "ratio": 12.875292147765723,
+   "record_bytes": 697,
+   "lossless": false,
+   "max_relative_error": 0.00000005795484412694443,
+   "mean_kl": 0.00000000000002751746376477921,
+   "max_kl": 0.000000000004289341383679604,
+   "greedy_changed": 0,
+   "accuracy": 0.58,
+   "accuracy_rebuilt": 0.58
+  },
+  {
+   "machine": "even-b",
+   "precision": "float16",
+   "touched": 338,
+   "bytes": 18527,
+   "dense_bytes": 369096,
+   "ratio": 19.92205969665893,
+   "record_bytes": 697,
+   "lossless": false,
+   "max_relative_error": 0.0004762447990262639,
+   "mean_kl": 0.0000013163246030228038,
+   "max_kl": 0.0001783070585040376,
+   "greedy_changed": 0,
+   "accuracy": 0.58,
+   "accuracy_rebuilt": 0.58
+  },
+  {
+   "machine": "contains-aa",
+   "precision": "exact",
+   "touched": 333,
+   "bytes": 48227,
+   "dense_bytes": 369096,
+   "ratio": 7.653306239243578,
+   "record_bytes": 701,
+   "lossless": true,
+   "max_relative_error": 0,
+   "mean_kl": 0,
+   "max_kl": 0,
+   "greedy_changed": 0,
+   "accuracy": 0.66,
+   "accuracy_rebuilt": 0.66
+  },
+  {
+   "machine": "contains-aa",
+   "precision": "float32",
+   "touched": 333,
+   "bytes": 28247,
+   "dense_bytes": 369096,
+   "ratio": 13.066732750380572,
+   "record_bytes": 701,
+   "lossless": false,
+   "max_relative_error": 0.000000058375310199743284,
+   "mean_kl": 0.000000000000017118997128223116,
+   "max_kl": 0.0000000000011446616395579335,
+   "greedy_changed": 0,
+   "accuracy": 0.66,
+   "accuracy_rebuilt": 0.66
+  },
+  {
+   "machine": "contains-aa",
+   "precision": "float16",
+   "touched": 333,
+   "bytes": 18257,
+   "dense_bytes": 369096,
+   "ratio": 20.216684011611985,
+   "record_bytes": 701,
+   "lossless": false,
+   "max_relative_error": 0.000486394410492365,
+   "mean_kl": 0.0000009629279349766072,
+   "max_kl": 0.00007787856248287406,
+   "greedy_changed": 0,
+   "accuracy": 0.66,
+   "accuracy_rebuilt": 0.66
+  },
+  {
+   "machine": "ends-ab",
+   "precision": "exact",
+   "touched": 230,
+   "bytes": 33395,
+   "dense_bytes": 369096,
+   "ratio": 11.05243299895194,
+   "record_bytes": 697,
+   "lossless": true,
+   "max_relative_error": 0,
+   "mean_kl": 0,
+   "max_kl": 0,
+   "greedy_changed": 0,
+   "accuracy": 1,
+   "accuracy_rebuilt": 1
+  },
+  {
+   "machine": "ends-ab",
+   "precision": "float32",
+   "touched": 230,
+   "bytes": 19595,
+   "dense_bytes": 369096,
+   "ratio": 18.836233733095177,
+   "record_bytes": 697,
+   "lossless": false,
+   "max_relative_error": 0.00000005744869647689114,
+   "mean_kl": 0.0000000000000000019682440325210182,
+   "max_kl": 0.0000000000000003326332414960521,
+   "greedy_changed": 0,
+   "accuracy": 1,
+   "accuracy_rebuilt": 1
+  },
+  {
+   "machine": "ends-ab",
+   "precision": "float16",
+   "touched": 230,
+   "bytes": 12695,
+   "dense_bytes": 369096,
+   "ratio": 29.074123670736512,
+   "record_bytes": 697,
+   "lossless": false,
+   "max_relative_error": 0.0004776421495257118,
+   "mean_kl": 0.0000000000000015220243045674357,
+   "max_kl": 0.0000000000002572221074718966,
+   "greedy_changed": 0,
+   "accuracy": 1,
+   "accuracy_rebuilt": 1
+  },
+  {
+   "machine": "mod3-a",
+   "precision": "exact",
+   "touched": 316,
+   "bytes": 45779,
+   "dense_bytes": 369096,
+   "ratio": 8.062561436466503,
+   "record_bytes": 699,
+   "lossless": true,
+   "max_relative_error": 0,
+   "mean_kl": 0,
+   "max_kl": 0,
+   "greedy_changed": 0,
+   "accuracy": 0.87,
+   "accuracy_rebuilt": 0.87
+  },
+  {
+   "machine": "mod3-a",
+   "precision": "float32",
+   "touched": 316,
+   "bytes": 26819,
+   "dense_bytes": 369096,
+   "ratio": 13.762481822588464,
+   "record_bytes": 699,
+   "lossless": false,
+   "max_relative_error": 0.00000005825174018350775,
+   "mean_kl": 0.0000000000000028104875075372316,
+   "max_kl": 0.0000000000002565082471697542,
+   "greedy_changed": 0,
+   "accuracy": 0.87,
+   "accuracy_rebuilt": 0.87
+  },
+  {
+   "machine": "mod3-a",
+   "precision": "float16",
+   "touched": 316,
+   "bytes": 17339,
+   "dense_bytes": 369096,
+   "ratio": 21.287040775131207,
+   "record_bytes": 699,
+   "lossless": false,
+   "max_relative_error": 0.0033068664723780025,
+   "mean_kl": 0.00000012996799559329893,
+   "max_kl": 0.000014915988769671719,
+   "greedy_changed": 0,
+   "accuracy": 0.87,
+   "accuracy_rebuilt": 0.87
+  }
+ ],
+ "expansion": [
+  {
+   "shells": 1,
+   "cells": 1,
+   "touched": 0,
+   "greedy_changed": 25,
+   "max_kl": 2.5649493574615367,
+   "accuracy": 0.55
+  },
+  {
+   "shells": 2,
+   "cells": 27,
+   "touched": 0,
+   "greedy_changed": 25,
+   "max_kl": 2.5649493574615367,
+   "accuracy": 0.55
+  },
+  {
+   "shells": 3,
+   "cells": 125,
+   "touched": 0,
+   "greedy_changed": 25,
+   "max_kl": 2.5649493574615367,
+   "accuracy": 0.55
+  },
+  {
+   "shells": 4,
+   "cells": 343,
+   "touched": 0,
+   "greedy_changed": 25,
+   "max_kl": 2.5649493574615367,
+   "accuracy": 0.55
+  },
+  {
+   "shells": 5,
+   "cells": 729,
+   "touched": 0,
+   "greedy_changed": 25,
+   "max_kl": 2.5649493574615367,
+   "accuracy": 0.55
+  },
+  {
+   "shells": 6,
+   "cells": 1331,
+   "touched": 121,
+   "greedy_changed": 23,
+   "max_kl": 2.5649493574615367,
+   "accuracy": 0.5566666666666666
+  },
+  {
+   "shells": 7,
+   "cells": 2197,
+   "touched": 338,
+   "greedy_changed": 0,
+   "max_kl": 0,
+   "accuracy": 0.58
+  }
+ ],
+ "periodic": [
+  {
+   "language": "even-b",
+   "compression": "never",
+   "precision": null,
+   "compressions": 0,
+   "bytes": null,
+   "accuracy": 0.58
+  },
+  {
+   "language": "even-b",
+   "compression": "every 500",
+   "precision": "exact",
+   "compressions": 23,
+   "bytes": 48947,
+   "accuracy": 0.58
+  },
+  {
+   "language": "even-b",
+   "compression": "every 500",
+   "precision": "float32",
+   "compressions": 23,
+   "bytes": 28667,
+   "accuracy": 0.58
+  },
+  {
+   "language": "even-b",
+   "compression": "every 500",
+   "precision": "float16",
+   "compressions": 23,
+   "bytes": 18527,
+   "accuracy": 0.82
+  },
+  {
+   "language": "contains-aa",
+   "compression": "never",
+   "precision": null,
+   "compressions": 0,
+   "bytes": null,
+   "accuracy": 0.66
+  },
+  {
+   "language": "contains-aa",
+   "compression": "every 500",
+   "precision": "exact",
+   "compressions": 23,
+   "bytes": 48083,
+   "accuracy": 0.66
+  },
+  {
+   "language": "contains-aa",
+   "compression": "every 500",
+   "precision": "float32",
+   "compressions": 23,
+   "bytes": 28163,
+   "accuracy": 0.66
+  },
+  {
+   "language": "contains-aa",
+   "compression": "every 500",
+   "precision": "float16",
+   "compressions": 23,
+   "bytes": 18203,
+   "accuracy": 0.6466666666666666
+  },
+  {
+   "language": "ends-ab",
+   "compression": "never",
+   "precision": null,
+   "compressions": 0,
+   "bytes": null,
+   "accuracy": 1
+  },
+  {
+   "language": "ends-ab",
+   "compression": "every 500",
+   "precision": "exact",
+   "compressions": 23,
+   "bytes": 33395,
+   "accuracy": 1
+  },
+  {
+   "language": "ends-ab",
+   "compression": "every 500",
+   "precision": "float32",
+   "compressions": 23,
+   "bytes": 19595,
+   "accuracy": 1
+  },
+  {
+   "language": "ends-ab",
+   "compression": "every 500",
+   "precision": "float16",
+   "compressions": 23,
+   "bytes": 12695,
+   "accuracy": 1
+  },
+  {
+   "language": "mod3-a",
+   "compression": "never",
+   "precision": null,
+   "compressions": 0,
+   "bytes": null,
+   "accuracy": 0.87
+  },
+  {
+   "language": "mod3-a",
+   "compression": "every 500",
+   "precision": "exact",
+   "compressions": 23,
+   "bytes": 45779,
+   "accuracy": 0.87
+  },
+  {
+   "language": "mod3-a",
+   "compression": "every 500",
+   "precision": "float32",
+   "compressions": 23,
+   "bytes": 26819,
+   "accuracy": 0.87
+  },
+  {
+   "language": "mod3-a",
+   "compression": "every 500",
+   "precision": "float16",
+   "compressions": 23,
+   "bytes": 17123,
+   "accuracy": 0.7266666666666667
+  }
+ ]
+}

@@ -6,8 +6,9 @@ The numbers in `../README.md`, committed beside the code that produced them.
 |---|---|
 | `learning_results.json` | four languages × four machine sizes (3, 4, 6 and the default 13) × five seeds: accuracy before and after 4 000 credited episodes, the curve every 500, and the quiet control |
 | `stimulation_results.json` | a fork of widths 4, 1, 0.25: the probabilities by stimulation level; a surge of +3 relaxing over four lives |
+| `compression_results.json` | default machines, fresh and taught each language, folded into the central node at each precision (bytes, loss in state and behaviour, accuracy kept); `even-b` rebuilt shell by shell from the centre outward; each language taught again with compression every 500 transitions |
 | `adaptation_results.json` | two edges from one prototype, one rewarded and one punished on every use: every field at six stages, and the two weighting functions |
-| `experiments.log` | the three tables as `make experiments` printed them |
+| `experiments.log` | the four experiments' tables as `make experiments` printed them |
 | `python/` | the same three from the Python reference (`make py-experiments`) |
 
 The records in this directory are the Rust crate's. `stimulation` and

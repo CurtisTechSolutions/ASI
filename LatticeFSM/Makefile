@@ -31,12 +31,19 @@ CREDIT    ?=
 TICKS     ?= 1000
 AMOUNT    ?= 2
 PORT      ?= 8000
+CORE      ?= core.json.gz
+PRECISION ?= exact
+SHELLS    ?=
+EVERY     ?= 0
+FROM_MIDDLE ?=
 HOST      ?= 127.0.0.1
 RESULTS   ?= results
 
-MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseline $(BASELINE) --seed $(SEED) --language $(LANGUAGE)
+MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseline $(BASELINE) --seed $(SEED) --language $(LANGUAGE) \
+               $(if $(filter-out 0,$(EVERY)),--compress-every $(EVERY) --compress-precision $(PRECISION),)
 
 .PHONY: help build test check demo train run teach accuracy table stats tick stimulate serve experiments \
+        compress expand core-run \
         py-test py-demo py-train py-run py-experiments parity \
         frontend-install frontend-build frontend-dev frontend-test clean
 
@@ -66,7 +73,7 @@ train: build ## Teach LANGUAGE over EPISODES random strings into a fresh machine
 	$(BIN) train $(MACHINE_OPTS) --episodes $(EPISODES) --save $(MODEL)
 
 run: build ## Read TEXT from MODEL (STIM=x runs at that stimulation; CREDIT=r rewards, negative punishes), saved back
-	$(BIN) run "$(TEXT)" --load $(MODEL) $(if $(STIM),--stimulation $(STIM),) $(if $(CREDIT),--credit $(CREDIT),) --save $(MODEL)
+	$(BIN) run "$(TEXT)" --load $(MODEL) $(if $(STIM),--stimulation $(STIM),) $(if $(CREDIT),--credit $(CREDIT),) $(if $(FROM_MIDDLE),--from-middle,) --save $(MODEL)
 
 teach: build ## Traverse edge SOURCE SYMBOL TARGET deliberately and credit it AMOUNT, saved back
 	$(BIN) teach $(SOURCE) $(SYMBOL) $(TARGET) --load $(MODEL) --amount $(AMOUNT) --save $(MODEL)
@@ -86,15 +93,26 @@ tick: build ## Let TICKS pass in MODEL, and save it
 stimulate: build ## Raise MODEL's stimulation by AMOUNT, and save it
 	$(BIN) stimulate --load $(MODEL) --amount $(AMOUNT) --save $(MODEL)
 
+##@ The central node
+compress: build ## Fold MODEL into its central node at PRECISION (exact|float32|float16) and save the code to CORE
+	$(BIN) compress --load $(MODEL) --precision $(PRECISION) --core $(CORE) --expansion
+
+expand: build ## Rebuild a machine from CORE, from the central node outward (SHELLS=k for only k shells), into MODEL
+	$(BIN) expand --core $(CORE) $(if $(SHELLS),--shells $(SHELLS),) --save $(MODEL)
+
+core-run: build ## Walk TEXT straight from CORE (FROM_MIDDLE=1 starts from the middle state)
+	$(BIN) core-run "$(TEXT)" --core $(CORE) $(if $(FROM_MIDDLE),--from-middle,)
+
+##@ Serving
 serve: build ## The HTTP API and the frontend on http://HOST:PORT/ (MODEL if it exists, else a fresh machine)
 	$(BIN) serve $(MACHINE_OPTS) --host $(HOST) --port $(PORT) --frontend-dir frontend/dist $(if $(wildcard $(MODEL)),--load $(MODEL),)
 
 ##@ The experiments README.md quotes
-experiments: build ## Learning, stimulation and adaptation, written to RESULTS/ - a second
+experiments: build ## Learning, stimulation, adaptation and compression, written to RESULTS/ - a second
 	mkdir -p $(RESULTS)
 	$(BIN) experiment --which all --life $(LIFE) --out $(RESULTS) | tee $(RESULTS)/experiments.log
 
-py-experiments: ## The same three from the Python reference, written to RESULTS/python/ - about a minute
+py-experiments: ## The same four from the Python reference, written to RESULTS/python/ - about two minutes
 	mkdir -p $(RESULTS)/python
 	$(PY) -m latticefsm experiment --which all --life $(LIFE) --out $(RESULTS)/python | tee $(RESULTS)/python/experiments.log
 
@@ -131,4 +149,4 @@ clean: ## Remove build output, __pycache__, node_modules and saved machines (res
 	cd rust && $(CARGO) clean
 	rm -rf frontend/node_modules
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-	rm -f machine.json machine.json.gz
+	rm -f machine.json machine.json.gz core.json core.json.gz

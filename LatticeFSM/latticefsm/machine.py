@@ -20,6 +20,11 @@ machine's behaviour, and everything else here is what feeds back into it:
   toward ``baseline`` by a half every ``calm`` ticks.
 * **quiet** - any run asked for ``quiet=True`` draws without traversing,
   credits nothing and moves no clock: a measurement.
+* **compression** - every ``compress_every`` transitions the matrix is folded
+  into its central node (``compress.py``) and the code kept on the machine
+  (:attr:`Machine.core`); with ``compress_rebuild`` the matrix is then rebuilt
+  from the code, so a lossy ``compress_precision`` is applied, not only
+  recorded.
 
 ``weight_fn`` replaces the weighting altogether: a callable
 ``(edge, clock, life, stimulation) -> log-weight``, for a machine whose
@@ -117,6 +122,9 @@ class Machine:
         prototype: Weighting | None = None,
         weight_fn: WeightFn | None = None,
         seed: int = 1,
+        compress_every: int = 0,
+        compress_precision: str = "exact",
+        compress_rebuild: bool = False,
     ) -> None:
         if not (life > 0) or not math.isfinite(life):
             raise ValueError(f"life must be a positive number of ticks, got {life}")
@@ -144,6 +152,19 @@ class Machine:
         self.punish_narrowing = float(punish_narrowing)
         self.weight_fn = weight_fn
         self.seed = int(seed)
+        if compress_every < 0:
+            raise ValueError(f"compress_every must be >= 0 (0 never), got {compress_every}")
+        if compress_precision not in ("exact", "float32", "float16"):
+            raise ValueError(f"compress_precision must be exact, float32 or float16, got {compress_precision!r}")
+        self.compress_every = int(compress_every)
+        """Fold the matrix into its central node every this many transitions; 0 never."""
+        self.compress_precision = compress_precision
+        self.compress_rebuild = bool(compress_rebuild)
+        self.core = None
+        """The latest code the central node holds (:meth:`compress_now`)."""
+        self.compressions = 0
+        self.since_compression = 0
+        self.last_compressed = -1
         self.rng = random.Random(seed)
         self.clock = 0
         """Every traversal, plus time let pass."""
@@ -166,6 +187,11 @@ class Machine:
     @property
     def alphabet(self) -> list[str]:
         return self.lattice.symbols
+
+    @property
+    def center_state(self) -> int:
+        """The middle state: the source and target of the matrix's central node (``geometry.center``)."""
+        return self.n_states // 2
 
     @property
     def accepting(self) -> list[int]:
@@ -255,13 +281,35 @@ class Machine:
         s = self.lattice.states[edge.target]
         s.visits += 1
         s.last_visited = self.clock
+        self._after_transition()
+
+    def _after_transition(self) -> None:
+        """Count a transition, and fold the matrix into its central node when ``compress_every`` have passed."""
+        self.since_compression += 1
+        if self.compress_every and self.since_compression >= self.compress_every:
+            self.compress_now()
+
+    def compress_now(self):
+        """Fold the matrix into its central node now, at ``compress_precision``; with ``compress_rebuild``, rebuild
+        the matrix from the code in place (every edge object is kept, so a run's path stays valid)."""
+        from .compress import compress
+        core = compress(self, precision=self.compress_precision)
+        if self.compress_rebuild:
+            core.rebuild_into(self.lattice)
+        self.compressions += 1
+        self.since_compression = 0
+        self.last_compressed = self.clock
+        self.core = core
+        return core
 
     def run(self, symbols: Iterable[str], stimulation: float | None = None, temperature: float | None = None,
-            quiet: bool = False) -> Run:
-        """Read a string from the start state.  Quiet, a copy of the machine's state is walked and nothing moves."""
+            quiet: bool = False, from_middle: bool = False) -> Run:
+        """Read a string from the start state - or, ``from_middle``, from the middle state, the central node's - and
+        walk outward from there.  Quiet, a copy of the machine's state is walked and nothing moves."""
         stim = self.stimulation if stimulation is None else float(stimulation)
+        origin = self.center_state if from_middle else self.start
         if quiet:
-            state = self.start
+            state = origin
             transitions = []
             for sym in symbols:
                 target, p = self.choose(state, sym, stim, temperature)
@@ -269,6 +317,7 @@ class Machine:
                 state = target
             return Run(transitions, state, self.lattice.states[state].accepting)
         self.reset()
+        self.state = origin
         self.runs += 1
         transitions = [self.step(sym, stim, temperature) for sym in symbols]
         return Run(transitions, self.state, self.lattice.states[self.state].accepting)
@@ -308,13 +357,14 @@ class Machine:
         edge.traverse(self.clock, self.life, trace=self.trace, widen=self.use_widening)
         self.clock += 1
         edge.credit(amount, self.clock, self.life, widen=self.reward_widening, narrow=self.punish_narrowing)
+        self._after_transition()
         return edge
 
     # ---- measurements (quiet) ----------------------------------------------------------------------------------------
 
-    def accepts(self, symbols: Iterable[str], temperature: float = 0.0) -> bool:
+    def accepts(self, symbols: Iterable[str], temperature: float = 0.0, from_middle: bool = False) -> bool:
         """Whether the greedy (or, at a temperature, a sampled) quiet run ends in an accepting state."""
-        return self.run(symbols, temperature=temperature, quiet=True).accepted
+        return self.run(symbols, temperature=temperature, quiet=True, from_middle=from_middle).accepted
 
     def accuracy(self, examples: Iterable[tuple[Sequence[str], bool]], temperature: float = 0.0) -> float:
         """The share of ``(string, accept?)`` examples the quiet run classifies correctly."""
@@ -354,24 +404,41 @@ class Machine:
             "total_punished": sum(e.punished for e in touched),
             "widest": max((e.width_at(self.clock, self.life) for e in touched), default=1.0),
             "narrowest": min((e.width_at(self.clock, self.life) for e in touched), default=1.0),
+            "center": [self.center_state, len(self.alphabet) // 2, self.center_state],
+            "compress_every": self.compress_every,
+            "compress_precision": self.compress_precision,
+            "compress_rebuild": self.compress_rebuild,
+            "compressions": self.compressions,
+            "since_compression": self.since_compression,
+            "last_compressed": self.last_compressed,
+            "core_bytes": self.core.bytes if self.core is not None else None,
         }
 
     # ---- persistence -------------------------------------------------------------------------------------------------
+
+    def settings_dict(self) -> dict:
+        """The settings as the machine file writes them."""
+        return {
+            "start": self.start, "life": self.life, "baseline": self.baseline, "calm": self.calm,
+            "temperature": self.temperature, "discount": self.discount, "trace": self.trace,
+            "use_widening": self.use_widening, "reward_widening": self.reward_widening,
+            "punish_narrowing": self.punish_narrowing, "seed": self.seed,
+            "compress_every": self.compress_every, "compress_precision": self.compress_precision,
+            "compress_rebuild": self.compress_rebuild,
+        }
 
     def to_dict(self) -> dict:
         return {
             "format": _FORMAT,
             "version": _FORMAT_VERSION,
-            "settings": {
-                "start": self.start, "life": self.life, "baseline": self.baseline, "calm": self.calm,
-                "temperature": self.temperature, "discount": self.discount, "trace": self.trace,
-                "use_widening": self.use_widening, "reward_widening": self.reward_widening,
-                "punish_narrowing": self.punish_narrowing, "seed": self.seed,
-            },
+            "settings": self.settings_dict(),
             "clock": self.clock,
             "state": self.state,
             "runs": self.runs,
             "credits": self.credits,
+            "compressions": self.compressions,
+            "since_compression": self.since_compression,
+            "last_compressed": self.last_compressed,
             "stimulation": [self._stimulation, self._stimulation_stamp],
             "rng": {"mersenne": list(self.rng.getstate())},
             "lattice": self.lattice.to_dict(),
@@ -383,10 +450,20 @@ class Machine:
         file the Rust port wrote reseeds from the seed."""
         if data.get("format") != _FORMAT:
             raise ValueError(f"not a {_FORMAT} file")
-        lat = Lattice.from_dict(data["lattice"])
+        m = cls._assemble(Lattice.from_dict(data["lattice"]), data, weight_fn)
+        state = data.get("rng")
+        if isinstance(state, dict) and "mersenne" in state:
+            version, key, gauss = state["mersenne"]
+            m.rng.setstate((version, tuple(key), gauss))
+        # a file written by the Rust port carries that port's generator state: reseeded from the seed
+        return m
+
+    @classmethod
+    def _assemble(cls, lattice: Lattice, data: dict, weight_fn: WeightFn | None = None) -> Machine:
+        """A machine around ``lattice`` from the rest of a machine file (or a code's record), reseeded."""
         st = data["settings"]
         m = cls.__new__(cls)
-        m.lattice = lat
+        m.lattice = lattice
         m.start = int(st["start"])
         m.life = float(st["life"])
         m.baseline = float(st["baseline"])
@@ -400,11 +477,13 @@ class Machine:
         m.weight_fn = weight_fn
         m.seed = int(st["seed"])
         m.rng = random.Random(m.seed)
-        state = data.get("rng")
-        if isinstance(state, dict) and "mersenne" in state:
-            version, key, gauss = state["mersenne"]
-            m.rng.setstate((version, tuple(key), gauss))
-        # a file written by the Rust port carries that port's generator state: reseeded from the seed
+        m.compress_every = int(st.get("compress_every", 0))
+        m.compress_precision = st.get("compress_precision", "exact")
+        m.compress_rebuild = bool(st.get("compress_rebuild", False))
+        m.core = None
+        m.compressions = int(data.get("compressions", 0))
+        m.since_compression = int(data.get("since_compression", 0))
+        m.last_compressed = int(data.get("last_compressed", -1))
         m.clock = int(data["clock"])
         m.state = int(data["state"])
         m.runs = int(data["runs"])

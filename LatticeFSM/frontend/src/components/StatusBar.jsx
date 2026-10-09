@@ -66,6 +66,11 @@ export default function StatusBar({ onStats, tick }) {
       <span className="stat" title="Reward and punishment credited to edges, ever">
         rewards <b className="ok">+{fmtNum(s.total_rewarded, 1)}</b> / <b className="bad">−{fmtNum(s.total_punished, 1)}</b>
       </span>
+      <span className="stat" title="Times the matrix was folded into its central node, and the automatic schedule">
+        compressed <b>{fmtInt(s.compressions)}</b>
+        {s.compress_every ? <> · every {fmtInt(s.compress_every)}</> : null}
+        {s.core_bytes ? <> · code {fmtInt(s.core_bytes)} B</> : null}
+      </span>
       <span className="stat" title="The widest and narrowest channel in the matrix now">
         width <b>{fmtNum(s.narrowest, 2)}</b> – <b>{fmtNum(s.widest, 2)}</b>
       </span>

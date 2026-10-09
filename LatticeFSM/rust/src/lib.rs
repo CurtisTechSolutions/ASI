@@ -21,8 +21,10 @@
 //! if run.accepted { m.reward(1.0); } else { m.punish(1.0); }
 //! ```
 
+pub mod compress;
 pub mod edge;
 pub mod experiment;
+pub mod geometry;
 pub mod gzip;
 pub mod http;
 pub mod json;

@@ -13,6 +13,10 @@ The five requirements, in the author's words, and where each is realised:
 | edges are dense data classes with multiple values — recently traversed, seen, rewarded, punished, last seen, and more | §2: `Edge`, fifteen fields |
 | stimulation makes it easier to traverse wider compared to narrower paths | §3: the `stimulation · log(width)` term; §4: how width moves |
 | traverse based on a custom adaptive weighting function for each edge | §3: `Weighting`, one per edge, adapted at every credit; §5: `weight_fn` |
+| a 13 × 13 × 13 matrix | §1: the default shape |
+| compress the matrix into the central node with minimal loss | §11.1–11.3: the code the central node `(6, g, 6)` holds, exact by default |
+| traverse from the middle outward as well | §11.4: the code laid out and rebuilt shell by shell from the centre; a walk from the middle state |
+| run the compression every N uses / transitions | §11.5: `compress_every`, `compress_precision`, `compress_rebuild` |
 
 ## 1. The matrix
 
@@ -282,8 +286,149 @@ serves it with no `npm`.
 * **Lazy fading, no sweep.** Everything that fades is a stored value and a
   stamp read through elapsed ticks, as in `RadixDecayNN`, so `tick(k)` is
   one addition and reading never writes.
+* **The central node, its code, and compression on a clock** have their own
+  decisions in §11.6.
 * **The Python port is the reference, the Rust crate is the build.** Python
   for the experiments' authorship and the tests that read like the spec;
   Rust for the CLI and the server, with no dependencies, as the repository's
   other crates. Both read one file format; sampling is not held to parity
   because the two generators are different by design.
+
+## 11. The central node: folding in, walking out
+
+### 11.1 The cube and its centre
+
+A `S × A × S` matrix is a block of cells. Its **central node** is the cell
+`(S / 2, A / 2, S / 2)` — `(6, g, 6)` on the default 13 × 13 × 13 machine,
+the self-loop of state 6 on the seventh symbol, the one cell with as many
+cells on every side as on the other. A cell's **shell** is its Chebyshev
+distance from the centre, `max(|s − 6|, |a − 6|, |t − 6|)`. The default cube
+has seven shells:
+
+| shell | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| cells | 1 | 26 | 98 | 218 | 386 | 602 | 866 |
+
+`geometry.center_out` lists every cell from the centre outward: shell by
+shell, `(s, a, t)` order within a shell. It is the one order the code is
+written in and read back in (`geometry.py`, `geometry.rs`).
+
+### 11.2 The code
+
+`compress(machine)` folds the whole matrix into a `Core`, the code the
+central node holds. In centre-out order:
+
+| part | what | cost |
+|---|---|---|
+| the structure | one bit per cell: was anything ever written to this edge | `⌈S·A·S / 8⌉` bytes — 275 for 13³ |
+| the integers | per touched edge, `seen` and its five stamps (`first_seen`, `last_seen`, `last_rewarded`, `last_punished`, `width_stamp`), little-endian | 6 × 4 bytes when every one fits in int32, else 6 × 8 |
+| the numbers | per touched edge, `recent`, `rewarded`, `punished`, `width`, the six weighting coefficients, the five features | 15 × 8, 4 or 2 bytes by precision |
+| the record | the settings, clock, state, counters, stimulation, the states, the prototype | a few hundred bytes of JSON, lossless |
+
+An untouched edge is exactly the prototype's, so a bit is all it costs and it
+comes back exactly; a weighting's `rate` is never adapted, so it is the
+prototype's too and is not stored. In the file, the bitmap is hex and the
+packed fields base64 (`latticefsm-core`, version 1).
+
+| precision | the numbers as | loss |
+|---|---|---|
+| `exact` (the default) | float64 | none: every field of every edge comes back bit for bit |
+| `float32` | IEEE single, round to nearest even | a relative error below 6 × 10⁻⁸ per number |
+| `float16` | IEEE half, round to nearest even, clamped to ±65 504 | a relative error below 5 × 10⁻⁴ per number, more for a value past the clamp |
+
+With a `budget` in bytes and no precision named, `compress` takes the least
+lossy precision whose code fits, and `float16` when none does. Both ports
+write the same code byte for byte, the half-float rounding included (the
+Rust crate writes the conversion out; Python's is `struct`'s `"e"`), and
+each rebuilds the other's.
+
+### 11.3 Minimal loss, measured
+
+`fidelity(original, rebuilt)` measures the loss two ways:
+
+* **in state**: how many edges differ in any field, and the largest
+  relative error over every number of every edge;
+* **in behaviour**: per row `(s, a)`, the KL divergence between the
+  original's and the rebuilt machine's distributions at the original's
+  stimulation (temperature 1 when the original's is 0), and whether the
+  rebuilt greedy choice is still among the original's best (two log-weights
+  within 10⁻⁶ relative are a tie). The behaviour is *preserved* when no
+  greedy choice changed and no row moved by more than 10⁻³ nats.
+
+**Why this code and not a low-rank one.** Two low-rank codes were measured
+while designing this, on a default machine taught `even-b` (338 touched
+edges, every one on the `a` and `b` slices):
+
+| code | the smallest that preserves the behaviour |
+|---|---|
+| Tucker decomposition (truncated HOSVD) of the cube's 20-channel tensor, ranks chosen greedily | ranks 13 × 2 × 13 × 19: 7 186 numbers |
+| PCA of the touched edges' 20 channels | rank 19: 6 822 numbers |
+| the touched edges stored exactly (this code) | 6 760 numbers, and lossless |
+
+The information in a taught matrix is sparse, not low-rank: the symbol axis
+collapses to the two slices in use — which the bitmap already captures —
+but within them the states need full rank, and a learned table is close to a
+permutation. The behaviour is also sensitive: a relative error of 0.24 % in
+the channels already moved a row by 7.7 × 10⁻⁴ nats. So the minimal-loss code
+is the exact one, and the lossy steps beyond it are precisions, not ranks.
+
+### 11.4 From the middle outward
+
+Because the code runs from the centre out, **rebuilding can stop at any
+shell**: `decompress(shells=k)` gives back every cell within `k − 1` shells
+of the central node exactly and every cell beyond as the prototype's edge;
+`decompress()` is every shell. The machine can also be **walked straight from
+the code** — `Core.probabilities` and `Core.run` decode only the cells of the
+rows the walk reaches.
+
+**A walk from the middle.** `run(…, from_middle=True)` (Rust:
+`run_from_middle`) starts the walk at the middle state, `S / 2` — the
+central node's source and target — instead of the start state, and walks out
+from there by the same rule; `Core.run(text, from_middle)` does the same
+from the code, and agrees with the machine's own greedy walk.
+
+**What that does on the languages.** The four languages are over `a` and
+`b`, the first two symbols, and so the outermost two layers of the symbol
+axis: shells 6 and 5. A machine taught one of them keeps all it learned
+there, and a partial rebuild from the middle gives back nothing it learned
+until the last two shells. That is the geometry, measured, not a fault of
+the code: a language over the middle symbols would be rebuilt from the
+middle first.
+
+### 11.5 Compression on a clock
+
+`Machine(compress_every=N)` folds the matrix into its central node every `N`
+transitions — a traversal in a run, in training, or in a lesson (`teach`);
+a quiet run is no transition. The code is kept on the machine (`core`), with
+`compressions`, `since_compression` and `last_compressed`; all of them and
+the schedule are saved in the machine file.
+
+* **Recorded** (`compress_rebuild` off, the default): the central node's code
+  is kept current and the machine is untouched.
+* **Rebuilt** (`compress_rebuild` on): after each compression the matrix is
+  rebuilt from the code, so the precision's loss is *applied* to the machine
+  and carried into what it learns next. At `exact` this changes nothing — a
+  test holds a machine taught with an exact rebuild every 50 transitions to
+  the same matrix, edge for edge, as one taught without. At `float16` the
+  machine's numbers are rounded to three digits every `N` transitions.
+
+The rebuild writes the decoded fields into the matrix in place (Python keeps
+every edge object, Rust every offset), so a run's path is still valid and a
+credit after the run lands where it should.
+
+### 11.6 Decisions
+
+* **The central node is the geometric centre.** Asked for, and well defined
+  for any shape. It is where the code is held and where the outward order
+  starts; it is not where a taught machine's information is (§11.4).
+* **Exact by default.** "Minimal loss" read as no loss when no loss is
+  possible, which it is, at 7.5 to 12 times smaller than the dense matrix on
+  a taught machine and 1 342 times on a fresh one. The lossy precisions are
+  there for a budget.
+* **Low-rank codes rejected,** measured (§11.3), not assumed.
+* **The code is laid out centre-out** so that "traverse from the middle
+  outward" is a property of the code itself: a prefix of it is a rebuild to
+  a shell.
+* **Compression on a clock counts transitions,** not clock ticks: `tick`
+  lets time pass without the machine doing anything, and a quiet run asks
+  without traversing.

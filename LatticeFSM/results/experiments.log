@@ -54,3 +54,56 @@ the two weighting functions at the end (bias, seen, recent, net, age, width, rat
   rewarded: [2.000, 4.234, 8.000, 2.640, 1.897, 3.496, 0.100]
   punished: [-2.000, -4.234, -8.000, 2.640, -1.897, 3.179, 0.100]
 
+compression: default 13 x 13 x 13 machines, fresh and taught each language for 4000 episodes, folded into the central node (6, g, 6) at each precision
+
+| machine | precision | touched | bytes | smaller than dense | lossless | max relative error | max KL | greedy changed | accuracy: original → rebuilt |
+|---|---|---|---|---|---|---|---|---|---|
+| fresh | exact | 0 | 275 | 1342.2× | yes | 0.0e0 | 0.0e0 | 0 | – |
+| fresh | float32 | 0 | 275 | 1342.2× | yes | 0.0e0 | 0.0e0 | 0 | – |
+| fresh | float16 | 0 | 275 | 1342.2× | yes | 0.0e0 | 0.0e0 | 0 | – |
+| even-b | exact | 338 | 48947 | 7.5× | yes | 0.0e0 | 0.0e0 | 0 | 0.580 → 0.580 |
+| even-b | float32 | 338 | 28667 | 12.9× | no | 5.8e-8 | 4.3e-12 | 0 | 0.580 → 0.580 |
+| even-b | float16 | 338 | 18527 | 19.9× | no | 4.8e-4 | 1.8e-4 | 0 | 0.580 → 0.580 |
+| contains-aa | exact | 333 | 48227 | 7.7× | yes | 0.0e0 | 0.0e0 | 0 | 0.660 → 0.660 |
+| contains-aa | float32 | 333 | 28247 | 13.1× | no | 5.8e-8 | 1.1e-12 | 0 | 0.660 → 0.660 |
+| contains-aa | float16 | 333 | 18257 | 20.2× | no | 4.9e-4 | 7.8e-5 | 0 | 0.660 → 0.660 |
+| ends-ab | exact | 230 | 33395 | 11.1× | yes | 0.0e0 | 0.0e0 | 0 | 1.000 → 1.000 |
+| ends-ab | float32 | 230 | 19595 | 18.8× | no | 5.7e-8 | 3.3e-16 | 0 | 1.000 → 1.000 |
+| ends-ab | float16 | 230 | 12695 | 29.1× | no | 4.8e-4 | 2.6e-13 | 0 | 1.000 → 1.000 |
+| mod3-a | exact | 316 | 45779 | 8.1× | yes | 0.0e0 | 0.0e0 | 0 | 0.870 → 0.870 |
+| mod3-a | float32 | 316 | 26819 | 13.8× | no | 5.8e-8 | 2.6e-13 | 0 | 0.870 → 0.870 |
+| mod3-a | float16 | 316 | 17339 | 21.3× | no | 3.3e-3 | 1.5e-5 | 0 | 0.870 → 0.870 |
+
+even-b, exact, rebuilt from the central node outward
+
+| shells rebuilt | cells | touched edges restored | greedy changed | accuracy |
+|---|---|---|---|---|
+| 1 | 1 | 0 | 25 | 0.550 |
+| 2 | 27 | 0 | 25 | 0.550 |
+| 3 | 125 | 0 | 25 | 0.550 |
+| 4 | 343 | 0 | 25 | 0.550 |
+| 5 | 729 | 0 | 25 | 0.550 |
+| 6 | 1331 | 121 | 23 | 0.557 |
+| 7 | 2197 | 338 | 0 | 0.580 |
+
+every language taught again, the matrix folded into its central node every 500 transitions and rebuilt from the code each time
+
+| language | compression | precision | compressions | last code, bytes | accuracy |
+|---|---|---|---|---|---|
+| even-b | never | – | 0 | – | 0.580 |
+| even-b | every 500 | exact | 23 | 48947 | 0.580 |
+| even-b | every 500 | float32 | 23 | 28667 | 0.580 |
+| even-b | every 500 | float16 | 23 | 18527 | 0.820 |
+| contains-aa | never | – | 0 | – | 0.660 |
+| contains-aa | every 500 | exact | 23 | 48083 | 0.660 |
+| contains-aa | every 500 | float32 | 23 | 28163 | 0.660 |
+| contains-aa | every 500 | float16 | 23 | 18203 | 0.647 |
+| ends-ab | never | – | 0 | – | 1.000 |
+| ends-ab | every 500 | exact | 23 | 33395 | 1.000 |
+| ends-ab | every 500 | float32 | 23 | 19595 | 1.000 |
+| ends-ab | every 500 | float16 | 23 | 12695 | 1.000 |
+| mod3-a | never | – | 0 | – | 0.870 |
+| mod3-a | every 500 | exact | 23 | 45779 | 0.870 |
+| mod3-a | every 500 | float32 | 23 | 26819 | 0.870 |
+| mod3-a | every 500 | float16 | 23 | 17123 | 0.727 |
+

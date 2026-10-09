@@ -20,6 +20,7 @@ from latticefsm import (  # noqa: E402
     COEFFICIENT_LIMIT, DEFAULT_ALPHABET, DEFAULT_STATES, FEATURES, LANGUAGES, WIDTH_MAX, WIDTH_MIN, WIDTH_REST, Edge,
     Machine, Weighting, examples, language, load_machine,
 )
+from latticefsm import center, center_out, compress, fidelity, load_core, shell, shell_sizes, shells  # noqa: E402
 from latticefsm import experiment  # noqa: E402
 from latticefsm.lattice import Lattice  # noqa: E402
 
@@ -397,6 +398,189 @@ def load_machine_from(m: Machine) -> Machine:
     return Machine.from_dict(json.loads(json.dumps(m.to_dict())))
 
 
+def taught(name="even-b", episodes=1500, seed=2, **kw):
+    lang = language(name)
+    m = Machine(accepting=lang.accepting, seed=seed, **kw)
+    experiment.teach_language(m, name, episodes, random.Random(seed))
+    return m
+
+
+class TestGeometry(unittest.TestCase):
+    def test_the_cube_has_a_centre_and_seven_shells(self):
+        shape = (13, 13, 13)
+        self.assertEqual(center(shape), (6, 6, 6))
+        self.assertEqual(shells(shape), 7)
+        self.assertEqual(shell_sizes(shape), [1, 26, 98, 218, 386, 602, 866])
+        self.assertEqual(sum(shell_sizes(shape)), 13 ** 3)
+        self.assertEqual(shell(shape, 6, 6, 6), 0)
+        self.assertEqual(shell(shape, 0, 6, 6), 6)
+        self.assertEqual(shell(shape, 7, 5, 6), 1)
+
+    def test_center_out_visits_every_cell_once_from_the_middle_outward(self):
+        shape = (13, 13, 13)
+        order = center_out(shape)
+        self.assertEqual(sorted(order), list(range(13 ** 3)))
+        self.assertEqual(order[0], (6 * 13 + 6) * 13 + 6)
+        rings = [shell(shape, c // 169, (c // 13) % 13, c % 13) for c in order]
+        self.assertEqual(rings, sorted(rings))
+
+    def test_other_shapes(self):
+        self.assertEqual(center((4, 2, 4)), (2, 1, 2))
+        self.assertEqual(sum(shell_sizes((4, 2, 4))), 32)
+        self.assertEqual(sorted(center_out((3, 5, 3))), list(range(45)))
+
+
+class TestCompression(unittest.TestCase):
+    def test_exact_is_lossless_bit_for_bit(self):
+        m = taught()
+        core = compress(m)
+        self.assertEqual(core.precision, "exact")
+        self.assertEqual(core.center, (6, 6, 6))
+        r = core.decompress()
+        self.assertEqual(r.to_dict()["lattice"], m.to_dict()["lattice"])
+        f = fidelity(m, r)
+        self.assertTrue(f["lossless"])
+        self.assertEqual((f["max_kl"], f["greedy_changed"], f["edges_differing"]), (0.0, 0, 0))
+        self.assertEqual((r.clock, r.state, r.runs, r.credits, r.stimulation), (m.clock, m.state, m.runs, m.credits, m.stimulation))
+        self.assertEqual([s.to_list() for s in r.lattice.states], [s.to_list() for s in m.lattice.states])
+
+    def test_the_code_is_small(self):
+        m = taught()
+        core = compress(m)
+        s = core.summary()
+        touched = sum(e.touched for e in m.lattice)
+        self.assertEqual(s["touched"], touched)
+        self.assertEqual(core.bytes, (13 ** 3 + 7) // 8 + touched * (6 * core.int_width + 15 * 8))
+        self.assertGreater(s["ratio"], 5)
+        self.assertEqual(compress(Machine()).bytes, (13 ** 3 + 7) // 8)    # a fresh matrix is its bitmap
+
+    def test_smaller_precisions_lose_a_little_and_keep_the_behaviour(self):
+        m = taught()
+        sizes = []
+        for precision in ("exact", "float32", "float16"):
+            core = compress(m, precision)
+            f = fidelity(m, core.decompress())
+            sizes.append(core.bytes)
+            self.assertEqual(f["lossless"], precision == "exact")
+            self.assertTrue(f["preserved"], (precision, f))
+        self.assertGreater(sizes[0], sizes[1])
+        self.assertGreater(sizes[1], sizes[2])
+        self.assertLess(fidelity(m, compress(m, "float32").decompress())["max_relative_error"], 1e-6)
+        self.assertLess(fidelity(m, compress(m, "float16").decompress())["max_relative_error"], 1e-2)
+
+    def test_a_budget_takes_the_least_lossy_precision_that_fits(self):
+        m = taught()
+        exact, f32, f16 = (compress(m, p).bytes for p in ("exact", "float32", "float16"))
+        self.assertEqual(compress(m, budget=exact).precision, "exact")
+        self.assertEqual(compress(m, budget=exact - 1).precision, "float32")
+        self.assertEqual(compress(m, budget=f32 - 1).precision, "float16")
+        self.assertEqual(compress(m, budget=1).precision, "float16")
+        with self.assertRaises(ValueError):
+            compress(m, "float8")
+
+    def test_rebuilding_from_the_middle_outward(self):
+        m = taught()
+        core = compress(m)
+        sizes = shell_sizes(core.shape)
+        hits = [row["touched"] for row in core.shell_table()]
+        self.assertEqual(sum(hits), core.n_touched)
+        for k in range(len(sizes) + 1):
+            part = core.decompress(shells=k)
+            inside = set(center_out(core.shape)[:sum(sizes[:k])])
+            for cell, (eo, ep) in enumerate(zip(m.lattice.edges, part.lattice.edges)):
+                if cell in inside:
+                    self.assertEqual(eo.to_list(), ep.to_list())
+                else:
+                    self.assertFalse(ep.touched)
+            self.assertEqual(sum(e.touched for e in part.lattice), sum(hits[:k]))
+        self.assertEqual(core.decompress(shells=len(sizes)).to_dict()["lattice"], m.to_dict()["lattice"])
+
+    def test_walking_straight_from_the_code(self):
+        m = taught()
+        core = compress(m)
+        for text in ("", "a", "abba", "bbab", "aaaa"):
+            for middle in (False, True):
+                states, accepted = core.run(text, from_middle=middle)
+                r = m.run(text, temperature=0.0, quiet=True, from_middle=middle)
+                self.assertEqual(states, r.states)
+                self.assertEqual(accepted, r.accepted)
+        for s in (0, 6, 12):
+            self.assertEqual(core.probabilities(s, "a"), m.probabilities(s, "a"))
+
+    def test_the_code_round_trips_through_its_file(self):
+        m = taught()
+        with tempfile.TemporaryDirectory() as d:
+            for precision in ("exact", "float16"):
+                core = compress(m, precision)
+                path = os.path.join(d, f"core-{precision}.json.gz")
+                core.save(path)
+                back = load_core(path)
+                self.assertEqual((back.ints, back.floats, back.touched), (core.ints, core.floats, core.touched))
+                self.assertEqual(back.decompress().to_dict()["lattice"], core.decompress().to_dict()["lattice"])
+
+    def test_measurements_and_compression_are_quiet(self):
+        m = taught()
+        before = m.to_dict()
+        compress(m, "float16").decompress()
+        fidelity(m, compress(m).decompress())
+        after = m.to_dict()
+        before.pop("rng"), after.pop("rng")
+        self.assertEqual(before, after)
+
+
+class TestFromTheMiddle(unittest.TestCase):
+    def test_a_run_can_start_from_the_middle_state(self):
+        m = Machine(seed=1)
+        self.assertEqual(m.center_state, 6)
+        r = m.run("ab", from_middle=True)
+        self.assertEqual(r.states[0], 6)
+        self.assertEqual(m.path[0].source, 6)
+        q = m.run("ab", quiet=True, from_middle=True)
+        self.assertEqual(q.states[0], 6)
+        self.assertEqual(m.run("ab").states[0], 0)
+
+
+class TestCompressEvery(unittest.TestCase):
+    def test_the_matrix_is_compressed_every_n_transitions(self):
+        m = Machine(seed=1, compress_every=10)
+        m.run("ab" * 12)                       # 24 transitions
+        self.assertEqual((m.compressions, m.since_compression, m.last_compressed), (2, 4, 20))
+        self.assertIsNotNone(m.core)
+        m.teach(0, "a", 1, 1.0)                # a lesson is a transition too
+        self.assertEqual(m.since_compression, 5)
+        m.run("a" * 5, quiet=True)             # a quiet run is not
+        self.assertEqual(m.since_compression, 5)
+        self.assertEqual(Machine(seed=1).compressions, 0)
+
+    def test_an_exact_rebuild_changes_nothing_and_a_lossy_one_is_applied(self):
+        plain = taught(episodes=800)
+        exact = taught(episodes=800, compress_every=50, compress_rebuild=True)
+        self.assertEqual(exact.to_dict()["lattice"], plain.to_dict()["lattice"])
+        self.assertGreater(exact.compressions, 10)
+        lossy = Machine(seed=3, compress_every=1, compress_precision="float16", compress_rebuild=True)
+        lossy.teach(0, "a", 1, 0.1234567)
+        e = lossy.edge(0, "a", 1)
+        self.assertNotEqual(e.rewarded, 0.1234567)
+        self.assertAlmostEqual(e.rewarded, 0.1234567, places=3)
+
+    def test_a_rebuild_keeps_the_path_valid(self):
+        m = Machine(seed=1, compress_every=2, compress_precision="float16", compress_rebuild=True)
+        m.run("abab")
+        path = list(m.path)
+        self.assertTrue(all(m.lattice.edges[m.lattice.offset(e.source, e.symbol, e.target)] is e for e in path))
+        self.assertEqual(m.reward(1.0), 4)
+        self.assertGreater(sum(e.rewarded for e in m.lattice), 0)
+
+    def test_the_schedule_is_saved(self):
+        m = Machine(compress_every=7, compress_precision="float32", compress_rebuild=True)
+        m.run("abababab")
+        back = Machine.from_dict(json.loads(json.dumps(m.to_dict())))
+        self.assertEqual((back.compress_every, back.compress_precision, back.compress_rebuild), (7, "float32", True))
+        self.assertEqual((back.compressions, back.since_compression), (m.compressions, m.since_compression))
+        with self.assertRaises(ValueError):
+            Machine(compress_every=-1)
+
+
 class TestCLI(unittest.TestCase):
     def run_cli(self, *args: str) -> str:
         out = subprocess.run([sys.executable, "-m", "latticefsm", *args], cwd=ROOT, capture_output=True, text=True)
@@ -419,6 +603,13 @@ class TestCLI(unittest.TestCase):
             self.assertIn("| stimulation |", self.run_cli("experiment", "--which", "stimulation"))
             self.assertIn("stimulation prefers the wide channel", self.run_cli("demo", "--episodes", "200"))
             self.assertIn("shape: [13, 13, 13]", self.run_cli("stats"))
+            core = os.path.join(d, "core.json.gz")
+            self.assertIn("bit for bit", self.run_cli("compress", "--load", path, "--core", core))
+            self.assertIn("every shell", self.run_cli("expand", "--core", core))
+            self.assertIn("3 shells", self.run_cli("expand", "--core", core, "--shells", "3"))
+            self.assertIn("read straight from the code", self.run_cli("core-run", "ab", "--core", core, "--from-middle"))
+            self.assertIn("float16", self.run_cli("compress", "--load", path, "--precision", "float16"))
+            self.assertIn("6 -", self.run_cli("run", "ab", "--load", path, "--from-middle", "--quiet"))
 
 
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
@@ -448,6 +639,51 @@ class TestRustParity(unittest.TestCase):
             m.save(path2)
             out2 = subprocess.run([RUST, "stats", "--load", path2], check=True, capture_output=True, text=True).stdout
             self.assertIn(f'"clock": {m.clock}', out2)
+
+
+class TestRustCompressionParity(unittest.TestCase):
+    """The code is the same, byte for byte, from either port, and either port rebuilds the other's."""
+
+    @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+    def test_the_two_ports_write_the_same_code(self):
+        m = taught()
+        with tempfile.TemporaryDirectory() as d:
+            mpath = os.path.join(d, "m.json")
+            m.save(mpath)
+            for precision in ("exact", "float32", "float16"):
+                rpath = os.path.join(d, f"r-{precision}.json")
+                subprocess.run([RUST, "compress", "--load", mpath, "--precision", precision, "--core", rpath],
+                               check=True, capture_output=True)
+                with open(rpath) as f:
+                    rust = json.load(f)
+                ours = compress(m, precision).to_dict()
+                for key in ("touched", "ints", "floats", "int_width", "precision", "center"):
+                    self.assertEqual(rust[key], ours[key], (precision, key))
+            back = os.path.join(d, "back.json")
+            compress(m).save(os.path.join(d, "p.json"))
+            subprocess.run([RUST, "expand", "--core", os.path.join(d, "p.json"), "--save", back], check=True,
+                           capture_output=True)
+            self.assertEqual(load_machine(back).to_dict()["lattice"]["edges"], m.to_dict()["lattice"]["edges"])
+            self.assertEqual(load_core(os.path.join(d, "r-exact.json")).decompress().to_dict()["lattice"],
+                             m.to_dict()["lattice"])
+
+    @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+    def test_half_floats_round_the_same_way(self):
+        # values that sit on rounding boundaries, the subnormal range, and the clamp
+        m = Machine(2, "a")
+        e = m.edge(0, "a", 1)
+        values = [0.1, 1/3, 2049.0, 2051.0, 65504.0, 1e9, -1e9, 6e-5, 6.1e-5, 3e-8, 1.0009765625, 1.00146484375, -0.0]
+        e.seen = 1
+        e.recent, e.rewarded, e.punished, e.width = values[0:4]
+        e.weighting = Weighting(*values[4:10], rate=0.1)
+        e.features = tuple(values[8:13])
+        with tempfile.TemporaryDirectory() as d:
+            mpath, rpath = os.path.join(d, "m.json"), os.path.join(d, "r.json")
+            m.save(mpath)
+            subprocess.run([RUST, "compress", "--load", mpath, "--precision", "float16", "--core", rpath], check=True,
+                           capture_output=True)
+            with open(rpath) as f:
+                self.assertEqual(json.load(f)["floats"], compress(m, "float16").to_dict()["floats"])
 
 
 def strip(value):

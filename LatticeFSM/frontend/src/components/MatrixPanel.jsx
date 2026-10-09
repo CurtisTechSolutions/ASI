@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
-import { cellStyle } from "../matrix.js";
+import { cellStyle, isCenter } from "../matrix.js";
 import { fmtNum } from "../util.js";
 import Alert from "./Alert.jsx";
 import EdgeCard from "./EdgeCard.jsx";
@@ -72,7 +72,9 @@ export default function MatrixPanel({ stats, tick }) {
           The slice of the matrix for one symbol. From the state on the left, reading this symbol, the machine moves
           to the state above with the probability in the cell, under stimulation{" "}
           <b>{slice ? fmtNum(slice.stimulation, 2) : "–"}</b>. Beneath: the channel's width and how often the edge was
-          traversed. ✓ marks an accepting state, ← the state the machine is in.
+          traversed. ✓ marks an accepting state, ← the state the machine is in, and the ringed cell on symbol{" "}
+          {stats && stats.center && alphabet[stats.center[1]]} is the matrix's central node, the one the Compress tab folds
+          the matrix into.
         </p>
         <Alert message={error} onDismiss={() => setError(null)} />
         <div className="table-wrap matrix-wrap">
@@ -98,7 +100,7 @@ export default function MatrixPanel({ stats, tick }) {
                   {row.edges.map((e) => (
                     <td
                       key={e.target}
-                      className="cell"
+                      className={`cell${isCenter(stats && stats.center, row.source, slice.symbol_index, e.target) ? " center" : ""}`}
                       style={cellStyle(e.probability)}
                       title={`seen ${e.seen}, width ${fmtNum(e.width, 2)}, net ${fmtNum(e.net, 2)}, log-weight ${fmtNum(e.log_weight, 2)}`}
                       onClick={() => showEdge(row.source, e.target)}

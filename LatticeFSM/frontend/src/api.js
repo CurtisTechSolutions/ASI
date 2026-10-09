@@ -74,4 +74,11 @@ export const api = {
   newMachine: (body) => post("/api/new", body),
   save: (path) => post("/api/save", { path }),
   load: (path) => post("/api/load", { path }),
+  compress: (body) => post("/api/compress", body),
+  core: () => get("/api/core"),
+  expand: (shells) => post("/api/expand", shells === undefined || shells === null ? {} : { shells }),
+  coreRun: (text, fromMiddle) => post("/api/core/run", { text, from_middle: fromMiddle }),
+  coreSave: (path) => post("/api/core/save", { path }),
+  coreLoad: (path) => post("/api/core/load", { path }),
+  compression: (body) => post("/api/compression", body),
 };
