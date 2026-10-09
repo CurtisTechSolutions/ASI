@@ -17,6 +17,10 @@ The five requirements, in the author's words, and where each is realised:
 | compress the matrix into the central node with minimal loss | §11.1–11.3: the code the central node `(6, g, 6)` holds, exact by default |
 | traverse from the middle outward as well | §11.4: the code laid out and rebuilt shell by shell from the centre; a walk from the middle state |
 | run the compression every N uses / transitions | §11.5: `compress_every`, `compress_precision`, `compress_rebuild` |
+| traverse from the central vertical vector by a finite "focus": high from the bottom node, low or none from the top | §12.1: `focus` in [0, 1], 13 equal bands on `(0..12, g, 6)` |
+| allow edges to skip one node if a more efficient path is found | §12.3: a skip reads two symbols in one move past the node between |
+| focus should also be a learned value based on the input | §12.2: `learn_focus`, a learner credited like the edges |
+| allow nodes to rearrange themselves and swap | §12.4: `swap_states`, `swap_symbols`, `rearrange`, `rearrange_every` |
 
 ## 1. The matrix
 
@@ -323,7 +327,7 @@ central node holds. In centre-out order:
 | the structure | one bit per cell: was anything ever written to this edge | `⌈S·A·S / 8⌉` bytes — 275 for 13³ |
 | the integers | per touched edge, `seen` and its five stamps (`first_seen`, `last_seen`, `last_rewarded`, `last_punished`, `width_stamp`), little-endian | 6 × 4 bytes when every one fits in int32, else 6 × 8 |
 | the numbers | per touched edge, `recent`, `rewarded`, `punished`, `width`, the six weighting coefficients, the five features | 15 × 8, 4 or 2 bytes by precision |
-| the record | the settings, clock, state, counters, stimulation, the states, the prototype | a few hundred bytes of JSON, lossless |
+| the record | the settings, clock, state, counters, stimulation, the states and where each sits, the prototype, the focus learner | about 1 KB of JSON, lossless |
 
 An untouched edge is exactly the prototype's, so a bit is all it costs and it
 comes back exactly; a weighting's `rate` is never adapted, so it is the
@@ -432,3 +436,136 @@ credit after the run lands where it should.
 * **Compression on a clock counts transitions,** not clock ticks: `tick`
   lets time pass without the machine doing anything, and a quiet run asks
   without traversing.
+
+## 12. Where a run starts and how it moves
+
+### 12.1 Focus on the central vertical vector
+
+The **central vertical vector** is the column of cells through the central
+node along the source axis — the axis the matrix is drawn with top to
+bottom: `(s, A / 2, S / 2)` for `s` from 0 (the top) to `S − 1` (the
+bottom), `(0..12, g, 6)` on the default machine (`geometry.central_vertical`).
+
+**Focus** is a number in the finite range `[0, 1]` (`FOCUS_RANGE`; a value
+outside it, infinite or not a number is refused). It translates to a node of
+the vector by cutting the range into `S` equal bands:
+
+```
+focus_index(S, f) = min(S − 1, floor(f · S))      no focus: 0
+```
+
+| focus | none | [0, 1/13) | … | [6/13, 7/13) ∋ 0.5 | … | [12/13, 1] |
+|---|---|---|---|---|---|---|
+| node | top (0) | top (0) | … | the central node (6) | … | bottom (12) |
+
+A run starts from the source state of the node the focus picks: low or no
+focus the top node, high focus the bottom one. The machine holds a focus
+(`focus`, saved; `None` by default), and a run may be given one for itself.
+The order a run's start is decided in: the middle state (`from_middle`), a
+focus given for the run, the learned focus (§12.2), the machine's focus, and
+— with none of these — the machine's `start`, which is the top node unless
+the nodes have rearranged themselves (§12.4).
+
+### 12.2 The learned focus
+
+With `learn_focus`, the focus is read off each input by a `FocusLearner`
+(`focus.py`, `focus.rs`):
+
+```
+focus(text) = sigmoid(w · x(text))
+x = [1, n / (n + 6), each symbol's share of the text, the first symbol one-hot, the last symbol one-hot]
+```
+
+`2 + 3A` weights, 41 on the default machine, starting at a bias of −3 and
+nothing else: an untrained learner says 0.047, the top node, as no focus
+does. A run that learns explores — it draws `f = mu + explore · N(0, 1)`
+(`explore` 0.15) and starts from the node the clipped draw picks — and when
+the run is credited `c` (a reward or a punishment, the same call that
+credits the edges),
+
+```
+w += rate · (c − baseline) · (f − mu) / explore² · mu (1 − mu) · x       rate 0.05
+baseline += 0.05 · (c − baseline)
+```
+
+the gradient of a Gaussian policy's log-likelihood through the sigmoid,
+measured against the credit's running mean. Learning from the unclipped
+draw and against a baseline matters: an earlier version that learned from
+the clipped draw drifted to the bottom node, because noise clipped at 0
+biases the draw upward while most credit is positive. Weights are clipped
+to [−8, 8]; a quiet run reads the mean and does not explore. The learner,
+its baseline and the switch are saved with the machine and in its code.
+
+### 12.3 Skipping a node
+
+With `skip` on, before each move with a symbol left to look at, the machine
+compares two ways to read the next two symbols `a`, `b` from state `s`:
+
+* the **step's path**: the step it would take on `a` anyway (greedy or a
+  draw, as always), then the best edge after it on `b`;
+* the **best path**: the best two-edge path on `a` then `b` through any
+  node `t`.
+
+Each is scored by its summed log-probability, at the run's temperature, or
+the machine's, or 1 when greedy. If the best path beats the step's by more
+than `skip_margin` (default 0: strictly), the machine **skips**: one move,
+reading both symbols, from `s` straight to the best path's end, past the
+node between. Both edges are traversed and credited, the clock ticks twice;
+the node skipped is not visited. The move is recorded as one `Transition`
+with both symbols and `skipped` naming the node passed. Without skips
+nothing changes — not even the random draws — which a test holds edge for
+edge. The walk from a compressed code (`Core.run`, `Core::walk`) skips as
+the machine's quiet greedy run does.
+
+### 12.4 Swapping and rearranging nodes
+
+`swap_states(i, j)` makes states `i` and `j` trade places everywhere:
+every edge from or to one moves to the other's row and column (an edge
+object keeps its identity in Python; Rust remaps the run's path offsets),
+the two state records trade places, and the start state and the current
+state follow. `swap_symbols(a, b)` does the same for two symbols' slices
+and labels, and keeps the learned focus's per-symbol weights with their
+symbols. A swap is a relabelling: from its start state the machine walks
+exactly as before (a test holds every edge's weight at its new
+coordinates). What changes is **where** each node sits — which one a focus
+picks, which is the middle state, which shell of the compressed code it
+falls in. `lattice.state_ids` remembers which state, by the number it was
+made with, sits at each position.
+
+`rearrange()` lets the nodes do it themselves. A node's load is the
+traversals of every edge through it (a state's edges in and out; a symbol's
+slice). One pass, on each axis: from the outside in on each side of the
+centre, a pair of neighbours swaps when the one farther from the centre is
+busier. The busy nodes move inward a step per pass; `full=True` repeats
+passes until none swaps, which leaves each axis busiest at the centre and
+falling away on both sides. `rearrange_every=N` runs one pass every `N`
+transitions — deferred to the end of the run or lesson it falls in, so that
+nothing a run holds (the symbols still to read, a skip's target) refers to a
+position that moved under it.
+
+This is what makes the outward rebuild of §11.4 useful on a taught machine.
+Before rearranging, every edge `even-b` taught lies in shells 5 and 6,
+because `a` and `b` are the outermost symbols; after, `a` and `b` sit at the
+centre of the symbol axis and the busiest states at the centre of the state
+axis, and the touched edges reach every shell down to the central node
+(README, "Where a run starts").
+
+### 12.5 Decisions
+
+* **"Vertical" is the source axis**, the one the matrix is drawn with top
+  to bottom, so the top node is state 0, the default start: no focus and
+  focus 0 agree on a default machine.
+* **Equal bands, not rounding**, so every node of the vector gets the same
+  share of the range, the ends included.
+* **No focus falls back to `start`**, not to position 0: `start` is
+  position 0 until the nodes rearrange, and the rearranged machine keeps
+  starting from the state it learned from.
+* **Learned focus as a Gaussian policy with a baseline,** the simplest
+  learner that is credited by the same rewards and punishments as the
+  edges; its measured effect is mixed (README), and it is off by default.
+* **A skip is a lookahead of one symbol,** scored in probability, the
+  direct reading of "a more efficient path"; it never changes what is read,
+  only how many moves it takes and which edges carry it.
+* **Rearrangement swaps neighbours toward the centre,** a local rule, so the
+  arrangement emerges from use; a swap's relabelling is exact, so it costs
+  nothing in what the machine has learned.

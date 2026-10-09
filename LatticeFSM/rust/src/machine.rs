@@ -15,6 +15,9 @@ use std::fs;
 use std::io::{Read, Write};
 
 use crate::compress::{compress, Core, Precision};
+use crate::focus::{FocusDraw, FocusLearner};
+use crate::geometry::{check_focus, focus_index, focus_node};
+
 use crate::edge::{Edge, Weighting};
 use crate::gzip;
 use crate::json::{parse, Json};
@@ -49,11 +52,14 @@ pub struct Transition {
     pub probability: f64,
     pub stimulation: f64,
     pub clock: i64,
+    /// A skip: the node passed through without stopping, the step reading two symbols (`symbol` holds both).
+    pub skipped: Option<usize>,
 }
 
 impl Transition {
     pub fn to_json(&self) -> Json {
         Json::object()
+            .with("skipped", self.skipped.map(Json::from).unwrap_or(Json::Null))
             .with("source", self.source.into())
             .with("symbol", self.symbol.as_str().into())
             .with("target", self.target.into())
@@ -126,6 +132,17 @@ pub struct Settings {
     pub compress_precision: Precision,
     /// Rebuild the matrix from the code after every automatic compression, so a lossy precision's loss is applied.
     pub compress_rebuild: bool,
+    /// A number in `[0, 1]`: the node of the central vertical vector runs start from; `None` the start state.
+    pub focus: Option<f64>,
+    /// Read the focus off the input through a learner, from credit.
+    pub learn_focus: bool,
+    pub focus_rate: f64,
+    pub focus_explore: f64,
+    /// Skip a node when a two-edge path is more efficient than the step the machine would take.
+    pub skip: bool,
+    pub skip_margin: f64,
+    /// Let the nodes rearrange themselves every this many transitions; 0 never.
+    pub rearrange_every: u64,
 }
 
 impl Default for Settings {
@@ -146,8 +163,34 @@ impl Default for Settings {
             compress_every: 0,
             compress_precision: Precision::Exact,
             compress_rebuild: false,
+            focus: None,
+            learn_focus: false,
+            focus_rate: 0.05,
+            focus_explore: 0.15,
+            skip: false,
+            skip_margin: 0.0,
+            rearrange_every: 0,
         }
     }
+}
+
+/// How one run goes: every field `None` / `false` is the machine's own way.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Walk {
+    pub stimulation: Option<f64>,
+    pub temperature: Option<f64>,
+    pub quiet: bool,
+    /// Start from the middle state, the central node's.
+    pub from_middle: bool,
+    /// Start from the node this focus picks, for this run only.
+    pub focus: Option<f64>,
+    /// Skip or not for this run, instead of the machine's `skip`.
+    pub skip: Option<bool>,
+}
+
+enum Move {
+    Step(usize, f64),
+    Skip(usize, usize, f64),
 }
 
 /// A finite state machine over a dense 3D matrix of adaptive edges.
@@ -187,6 +230,19 @@ pub struct Machine {
     pub since_compression: u64,
     /// The clock at the last compression; `-1` never.
     pub last_compressed: i64,
+    focus: Option<f64>,
+    pub learn_focus: bool,
+    pub focus_learner: FocusLearner,
+    last_focus_draw: Option<FocusDraw>,
+    /// The focus the latest run started from, when it had one.
+    pub last_focus: Option<f64>,
+    pub skip: bool,
+    pub skip_margin: f64,
+    pub skips: u64,
+    pub rearrange_every: u64,
+    pub swaps: u64,
+    pub since_rearrange: u64,
+    rearrange_due: bool,
 }
 
 impl Machine {
@@ -205,6 +261,12 @@ impl Machine {
         }
         if settings.temperature < 0.0 {
             return Err(format!("temperature must be >= 0, got {}", settings.temperature));
+        }
+        if let Some(f) = settings.focus {
+            check_focus(f)?;
+        }
+        if settings.skip_margin < 0.0 {
+            return Err(format!("skip_margin must be >= 0, got {}", settings.skip_margin));
         }
         let mut lattice = Lattice::new(states, alphabet, settings.prototype.clone())?;
         if settings.start >= states {
@@ -243,6 +305,18 @@ impl Machine {
             compressions: 0,
             since_compression: 0,
             last_compressed: -1,
+            focus: settings.focus,
+            learn_focus: settings.learn_focus,
+            focus_learner: FocusLearner::new(alphabet.to_vec(), settings.focus_rate, settings.focus_explore),
+            last_focus_draw: None,
+            last_focus: None,
+            skip: settings.skip,
+            skip_margin: settings.skip_margin,
+            skips: 0,
+            rearrange_every: settings.rearrange_every,
+            swaps: 0,
+            since_rearrange: 0,
+            rearrange_due: false,
             rng: Rng::new(settings.seed),
             clock: 0,
             state: settings.start,
@@ -273,6 +347,32 @@ impl Machine {
 
     pub fn alphabet(&self) -> &[String] {
         &self.lattice.symbols
+    }
+
+    /// The focus, a number in `[0, 1]`, or `None`: which node of the central vertical vector runs start from.
+    pub fn focus(&self) -> Option<f64> {
+        self.focus
+    }
+
+    pub fn set_focus(&mut self, focus: Option<f64>) -> Result<(), String> {
+        if let Some(f) = focus {
+            check_focus(f)?;
+        }
+        self.focus = focus;
+        Ok(())
+    }
+
+    /// The state `focus` starts a run from: its node on the central vertical vector.
+    pub fn focus_state(&self, focus: f64) -> usize {
+        focus_index(self.n_states(), Some(focus))
+    }
+
+    /// Where a run starts: the focus node's state when there is a focus, else `start`.
+    pub fn origin(&self) -> usize {
+        match self.focus {
+            Some(f) => self.focus_state(f),
+            None => self.start,
+        }
     }
 
     /// The middle state: the source and target of the matrix's central node (`geometry::center`).
@@ -421,10 +521,12 @@ impl Machine {
             probability: p,
             stimulation: stim,
             clock: self.clock,
+            skipped: None,
         };
         if !quiet {
             self.traverse(source, symbol, target);
             self.state = target;
+            self.settle_rearrange();
         }
         t
     }
@@ -444,9 +546,129 @@ impl Machine {
     /// Count a transition, and fold the matrix into its central node when `compress_every` of them have passed.
     fn after_transition(&mut self) {
         self.since_compression += 1;
+        self.since_rearrange += 1;
+        if self.rearrange_every > 0 && self.since_rearrange >= self.rearrange_every {
+            self.rearrange_due = true;
+        }
         if self.compress_every > 0 && self.since_compression >= self.compress_every {
             self.compress_now();
         }
+    }
+
+    // ---- rearranging ---------------------------------------------------------------------------------------------
+
+    /// States `i` and `j` trade places in the matrix: a relabelling - every edge, the two state records, the start
+    /// state, the current state and the run's path go with them - so the machine walks as before from its start
+    /// state; what changes is which one the focus and the middle pick, and which shell each sits in.
+    pub fn swap_states(&mut self, i: usize, j: usize) -> Result<(), String> {
+        let n = self.n_states();
+        if i >= n || j >= n {
+            return Err(format!("states {i} and {j} are not both in 0..{}", n - 1));
+        }
+        if i == j {
+            return Ok(());
+        }
+        let path: Vec<(usize, usize, usize)> = self
+            .path
+            .iter()
+            .map(|&o| {
+                (
+                    self.lattice.edges[o].source,
+                    self.lattice.edges[o].symbol,
+                    self.lattice.edges[o].target,
+                )
+            })
+            .collect();
+        self.lattice.swap_states(i, j);
+        let perm = |x: usize| {
+            if x == i {
+                j
+            } else if x == j {
+                i
+            } else {
+                x
+            }
+        };
+        self.path = path
+            .into_iter()
+            .map(|(s, a, t)| self.lattice.offset(perm(s), a, perm(t)).expect("in range"))
+            .collect();
+        self.start = perm(self.start);
+        self.state = perm(self.state);
+        self.swaps += 1;
+        Ok(())
+    }
+
+    /// Symbols `a` and `b` trade places: their slices and their labels; strings read the same as before.
+    pub fn swap_symbols(&mut self, a: usize, b: usize) -> Result<(), String> {
+        let n = self.lattice.n_symbols();
+        if a >= n || b >= n {
+            return Err(format!("symbols {a} and {b} are not both in 0..{}", n - 1));
+        }
+        if a == b {
+            return Ok(());
+        }
+        let path: Vec<(usize, usize, usize)> = self
+            .path
+            .iter()
+            .map(|&o| {
+                (
+                    self.lattice.edges[o].source,
+                    self.lattice.edges[o].symbol,
+                    self.lattice.edges[o].target,
+                )
+            })
+            .collect();
+        self.lattice.swap_symbols(a, b);
+        self.focus_learner.swap_symbols(a, b);
+        let perm = |x: usize| {
+            if x == a {
+                b
+            } else if x == b {
+                a
+            } else {
+                x
+            }
+        };
+        self.path = path
+            .into_iter()
+            .map(|(s, y, t)| self.lattice.offset(s, perm(y), t).expect("in range"))
+            .collect();
+        self.swaps += 1;
+        Ok(())
+    }
+
+    /// Let the nodes rearrange themselves toward the centre: one pass of neighbour swaps on the state axis and the
+    /// symbol axis (`full`: passes until none is left).  On each axis, from the outside in on each side, a pair
+    /// swaps when the node farther from the centre is busier.  Returns the swaps made, as `(axis, i, j)`.
+    pub fn rearrange(&mut self, full: bool) -> Vec<(&'static str, usize, usize)> {
+        let mut done = Vec::new();
+        loop {
+            let mut made = Vec::new();
+            let mut load = self.lattice.state_load();
+            for (i, j) in inward_pairs(load.len()) {
+                if load[i] > load[j] {
+                    self.swap_states(i, j).expect("in range");
+                    load.swap(i, j);
+                    made.push(("states", i.min(j), i.max(j)));
+                }
+            }
+            let mut load = self.lattice.symbol_load();
+            for (i, j) in inward_pairs(load.len()) {
+                if load[i] > load[j] {
+                    self.swap_symbols(i, j).expect("in range");
+                    load.swap(i, j);
+                    made.push(("symbols", i.min(j), i.max(j)));
+                }
+            }
+            let settled = made.is_empty();
+            done.extend(made);
+            if !full || settled {
+                break;
+            }
+        }
+        self.since_rearrange = 0;
+        done
     }
 
     /// Fold the matrix into its central node now, at `compress_precision`; with `compress_rebuild`, rebuild the
@@ -464,9 +686,19 @@ impl Machine {
         self.core.as_ref().expect("just set")
     }
 
-    /// Read a string from the start state.  Quiet, nothing moves.
+    /// Read a string the machine's own way: from its learned focus's node, its focus node, or its start state, with
+    /// its skips.  Quiet, nothing moves.
     pub fn run(&mut self, symbols: &[usize], stimulation: Option<f64>, temperature: Option<f64>, quiet: bool) -> Run {
-        self.run_from(self.start, symbols, stimulation, temperature, quiet)
+        self.walk(
+            symbols,
+            Walk {
+                stimulation,
+                temperature,
+                quiet,
+                ..Walk::default()
+            },
+        )
+        .expect("a walk without a focus of its own has nothing to refuse")
     }
 
     /// Read a string from the middle state - the central node's - and walk outward from there.
@@ -477,10 +709,20 @@ impl Machine {
         temperature: Option<f64>,
         quiet: bool,
     ) -> Run {
-        self.run_from(self.center_state(), symbols, stimulation, temperature, quiet)
+        self.walk(
+            symbols,
+            Walk {
+                stimulation,
+                temperature,
+                quiet,
+                from_middle: true,
+                ..Walk::default()
+            },
+        )
+        .expect("a walk without a focus of its own has nothing to refuse")
     }
 
-    /// Read a string from `origin`.  Quiet, nothing moves.
+    /// Read a string from `origin`, the machine's skips and nothing learned about the focus.  Quiet, nothing moves.
     pub fn run_from(
         &mut self,
         origin: usize,
@@ -489,41 +731,182 @@ impl Machine {
         temperature: Option<f64>,
         quiet: bool,
     ) -> Run {
-        let origin = origin.min(self.n_states() - 1);
-        let stim = stimulation.unwrap_or_else(|| self.stimulation());
-        if quiet {
-            let mut state = origin;
-            let mut transitions = Vec::with_capacity(symbols.len());
-            for &sym in symbols {
-                let (target, p) = self.choose(state, sym, Some(stim), temperature);
-                transitions.push(Transition {
-                    source: state,
-                    symbol: self.lattice.symbols[sym].clone(),
-                    target,
-                    probability: p,
-                    stimulation: stim,
-                    clock: self.clock,
-                });
-                state = target;
+        let walk = Walk {
+            stimulation,
+            temperature,
+            quiet,
+            ..Walk::default()
+        };
+        self.walk_from(origin.min(self.n_states() - 1), None, symbols, walk)
+    }
+
+    /// Read a string as `walk` says.  It starts from the middle state (`from_middle`), else the node `walk.focus`
+    /// picks, else - with `learn_focus` - the node the learned focus reads off the input, else [`Machine::origin`].
+    /// With skips on, two symbols are read in one move whenever that is more efficient (`decide`).
+    pub fn walk(&mut self, symbols: &[usize], walk: Walk) -> Result<Run, String> {
+        if let Some(f) = walk.focus {
+            check_focus(f)?;
+        }
+        let mut learned = None;
+        let origin = if walk.from_middle {
+            self.center_state()
+        } else if let Some(f) = walk.focus {
+            self.focus_state(f)
+        } else if self.learn_focus {
+            let explore = !walk.quiet;
+            let draw = {
+                let rng = &mut self.rng;
+                self.focus_learner.choose(symbols, || rng.gauss(), explore)
+            };
+            let origin = self.focus_state(FocusLearner::clip(draw.0));
+            learned = Some(draw);
+            origin
+        } else {
+            self.origin()
+        };
+        Ok(self.walk_from(origin, learned, symbols, walk))
+    }
+
+    fn walk_from(&mut self, origin: usize, learned: Option<FocusDraw>, symbols: &[usize], walk: Walk) -> Run {
+        let stim = walk.stimulation.unwrap_or_else(|| self.stimulation());
+        let do_skip = walk.skip.unwrap_or(self.skip);
+        if !walk.quiet {
+            self.reset();
+            self.state = origin;
+            self.runs += 1;
+            self.last_focus = match &learned {
+                Some(d) => Some(FocusLearner::clip(d.0)),
+                None => walk.focus.or(self.focus),
+            };
+            self.last_focus_draw = learned;
+        }
+        let mut state = origin;
+        let mut transitions = Vec::with_capacity(symbols.len());
+        let mut i = 0;
+        while i < symbols.len() {
+            let a = symbols[i];
+            let next = if do_skip && i + 1 < symbols.len() {
+                Some(symbols[i + 1])
+            } else {
+                None
+            };
+            let clock = self.clock;
+            match self.decide(state, a, next, stim, walk.temperature) {
+                Move::Step(target, p) => {
+                    if !walk.quiet {
+                        let e = self.lattice.offset(state, a, target).expect("edge index");
+                        self.traverse_offset(e, true);
+                        self.state = target;
+                    }
+                    transitions.push(Transition {
+                        source: state,
+                        symbol: self.lattice.symbols[a].clone(),
+                        target,
+                        probability: p,
+                        stimulation: stim,
+                        clock,
+                        skipped: None,
+                    });
+                    i += 1;
+                }
+                Move::Skip(mid, target, p) => {
+                    let b = next.expect("a skip reads two symbols");
+                    if !walk.quiet {
+                        let e1 = self.lattice.offset(state, a, mid).expect("edge index");
+                        self.traverse_offset(e1, false);
+                        let e2 = self.lattice.offset(mid, b, target).expect("edge index");
+                        self.traverse_offset(e2, true);
+                        self.state = target;
+                        self.skips += 1;
+                    }
+                    transitions.push(Transition {
+                        source: state,
+                        symbol: format!("{}{}", self.lattice.symbols[a], self.lattice.symbols[b]),
+                        target,
+                        probability: p,
+                        stimulation: stim,
+                        clock,
+                        skipped: Some(mid),
+                    });
+                    i += 2;
+                }
             }
-            return Run {
-                transitions,
-                final_state: state,
-                accepted: self.lattice.states[state].accepting,
+            state = if walk.quiet {
+                transitions.last().expect("a move").target
+            } else {
+                self.state
             };
         }
-        self.reset();
-        self.state = origin;
-        self.runs += 1;
-        let transitions = symbols
-            .iter()
-            .map(|&sym| self.step(sym, Some(stim), temperature, false))
-            .collect();
+        let accepted = self.lattice.states[state].accepting;
+        if !walk.quiet {
+            self.settle_rearrange();
+        }
         Run {
             transitions,
-            final_state: self.state,
-            accepted: self.lattice.states[self.state].accepting,
+            final_state: if walk.quiet { state } else { self.state },
+            accepted,
         }
+    }
+
+    /// A rearrangement that fell due during a run or a lesson happens when it is over, so nothing the run holds -
+    /// the symbols still to read, a skip's target - refers to a position that moved under it.
+    fn settle_rearrange(&mut self) {
+        if self.rearrange_due {
+            self.rearrange_due = false;
+            self.rearrange(false);
+        }
+    }
+
+    /// The next move from `state`: a step on `a`, or a skip on `a` then `b` past the node between - when the best
+    /// two-edge path beats the path the step begins (the step, then the best edge after it) by more than
+    /// `skip_margin` in summed log-probability, at the run's temperature, else the machine's, else 1.
+    fn decide(&mut self, state: usize, a: usize, b: Option<usize>, stim: f64, temperature: Option<f64>) -> Move {
+        let (t1, p1) = self.choose(state, a, Some(stim), temperature);
+        let Some(b) = b else {
+            return Move::Step(t1, p1);
+        };
+        let temp = match temperature {
+            Some(t) if t > 0.0 => t,
+            _ => {
+                if self.temperature > 0.0 {
+                    self.temperature
+                } else {
+                    1.0
+                }
+            }
+        };
+        let pa = self.probabilities(state, a, Some(stim), Some(temp));
+        let (mut best_t, mut best_u, mut best_v, mut step_v) = (0, 0, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (t, &pt) in pa.iter().enumerate() {
+            let pb = self.probabilities(t, b, Some(stim), Some(temp));
+            let u = argmax(&pb);
+            let v = pt.max(1e-300).ln() + pb[u].max(1e-300).ln();
+            if v > best_v {
+                (best_t, best_u, best_v) = (t, u, v);
+            }
+            if t == t1 {
+                step_v = v;
+            }
+        }
+        if best_v > step_v + self.skip_margin {
+            let pb = self.probabilities(best_t, b, Some(stim), Some(temp));
+            return Move::Skip(best_t, best_u, pa[best_t] * pb[best_u]);
+        }
+        Move::Step(t1, p1)
+    }
+
+    fn traverse_offset(&mut self, i: usize, visit: bool) {
+        let (clock, life, trace, widen) = (self.clock, self.life, self.trace, self.use_widening);
+        self.lattice.edges[i].traverse(clock, life, trace, widen);
+        self.path.push(i);
+        self.clock += 1;
+        if visit {
+            let target = self.lattice.edges[i].target;
+            let s = &mut self.lattice.states[target];
+            s.visits += 1;
+            s.last_visited = self.clock;
+        }
+        self.after_transition();
     }
 
     /// The same, from a string of text (`tokenize`).
@@ -552,6 +935,9 @@ impl Machine {
             return 0;
         }
         self.credits += 1;
+        if let Some(draw) = self.last_focus_draw.clone() {
+            self.focus_learner.learn(amount, &draw);
+        }
         let mut share = amount;
         let (clock, life, widen, narrow) = (self.clock, self.life, self.reward_widening, self.punish_narrowing);
         for &i in self.path.iter().rev() {
@@ -581,7 +967,18 @@ impl Machine {
         let (clock, rw, pn) = (self.clock, self.reward_widening, self.punish_narrowing);
         self.lattice.edges[i].credit(amount, clock, life, rw, pn);
         self.after_transition();
-        Ok(&self.lattice.edges[i])
+        // the edge's states and symbol by identity, to find it again if a rearrangement moves it
+        let (sid, tid, label) = (
+            self.lattice.state_ids[source],
+            self.lattice.state_ids[target],
+            self.lattice.symbols[symbol].clone(),
+        );
+        self.settle_rearrange();
+        let pos = |id: usize, ids: &[usize]| ids.iter().position(|&x| x == id).expect("a permutation");
+        let (s2, t2) = (pos(sid, &self.lattice.state_ids), pos(tid, &self.lattice.state_ids));
+        let a2 = self.lattice.symbol_index(&label)?;
+        let at = self.lattice.offset(s2, a2, t2)?;
+        Ok(&self.lattice.edges[at])
     }
 
     // ---- measurements (quiet) ------------------------------------------------------------------------------------
@@ -669,6 +1066,24 @@ impl Machine {
                     .map(Json::from)
                     .unwrap_or(Json::Null),
             )
+            .with("focus", self.focus.map(Json::from).unwrap_or(Json::Null))
+            .with("focus_node", {
+                let (s, a, t) = focus_node(self.lattice.shape(), self.focus);
+                Json::numbers(&[s as f64, a as f64, t as f64])
+            })
+            .with("origin", self.origin().into())
+            .with("learn_focus", self.learn_focus.into())
+            .with("last_focus", self.last_focus.map(Json::from).unwrap_or(Json::Null))
+            .with("skip", self.skip.into())
+            .with("skip_margin", self.skip_margin.into())
+            .with("skips", (self.skips as f64).into())
+            .with("rearrange_every", (self.rearrange_every as f64).into())
+            .with("swaps", (self.swaps as f64).into())
+            .with(
+                "state_order",
+                Json::Array(self.lattice.state_ids.iter().map(|&i| i.into()).collect()),
+            )
+            .with("symbol_order", Json::strings(&self.lattice.symbols))
     }
 
     // ---- persistence ---------------------------------------------------------------------------------------------
@@ -690,6 +1105,11 @@ impl Machine {
             .with("compress_every", (self.compress_every as f64).into())
             .with("compress_precision", self.compress_precision.name().into())
             .with("compress_rebuild", self.compress_rebuild.into())
+            .with("focus", self.focus.map(Json::from).unwrap_or(Json::Null))
+            .with("learn_focus", self.learn_focus.into())
+            .with("skip", self.skip.into())
+            .with("skip_margin", self.skip_margin.into())
+            .with("rearrange_every", (self.rearrange_every as f64).into())
     }
 
     pub fn to_json(&self) -> Json {
@@ -705,6 +1125,10 @@ impl Machine {
             .with("compressions", (self.compressions as f64).into())
             .with("since_compression", (self.since_compression as f64).into())
             .with("last_compressed", self.last_compressed.into())
+            .with("skips", (self.skips as f64).into())
+            .with("swaps", (self.swaps as f64).into())
+            .with("since_rearrange", (self.since_rearrange as f64).into())
+            .with("focus_learner", self.focus_learner.to_json())
             .with(
                 "stimulation",
                 Json::numbers(&[self.stimulation, self.stimulation_stamp as f64]),
@@ -771,6 +1195,24 @@ impl Machine {
             compressions: v.num("compressions", 0.0) as u64,
             since_compression: v.num("since_compression", 0.0) as u64,
             last_compressed: v.num("last_compressed", -1.0) as i64,
+            focus: match st.get("focus").and_then(Json::as_f64) {
+                Some(f) => Some(check_focus(f)?),
+                None => None,
+            },
+            learn_focus: st.bool_or("learn_focus", false),
+            focus_learner: match v.get("focus_learner") {
+                Some(fl) if !matches!(fl, Json::Null) => FocusLearner::from_json(fl)?,
+                _ => FocusLearner::new(lattice.symbols.clone(), 0.05, 0.15),
+            },
+            last_focus_draw: None,
+            last_focus: None,
+            skip: st.bool_or("skip", false),
+            skip_margin: st.num("skip_margin", 0.0),
+            skips: v.num("skips", 0.0) as u64,
+            rearrange_every: st.num("rearrange_every", 0.0) as u64,
+            swaps: v.num("swaps", 0.0) as u64,
+            since_rearrange: v.num("since_rearrange", 0.0) as u64,
+            rearrange_due: false,
             lattice,
         })
     }
@@ -830,4 +1272,15 @@ pub fn argmax(values: &[f64]) -> usize {
         }
     }
     best
+}
+
+/// One pass's neighbour pairs toward the centre of an axis of `n` nodes, as `(outer, inner)`: from the outside in on
+/// the left side, then from the outside in on the right.
+fn inward_pairs(n: usize) -> Vec<(usize, usize)> {
+    let c = n / 2;
+    let mut pairs: Vec<(usize, usize)> = (1..=c).map(|k| (k - 1, k)).collect();
+    if n >= 2 {
+        pairs.extend((c..n - 1).rev().map(|k| (k + 1, k)));
+    }
+    pairs
 }

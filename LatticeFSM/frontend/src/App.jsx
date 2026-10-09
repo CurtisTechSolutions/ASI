@@ -8,10 +8,12 @@ import TrainPanel from "./components/TrainPanel.jsx";
 import TimePanel from "./components/TimePanel.jsx";
 import MachinePanel from "./components/MachinePanel.jsx";
 import CompressPanel from "./components/CompressPanel.jsx";
+import WalkPanel from "./components/WalkPanel.jsx";
 
 const TABS = [
   { id: "matrix", label: "Matrix", Component: MatrixPanel },
   { id: "run", label: "Run", Component: RunPanel },
+  { id: "walk", label: "Walk", Component: WalkPanel },
   { id: "train", label: "Train", Component: TrainPanel },
   { id: "time", label: "Time", Component: TimePanel },
   { id: "compress", label: "Compress", Component: CompressPanel },

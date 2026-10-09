@@ -30,6 +30,9 @@
 //! | `POST /api/core/run` | `{text, from_middle?}`: the greedy walk read straight from the code |
 //! | `POST /api/core/save`, `/api/core/load` | `{path}`: write or read the code |
 //! | `POST /api/compression` | `{every?, precision?, rebuild?}`: compress automatically every N transitions |
+//! | `POST /api/focus` | `{focus?: number or null, learn?, text?}`: the node of the central vertical vector runs start from, or a focus learned from the input |
+//! | `POST /api/skip` | `{skip?, margin?, rearrange_every?}`: skips when a two-edge path is more efficient; the rearrangement schedule |
+//! | `POST /api/rearrange` | `{full?}` or `{axis, i, j}`: let the nodes rearrange themselves toward the centre, or swap two |
 //! | `POST /api/save` | `{path}`: write the machine |
 //! | `POST /api/load` | `{path}`: read a machine in place of the old |
 
@@ -41,7 +44,7 @@ use crate::experiment::teach_language;
 use crate::http::{self, Handler, Request, Response};
 use crate::json::Json;
 use crate::languages::{examples, language, LANGUAGES};
-use crate::machine::{load_machine, Machine, Settings, DEFAULT_ALPHABET, DEFAULT_STATES};
+use crate::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
 use crate::rng::Rng;
 use crate::VERSION;
 
@@ -111,7 +114,12 @@ impl Service {
             ("POST", "expand") => expand_route(&mut m, &req.body),
             ("POST", "core/run") => match &m.core {
                 Some(core) => core
-                    .run(req.body.str_or("text", ""), req.body.bool_or("from_middle", false))
+                    .walk(
+                        req.body.str_or("text", ""),
+                        req.body.bool_or("from_middle", false),
+                        req.body.get("focus").and_then(Json::as_f64),
+                        req.body.get("skip").and_then(Json::as_bool),
+                    )
                     .map(|(states, accepted)| {
                         Json::object()
                             .with("states", Json::Array(states.into_iter().map(Json::from).collect()))
@@ -134,6 +142,9 @@ impl Service {
                 Json::object().with("summary", summary)
             }),
             ("POST", "compression") => compression_route(&mut m, &req.body),
+            ("POST", "focus") => focus_route(&mut m, &req.body),
+            ("POST", "skip") => skip_route(&mut m, &req.body),
+            ("POST", "rearrange") => rearrange_route(&mut m, &req.body),
             ("POST", "credit") => {
                 let amount = req.body.num("amount", 1.0);
                 let credited = m.credit(amount);
@@ -335,20 +346,85 @@ fn table(m: &Machine) -> Json {
 
 fn run(m: &mut Machine, body: &Json) -> Result<Json, String> {
     let text = body.str_or("text", "");
-    let stimulation = body.get("stimulation").and_then(Json::as_f64);
-    let temperature = body.get("temperature").and_then(Json::as_f64);
     let quiet = body.bool_or("quiet", false);
-    let from_middle = body.bool_or("from_middle", false);
-    let symbols = m.tokenize(text)?;
-    let run = if from_middle {
-        m.run_from_middle(&symbols, stimulation, temperature, quiet)
-    } else {
-        m.run(&symbols, stimulation, temperature, quiet)
+    let walk = Walk {
+        stimulation: body.get("stimulation").and_then(Json::as_f64),
+        temperature: body.get("temperature").and_then(Json::as_f64),
+        quiet,
+        from_middle: body.bool_or("from_middle", false),
+        focus: body.get("focus").and_then(Json::as_f64),
+        skip: body.get("skip").and_then(Json::as_bool),
     };
+    let symbols = m.tokenize(text)?;
+    let run = m.walk(&symbols, walk)?;
     Ok(run
         .to_json()
         .with("quiet", quiet.into())
-        .with("from_middle", from_middle.into())
+        .with("from_middle", walk.from_middle.into())
+        .with("focus", m.last_focus.map(Json::from).unwrap_or(Json::Null))
+        .with("stats", m.stats()))
+}
+
+fn focus_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    match body.get("focus") {
+        Some(Json::Null) => m.set_focus(None)?,
+        Some(Json::Number(f)) => m.set_focus(Some(*f))?,
+        Some(_) => return Err("focus is a number in [0, 1] or null".to_string()),
+        None => {}
+    }
+    if let Some(learn) = body.get("learn").and_then(Json::as_bool) {
+        m.learn_focus = learn;
+    }
+    let predicted = match body.get("text").and_then(Json::as_str) {
+        Some(text) => {
+            let symbols = m.tokenize(text)?;
+            let f = m.focus_learner.predict(&symbols);
+            Json::object()
+                .with("text", text.into())
+                .with("focus", f.into())
+                .with("state", m.focus_state(f).into())
+        }
+        None => Json::Null,
+    };
+    Ok(Json::object().with("learned", predicted).with("stats", m.stats()))
+}
+
+fn skip_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    if let Some(skip) = body.get("skip").and_then(Json::as_bool) {
+        m.skip = skip;
+    }
+    if let Some(margin) = body.get("margin").and_then(Json::as_f64) {
+        if margin < 0.0 {
+            return Err("margin must be >= 0".to_string());
+        }
+        m.skip_margin = margin;
+    }
+    if let Some(every) = body.get("rearrange_every").and_then(Json::as_f64) {
+        m.rearrange_every = every.max(0.0) as u64;
+    }
+    Ok(m.stats())
+}
+
+fn rearrange_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    let swaps: Vec<Json> = if let Some(axis) = body.get("axis").and_then(Json::as_str) {
+        let (i, j) = (body.num("i", -1.0), body.num("j", -1.0));
+        if i < 0.0 || j < 0.0 {
+            return Err("a swap needs i and j".to_string());
+        }
+        match axis {
+            "states" => m.swap_states(i as usize, j as usize)?,
+            "symbols" => m.swap_symbols(i as usize, j as usize)?,
+            other => return Err(format!("axis is states or symbols, got {other:?}")),
+        }
+        vec![Json::Array(vec![axis.into(), i.into(), j.into()])]
+    } else {
+        m.rearrange(body.bool_or("full", false))
+            .into_iter()
+            .map(|(axis, i, j)| Json::Array(vec![axis.into(), i.into(), j.into()]))
+            .collect()
+    };
+    Ok(Json::object()
+        .with("swaps", Json::Array(swaps))
         .with("stats", m.stats()))
 }
 
@@ -517,6 +593,13 @@ pub fn new_machine(body: &Json) -> Result<Machine, String> {
         compress_every: body.num("compress_every", 0.0).max(0.0) as u64,
         compress_precision: Precision::parse(body.str_or("compress_precision", "exact"))?,
         compress_rebuild: body.bool_or("compress_rebuild", false),
+        focus: body.get("focus").and_then(Json::as_f64),
+        learn_focus: body.bool_or("learn_focus", false),
+        focus_rate: body.num("focus_rate", d.focus_rate),
+        focus_explore: body.num("focus_explore", d.focus_explore),
+        skip: body.bool_or("skip", false),
+        skip_margin: body.num("skip_margin", 0.0),
+        rearrange_every: body.num("rearrange_every", 0.0).max(0.0) as u64,
     };
     Machine::new(states, &alphabet, &accepting, settings)
 }

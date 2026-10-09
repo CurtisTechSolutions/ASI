@@ -21,6 +21,7 @@ from latticefsm import (  # noqa: E402
     Machine, Weighting, examples, language, load_machine,
 )
 from latticefsm import center, center_out, compress, fidelity, load_core, shell, shell_sizes, shells  # noqa: E402
+from latticefsm import FOCUS_RANGE, central_vertical, focus_index, focus_node  # noqa: E402
 from latticefsm import experiment  # noqa: E402
 from latticefsm.lattice import Lattice  # noqa: E402
 
@@ -581,6 +582,154 @@ class TestCompressEvery(unittest.TestCase):
             Machine(compress_every=-1)
 
 
+class TestFocus(unittest.TestCase):
+    def test_focus_picks_a_node_of_the_central_vertical_vector(self):
+        shape = (13, 13, 13)
+        self.assertEqual(central_vertical(shape), [(s, 6, 6) for s in range(13)])
+        self.assertEqual(FOCUS_RANGE, (0.0, 1.0))
+        cases = {None: 0, 0.0: 0, 0.07: 0, 1 / 13: 1, 0.5: 6, 0.92: 11, 12 / 13: 12, 1.0: 12}
+        for f, k in cases.items():
+            self.assertEqual(focus_index(13, f), k, f)
+            self.assertEqual(focus_node(shape, f), (k, 6, 6))
+        for bad in (-0.01, 1.01, float("nan"), float("inf"), "0.5", True):
+            with self.assertRaises(ValueError, msg=bad):
+                focus_index(13, bad)
+
+    def test_runs_start_from_the_focus_node(self):
+        m = Machine(seed=1)
+        self.assertEqual(m.run("ab").states[0], 0)              # no focus: the start state, the top node
+        m.focus = 1.0
+        self.assertEqual((m.origin, m.run("ab").states[0]), (12, 12))
+        self.assertEqual(m.run("ab", quiet=True).states[0], 12)
+        self.assertEqual(m.run("ab", focus=0.5).states[0], 6)   # for this run only
+        self.assertEqual(m.run("ab", from_middle=True).states[0], 6)
+        self.assertEqual(m.stats()["focus_node"], [12, 6, 6])
+        with self.assertRaises(ValueError):
+            m.focus = 2.0
+        with self.assertRaises(ValueError):
+            Machine(focus=-1)
+        back = Machine.from_dict(json.loads(json.dumps(m.to_dict())))
+        self.assertEqual(back.focus, 1.0)
+
+    def test_a_learned_focus_reads_the_input_and_learns_from_credit(self):
+        m = Machine(seed=1, learn_focus=True)
+        x = m.focus_learner.features(list("abba"))
+        self.assertEqual(len(x), 2 + 3 * 13)
+        self.assertAlmostEqual(m.focus_learner.predict(list("abba")), 1 / (1 + math.exp(3)))
+        self.assertEqual(m.run("abba", quiet=True).states[0], 0)   # untrained: the top node
+        before = list(m.focus_learner.weights)
+        m.run("abba")
+        f = m.last_focus
+        self.assertIsNotNone(f)
+        m.reward(1.0)
+        self.assertNotEqual(m.focus_learner.weights, before)
+        learner = m.focus_learner
+        lo = taught("ends-ab", episodes=600, seed=4, learn_focus=True).focus_learner
+        self.assertTrue(all(-8 <= w <= 8 for w in lo.weights))
+        back = Machine.from_dict(json.loads(json.dumps(m.to_dict())))
+        self.assertEqual(back.focus_learner.weights, learner.weights)
+        self.assertTrue(back.learn_focus)
+
+    def test_the_learner_moves_toward_a_rewarded_draw_and_away_from_a_punished_one(self):
+        from latticefsm.focus import FocusLearner
+        for credit, direction in ((1.0, 1), (-1.0, -1)):
+            fl = FocusLearner(list("ab"), rate=0.1, explore=0.2)
+            x = fl.features(list("ab"))
+            mu = fl.mean(x)
+            fl.learn(credit, mu + 0.3, mu, x)
+            self.assertEqual((fl.mean(x) > mu) - (fl.mean(x) < mu), direction)
+
+
+class TestSkip(unittest.TestCase):
+    def test_a_skip_takes_the_more_efficient_two_edge_path(self):
+        m = Machine(3, "ab", seed=1, skip=True, temperature=0.0)
+        # the greedy step on a goes to 1, but from 1 nothing on b is good; through 2 there is a sure path to 0
+        m.edge(0, "a", 1).weighting.bias = 1.0
+        m.edge(0, "a", 2).weighting.bias = 0.9
+        for t in range(3):
+            m.edge(1, "b", t).weighting.bias = 0.0
+        m.edge(2, "b", 0).weighting.bias = 6.0
+        r = m.run("ab")
+        self.assertEqual(len(r.transitions), 1)
+        t = r.transitions[0]
+        self.assertEqual((t.source, t.symbol, t.target, t.skipped), (0, "ab", 0, 2))
+        self.assertEqual(r.states, [0, 0])
+        self.assertEqual([(e.source, e.target) for e in m.path], [(0, 2), (2, 0)])   # both edges traversed
+        self.assertEqual(m.lattice.states[2].visits, 0)                             # the node skipped is not visited
+        self.assertEqual((m.skips, m.clock), (1, 2))
+        plain = m.run("ab", skip=False, quiet=True)          # without skips: two moves, the greedy step first
+        self.assertEqual(len(plain.transitions), 2)
+        self.assertEqual(plain.transitions[0].target, 1)
+        self.assertTrue(all(t.skipped is None for t in plain.transitions))
+        self.assertEqual(m.reward(1.0), 2)
+        m.skip_margin = 100.0
+        self.assertIsNone(m.run("ab", quiet=True).transitions[0].skipped)          # not that much more efficient
+
+    def test_without_skips_nothing_changes(self):
+        a = taught(episodes=500)
+        b = taught(episodes=500, skip=False)
+        self.assertEqual(a.to_dict()["lattice"], b.to_dict()["lattice"])
+        self.assertEqual(a.skips, 0)
+
+    def test_skips_happen_in_training_and_are_saved(self):
+        m = taught(episodes=600, skip=True)
+        self.assertGreater(m.skips, 0)
+        back = Machine.from_dict(json.loads(json.dumps(m.to_dict())))
+        self.assertEqual((back.skip, back.skips), (True, m.skips))
+        core = compress(m)
+        for text in ("abba", "aab", "bbbb"):
+            states, accepted = core.run(text)
+            r = m.run(text, quiet=True, temperature=0.0)
+            self.assertEqual(states, r.states, text)
+
+
+class TestRearrange(unittest.TestCase):
+    def test_a_swap_is_a_relabelling(self):
+        m = taught(episodes=800)
+        before = {(s, a, t): m.lattice[s, a, t].log_weight(m.clock, m.life, 1.0)
+                  for s in range(13) for a in range(13) for t in range(13)}
+        accepting = {sid: m.lattice.states[sid].accepting for sid in range(13)}
+        m.swap_states(0, 12)
+        m.swap_symbols("a", "g")
+        self.assertEqual(m.lattice.state_ids[:1] + m.lattice.state_ids[12:], [12, 0])
+        self.assertEqual((m.start, m.alphabet[0], m.alphabet[6]), (12, "g", "a"))
+        pos = {sid: p for p, sid in enumerate(m.lattice.state_ids)}
+        old_symbols = list("abcdefghijklm")
+        for (s, a, t), w in before.items():
+            moved = m.lattice[pos[s], m.alphabet.index(old_symbols[a]), pos[t]]
+            self.assertEqual(moved.log_weight(m.clock, m.life, 1.0), w)
+            self.assertEqual((moved.source, moved.symbol, moved.target),
+                             (pos[s], m.alphabet.index(old_symbols[a]), pos[t]))
+        for sid, acc in accepting.items():
+            self.assertEqual(m.lattice.states[pos[sid]].accepting, acc)
+        self.assertEqual(m.swaps, 2)
+
+    def test_rearranging_moves_the_busy_nodes_inward(self):
+        m = taught(episodes=800)
+        made = m.rearrange(full=True)
+        self.assertTrue(made)
+        self.assertEqual(m.rearrange(full=True), [])                 # settled
+        for load in (m.lattice.state_load(), m.lattice.symbol_load()):
+            c = len(load) // 2
+            self.assertTrue(all(load[k] <= load[k + 1] for k in range(c)), load)
+            self.assertTrue(all(load[k] >= load[k + 1] for k in range(c, len(load) - 1)), load)
+        self.assertIn(m.alphabet[6], "ab")                           # the busiest symbol at the centre
+        shells_hit = [row["touched"] for row in compress(m).shell_table()]
+        self.assertGreater(sum(shells_hit[:5]), 0)                   # information now inside the outer shells
+        self.assertEqual(compress(m).decompress().to_dict()["lattice"], m.to_dict()["lattice"])
+
+    def test_a_rearrangement_waits_for_the_end_of_a_run(self):
+        m = Machine(seed=1, rearrange_every=3, skip=True)
+        for _ in range(30):
+            r = m.run("abababab")
+            path = list(m.path)
+            self.assertTrue(all(m.lattice.edges[m.lattice.offset(e.source, e.symbol, e.target)] is e for e in path))
+            m.reward(1.0) if r.accepted else m.punish(1.0)
+        self.assertGreater(m.swaps, 0)
+        back = Machine.from_dict(json.loads(json.dumps(m.to_dict())))
+        self.assertEqual((back.rearrange_every, back.swaps, back.lattice.state_ids), (3, m.swaps, m.lattice.state_ids))
+
+
 class TestCLI(unittest.TestCase):
     def run_cli(self, *args: str) -> str:
         out = subprocess.run([sys.executable, "-m", "latticefsm", *args], cwd=ROOT, capture_output=True, text=True)
@@ -610,6 +759,12 @@ class TestCLI(unittest.TestCase):
             self.assertIn("read straight from the code", self.run_cli("core-run", "ab", "--core", core, "--from-middle"))
             self.assertIn("float16", self.run_cli("compress", "--load", path, "--precision", "float16"))
             self.assertIn("6 -", self.run_cli("run", "ab", "--load", path, "--from-middle", "--quiet"))
+            self.assertIn("state 12", self.run_cli("focus", "--load", path, "--level", "1", "--save", path))
+            self.assertIn("12 -", self.run_cli("run", "ab", "--load", path, "--quiet"))
+            self.assertIn("learned from the input", self.run_cli("focus", "--load", path, "--learn", "on", "--text", "ab"))
+            self.assertIn("skips on", self.run_cli("skip", "on", "--load", path))
+            self.assertIn("swaps toward the centre", self.run_cli("rearrange", "--load", path, "--full"))
+            self.assertIn("swapped states 0 and 12", self.run_cli("rearrange", "--load", path, "--swap", "states", "0", "12"))
 
 
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
@@ -684,6 +839,56 @@ class TestRustCompressionParity(unittest.TestCase):
                            capture_output=True)
             with open(rpath) as f:
                 self.assertEqual(json.load(f)["floats"], compress(m, "float16").to_dict()["floats"])
+
+
+class TestRustWalkParity(unittest.TestCase):
+    """Focus bands, skip decisions and rearrangement are deterministic, and the two ports agree on them."""
+
+    @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+    def test_focus_bands_agree(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.json")
+            Machine().save(path)
+            for f in (0.0, 0.07, 1 / 13, 0.3, 0.5, 0.75, 12 / 13, 1.0):
+                out = subprocess.run([RUST, "run", "ab", "--load", path, "--focus", repr(f), "--quiet"], check=True,
+                                     capture_output=True, text=True).stdout
+                self.assertTrue(out.startswith(f"quietly: {focus_index(13, f)} -"), (f, out))
+
+    @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+    def test_rearrangement_and_the_code_agree(self):
+        m = taught(episodes=800)
+        with tempfile.TemporaryDirectory() as d:
+            path, rpath = os.path.join(d, "m.json"), os.path.join(d, "r.json")
+            m.save(path)
+            subprocess.run([RUST, "rearrange", "--load", path, "--full", "--save", rpath], check=True, capture_output=True)
+            ours = Machine.from_dict(json.loads(json.dumps(m.to_dict())))
+            ours.rearrange(full=True)
+            rust = load_machine(rpath)
+            self.assertEqual(rust.lattice.state_ids, ours.lattice.state_ids)
+            self.assertEqual(rust.alphabet, ours.alphabet)
+            self.assertEqual(rust.to_dict()["lattice"]["edges"], ours.to_dict()["lattice"]["edges"])
+            cpath = os.path.join(d, "c.json")
+            subprocess.run([RUST, "compress", "--load", rpath, "--core", cpath], check=True, capture_output=True)
+            with open(cpath) as f:
+                code = json.load(f)
+            self.assertEqual((code["touched"], code["floats"]), (compress(ours).to_dict()["touched"],
+                                                                 compress(ours).to_dict()["floats"]))
+
+    @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+    def test_quiet_skips_agree(self):
+        m = taught(episodes=600, skip=True)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.json")
+            m.save(path)
+            for text in ("abba", "aabab", "bbab"):
+                out = subprocess.run([RUST, "core-run", text, "--core", path], capture_output=True, text=True)
+                core = compress(m)
+                cpath = os.path.join(d, "c.json")
+                core.save(cpath)
+                out = subprocess.run([RUST, "core-run", text, "--core", cpath], check=True, capture_output=True,
+                                     text=True).stdout
+                states, _ = core.run(text)
+                self.assertTrue(out.startswith(" -> ".join(map(str, states))), (text, out, states))
 
 
 def strip(value):

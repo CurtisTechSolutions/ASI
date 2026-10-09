@@ -56,3 +56,42 @@ pub fn shell_sizes(shape: (usize, usize, usize)) -> Vec<usize> {
     }
     sizes
 }
+
+/// The finite range focus lives in: 0 is none, 1 is full.
+pub const FOCUS_MIN: f64 = 0.0;
+pub const FOCUS_MAX: f64 = 1.0;
+
+/// The central vertical vector, top to bottom: `(s, A / 2, S / 2)` for every source state `s` - the column through
+/// the central node along the axis the matrix is drawn with top to bottom.
+pub fn central_vertical(shape: (usize, usize, usize)) -> Vec<(usize, usize, usize)> {
+    let (_, ca, ct) = center(shape);
+    (0..shape.0).map(|s| (s, ca, ct)).collect()
+}
+
+/// `focus` if it is a finite number in `[FOCUS_MIN, FOCUS_MAX]`.
+pub fn check_focus(focus: f64) -> Result<f64, String> {
+    if focus.is_finite() && (FOCUS_MIN..=FOCUS_MAX).contains(&focus) {
+        Ok(focus)
+    } else {
+        Err(format!(
+            "focus must be a finite number in [{FOCUS_MIN}, {FOCUS_MAX}], got {focus}"
+        ))
+    }
+}
+
+/// Which of the `n` nodes of the central vertical vector `focus` picks, 0 the top: the range cut into `n` equal
+/// bands, `floor(focus · n)`, the top of the range in the last band.  No focus is the top node.
+pub fn focus_index(n: usize, focus: Option<f64>) -> usize {
+    match focus {
+        None => 0,
+        Some(f) => {
+            let f = f.clamp(FOCUS_MIN, FOCUS_MAX);
+            (((f - FOCUS_MIN) / (FOCUS_MAX - FOCUS_MIN) * n as f64).floor() as usize).min(n - 1)
+        }
+    }
+}
+
+/// The node of the central vertical vector `focus` picks: the walk starts from its source state.
+pub fn focus_node(shape: (usize, usize, usize), focus: Option<f64>) -> (usize, usize, usize) {
+    central_vertical(shape)[focus_index(shape.0, focus)]
+}

@@ -81,4 +81,7 @@ export const api = {
   coreSave: (path) => post("/api/core/save", { path }),
   coreLoad: (path) => post("/api/core/load", { path }),
   compression: (body) => post("/api/compression", body),
+  focus: (body) => post("/api/focus", body),
+  skip: (body) => post("/api/skip", body),
+  rearrange: (body) => post("/api/rearrange", body),
 };

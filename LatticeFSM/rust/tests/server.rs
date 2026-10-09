@@ -269,6 +269,77 @@ fn compression_routes_answer() {
 }
 
 #[test]
+fn walk_routes_answer() {
+    let addr = serve(10);
+    let (_, f) = request(&addr, "POST", "/api/focus", Some(&parse(r#"{"focus":1.0}"#).unwrap())).unwrap();
+    assert_eq!(f.get("stats").unwrap().num("origin", -1.0), 3.0); // a 4-state machine: the bottom node is 3
+    let (_, run) = request(
+        &addr,
+        "POST",
+        "/api/run",
+        Some(&parse(r#"{"text":"ab","quiet":true}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(run.get("states").unwrap().as_array().unwrap()[0].as_f64(), Some(3.0));
+    let (status, _) = request(&addr, "POST", "/api/focus", Some(&parse(r#"{"focus":7}"#).unwrap())).unwrap();
+    assert_eq!(status, 400);
+    let (_, f) = request(
+        &addr,
+        "POST",
+        "/api/focus",
+        Some(&parse(r#"{"focus":null,"learn":true,"text":"ab"}"#).unwrap()),
+    )
+    .unwrap();
+    assert!(f.get("learned").unwrap().num("focus", 1.0) < 0.1);
+    let (_, sk) = request(
+        &addr,
+        "POST",
+        "/api/skip",
+        Some(&parse(r#"{"skip":true,"margin":0.5,"rearrange_every":7}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            sk.bool_or("skip", false),
+            sk.num("skip_margin", 0.0),
+            sk.num("rearrange_every", 0.0)
+        ),
+        (true, 0.5, 7.0)
+    );
+    request(
+        &addr,
+        "POST",
+        "/api/train",
+        Some(&parse(r#"{"language":"even-b","episodes":200}"#).unwrap()),
+    )
+    .unwrap();
+    let (_, re) = request(
+        &addr,
+        "POST",
+        "/api/rearrange",
+        Some(&parse(r#"{"full":true}"#).unwrap()),
+    )
+    .unwrap();
+    assert!(re.get("stats").unwrap().num("swaps", 0.0) > 0.0);
+    let (_, sw) = request(
+        &addr,
+        "POST",
+        "/api/rearrange",
+        Some(&parse(r#"{"axis":"states","i":0,"j":3}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(sw.get("swaps").unwrap().as_array().unwrap().len(), 1);
+    let (status, _) = request(
+        &addr,
+        "POST",
+        "/api/rearrange",
+        Some(&parse(r#"{"axis":"rows","i":0,"j":3}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(status, 400);
+}
+
+#[test]
 fn query_strings_decode() {
     assert_eq!(
         http::parse_query("a=1&b=x%20y&c=p+q&flag"),

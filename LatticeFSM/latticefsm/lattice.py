@@ -54,6 +54,8 @@ class Lattice:
         self.prototype = prototype.copy() if prototype is not None else Weighting()
         """The weighting every edge starts from; each adapts its own copy."""
         self.states: list[State] = [State(i) for i in range(self.n_states)]
+        self.state_ids: list[int] = list(range(self.n_states))
+        """Which state, by the number it was made with, sits at each position: rearranging moves them."""
         S, A = self.n_states, len(symbols)
         self._A = A
         self.edges: list[Edge] = [
@@ -119,6 +121,58 @@ class Lattice:
     def __iter__(self) -> Iterator[Edge]:
         return iter(self.edges)
 
+    # ---- rearranging ------------------------------------------------------------------------------------------------
+
+    def swap_states(self, i: int, j: int) -> None:
+        """States ``i`` and ``j`` trade places: every edge from or to one is moved to the other's row and column, the
+        two state records trade places, and nothing else changes.  Edge objects keep their identity."""
+        if i == j:
+            return
+        S, A = self.n_states, self._A
+        perm = list(range(S))
+        perm[i], perm[j] = j, i
+        new = [None] * len(self.edges)
+        for e in self.edges:
+            e.source, e.target = perm[e.source], perm[e.target]
+            new[(e.source * A + e.symbol) * S + e.target] = e
+        self.edges = new
+        self.states[i], self.states[j] = self.states[j], self.states[i]
+        self.states[i].index, self.states[j].index = i, j
+        self.state_ids[i], self.state_ids[j] = self.state_ids[j], self.state_ids[i]
+
+    def swap_symbols(self, a: int, b: int) -> None:
+        """Symbols ``a`` and ``b`` trade places: their slices of the matrix and their labels."""
+        if a == b:
+            return
+        S, A = self.n_states, self._A
+        new = [None] * len(self.edges)
+        for e in self.edges:
+            if e.symbol == a:
+                e.symbol = b
+            elif e.symbol == b:
+                e.symbol = a
+            new[(e.source * A + e.symbol) * S + e.target] = e
+        self.edges = new
+        self.symbols[a], self.symbols[b] = self.symbols[b], self.symbols[a]
+        self.index = {s: k for k, s in enumerate(self.symbols)}
+
+    def state_load(self) -> list[float]:
+        """How busy each state is: the traversals of every edge leaving it and every edge arriving at it."""
+        load = [0.0] * self.n_states
+        for e in self.edges:
+            if e.seen:
+                load[e.source] += e.seen
+                load[e.target] += e.seen
+        return load
+
+    def symbol_load(self) -> list[float]:
+        """How busy each symbol is: the traversals of every edge in its slice."""
+        load = [0.0] * self._A
+        for e in self.edges:
+            if e.seen:
+                load[e.symbol] += e.seen
+        return load
+
     # ---- persistence ------------------------------------------------------------------------------------------------
 
     def to_dict(self) -> dict:
@@ -128,6 +182,7 @@ class Lattice:
             "alphabet": list(self.symbols),
             "prototype": self.prototype.to_list(),
             "state_records": [s.to_list() for s in self.states],
+            "state_ids": list(self.state_ids),
             "edges": [e.to_list() for e in self.touched()],
         }
 
@@ -137,6 +192,11 @@ class Lattice:
         for values in data["state_records"]:
             state = State.from_list(values)
             lattice.states[state.index] = state
+        ids = data.get("state_ids")
+        if ids is not None:
+            if sorted(ids) != list(range(lattice.n_states)):
+                raise ValueError("state_ids must be a permutation of the states")
+            lattice.state_ids = [int(x) for x in ids]
         for values in data["edges"]:
             edge = Edge.from_list(values)
             lattice.edges[lattice.offset(edge.source, edge.symbol, edge.target)] = edge

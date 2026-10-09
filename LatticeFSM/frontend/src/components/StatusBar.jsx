@@ -71,6 +71,12 @@ export default function StatusBar({ onStats, tick }) {
         {s.compress_every ? <> · every {fmtInt(s.compress_every)}</> : null}
         {s.core_bytes ? <> · code {fmtInt(s.core_bytes)} B</> : null}
       </span>
+      <span className="stat" title="Where runs start, how often they skipped a node, and how often nodes swapped">
+        focus <b>{s.learn_focus ? "learned" : s.focus === null || s.focus === undefined ? "none" : fmtNum(s.focus, 2)}</b>
+        {s.origin !== undefined && !s.learn_focus ? <> · from state {s.origin}</> : null}
+        {s.skip ? <> · skips <b>{fmtInt(s.skips)}</b></> : null}
+        {s.swaps ? <> · swaps <b>{fmtInt(s.swaps)}</b></> : null}
+      </span>
       <span className="stat" title="The widest and narrowest channel in the matrix now">
         width <b>{fmtNum(s.narrowest, 2)}</b> – <b>{fmtNum(s.widest, 2)}</b>
       </span>

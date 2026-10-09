@@ -8,7 +8,9 @@ import {
   curvePoints,
   describeRun,
   fmtSize,
+  focusIndex,
   isCenter,
+  onVector,
   shade,
   stimulationFrom,
   tableRows,
@@ -51,6 +53,22 @@ test("the greedy table is rows of text with accepting states starred", () => {
     { state: 1, accepting: false, cells: ["a -> 1", "b -> 0"] },
   ]);
   assert.deepEqual(tableRows(null), []);
+});
+
+test("a skip is written as one move past the node it skips", () => {
+  const run = { transitions: [{ source: 0, symbol: "ab", target: 5, probability: 0.31, skipped: 3 }] };
+  assert.equal(describeRun(run), "0 =ab(0.31)=> 5 [skipping 3]");
+});
+
+test("focus picks a node of the central vertical vector, in equal bands", () => {
+  assert.equal(focusIndex(13, null), 0);
+  assert.equal(focusIndex(13, 0), 0);
+  assert.equal(focusIndex(13, 0.5), 6);
+  assert.equal(focusIndex(13, 1), 12);
+  assert.equal(focusIndex(13, 1 / 13), 1);
+  assert.equal(focusIndex(13, 0.92), 11);
+  assert.equal(onVector([6, 6, 6], 6, 6), true);
+  assert.equal(onVector([6, 6, 6], 5, 6), false);
 });
 
 test("sizes read as bytes, kilobytes and megabytes", () => {

@@ -44,6 +44,16 @@ smaller with the behaviour still preserved. The machine can fold itself into
 its central node every N transitions, and can walk from the middle state as
 well as from the start state.
 
+**Where a run starts and how it moves.** A **focus** in `[0, 1]` picks a
+node of the central vertical vector `(0..12, g, 6)` — low or none the top
+node, high the bottom, 0.5 the central node — and runs start from it; it can
+be a setting, or **learned** from each input by a small function trained by
+the same rewards and punishments as the edges. With **skips**, a run reads
+two symbols in one move, past the node between, when that two-edge path is
+more efficient than the step it would take. And the nodes can **swap** and
+**rearrange themselves**, busiest toward the centre, which moves a taught
+machine's information into the inner shells of its compressed code.
+
 Two ports of one model, standard library only in each, reading and writing
 the same machine files:
 
@@ -73,6 +83,10 @@ number, and a machine file written by either reads in the other.
 | The matrix folds into its central node | `compress(machine)` → `Core`, held at `(6, g, 6)`: a bitmap of touched edges and their fields, centre-out, exact by default (`compress.py`, `compress.rs`; `DESIGN.md` §11) |
 | Traversal from the middle outward | the code is laid out and rebuilt shell by shell from the centre (`geometry.center_out`, `decompress(shells=k)`); `run(…, from_middle=True)` starts from the middle state |
 | Compression every N transitions | `compress_every`, `compress_precision`, `compress_rebuild`: the code kept current, or the matrix rebuilt from it so a lossy precision is applied |
+| Focus picks the start node | `focus` in [0, 1] → node `floor(focus · 13)` of the central vertical vector `(s, g, 6)`, top to bottom; none: the start state (`geometry.focus_index`; `DESIGN.md` §12.1) |
+| Focus learned from the input | `learn_focus`: `focus = sigmoid(w · x(text))`, a Gaussian policy credited by the run's reward or punishment against a baseline (`focus.py`, `focus.rs`) |
+| Skip a node when it is more efficient | `skip`, `skip_margin`: one move reading two symbols when the best two-edge path beats the step's path in log-probability; both edges traversed and credited, the node between not visited |
+| Nodes swap and rearrange themselves | `swap_states`, `swap_symbols` (exact relabellings); `rearrange()` and `rearrange_every`: neighbours swap toward the centre when the outer one is busier |
 | A different function altogether | `weight_fn(edge, clock, life, stimulation)` replaces every edge's own weighting |
 
 ## Quick start
@@ -88,6 +102,9 @@ make train && make compress    # fold the taught machine into its central node, 
 make expand SHELLS=6           # rebuild it from the middle outward, six shells of seven
 make core-run TEXT=abba FROM_MIDDLE=1   # walk straight from the code, from the middle state
 make demo EVERY=500 PRECISION=float16   # fold into the central node every 500 transitions
+make train SKIP=1 && make focus FOCUS=0.8   # skips in training; runs start from node (10, g, 6)
+make rearrange && make compress         # busy nodes to the centre, then fold into the central node
+make demo LEARN_FOCUS=1                 # the focus read off each input, learned
 python3 -m latticefsm demo     # the same from the Python reference
 rust/target/release/latticefsm --help
 ```
@@ -143,11 +160,14 @@ remembered in the browser — with five tabs for this model:
 | **Run** | read a string at a stimulation of your choosing, traversing it or asking quietly; reward or punish the last run |
 | **Train** | teach a language for some episodes, with the accuracy curve and the greedy table it ends in |
 | **Time** | let ticks pass; raise or set the stimulation |
+| **Walk** | the focus: a slider over the central vertical vector, none, or learned from the input (and what the learner reads off a string); skips and their margin; the nodes rearranging themselves (one pass, until settled, every N transitions) or two of them swapped |
 | **Compress** | fold the matrix into its central node at a precision or a budget; the code's size, its loss in state and behaviour, and its rebuild shell by shell from the centre outward; rebuild the machine to any shell; walk straight from the code, from the start or the middle; save and load codes |
 | **Machine** | a fresh machine of any shape; compress every N transitions (precision, rebuild); save and load; teach one edge deliberately |
 
-The Run tab can start the walk from the middle state, and the Matrix tab
-rings the central node on its slice.
+The Run tab can start the walk from the middle state and shows a skip as one
+move past the node it skips; the Matrix tab rings the central node on its
+slice, shades the central vertical vector, marks the focus node, and shows
+each state's original number once the nodes have rearranged.
 
 The status bar polls the machine every two seconds: shape, how much of the
 matrix is touched, the clock, the stimulation, the state, credits, and the
@@ -169,7 +189,7 @@ curl -s "localhost:8000/api/matrix?symbol=b"
 
 ## What it measured
 
-Four experiments, deterministic given the seed, from both ports;
+Five experiments, deterministic given the seed, from both ports;
 `results/` holds the Rust records and `results/python/` the Python ones.
 The stimulation and adaptation records are identical to the last digit
 across the ports (the parity test checks it); the learning rows draw their
@@ -337,6 +357,54 @@ times and so sends training down another path: better on one language,
 worse on two, on one seed. That is a perturbation, not a method; the
 Python port's run moves the same way on two of the three.
 
+### Where a run starts
+
+Every language taught on default machines for 4 000 episodes on three seeds,
+six ways: plain, with skips, with a learned focus, rearranging every 500
+transitions, and from a fixed focus of 0.5 (the central node) and of 1 (the
+bottom node). Mean accuracy on 300 held-out strings; the two ports draw
+from different generators, so each column pair is two samples of the same
+experiment, and their disagreement is the noise in three seeds.
+
+| language | plain (Rust · Python) | skip | learned focus | rearrange every 500 |
+|---|---|---|---|---|
+| even-b | 0.597 · 0.556 | **1.000 · 1.000** (3/3 · 3/3) | 0.619 · 0.546 | 0.729 · 1.000 |
+| contains-aa | 0.628 · 0.888 | 0.681 · 0.948 | 0.577 · 0.633 | 0.680 · 0.838 |
+| ends-ab | 0.968 · 0.959 | 0.947 · 0.968 | 0.926 · 0.920 | 0.913 · 0.929 |
+| mod3-a | 0.774 · 0.724 | 0.716 · 0.868 | 0.751 · 0.813 | 0.717 · 0.708 |
+
+* **Skips** solve `even-b` on every seed in both ports, where plain runs
+  solve it on none: the lookahead finds the two-state parity cycle that a
+  step-by-step walk among thirteen states misses. Elsewhere the effect
+  goes either way between the ports. Training skips on 2 to 15 % of
+  transitions.
+* **The learned focus** shows no consistent gain: better on one language
+  in each port, a different one, and worse on `contains-aa` in both. The
+  languages' accepting states are fixed by number, so the learner mostly
+  learns to stay at the top node — which is where no focus starts anyway.
+* **Rearranging on a clock** relabels exactly, so it cannot change what a
+  machine knows; it changes the order a sampled step draws its targets in,
+  and so the training path. Its `even-b` row (3/3 in Python, 1/3 in Rust)
+  is that, not a method.
+* **A fixed focus away from the top** is worse on most languages in both
+  ports (`walk_results.json`): the accepting states are numbered for a
+  start at the top, and the empty string is judged where the run starts.
+
+**Rearranging and the central node.** `even-b` taught plain, then left to
+rearrange itself until settled — `a` and `b` move to the middle of the
+symbol axis, the busiest states to the middle of the state axis, the start
+state to the centre:
+
+| shell | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|---|
+| touched edges before | 0 | 0 | 0 | 0 | 0 | 121 | 217 |
+| after | 1 | 17 | 32 | 48 | 64 | 80 | 96 |
+
+Before, a rebuild from the middle outward gave back nothing until the last
+two shells; after, the central node itself holds a learned edge and every
+shell carries some. The machine walks exactly as before from its start
+state — a swap is a relabelling — and the code is still exact.
+
 ## The pieces
 
 | file | what it holds |
@@ -346,14 +414,15 @@ Python port's run moves the same way on two of the three.
 | `rust/src/lattice.rs` | `Lattice` and `State`: the dense matrix and its persistence |
 | `rust/src/machine.rs` | `Machine`: the walk, the clock, credit, stimulation, the quiet measurements, the file |
 | `rust/src/languages.rs`, `experiment.rs` | the four languages; the four experiments and their tables |
-| `rust/src/geometry.rs`, `compress.rs` | the cube's centre and shells, the centre-out order; the code the central node holds, its precisions, the outward rebuild, the walk from the code, `fidelity` |
+| `rust/src/geometry.rs`, `compress.rs` | the cube's centre and shells, the centre-out order, the central vertical vector and focus; the code the central node holds, its precisions, the outward rebuild, the walk from the code, `fidelity` |
+| `rust/src/focus.rs` | the learned focus |
 | `rust/src/http.rs`, `server.rs` | the HTTP/1.1 server, the JSON routes, the static files of the frontend |
 | `frontend/` | the React app: `src/App.jsx`, the five panels in `src/components/`, `src/api.js`, `src/matrix.js`; `dist/` built and committed |
 | `rust/src/json.rs`, `gzip.rs`, `rng.rs` | JSON, gzip and the generator, written out: no dependencies |
 | `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, experiment, serve |
 | `rust/tests/` | the machine and the server over a real socket |
-| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `compress.py`, `languages.py`, `experiment.py`, `cli.py` |
-| `tests/test_latticefsm.py` | 54 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
+| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `focus.py`, `compress.py`, `languages.py`, `experiment.py`, `cli.py` |
+| `tests/test_latticefsm.py` | 67 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
 | `results/` | the measured numbers from both ports, with a README |
 
 ## Limits
@@ -375,6 +444,9 @@ Python port's run moves the same way on two of the three.
 * A partial rebuild from the middle outward gives back nothing a taught
   machine learned until the last two shells, because the languages use the
   outermost symbols (`DESIGN.md` §11.4).
+* The learned focus is off by default and measured to help no language
+  consistently; skips are off by default and help `even-b` reliably, the
+  rest by chance (three seeds per port).
 * A lossy precision with `compress_rebuild` on changes what the machine
   learns afterwards; the code's own loss is measured, the downstream effect
   only on one seed.

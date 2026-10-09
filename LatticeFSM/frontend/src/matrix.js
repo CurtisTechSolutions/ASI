@@ -20,7 +20,13 @@ export function cellStyle(probability) {
 export function describeRun(run) {
   const steps = Array.isArray(run && run.transitions) ? run.transitions : [];
   if (steps.length === 0) return "(empty)";
-  return steps.map((t) => `${t.source} -${t.symbol}(${Number(t.probability).toFixed(2)})-> ${t.target}`).join("  ");
+  return steps
+    .map((t) =>
+      t.skipped === null || t.skipped === undefined
+        ? `${t.source} -${t.symbol}(${Number(t.probability).toFixed(2)})-> ${t.target}`
+        : `${t.source} =${t.symbol}(${Number(t.probability).toFixed(2)})=> ${t.target} [skipping ${t.skipped}]`,
+    )
+    .join("  ");
 }
 
 /** `[[episode, accuracy], ...]` from the API -> `[{x, y}]` for the line chart. */
@@ -54,6 +60,18 @@ export function fmtSize(bytes) {
 /** Whether `(source, symbolIndex, target)` is the matrix's central node, given the stats' `center`. */
 export function isCenter(center, source, symbolIndex, target) {
   return Array.isArray(center) && center[0] === source && center[1] === symbolIndex && center[2] === target;
+}
+
+/** Which node of the central vertical vector a focus picks: `floor(focus * n)`, the top of the range in the last band. */
+export function focusIndex(n, focus) {
+  if (focus === null || focus === undefined || focus === "") return 0;
+  const f = Math.min(1, Math.max(0, Number(focus)));
+  return Math.min(n - 1, Math.floor(f * n));
+}
+
+/** Whether `(source, symbolIndex, target)` lies on the central vertical vector `(any, center[1], center[2])`. */
+export function onVector(center, symbolIndex, target) {
+  return Array.isArray(center) && center[1] === symbolIndex && center[2] === target;
 }
 
 /** The stimulation to run at, from the slider's string: blank or invalid means "the machine's own". */

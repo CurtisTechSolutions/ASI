@@ -50,6 +50,8 @@ pub struct Lattice {
     /// The weighting every edge starts from; each adapts its own copy.
     pub prototype: Weighting,
     pub states: Vec<State>,
+    /// Which state, by the number it was made with, sits at each position: rearranging moves them.
+    pub state_ids: Vec<usize>,
     /// Row-major: `edges[(s · A + a) · S + t]` is `(s, a, t)`.
     pub edges: Vec<Edge>,
 }
@@ -88,8 +90,84 @@ impl Lattice {
                     last_visited: -1,
                 })
                 .collect(),
+            state_ids: (0..states).collect(),
             edges,
         })
+    }
+
+    /// States `i` and `j` trade places: every edge from or to one moves to the other's row and column, and the two
+    /// state records trade places.
+    pub fn swap_states(&mut self, i: usize, j: usize) {
+        if i == j {
+            return;
+        }
+        let (s_n, a_n) = (self.n_states, self.symbols.len());
+        let perm = |x: usize| {
+            if x == i {
+                j
+            } else if x == j {
+                i
+            } else {
+                x
+            }
+        };
+        let mut new: Vec<Option<Edge>> = (0..self.edges.len()).map(|_| None).collect();
+        for mut e in std::mem::take(&mut self.edges) {
+            e.source = perm(e.source);
+            e.target = perm(e.target);
+            let at = (e.source * a_n + e.symbol) * s_n + e.target;
+            new[at] = Some(e);
+        }
+        self.edges = new
+            .into_iter()
+            .map(|e| e.expect("a permutation fills every cell"))
+            .collect();
+        self.states.swap(i, j);
+        self.states[i].index = i;
+        self.states[j].index = j;
+        self.state_ids.swap(i, j);
+    }
+
+    /// Symbols `a` and `b` trade places: their slices of the matrix and their labels.
+    pub fn swap_symbols(&mut self, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
+        let (s_n, a_n) = (self.n_states, self.symbols.len());
+        let mut new: Vec<Option<Edge>> = (0..self.edges.len()).map(|_| None).collect();
+        for mut e in std::mem::take(&mut self.edges) {
+            if e.symbol == a {
+                e.symbol = b;
+            } else if e.symbol == b {
+                e.symbol = a;
+            }
+            let at = (e.source * a_n + e.symbol) * s_n + e.target;
+            new[at] = Some(e);
+        }
+        self.edges = new
+            .into_iter()
+            .map(|e| e.expect("a permutation fills every cell"))
+            .collect();
+        self.symbols.swap(a, b);
+    }
+
+    /// How busy each state is: the traversals of every edge leaving it and every edge arriving at it.
+    pub fn state_load(&self) -> Vec<f64> {
+        let mut load = vec![0.0; self.n_states];
+        for e in self.edges.iter().filter(|e| e.seen > 0) {
+            load[e.source] += e.seen as f64;
+            load[e.target] += e.seen as f64;
+        }
+        load
+    }
+
+    /// How busy each symbol is: the traversals of every edge in its slice.
+    pub fn symbol_load(&self) -> Vec<f64> {
+        let mut load = vec![0.0; self.symbols.len()];
+        for e in self.edges.iter().filter(|e| e.seen > 0) {
+            load[e.symbol] += e.seen as f64;
+        }
+        load
     }
 
     pub fn n_symbols(&self) -> usize {
@@ -168,6 +246,10 @@ impl Lattice {
                 "state_records",
                 Json::Array(self.states.iter().map(State::to_json).collect()),
             )
+            .with(
+                "state_ids",
+                Json::Array(self.state_ids.iter().map(|&i| i.into()).collect()),
+            )
             .with("edges", Json::Array(self.touched().map(Edge::to_json).collect()))
     }
 
@@ -193,6 +275,15 @@ impl Lattice {
             }
             let index = state.index;
             lattice.states[index] = state;
+        }
+        if let Some(ids) = v.get("state_ids").and_then(Json::as_array) {
+            let ids: Vec<usize> = ids.iter().filter_map(|x| x.as_f64().map(|n| n as usize)).collect();
+            let mut sorted = ids.clone();
+            sorted.sort();
+            if sorted != (0..states).collect::<Vec<_>>() {
+                return Err("state_ids must be a permutation of the states".to_string());
+            }
+            lattice.state_ids = ids;
         }
         for e in v.get("edges").and_then(Json::as_array).ok_or("lattice.edges")? {
             let edge = Edge::from_json(e)?;

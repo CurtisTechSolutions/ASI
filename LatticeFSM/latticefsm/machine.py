@@ -20,6 +20,10 @@ machine's behaviour, and everything else here is what feeds back into it:
   toward ``baseline`` by a half every ``calm`` ticks.
 * **quiet** - any run asked for ``quiet=True`` draws without traversing,
   credits nothing and moves no clock: a measurement.
+* **focus** - a number in ``[0, 1]`` that picks a node of the matrix's central
+  vertical vector (``geometry.py``), and so the state every run starts from:
+  none or low the top node (state 0), high the bottom one, ``0.5`` the
+  central node.  Without a focus a run starts from ``start``.
 * **compression** - every ``compress_every`` transitions the matrix is folded
   into its central node (``compress.py``) and the code kept on the machine
   (:attr:`Machine.core`); with ``compress_rebuild`` the matrix is then rebuilt
@@ -79,6 +83,8 @@ class Transition:
     """The probability the step had among the row's options under the stimulation it was taken at."""
     stimulation: float
     clock: int
+    skipped: int | None = None
+    """A skip: the node passed through without stopping, the step reading two symbols (``symbol`` holds both)."""
 
 
 @dataclass(slots=True)
@@ -125,6 +131,13 @@ class Machine:
         compress_every: int = 0,
         compress_precision: str = "exact",
         compress_rebuild: bool = False,
+        focus: float | None = None,
+        learn_focus: bool = False,
+        focus_rate: float = 0.05,
+        focus_explore: float = 0.15,
+        skip: bool = False,
+        skip_margin: float = 0.0,
+        rearrange_every: int = 0,
     ) -> None:
         if not (life > 0) or not math.isfinite(life):
             raise ValueError(f"life must be a positive number of ticks, got {life}")
@@ -156,6 +169,26 @@ class Machine:
             raise ValueError(f"compress_every must be >= 0 (0 never), got {compress_every}")
         if compress_precision not in ("exact", "float32", "float16"):
             raise ValueError(f"compress_precision must be exact, float32 or float16, got {compress_precision!r}")
+        from .focus import FocusLearner
+        from .geometry import check_focus
+        self._focus = check_focus(focus)
+        if skip_margin < 0:
+            raise ValueError(f"skip_margin must be >= 0, got {skip_margin}")
+        if rearrange_every < 0:
+            raise ValueError(f"rearrange_every must be >= 0 (0 never), got {rearrange_every}")
+        self.learn_focus = bool(learn_focus)
+        """Read the focus off the input through :attr:`focus_learner` instead of taking it as a setting."""
+        self.focus_learner = FocusLearner(list(self.lattice.symbols), rate=focus_rate, explore=focus_explore)
+        self._last_focus: tuple[float, float, list[float]] | None = None
+        self.skip = bool(skip)
+        """Take a skip - two symbols in one move, past the node between - when it is more efficient (``_decide``)."""
+        self.skip_margin = float(skip_margin)
+        self.skips = 0
+        self.rearrange_every = int(rearrange_every)
+        """Let the nodes rearrange themselves every this many transitions: one pass of swaps toward the centre."""
+        self.swaps = 0
+        self.since_rearrange = 0
+        self._rearrange_due = False
         self.compress_every = int(compress_every)
         """Fold the matrix into its central node every this many transitions; 0 never."""
         self.compress_precision = compress_precision
@@ -171,6 +204,8 @@ class Machine:
         self.state = self.start
         self.path: list[Edge] = []
         """The edges of the current run, in order: what credit lands on."""
+        self.last_focus: float | None = None
+        """The focus the latest run started from, when it had one."""
         self._stimulation = self.baseline
         self._stimulation_stamp = 0
         self.runs = 0
@@ -187,6 +222,26 @@ class Machine:
     @property
     def alphabet(self) -> list[str]:
         return self.lattice.symbols
+
+    @property
+    def focus(self) -> float | None:
+        """The focus, a number in ``[0, 1]``, or ``None``: which node of the central vertical vector runs start from."""
+        return self._focus
+
+    @focus.setter
+    def focus(self, value: float | None) -> None:
+        from .geometry import check_focus
+        self._focus = check_focus(value)
+
+    def focus_state(self, focus: float | None) -> int:
+        """The state ``focus`` starts a run from: its node on the central vertical vector."""
+        from .geometry import focus_index
+        return focus_index(self.n_states, focus)
+
+    @property
+    def origin(self) -> int:
+        """Where a run starts: the focus node's state when there is a focus, else ``start``."""
+        return self.start if self._focus is None else self.focus_state(self._focus)
 
     @property
     def center_state(self) -> int:
@@ -272,22 +327,78 @@ class Machine:
         if not quiet:
             self._traverse(self.lattice[source, symbol, target])
             self.state = target
+            self._settle_rearrange()
         return t
 
-    def _traverse(self, edge: Edge) -> None:
+    def _traverse(self, edge: Edge, visit: bool = True) -> None:
         edge.traverse(self.clock, self.life, trace=self.trace, widen=self.use_widening)
         self.path.append(edge)
         self.clock += 1
-        s = self.lattice.states[edge.target]
-        s.visits += 1
-        s.last_visited = self.clock
+        if visit:
+            s = self.lattice.states[edge.target]
+            s.visits += 1
+            s.last_visited = self.clock
         self._after_transition()
 
     def _after_transition(self) -> None:
-        """Count a transition, and fold the matrix into its central node when ``compress_every`` have passed."""
+        """Count a transition; let the nodes rearrange themselves when ``rearrange_every`` have passed, and fold the
+        matrix into its central node when ``compress_every`` have."""
         self.since_compression += 1
+        self.since_rearrange += 1
+        if self.rearrange_every and self.since_rearrange >= self.rearrange_every:
+            self._rearrange_due = True
         if self.compress_every and self.since_compression >= self.compress_every:
             self.compress_now()
+
+    # ---- rearranging ---------------------------------------------------------------------------------------------
+
+    def swap_states(self, i: int, j: int) -> None:
+        """States ``i`` and ``j`` trade places in the matrix.  A relabelling: every edge, the two state records, the
+        start state, the current state and the run's path go with them, so the machine walks exactly as before from
+        its start state.  What changes is where they are: which one the focus and the middle pick, which shell they
+        sit in."""
+        if not (0 <= i < self.n_states and 0 <= j < self.n_states):
+            raise IndexError(f"states {i} and {j} are not both in 0..{self.n_states - 1}")
+        if i == j:
+            return
+        self.lattice.swap_states(i, j)
+        swap = {i: j, j: i}
+        self.start = swap.get(self.start, self.start)
+        self.state = swap.get(self.state, self.state)
+        self.swaps += 1
+
+    def swap_symbols(self, a: int | str, b: int | str) -> None:
+        """Symbols ``a`` and ``b`` trade places: their slices and their labels.  Strings read the same as before."""
+        a = self.lattice.symbol_index(a) if isinstance(a, str) else a
+        b = self.lattice.symbol_index(b) if isinstance(b, str) else b
+        if a == b:
+            return
+        self.lattice.swap_symbols(a, b)
+        self.focus_learner.swap_symbols(a, b)
+        self.swaps += 1
+
+    def rearrange(self, full: bool = False, axes: Sequence[str] = ("states", "symbols")) -> list[tuple[str, int, int]]:
+        """Let the nodes rearrange themselves toward the centre: one pass of swaps (``full``: passes until none is
+        left), on the state axis and the symbol axis.
+
+        On each axis, every pair of neighbours from the outside in swaps when the one farther from the centre is
+        busier (``Lattice.state_load``, ``symbol_load``), so the busy nodes move inward a step per pass and the
+        settled order is busiest at the centre, falling away on both sides.  Returns the swaps made."""
+        done: list[tuple[str, int, int]] = []
+        while True:
+            made = []
+            for axis in axes:
+                if axis == "states":
+                    made += [("states", i, j) for i, j in _inward_swaps(self.lattice.state_load(), self.swap_states)]
+                elif axis == "symbols":
+                    made += [("symbols", i, j) for i, j in _inward_swaps(self.lattice.symbol_load(), self.swap_symbols)]
+                else:
+                    raise ValueError(f"axes are states and symbols, got {axis!r}")
+            done += made
+            if not full or not made:
+                break
+        self.since_rearrange = 0
+        return done
 
     def compress_now(self):
         """Fold the matrix into its central node now, at ``compress_precision``; with ``compress_rebuild``, rebuild
@@ -303,24 +414,97 @@ class Machine:
         return core
 
     def run(self, symbols: Iterable[str], stimulation: float | None = None, temperature: float | None = None,
-            quiet: bool = False, from_middle: bool = False) -> Run:
-        """Read a string from the start state - or, ``from_middle``, from the middle state, the central node's - and
-        walk outward from there.  Quiet, a copy of the machine's state is walked and nothing moves."""
+            quiet: bool = False, from_middle: bool = False, focus: float | None = None,
+            skip: bool | None = None) -> Run:
+        """Read a string.  It starts from the middle state (``from_middle``), else the node a ``focus`` given for this
+        run picks, else - with ``learn_focus`` - the node the learned focus reads off the input, else :attr:`origin`
+        (the machine's focus node, or ``start``).  With skips on (the machine's ``skip``, or ``skip`` for this run),
+        two symbols are read in one move whenever that is more efficient.  Quiet, the same choices are made and
+        nothing moves."""
         stim = self.stimulation if stimulation is None else float(stimulation)
-        origin = self.center_state if from_middle else self.start
-        if quiet:
-            state = origin
-            transitions = []
-            for sym in symbols:
-                target, p = self.choose(state, sym, stim, temperature)
-                transitions.append(Transition(state, sym, target, p, stim, self.clock))
-                state = target
-            return Run(transitions, state, self.lattice.states[state].accepting)
-        self.reset()
-        self.state = origin
-        self.runs += 1
-        transitions = [self.step(sym, stim, temperature) for sym in symbols]
-        return Run(transitions, self.state, self.lattice.states[self.state].accepting)
+        syms = [s for s in symbols if not (isinstance(s, str) and s.isspace())]
+        learned = None
+        if from_middle:
+            origin = self.center_state
+        elif focus is not None:
+            origin = self.focus_state(focus)
+        elif self.learn_focus:
+            learned = self.focus_learner.choose(syms, lambda: self.rng.gauss(0.0, 1.0), explore=not quiet)
+            origin = self.focus_state(self.focus_learner.clip(learned[0]))
+        else:
+            origin = self.origin
+        do_skip = self.skip if skip is None else bool(skip)
+        if not quiet:
+            self.reset()
+            self.state = origin
+            self.runs += 1
+            self._last_focus = learned
+            self.last_focus = self.focus_learner.clip(learned[0]) if learned else (focus if focus is not None else self._focus)
+        state = origin
+        transitions: list[Transition] = []
+        i = 0
+        while i < len(syms):
+            nxt = syms[i + 1] if do_skip and i + 1 < len(syms) else None
+            move = self._decide(state, syms[i], nxt, stim, temperature)
+            clock = self.clock
+            if move[0] == "step":
+                _, target, p = move
+                if not quiet:
+                    self._traverse(self.lattice[state, syms[i], target])
+                    self.state = target
+                transitions.append(Transition(state, syms[i], target, p, stim, clock))
+                i += 1
+            else:
+                _, mid, target, p = move
+                if not quiet:
+                    self._traverse(self.lattice[state, syms[i], mid], visit=False)
+                    self._traverse(self.lattice[mid, nxt, target])
+                    self.state = target
+                    self.skips += 1
+                transitions.append(Transition(state, syms[i] + nxt, target, p, stim, clock, skipped=mid))
+                i += 2
+            state = self.state if not quiet else target
+        if not quiet:
+            state = self.state
+        accepted = self.lattice.states[state].accepting
+        if not quiet:
+            self._settle_rearrange()
+            state = self.state
+        return Run(transitions, state, accepted)
+
+    def _settle_rearrange(self) -> None:
+        """A rearrangement that fell due during a run or a lesson happens when it is over, so nothing the run holds
+        - a skip's target, the states it has passed - refers to a position that moved under it."""
+        if self._rearrange_due:
+            self._rearrange_due = False
+            self.rearrange()
+
+    def _decide(self, state: int, a: str, b: str | None, stim: float, temperature: float | None):
+        """The next move from ``state``: ``("step", target, p)``, or ``("skip", passed, target, p)``.
+
+        The machine draws its step on ``a`` as always.  With a next symbol ``b`` to look at, it compares the path
+        that step begins - the step, then the best edge after it on ``b`` - with the best two-edge path on ``a``
+        then ``b`` through any node, scoring each by its summed log-probability (at the run's temperature, or the
+        machine's, or 1 when greedy).  When the best path beats the step's by more than ``skip_margin``, it skips:
+        straight to that path's end, past the node between."""
+        t1, p1 = self.choose(state, a, stim, temperature)
+        if b is None:
+            return ("step", t1, p1)
+        temp = temperature if temperature is not None and temperature > 0 else (self.temperature or 1.0)
+        pa = self.probabilities(state, a, stim, temp)
+        best_t, best_u, best_v, step_v = 0, 0, -math.inf, -math.inf
+        for t in range(self.n_states):
+            pb = self.probabilities(t, b, stim, temp)
+            u = max(range(len(pb)), key=pb.__getitem__)
+            v = math.log(max(pa[t], 1e-300)) + math.log(max(pb[u], 1e-300))
+            if v > best_v:
+                best_t, best_u, best_v = t, u, v
+            if t == t1:
+                step_v = v
+        if best_v > step_v + self.skip_margin:
+            pb = self.probabilities(best_t, b, stim, temp)
+            return ("skip", best_t, best_u, pa[best_t] * pb[best_u])
+        return ("step", t1, p1)
 
     def tick(self, ticks: int = 1) -> None:
         """Let time pass: the clock advances with nothing traversed."""
@@ -337,6 +521,8 @@ class Machine:
         if not edges or amount == 0.0:
             return 0
         self.credits += 1
+        if path is None and self._last_focus is not None:
+            self.focus_learner.learn(amount, *self._last_focus)
         share = float(amount)
         for edge in reversed(edges):
             edge.credit(share, self.clock, self.life, widen=self.reward_widening, narrow=self.punish_narrowing)
@@ -358,9 +544,14 @@ class Machine:
         self.clock += 1
         edge.credit(amount, self.clock, self.life, widen=self.reward_widening, narrow=self.punish_narrowing)
         self._after_transition()
+        self._settle_rearrange()
         return edge
 
     # ---- measurements (quiet) ----------------------------------------------------------------------------------------
+
+    def _focus_node(self) -> tuple[int, int, int]:
+        from .geometry import focus_node
+        return focus_node(self.lattice.shape, self._focus)
 
     def accepts(self, symbols: Iterable[str], temperature: float = 0.0, from_middle: bool = False) -> bool:
         """Whether the greedy (or, at a temperature, a sampled) quiet run ends in an accepting state."""
@@ -405,6 +596,18 @@ class Machine:
             "widest": max((e.width_at(self.clock, self.life) for e in touched), default=1.0),
             "narrowest": min((e.width_at(self.clock, self.life) for e in touched), default=1.0),
             "center": [self.center_state, len(self.alphabet) // 2, self.center_state],
+            "focus": self._focus,
+            "focus_node": list(self._focus_node()),
+            "origin": self.origin,
+            "learn_focus": self.learn_focus,
+            "last_focus": self.last_focus,
+            "skip": self.skip,
+            "skip_margin": self.skip_margin,
+            "skips": self.skips,
+            "rearrange_every": self.rearrange_every,
+            "swaps": self.swaps,
+            "state_order": list(self.lattice.state_ids),
+            "symbol_order": list(self.lattice.symbols),
             "compress_every": self.compress_every,
             "compress_precision": self.compress_precision,
             "compress_rebuild": self.compress_rebuild,
@@ -424,7 +627,8 @@ class Machine:
             "use_widening": self.use_widening, "reward_widening": self.reward_widening,
             "punish_narrowing": self.punish_narrowing, "seed": self.seed,
             "compress_every": self.compress_every, "compress_precision": self.compress_precision,
-            "compress_rebuild": self.compress_rebuild,
+            "compress_rebuild": self.compress_rebuild, "focus": self._focus, "learn_focus": self.learn_focus,
+            "skip": self.skip, "skip_margin": self.skip_margin, "rearrange_every": self.rearrange_every,
         }
 
     def to_dict(self) -> dict:
@@ -439,6 +643,10 @@ class Machine:
             "compressions": self.compressions,
             "since_compression": self.since_compression,
             "last_compressed": self.last_compressed,
+            "skips": self.skips,
+            "swaps": self.swaps,
+            "since_rearrange": self.since_rearrange,
+            "focus_learner": self.focus_learner.to_dict(),
             "stimulation": [self._stimulation, self._stimulation_stamp],
             "rng": {"mersenne": list(self.rng.getstate())},
             "lattice": self.lattice.to_dict(),
@@ -477,6 +685,21 @@ class Machine:
         m.weight_fn = weight_fn
         m.seed = int(st["seed"])
         m.rng = random.Random(m.seed)
+        from .focus import FocusLearner
+        from .geometry import check_focus
+        m._focus = check_focus(st.get("focus"))
+        m.learn_focus = bool(st.get("learn_focus", False))
+        m.skip = bool(st.get("skip", False))
+        m.skip_margin = float(st.get("skip_margin", 0.0))
+        m.rearrange_every = int(st.get("rearrange_every", 0))
+        m.skips = int(data.get("skips", 0))
+        m.swaps = int(data.get("swaps", 0))
+        m.since_rearrange = int(data.get("since_rearrange", 0))
+        m._rearrange_due = False
+        fl = data.get("focus_learner")
+        m.focus_learner = FocusLearner.from_dict(fl) if fl else FocusLearner(list(lattice.symbols))
+        m._last_focus = None
+        m.last_focus = None
         m.compress_every = int(st.get("compress_every", 0))
         m.compress_precision = st.get("compress_precision", "exact")
         m.compress_rebuild = bool(st.get("compress_rebuild", False))
@@ -518,3 +741,19 @@ def _softmax(logits: Sequence[float], temperature: float) -> list[float]:
     exps = [math.exp(v - top) for v in scaled]
     total = sum(exps)
     return [v / total for v in exps]
+
+
+def _inward_swaps(load: list[float], swap) -> list[tuple[int, int]]:
+    """One pass of neighbour swaps toward the centre on an axis of ``len(load)`` nodes: from the outside in on each
+    side, a pair swaps when the outer node is busier than the inner.  ``swap(i, j)`` makes each swap; ``load`` is
+    kept in step.  Returns the pairs swapped."""
+    n = len(load)
+    c = n // 2
+    made = []
+    pairs = [(k - 1, k) for k in range(1, c + 1)] + [(k + 1, k) for k in range(n - 2, c - 1, -1)]
+    for outer, inner in pairs:
+        if load[outer] > load[inner]:
+            swap(outer, inner)
+            load[outer], load[inner] = load[inner], load[outer]
+            made.append((min(outer, inner), max(outer, inner)))
+    return made

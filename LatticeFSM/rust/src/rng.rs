@@ -40,6 +40,13 @@ impl Rng {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
+    /// A standard normal draw, by Box–Muller (one of the pair; the other is dropped so a draw is two numbers).
+    pub fn gauss(&mut self) -> f64 {
+        let u1 = 1.0 - self.random();
+        let u2 = self.random();
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+
     /// An integer in `[low, high]`.
     pub fn randint(&mut self, low: usize, high: usize) -> usize {
         low + (self.random() * (high - low + 1) as f64) as usize

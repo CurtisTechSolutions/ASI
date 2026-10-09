@@ -22,7 +22,7 @@ use crate::languages::{examples, language, random_string, Language, ALPHABET, LA
 use crate::machine::{Machine, Settings, BASELINE, DISCOUNT, LIFE};
 use crate::rng::Rng;
 
-pub const EXPERIMENTS: [&str; 4] = ["learning", "stimulation", "adaptation", "compression"];
+pub const EXPERIMENTS: [&str; 5] = ["learning", "stimulation", "adaptation", "compression", "walk"];
 
 fn alphabet() -> Vec<String> {
     ALPHABET.iter().map(|s| s.to_string()).collect()
@@ -474,6 +474,226 @@ pub fn compression(episodes: usize, seed: u64, life: f64, tests: usize, every: u
         .with("periodic", Json::Array(periodic)))
 }
 
+/// Focus, skips, the learned focus and rearrangement, measured on default 13 × 13 × 13 machines: the node each
+/// focus picks; every language taught each way on `seeds`; and a taught machine left to rearrange itself, shell by
+/// shell before and after.
+pub fn walk(episodes: usize, seeds: &[u64], life: f64, tests: usize) -> Result<Json, String> {
+    use crate::geometry::focus_node;
+    let shape = (13, 13, 13);
+    let focus: Vec<Json> = [
+        None,
+        Some(0.0),
+        Some(0.07),
+        Some(0.08),
+        Some(0.25),
+        Some(0.5),
+        Some(0.75),
+        Some(0.92),
+        Some(0.93),
+        Some(1.0),
+    ]
+    .iter()
+    .map(|&f| {
+        let (s, a, t) = focus_node(shape, f);
+        Json::object()
+            .with("focus", f.map(Json::from).unwrap_or(Json::Null))
+            .with("node", Json::numbers(&[s as f64, a as f64, t as f64]))
+    })
+    .collect();
+    let arms: [(&str, Settings); 6] = [
+        ("plain", Settings::default()),
+        (
+            "skip",
+            Settings {
+                skip: true,
+                ..Settings::default()
+            },
+        ),
+        (
+            "learned focus",
+            Settings {
+                learn_focus: true,
+                ..Settings::default()
+            },
+        ),
+        (
+            "rearrange every 500",
+            Settings {
+                rearrange_every: 500,
+                ..Settings::default()
+            },
+        ),
+        (
+            "focus 0.5",
+            Settings {
+                focus: Some(0.5),
+                ..Settings::default()
+            },
+        ),
+        (
+            "focus 1",
+            Settings {
+                focus: Some(1.0),
+                ..Settings::default()
+            },
+        ),
+    ];
+    let mut rows = Vec::new();
+    for lang in LANGUAGES.iter() {
+        let test = examples(lang, tests, &mut Rng::new(1000), 6);
+        for (label, base) in arms.iter() {
+            let (mut accs, mut skips, mut swaps, mut moves) = (Vec::new(), 0u64, 0u64, 0i64);
+            for &seed in seeds {
+                let settings = Settings {
+                    life,
+                    seed,
+                    ..base.clone()
+                };
+                let mut m = Machine::default_shape(lang.accepting, settings)?;
+                teach_language(&mut m, lang, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
+                accs.push(m.accuracy(&test, 0.0));
+                skips += m.skips;
+                swaps += m.swaps;
+                moves += m.clock;
+            }
+            rows.push(
+                Json::object()
+                    .with("language", lang.name.into())
+                    .with("arm", (*label).into())
+                    .with("accuracy_mean", (accs.iter().sum::<f64>() / accs.len() as f64).into())
+                    .with("accuracies", Json::numbers(&accs))
+                    .with("solved", accs.iter().filter(|&&a| a >= 0.999).count().into())
+                    .with("skips", (skips as f64).into())
+                    .with("swaps", (swaps as f64).into())
+                    .with("transitions", moves.into()),
+            );
+        }
+    }
+    let lang = language("even-b")?;
+    let mut m = Machine::default_shape(
+        lang.accepting,
+        Settings {
+            life,
+            seed: seeds[0],
+            ..Settings::default()
+        },
+    )?;
+    teach_language(&mut m, &lang, episodes, &mut Rng::new(seeds[0]), 6, false, 1.0, None, 0);
+    let before = compress(&m, None, None).shell_table();
+    let made = m.rearrange(true);
+    let after = compress(&m, None, None).shell_table();
+    let shells: Vec<Json> = before
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .zip(after.as_array().cloned().unwrap_or_default().iter())
+        .map(|(b, a)| {
+            Json::object()
+                .with("shell", b.num("shell", 0.0).into())
+                .with("cells", b.num("cells", 0.0).into())
+                .with("touched_before", b.num("touched", 0.0).into())
+                .with("touched_after", a.num("touched", 0.0).into())
+        })
+        .collect();
+    let rearranged = Json::object()
+        .with("swaps", made.len().into())
+        .with(
+            "state_order",
+            Json::Array(m.lattice.state_ids.iter().map(|&i| i.into()).collect()),
+        )
+        .with("symbol_order", Json::strings(&m.lattice.symbols))
+        .with("start", m.start.into())
+        .with("shells", Json::Array(shells));
+    Ok(Json::object()
+        .with("experiment", "walk".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("episodes", episodes.into())
+                .with(
+                    "seeds",
+                    Json::numbers(&seeds.iter().map(|&s| s as f64).collect::<Vec<_>>()),
+                )
+                .with("life", life.into())
+                .with("tests", tests.into())
+                .with("shape", Json::numbers(&[13.0, 13.0, 13.0])),
+        )
+        .with("focus", Json::Array(focus))
+        .with("arms", Json::Array(rows))
+        .with("rearranged", rearranged))
+}
+
+fn walk_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let seeds = arr(&s, "seeds").len();
+    let mut lines = vec![
+        "walk: the node each focus picks on the central vertical vector (s, g, 6) of the 13 x 13 x 13 matrix"
+            .to_string(),
+        String::new(),
+        "| focus | node | runs start from |".to_string(),
+        "|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "focus") {
+        let f = row
+            .get("focus")
+            .and_then(Json::as_f64)
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let node = arr(row, "node");
+        let n0 = node.first().and_then(Json::as_f64).unwrap_or(0.0);
+        let n2 = node.get(2).and_then(Json::as_f64).unwrap_or(0.0);
+        lines.push(format!("| {f} | ({n0}, g, {n2}) | state {n0} |"));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "every language taught for {} episodes on {seeds} seeds, each way",
+        s.num("episodes", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push("| language | way | accuracy, mean | solved | skips per transition | swaps |".to_string());
+    lines.push("|---|---|---|---|---|---|".to_string());
+    for row in arr(r, "arms") {
+        let moves = row.num("transitions", 0.0);
+        let per = if moves > 0.0 {
+            row.num("skips", 0.0) / moves
+        } else {
+            0.0
+        };
+        lines.push(format!(
+            "| {} | {} | {:.3} | {}/{seeds} | {per:.3} | {} |",
+            row.str_or("language", ""),
+            row.str_or("arm", ""),
+            row.num("accuracy_mean", 0.0),
+            row.num("solved", 0.0),
+            row.num("swaps", 0.0)
+        ));
+    }
+    let rr = r.get("rearranged").cloned().unwrap_or(Json::object());
+    let order: Vec<String> = arr(&rr, "state_order").iter().map(Json::dump).collect();
+    let symbols: String = arr(&rr, "symbol_order").iter().filter_map(Json::as_str).collect();
+    lines.push(String::new());
+    lines.push(format!(
+        "even-b, taught plain, then left to rearrange itself until settled: {} swaps; states top to bottom [{}], symbols {symbols}, start state {}",
+        rr.num("swaps", 0.0),
+        order.join(", "),
+        rr.num("start", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push("| shell | cells | touched edges before | after |".to_string());
+    lines.push("|---|---|---|---|".to_string());
+    for row in arr(&rr, "shells") {
+        lines.push(format!(
+            "| {} | {} | {} | {} |",
+            row.num("shell", 0.0),
+            row.num("cells", 0.0),
+            row.num("touched_before", 0.0),
+            row.num("touched_after", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
 fn compression_table(r: &Json) -> String {
     let s = r.get("settings").cloned().unwrap_or(Json::object());
     let mut lines = vec![
@@ -556,6 +776,7 @@ pub fn tables(record: &Json) -> String {
         "learning" => learning_table(record),
         "stimulation" => stimulation_table(record),
         "compression" => compression_table(record),
+        "walk" => walk_table(record),
         _ => adaptation_table(record),
     }
 }
@@ -721,6 +942,7 @@ pub fn run(which: &[String], out: Option<&str>, episodes: usize, life: f64) -> R
             }),
             "adaptation" => adaptation(20, life, &[0.0, 1.0, 4.0]),
             "compression" => compression(episodes, 1, life, 300, 500)?,
+            "walk" => walk(episodes, &[1, 2, 3], life, 300)?,
             other => {
                 return Err(format!(
                     "no experiment named {other:?}; choose from {EXPERIMENTS:?} or all"

@@ -38,7 +38,7 @@ root answers a JSON 404 that says so and the API still works:
 | `GET /api/edge` | `?source=&symbol=&target=` | one edge, every field, the fading ones read at the clock |
 | `GET /api/table` | | the greedy transition table |
 | `GET /api/languages` | | the languages `train` knows |
-| `POST /api/run` | `{text, stimulation?, temperature?, quiet?, from_middle?}` | the run, traversed unless quiet, from the start state or the middle one, and the stats |
+| `POST /api/run` | `{text, stimulation?, temperature?, quiet?, from_middle?, focus?, skip?}` | the run, traversed unless quiet, from where the machine starts (or the middle, or the node `focus` picks), with skips as asked; a skip shows as one transition with `skipped` |
 | `POST /api/credit` | `{amount}` | reward (positive) or punish (negative) the last run |
 | `POST /api/teach` | `{source, symbol, target, amount}` | one edge, traversed and credited |
 | `POST /api/train` | `{language, episodes? (4000), max_length?}` | accuracy before and after, the curve, the table |
@@ -48,9 +48,12 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/compress` | `{precision?, budget?}` | fold the matrix into its central node; the code's summary, its `fidelity`, and its rebuild shell by shell (`expansion`) |
 | `GET /api/core` | | the code the machine holds (from `/api/compress` or the every-N schedule), measured against the machine now |
 | `POST /api/expand` | `{shells?}` | replace the machine with the code's rebuild, from the central node outward; all shells without `shells` |
-| `POST /api/core/run` | `{text, from_middle?}` | the greedy walk read straight from the code |
+| `POST /api/core/run` | `{text, from_middle?, focus?, skip?}` | the greedy walk read straight from the code |
 | `POST /api/core/save`, `/api/core/load` | `{path}` | write the held code, or read one in |
 | `POST /api/compression` | `{every?, precision?, rebuild?}` | compress automatically every N transitions (0 never) |
+| `POST /api/focus` | `{focus?: number or null, learn?, text?}` | set the focus (0 the top node of the central vertical vector, 1 the bottom; null none), switch the learned focus, or ask the learner what it reads off `text` |
+| `POST /api/skip` | `{skip?, margin?, rearrange_every?}` | skip a node when a two-edge path is more efficient; the automatic rearrangement schedule |
+| `POST /api/rearrange` | `{full?}` or `{axis, i, j}` | let the nodes rearrange themselves toward the centre (one pass, or until settled), or swap two states or symbols |
 | `POST /api/save` | `{path}` | write the machine (`.json` or `.json.gz`) |
 | `POST /api/load` | `{path}` | read a machine in place of the old |
 
@@ -66,10 +69,11 @@ or 405. `tests/server.rs` exercises every route over a real socket.
 | `src/machine.rs` | `Machine`, `Run`, `Transition`, `Settings`: the walk, the clock, credit, stimulation, the file |
 | `src/languages.rs` | the four regular languages and their examples |
 | `src/geometry.rs` | the cube's central node and shells; `center_out`, the order the code is laid out in |
+| `src/focus.rs` | `FocusLearner`: the focus read off the input, learned from credit |
 | `src/compress.rs` | `Core`, the code the central node holds; `compress`, `fidelity`, `expansion`; the half floats and base64, written out |
 | `src/experiment.rs` | learning, stimulation, adaptation; the tables; `run` |
 | `src/http.rs` | the HTTP/1.1 server and a test client |
 | `src/server.rs` | the routes above, `Service`, `new_machine`, the static files (`safe_join`, `content_type`) |
 | `src/json.rs`, `src/gzip.rs`, `src/rng.rs` | written out, no crates |
 | `src/bin/latticefsm.rs` | the CLI |
-| `tests/machine.rs`, `tests/compress.rs`, `tests/server.rs` | the integration tests |
+| `tests/machine.rs`, `tests/compress.rs`, `tests/walk.rs`, `tests/server.rs` | the integration tests |

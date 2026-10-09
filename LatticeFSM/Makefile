@@ -36,14 +36,20 @@ PRECISION ?= exact
 SHELLS    ?=
 EVERY     ?= 0
 FROM_MIDDLE ?=
+FOCUS     ?=
+LEARN_FOCUS ?=
+SKIP      ?=
+REARRANGE ?= 0
 HOST      ?= 127.0.0.1
 RESULTS   ?= results
 
 MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseline $(BASELINE) --seed $(SEED) --language $(LANGUAGE) \
-               $(if $(filter-out 0,$(EVERY)),--compress-every $(EVERY) --compress-precision $(PRECISION),)
+               $(if $(filter-out 0,$(EVERY)),--compress-every $(EVERY) --compress-precision $(PRECISION),) \
+               $(if $(FOCUS),--focus $(FOCUS),) $(if $(LEARN_FOCUS),--learn-focus,) $(if $(SKIP),--skip,) \
+               $(if $(filter-out 0,$(REARRANGE)),--rearrange-every $(REARRANGE),)
 
 .PHONY: help build test check demo train run teach accuracy table stats tick stimulate serve experiments \
-        compress expand core-run \
+        compress expand core-run focus rearrange \
         py-test py-demo py-train py-run py-experiments parity \
         frontend-install frontend-build frontend-dev frontend-test clean
 
@@ -103,16 +109,23 @@ expand: build ## Rebuild a machine from CORE, from the central node outward (SHE
 core-run: build ## Walk TEXT straight from CORE (FROM_MIDDLE=1 starts from the middle state)
 	$(BIN) core-run "$(TEXT)" --core $(CORE) $(if $(FROM_MIDDLE),--from-middle,)
 
+##@ Where a run starts and how it moves
+focus: build ## Set MODEL's focus to FOCUS (0..1: 0 the top node, 1 the bottom; empty: none), and save it
+	$(BIN) focus --load $(MODEL) $(if $(FOCUS),--level $(FOCUS),--none) $(if $(LEARN_FOCUS),--learn on,) --save $(MODEL)
+
+rearrange: build ## Let MODEL's nodes rearrange themselves toward the centre until settled, and save it
+	$(BIN) rearrange --load $(MODEL) --full --save $(MODEL)
+
 ##@ Serving
 serve: build ## The HTTP API and the frontend on http://HOST:PORT/ (MODEL if it exists, else a fresh machine)
 	$(BIN) serve $(MACHINE_OPTS) --host $(HOST) --port $(PORT) --frontend-dir frontend/dist $(if $(wildcard $(MODEL)),--load $(MODEL),)
 
 ##@ The experiments README.md quotes
-experiments: build ## Learning, stimulation, adaptation and compression, written to RESULTS/ - a second
+experiments: build ## Learning, stimulation, adaptation, compression and walk, written to RESULTS/ - two seconds
 	mkdir -p $(RESULTS)
 	$(BIN) experiment --which all --life $(LIFE) --out $(RESULTS) | tee $(RESULTS)/experiments.log
 
-py-experiments: ## The same four from the Python reference, written to RESULTS/python/ - about two minutes
+py-experiments: ## The same five from the Python reference, written to RESULTS/python/ - about three minutes
 	mkdir -p $(RESULTS)/python
 	$(PY) -m latticefsm experiment --which all --life $(LIFE) --out $(RESULTS)/python | tee $(RESULTS)/python/experiments.log
 

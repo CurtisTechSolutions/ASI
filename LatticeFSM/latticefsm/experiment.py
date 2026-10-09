@@ -25,6 +25,11 @@ is deterministic given the seed.
   time; and every language taught again with the matrix folded into its central
   node every ``every`` transitions, rebuilt from the code each time, at each
   precision - what a compression on a clock costs the learning.
+* :func:`walk` - where a run starts and how it moves: the node each focus picks
+  on the central vertical vector; every language taught plain, with skips,
+  with a learned focus, with the nodes rearranging themselves, and from a
+  fixed focus of 0.5 and of 1; and what letting the nodes rearrange
+  themselves does to the shells the compressed code is laid out in.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from .machine import BASELINE, DISCOUNT, LIFE, Machine
 
 __all__ = ["EXPERIMENTS", "adaptation", "learning", "main", "run", "stimulation", "tables", "teach_language"]
 
-EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression")
+EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk")
 
 
 def _settings(**kw) -> dict:
@@ -229,6 +234,59 @@ def compression(episodes: int = 4000, seed: int = 1, life: float = LIFE, tests: 
     }
 
 
+WALK_ARMS = (
+    ("plain", {}),
+    ("skip", {"skip": True}),
+    ("learned focus", {"learn_focus": True}),
+    ("rearrange every 500", {"rearrange_every": 500}),
+    ("focus 0.5", {"focus": 0.5}),
+    ("focus 1", {"focus": 1.0}),
+)
+
+
+def walk(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3), life: float = LIFE, tests: int = 300) -> dict:
+    """Focus, skips, the learned focus and rearrangement, measured on default 13 x 13 x 13 machines."""
+    from .geometry import focus_node
+    shape = (13, 13, 13)
+    focus = [{"focus": f, "node": list(focus_node(shape, f))} for f in (None, 0.0, 0.07, 0.08, 0.25, 0.5, 0.75, 0.92, 0.93, 1.0)]
+    arms = []
+    for name in LANGUAGES:
+        lang = language(name)
+        test = examples(lang, tests, random.Random(1000))
+        for label, kw in WALK_ARMS:
+            accs, skips, swaps, moves = [], 0, 0, 0
+            for seed in seeds:
+                m = Machine(accepting=lang.accepting, life=life, seed=seed, **kw)
+                teach_language(m, name, episodes, random.Random(seed))
+                accs.append(m.accuracy(test))
+                skips += m.skips
+                swaps += m.swaps
+                moves += m.clock
+            arms.append({"language": name, "arm": label, "accuracy_mean": sum(accs) / len(accs), "accuracies": accs,
+                         "solved": sum(a >= 0.999 for a in accs), "skips": skips, "swaps": swaps, "transitions": moves})
+    lang = language("even-b")
+    m = Machine(accepting=lang.accepting, life=life, seed=seeds[0])
+    teach_language(m, "even-b", episodes, random.Random(seeds[0]))
+    before = compress(m).shell_table()
+    test = examples(lang, tests, random.Random(1000))
+    acc_before = m.accuracy(test, temperature=0.0)
+    made = m.rearrange(full=True)
+    after = compress(m).shell_table()
+    rearranged = {
+        "swaps": len(made), "state_order": list(m.lattice.state_ids), "symbol_order": list(m.alphabet),
+        "start": m.start,
+        "shells": [{"shell": b["shell"], "cells": b["cells"], "touched_before": b["touched"],
+                    "touched_after": a["touched"]} for b, a in zip(before, after)],
+    }
+    return {
+        "experiment": "walk",
+        "settings": _settings(episodes=episodes, seeds=list(seeds), life=life, tests=tests, shape=list(shape)),
+        "focus": focus,
+        "arms": arms,
+        "rearranged": rearranged,
+    }
+
+
 def _edge_view(e, m: Machine) -> dict:
     """Every field of an edge by name, the fading ones read at the clock - the Rust crate's ``Edge::describe``."""
     return {
@@ -253,7 +311,32 @@ def tables(record: dict) -> str:
         return _stimulation_table(record)
     if kind == "compression":
         return _compression_table(record)
+    if kind == "walk":
+        return _walk_table(record)
     return _adaptation_table(record)
+
+
+def _walk_table(r: dict) -> str:
+    s = r["settings"]
+    lines = ["walk: the node each focus picks on the central vertical vector (s, g, 6) of the 13 x 13 x 13 matrix", "",
+             "| focus | node | runs start from |", "|---|---|---|"]
+    for row in r["focus"]:
+        f = "none" if row["focus"] is None else f"{row['focus']:g}"
+        node = row["node"]
+        lines.append(f"| {f} | ({node[0]}, g, {node[2]}) | state {node[0]} |")
+    lines += ["", f"every language taught for {s['episodes']} episodes on {len(s['seeds'])} seeds, each way", "",
+              "| language | way | accuracy, mean | solved | skips per transition | swaps |", "|---|---|---|---|---|---|"]
+    for row in r["arms"]:
+        per = row["skips"] / row["transitions"] if row["transitions"] else 0.0
+        lines.append(f"| {row['language']} | {row['arm']} | {row['accuracy_mean']:.3f} | {row['solved']}/{len(s['seeds'])} | "
+                     f"{per:.3f} | {row['swaps']} |")
+    rr = r["rearranged"]
+    lines += ["", f"even-b, taught plain, then left to rearrange itself until settled: {rr['swaps']} swaps; states top to "
+              f"bottom {rr['state_order']}, symbols {''.join(rr['symbol_order'])}, start state {rr['start']}", "",
+              "| shell | cells | touched edges before | after |", "|---|---|---|---|"]
+    for row in rr["shells"]:
+        lines.append(f"| {row['shell']} | {row['cells']} | {row['touched_before']} | {row['touched_after']} |")
+    return "\n".join(lines)
 
 
 def _compression_table(r: dict) -> str:
@@ -346,6 +429,8 @@ def run(which: Sequence[str], out: str | None = None, **kw) -> list[dict]:
             rec = adaptation(life=kw.get("life", LIFE))
         elif name == "compression":
             rec = compression(life=kw.get("life", LIFE))
+        elif name == "walk":
+            rec = walk(life=kw.get("life", LIFE))
         else:
             raise ValueError(f"no experiment named {name!r}; choose from {EXPERIMENTS} or all")
         records.append(rec)

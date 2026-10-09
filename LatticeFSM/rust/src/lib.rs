@@ -24,6 +24,7 @@
 pub mod compress;
 pub mod edge;
 pub mod experiment;
+pub mod focus;
 pub mod geometry;
 pub mod gzip;
 pub mod http;

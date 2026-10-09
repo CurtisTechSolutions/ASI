@@ -2259,3 +2259,13 @@ pre.code.wrap {
   font-size: 0.85rem;
   padding: 0;
 }
+
+/* the central vertical vector, and the node the focus starts runs from */
+.matrix td.cell.vector {
+  box-shadow: inset 3px 0 0 var(--accent-2, #b8862b), inset -3px 0 0 var(--accent-2, #b8862b);
+}
+.matrix td.cell.focus::before {
+  content: "▸ ";
+  color: var(--accent-2, #b8862b);
+  font-weight: 700;
+}

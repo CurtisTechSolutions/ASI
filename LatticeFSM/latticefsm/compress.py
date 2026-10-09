@@ -43,7 +43,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields
 
 from .edge import Edge, Weighting
-from .geometry import center, center_out, shell_sizes, shells
+from .geometry import center, center_out, focus_index, shell_sizes, shells
 from .lattice import Lattice, State
 from .machine import Machine, _softmax
 
@@ -191,6 +191,7 @@ class Core:
         S, A, _ = self.shape
         lattice = Lattice(S, self.alphabet, self._prototype())
         lattice.states = [State.from_list(v) for v in self.machine["states"]]
+        lattice.state_ids = list(self.machine.get("state_ids", range(S)))
         limit = len(self.order)
         if shells is not None:
             limit = sum(shell_sizes(self.shape)[:max(0, shells)])
@@ -241,18 +242,53 @@ class Core:
         logits = [self.edge(s, a, t).log_weight(clock, life, stim) for t in range(self.shape[2])]
         return _softmax(logits, st["temperature"] if temperature is None else temperature)
 
-    def run(self, text: str, from_middle: bool = False) -> tuple[list[int], bool]:
-        """The greedy walk of ``text``, read straight from the code, from the start state or (``from_middle``) the
-        middle state: the states it passes through, and whether the last accepts."""
-        state = self.center[0] if from_middle else self.machine["settings"]["start"]
+    def run(self, text: str, from_middle: bool = False, focus: float | None = None,
+            skip: bool | None = None) -> tuple[list[int], bool]:
+        """The greedy walk of ``text``, read straight from the code, decoding only the rows it looks at.  It starts
+        as the machine's runs do - the middle state (``from_middle``), the node a ``focus`` picks, the learned
+        focus's node, the machine's focus node, or its start state - and skips as the machine would (the machine's
+        ``skip``, or ``skip``).  The states it stops at, and whether the last accepts."""
+        from .focus import FocusLearner
+        st = self.machine["settings"]
+        syms = [ch for ch in text if not ch.isspace()]
+        if from_middle:
+            state = self.center[0]
+        elif focus is not None:
+            state = focus_index(self.shape[0], focus)
+        elif st.get("learn_focus") and self.machine.get("focus_learner"):
+            learner = FocusLearner.from_dict(self.machine["focus_learner"])
+            state = focus_index(self.shape[0], learner.predict(syms))
+        elif st.get("focus") is not None:
+            state = focus_index(self.shape[0], st["focus"])
+        else:
+            state = st["start"]
+        do_skip = bool(st.get("skip")) if skip is None else bool(skip)
+        margin = float(st.get("skip_margin", 0.0))
+        temp = st["temperature"] or 1.0
         states = [state]
-        accepting = {s[0] for s in self.machine["states"] if s[1]}
-        for ch in text:
-            if ch.isspace():
-                continue
-            probs = self.probabilities(state, ch, temperature=0.0)
-            state = max(range(len(probs)), key=probs.__getitem__)
+        i = 0
+        while i < len(syms):
+            pa = self.probabilities(state, syms[i], temperature=temp)
+            t1 = max(range(len(pa)), key=pa.__getitem__)
+            if do_skip and i + 1 < len(syms):
+                best_t, best_u, best_v, step_v = 0, 0, -math.inf, -math.inf
+                for t in range(self.shape[0]):
+                    pb = self.probabilities(t, syms[i + 1], temperature=temp)
+                    u = max(range(len(pb)), key=pb.__getitem__)
+                    v = math.log(max(pa[t], 1e-300)) + math.log(max(pb[u], 1e-300))
+                    if v > best_v:
+                        best_t, best_u, best_v = t, u, v
+                    if t == t1:
+                        step_v = v
+                if best_v > step_v + margin:
+                    state = best_u
+                    states.append(state)
+                    i += 2
+                    continue
+            state = t1
             states.append(state)
+            i += 1
+        accepting = {s[0] for s in self.machine["states"] if s[1]}
         return states, state in accepting
 
     # ---- persistence -----------------------------------------------------------------------------------------------
@@ -315,6 +351,8 @@ def _machine_record(m: Machine) -> dict:
         "settings": m.settings_dict(), "clock": m.clock, "state": m.state, "runs": m.runs, "credits": m.credits,
         "compressions": m.compressions, "since_compression": m.since_compression,
         "last_compressed": m.last_compressed, "stimulation": [m._stimulation, m._stimulation_stamp],
+        "skips": m.skips, "swaps": m.swaps, "since_rearrange": m.since_rearrange,
+        "focus_learner": m.focus_learner.to_dict(), "state_ids": list(m.lattice.state_ids),
         "states": [s.to_list() for s in m.lattice.states], "lattice_prototype": m.lattice.prototype.to_list(),
     }
 

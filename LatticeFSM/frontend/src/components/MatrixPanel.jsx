@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
-import { cellStyle, isCenter } from "../matrix.js";
+import { cellStyle, focusIndex, isCenter, onVector } from "../matrix.js";
 import { fmtNum } from "../util.js";
 import Alert from "./Alert.jsx";
 import EdgeCard from "./EdgeCard.jsx";
@@ -74,7 +74,9 @@ export default function MatrixPanel({ stats, tick }) {
           <b>{slice ? fmtNum(slice.stimulation, 2) : "–"}</b>. Beneath: the channel's width and how often the edge was
           traversed. ✓ marks an accepting state, ← the state the machine is in, and the ringed cell on symbol{" "}
           {stats && stats.center && alphabet[stats.center[1]]} is the matrix's central node, the one the Compress tab folds
-          the matrix into.
+          the matrix into. On that slice the shaded column {stats && stats.center ? stats.center[2] : ""} is the central
+          vertical vector, and the cell marked ▸ is the node the focus starts runs from. A state's number after # is the
+          one it was made with, when the nodes have rearranged themselves.
         </p>
         <Alert message={error} onDismiss={() => setError(null)} />
         <div className="table-wrap matrix-wrap">
@@ -93,14 +95,30 @@ export default function MatrixPanel({ stats, tick }) {
             <tbody>
               {rows.map((row) => (
                 <tr key={row.source}>
-                  <th className={slice && row.source === slice.state ? "here" : ""}>
+                  <th
+                    className={slice && row.source === slice.state ? "here" : ""}
+                    title={stats && stats.state_order ? `state #${stats.state_order[row.source]} sits here` : undefined}
+                  >
                     {row.source}
+                    {stats && stats.state_order && stats.state_order[row.source] !== row.source ? (
+                      <small className="muted"> #{stats.state_order[row.source]}</small>
+                    ) : null}
                     {slice && row.source === slice.state ? " ←" : ""}
                   </th>
                   {row.edges.map((e) => (
                     <td
                       key={e.target}
-                      className={`cell${isCenter(stats && stats.center, row.source, slice.symbol_index, e.target) ? " center" : ""}`}
+                      className={`cell${isCenter(stats && stats.center, row.source, slice.symbol_index, e.target) ? " center" : ""}${
+                        onVector(stats && stats.center, slice.symbol_index, e.target) ? " vector" : ""
+                      }${
+                        onVector(stats && stats.center, slice.symbol_index, e.target) &&
+                        stats &&
+                        stats.focus !== null &&
+                        stats.focus !== undefined &&
+                        row.source === focusIndex(S, stats.focus)
+                          ? " focus"
+                          : ""
+                      }`}
                       style={cellStyle(e.probability)}
                       title={`seen ${e.seen}, width ${fmtNum(e.width, 2)}, net ${fmtNum(e.net, 2)}, log-weight ${fmtNum(e.log_weight, 2)}`}
                       onClick={() => showEdge(row.source, e.target)}

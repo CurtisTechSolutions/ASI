@@ -14,7 +14,8 @@ use std::fs;
 use std::io::{Read, Write};
 
 use crate::edge::{Edge, Weighting};
-use crate::geometry::{center, center_out, shell_sizes, shells};
+use crate::focus::FocusLearner;
+use crate::geometry::{center, center_out, check_focus, focus_index, shell_sizes, shells};
 use crate::gzip;
 use crate::json::{parse, Json};
 use crate::lattice::Lattice;
@@ -251,6 +252,14 @@ fn machine_record(m: &Machine) -> Json {
         .with("compressions", (m.compressions as f64).into())
         .with("since_compression", (m.since_compression as f64).into())
         .with("last_compressed", m.last_compressed.into())
+        .with("skips", (m.skips as f64).into())
+        .with("swaps", (m.swaps as f64).into())
+        .with("since_rearrange", (m.since_rearrange as f64).into())
+        .with("focus_learner", m.focus_learner.to_json())
+        .with(
+            "state_ids",
+            Json::Array(m.lattice.state_ids.iter().map(|&i| i.into()).collect()),
+        )
         .with("stimulation", m.to_json_stimulation())
         .with(
             "states",
@@ -260,7 +269,7 @@ fn machine_record(m: &Machine) -> Json {
 }
 
 /// The record's keys a rebuilt machine takes back.
-const RECORD_KEYS: [&str; 9] = [
+const RECORD_KEYS: [&str; 13] = [
     "settings",
     "clock",
     "state",
@@ -270,6 +279,10 @@ const RECORD_KEYS: [&str; 9] = [
     "since_compression",
     "last_compressed",
     "stimulation",
+    "skips",
+    "swaps",
+    "since_rearrange",
+    "focus_learner",
 ];
 
 impl Core {
@@ -406,6 +419,9 @@ impl Core {
         let states = self.machine.get("states").cloned().unwrap_or(Json::Array(vec![]));
         let mut lat_json = lattice.to_json();
         lat_json.set("state_records", states);
+        if let Some(ids) = self.machine.get("state_ids") {
+            lat_json.set("state_ids", ids.clone());
+        }
         let mut doc = Json::object()
             .with("format", "latticefsm-machine".into())
             .with("version", 1.0.into());
@@ -485,20 +501,79 @@ impl Core {
     /// The greedy walk of `text`, read straight from the code, from the start state or (`from_middle`) the middle
     /// state: the states it passes through, and whether the last accepts.
     pub fn run(&self, text: &str, from_middle: bool) -> Result<(Vec<usize>, bool), String> {
+        self.walk(text, from_middle, None, None)
+    }
+
+    /// The greedy walk of `text`, read straight from the code, decoding only the rows it looks at. It starts as the
+    /// machine's runs do - the middle state, the node `focus` picks, the learned focus's node, the machine's focus
+    /// node, or its start state - and skips as the machine would (its `skip`, or `skip`). The states it stops at,
+    /// and whether the last accepts.
+    pub fn walk(
+        &self,
+        text: &str,
+        from_middle: bool,
+        focus: Option<f64>,
+        skip: Option<bool>,
+    ) -> Result<(Vec<usize>, bool), String> {
+        let symbols: Vec<usize> = text
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|ch| {
+                self.alphabet
+                    .iter()
+                    .position(|s| *s == ch.to_string())
+                    .ok_or_else(|| format!("{ch:?} is not in the alphabet"))
+            })
+            .collect::<Result<_, _>>()?;
+        let settings = self.machine.get("settings").cloned().unwrap_or(Json::object());
+        let n = self.shape.0;
         let mut state = if from_middle {
             self.center().0
+        } else if let Some(f) = focus {
+            focus_index(n, Some(check_focus(f)?))
+        } else if settings.bool_or("learn_focus", false) && self.machine.get("focus_learner").is_some() {
+            let learner = FocusLearner::from_json(self.machine.get("focus_learner").expect("checked"))?;
+            focus_index(n, Some(learner.predict(&symbols)))
+        } else if let Some(f) = settings.get("focus").and_then(Json::as_f64) {
+            focus_index(n, Some(f))
         } else {
-            self.setting("start") as usize
+            settings.num("start", 0.0) as usize
+        };
+        let do_skip = skip.unwrap_or_else(|| settings.bool_or("skip", false));
+        let margin = settings.num("skip_margin", 0.0);
+        let temp = match settings.num("temperature", 1.0) {
+            t if t > 0.0 => t,
+            _ => 1.0,
         };
         let mut states = vec![state];
-        for ch in text.chars().filter(|c| !c.is_whitespace()) {
-            let a = self
-                .alphabet
-                .iter()
-                .position(|s| *s == ch.to_string())
-                .ok_or_else(|| format!("{ch:?} is not in the alphabet"))?;
-            state = argmax(&self.probabilities(state, a, None, Some(0.0))?);
+        let mut i = 0;
+        while i < symbols.len() {
+            let pa = self.probabilities(state, symbols[i], None, Some(temp))?;
+            let t1 = argmax(&pa);
+            if do_skip && i + 1 < symbols.len() {
+                let (mut best_t, mut best_u, mut best_v, mut step_v) = (0, 0, f64::NEG_INFINITY, f64::NEG_INFINITY);
+                for (t, &pt) in pa.iter().enumerate().take(n) {
+                    let pb = self.probabilities(t, symbols[i + 1], None, Some(temp))?;
+                    let u = argmax(&pb);
+                    let v = pt.max(1e-300).ln() + pb[u].max(1e-300).ln();
+                    if v > best_v {
+                        (best_t, best_u, best_v) = (t, u, v);
+                    }
+                    if t == t1 {
+                        step_v = v;
+                    }
+                }
+                let _ = best_t;
+                if best_v > step_v + margin {
+                    state = best_u;
+                    states.push(state);
+                    i += 2;
+                    continue;
+                }
+            }
+            state = t1;
             states.push(state);
+            i += 1;
         }
         let accepting = self
             .machine

@@ -25,7 +25,7 @@ use latticefsm::compress::{compress, expansion, fidelity, load_core, Core, Preci
 use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
 use latticefsm::languages::{examples, language, LANGUAGES};
-use latticefsm::machine::{load_machine, Machine, Settings, DEFAULT_ALPHABET, DEFAULT_STATES};
+use latticefsm::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
 use latticefsm::rng::Rng;
 use latticefsm::server;
 
@@ -100,6 +100,10 @@ commands
               --core FILE saves the code
   expand      --core FILE [--shells K]: rebuild a machine from the central node outward; --save it
   core-run TEXT --core FILE [--from-middle]: the greedy walk read straight from the code
+  focus       --level F (0..1) | --none | --learn on|off [--text T]: the node of the central vertical vector runs start
+              from - none or 0 the top, 1 the bottom - or a focus learned from the input
+  skip on|off [--margin M]: let runs skip a node when a two-edge path is more efficient
+  rearrange   [--full] | --swap states|symbols I J: let the nodes rearrange themselves toward the centre, or swap two
   teach S SYM T [--amount R]   traverse one edge deliberately and credit it
   accuracy    the share of --tests random strings of --language classified right (nothing moves)
   table       the greedy transition table (nothing moves)
@@ -115,6 +119,7 @@ machine options (train, demo, serve without --load)
   --baseline 1  --calm LIFE
   --temperature 1  --discount 0.8  --seed 1  --use-widening 0.01  --reward-widening 0.2  --punish-narrowing 0.2
   --compress-every N (0: never)  --compress-precision exact|float32|float16  --compress-rebuild
+  --focus F (0..1)  --learn-focus  --skip  --skip-margin M  --rearrange-every N (0: never)
 common options
   --load FILE  --save FILE (.json or .json.gz)  --stimulation X (run)  --temperature T (run, accuracy)
   --language even-b|contains-aa|ends-ab|mod3-a  --episodes N  --max-length 6  --tests 300
@@ -144,6 +149,13 @@ fn settings(a: &Args) -> Settings {
             .flatten()
             .unwrap_or(Precision::Exact),
         compress_rebuild: a.has("compress-rebuild"),
+        focus: a.get("focus").and_then(|v| v.parse().ok()),
+        learn_focus: a.has("learn-focus"),
+        focus_rate: a.num("focus-rate", d.focus_rate),
+        focus_explore: a.num("focus-explore", d.focus_explore),
+        skip: a.has("skip"),
+        skip_margin: a.num("skip-margin", 0.0),
+        rearrange_every: a.num("rearrange-every", 0.0).max(0.0) as u64,
     }
 }
 
@@ -196,6 +208,9 @@ fn main() {
         "compress" => compress_cmd(&a),
         "expand" => expand_cmd(&a),
         "core-run" => core_run(&a),
+        "focus" => focus_cmd(&a),
+        "skip" => skip_cmd(&a),
+        "rearrange" => rearrange_cmd(&a),
         "teach" => teach(&a),
         "accuracy" => accuracy(&a),
         "table" => table(&a),
@@ -404,6 +419,106 @@ fn expand_cmd(a: &Args) -> Result<(), String> {
     save_if_asked(&m, a)
 }
 
+fn focus_line(m: &Machine) -> String {
+    if m.learn_focus {
+        return "focus learned from the input: each run starts from the node of the central vertical vector it picks"
+            .to_string();
+    }
+    match m.focus() {
+        None => format!("no focus: runs start from the start state, {}", m.start),
+        Some(f) => {
+            let (s, a, t) = latticefsm::geometry::focus_node(m.lattice.shape(), Some(f));
+            format!(
+                "focus {f}: runs start from node ({s}, {}, {t}) of the central vertical vector, state {s}",
+                m.alphabet()[a]
+            )
+        }
+    }
+}
+
+fn focus_cmd(a: &Args) -> Result<(), String> {
+    let mut m = machine(a)?;
+    if a.has("none") {
+        m.set_focus(None)?;
+    } else if let Some(level) = a.get("level") {
+        m.set_focus(Some(level.parse().map_err(|_| "bad --level")?))?;
+    }
+    match a.get("learn") {
+        Some("on") => m.learn_focus = true,
+        Some("off") => m.learn_focus = false,
+        Some(other) => return Err(format!("--learn is on or off, got {other:?}")),
+        None => {}
+    }
+    println!("{}", focus_line(&m));
+    if let (true, Some(text)) = (m.learn_focus, a.get("text")) {
+        let symbols = m.tokenize(text)?;
+        let f = m.focus_learner.predict(&symbols);
+        println!(
+            "  the learner reads {text:?} as focus {f:.3}: state {}",
+            m.focus_state(f)
+        );
+    }
+    save_if_asked(&m, a)
+}
+
+fn skip_cmd(a: &Args) -> Result<(), String> {
+    let mut m = machine(a)?;
+    match a.positional.first().map(String::as_str) {
+        Some("on") => m.skip = true,
+        Some("off") => m.skip = false,
+        _ => return Err("skip needs on or off".to_string()),
+    }
+    if let Some(margin) = a.get("margin") {
+        let margin: f64 = margin.parse().map_err(|_| "bad --margin")?;
+        if margin < 0.0 {
+            return Err("--margin must be >= 0".to_string());
+        }
+        m.skip_margin = margin;
+    }
+    println!(
+        "skips {}, margin {}; {} taken so far",
+        if m.skip { "on" } else { "off" },
+        m.skip_margin,
+        m.skips
+    );
+    save_if_asked(&m, a)
+}
+
+fn rearrange_cmd(a: &Args) -> Result<(), String> {
+    let mut m = machine(a)?;
+    if let Some(kind) = a.get("swap") {
+        let (i, j) = (
+            a.positional.first().ok_or("--swap needs I J")?,
+            a.positional.get(1).ok_or("--swap needs I J")?,
+        );
+        match kind {
+            "states" => m.swap_states(i.parse().map_err(|_| "bad state")?, j.parse().map_err(|_| "bad state")?)?,
+            "symbols" => {
+                let (x, y) = (m.symbol(i)?, m.symbol(j)?);
+                m.swap_symbols(x, y)?
+            }
+            other => return Err(format!("--swap states|symbols, got {other:?}")),
+        }
+        println!("swapped {kind} {i} and {j}");
+    } else {
+        let full = a.has("full");
+        let made = m.rearrange(full);
+        println!(
+            "{} swaps toward the centre{}",
+            made.len(),
+            if full { " (until settled)" } else { " (one pass)" }
+        );
+    }
+    let order: Vec<String> = m.lattice.state_ids.iter().map(|i| i.to_string()).collect();
+    println!(
+        "  states, top to bottom: [{}]  (start state {})",
+        order.join(", "),
+        m.start
+    );
+    println!("  symbols, in order: {}", m.alphabet().concat());
+    save_if_asked(&m, a)
+}
+
 fn core_run(a: &Args) -> Result<(), String> {
     let core = load_core(a.get("core").ok_or("core-run needs --core FILE")?)?;
     let text = a.positional.first().ok_or("core-run needs a string")?;
@@ -433,15 +548,32 @@ fn run(a: &Args) -> Result<(), String> {
     let times = a.num("times", 1.0) as usize;
     for _ in 0..times.max(1) {
         let symbols = m.tokenize(&text)?;
-        let r = if a.has("from-middle") {
-            m.run_from_middle(&symbols, stimulation, temperature, quiet)
+        let focus = if a.has("load") {
+            a.get("focus")
+                .map(|f| f.parse::<f64>().map_err(|_| "bad --focus"))
+                .transpose()?
         } else {
-            m.run(&symbols, stimulation, temperature, quiet)
+            None
         };
+        let walk = Walk {
+            stimulation,
+            temperature,
+            quiet,
+            from_middle: a.has("from-middle"),
+            focus,
+            skip: if a.has("skip") { Some(true) } else { None },
+        };
+        let r = m.walk(&symbols, walk)?;
         let steps: Vec<String> = r
             .transitions
             .iter()
-            .map(|t| format!("{} -{}({:.2})-> {}", t.source, t.symbol, t.probability, t.target))
+            .map(|t| match t.skipped {
+                None => format!("{} -{}({:.2})-> {}", t.source, t.symbol, t.probability, t.target),
+                Some(k) => format!(
+                    "{} ={}({:.2})=> {} [skipping {}]",
+                    t.source, t.symbol, t.probability, t.target, k
+                ),
+            })
             .collect();
         println!(
             "{}{}  => {} ({}), log p {:.3}, stimulation {:.2}",

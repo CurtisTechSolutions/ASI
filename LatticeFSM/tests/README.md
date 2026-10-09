@@ -7,7 +7,7 @@ python3 -m latticefsm test         # the same, through the CLI
 make parity                        # TestRustParity alone (needs make build)
 ```
 
-Plain `unittest`, standard library, a few seconds, deterministic (54 tests; the
+Plain `unittest`, standard library, a few seconds, deterministic (67 tests; the
 parity ones need `rust/target/release/latticefsm` and skip without it). Each
 test names the rule it protects; the ones that hold the line on something
 this model is specifically about:
@@ -41,6 +41,10 @@ this model is specifically about:
 | `TestFromTheMiddle` | a run can start from the middle state, traversed or quiet |
 | `TestCompressEvery` | the matrix is folded every N transitions (a lesson counts, a quiet run does not); an exact rebuild on a clock changes nothing; a float16 one is applied; a rebuild keeps the run's path valid; the schedule is saved |
 | `TestRustCompressionParity` | the two ports write the same code byte for byte at every precision, half floats on rounding boundaries included, and each rebuilds the other's |
+| `TestFocus` | focus's 13 equal bands on the central vertical vector, the refusals, runs starting from the focus node, and the learned focus reading the input and moving with credit (toward a rewarded draw, away from a punished one) |
+| `TestSkip` | a skip takes the more efficient two-edge path in one move, traverses and credits both edges, does not visit the node it skips, and respects the margin; without skips nothing changes, edge for edge |
+| `TestRearrange` | a swap is an exact relabelling (every weight at its new coordinates, accepting states with their states); rearranging settles busiest at the centre on both axes and moves a taught machine's edges into the inner shells; a rearrangement on a clock waits for the end of the run |
+| `TestRustWalkParity` | the two ports agree on focus bands, on a full rearrangement down to the code's bytes, and on quiet walks with skips |
 | `TestCLI.test_every_command` | every command runs out of a checkout, `compress`, `expand`, `core-run` and `run --from-middle` among them |
 | `TestRustParity.test_the_deterministic_experiments_agree` | the stimulation and adaptation records from the two ports are equal to `10⁻⁹` |
 | `TestRustParity.test_a_machine_file_crosses` | a machine trained by the Rust binary loads in Python to the same greedy table, and saves back to a file the binary reads |

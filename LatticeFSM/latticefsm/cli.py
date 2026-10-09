@@ -9,6 +9,9 @@
     stats       size, memory, clock and stimulation
     tick        let time pass
     stimulate   raise the stimulation
+    focus       set the machine's focus (a node of the central vertical vector to start from), or learn it
+    skip        let runs skip a node when a two-edge path is more efficient
+    rearrange   let the nodes rearrange themselves toward the centre (one pass, or --full), or swap two
     compress    fold the matrix into its central node (exact, float32 or float16) and save the code
     expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
     core-run    walk a string straight from a code, decoding only the cells the walk reaches
@@ -44,6 +47,13 @@ def _add_machine_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--discount", type=float, default=DISCOUNT, help="credit each step back from a run's end receives")
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--language", default="even-b", choices=sorted(LANGUAGES), help="the language train / demo / accuracy use")
+    p.add_argument("--focus", type=float, default=None,
+                   help="0..1: the node of the central vertical vector runs start from (0 or none the top, 1 the bottom)")
+    p.add_argument("--learn-focus", action="store_true", help="read the focus off the input, learned from credit")
+    p.add_argument("--skip", action="store_true", help="skip a node when a two-edge path is more efficient")
+    p.add_argument("--skip-margin", type=float, default=0.0, help="how much more efficient (log-probability)")
+    p.add_argument("--rearrange-every", type=int, default=0,
+                   help="let the nodes rearrange themselves every N transitions (0: never)")
     p.add_argument("--compress-every", type=int, default=0,
                    help="fold the matrix into its central node every N transitions (0: never)")
     p.add_argument("--compress-precision", choices=list(PRECISIONS), default="exact")
@@ -64,7 +74,8 @@ def _fresh(args) -> Machine:
     return Machine(args.states, list(args.alphabet), accepting=accepting, start=args.start, life=args.life,
                    baseline=args.baseline, calm=args.calm, temperature=args.temperature, discount=args.discount,
                    seed=args.seed, compress_every=args.compress_every, compress_precision=args.compress_precision,
-                   compress_rebuild=args.compress_rebuild)
+                   compress_rebuild=args.compress_rebuild, focus=args.focus, learn_focus=args.learn_focus,
+                   skip=args.skip, skip_margin=args.skip_margin, rearrange_every=args.rearrange_every)
 
 
 def _machine(args) -> Machine:
@@ -113,8 +124,11 @@ def cmd_run(args) -> int:
     m = _machine(args)
     for _ in range(max(1, args.times)):
         r = m.run(args.text, stimulation=args.stimulation, temperature=args.temperature_run, quiet=args.quiet,
-                  from_middle=args.from_middle)
-        steps = "  ".join(f"{t.source} -{t.symbol}({t.probability:.2f})-> {t.target}" for t in r.transitions)
+                  from_middle=args.from_middle, focus=args.focus if args.load else None,
+                  skip=True if args.skip else None)
+        steps = "  ".join(f"{t.source} -{t.symbol}({t.probability:.2f})-> {t.target}" if t.skipped is None else
+                          f"{t.source} ={t.symbol}({t.probability:.2f})=> {t.target} [skipping {t.skipped}]"
+                          for t in r.transitions)
         print(f"{'quietly: ' if args.quiet else ''}{steps or '(empty)'}  => {r.final} "
               f"({'accepted' if r.accepted else 'rejected'}), log p {r.log_probability:.3f}, "
               f"stimulation {m.stimulation:.2f}")
@@ -159,6 +173,62 @@ def cmd_expand(args) -> int:
     print(f"rebuilt from the central node outward, {shown}: {st['touched']} of {st['edges']} edges written, "
           f"clock {st['clock']}")
     _table(m)
+    _save(m, args)
+    return 0
+
+
+def _focus_line(m) -> str:
+    if m.learn_focus:
+        return "focus learned from the input: each run starts from the node of the central vertical vector it picks"
+    if m.focus is None:
+        return f"no focus: runs start from the start state, {m.start}"
+    s, a, t = m.stats()["focus_node"]
+    return f"focus {m.focus:g}: runs start from node ({s}, {m.alphabet[a]}, {t}) of the central vertical vector, state {s}"
+
+
+def cmd_focus(args) -> int:
+    m = _machine(args)
+    if args.none:
+        m.focus = None
+    elif args.level is not None:
+        m.focus = args.level
+    if args.learn is not None:
+        m.learn_focus = args.learn == "on"
+    print(_focus_line(m))
+    if m.learn_focus and args.text:
+        f = m.focus_learner.predict([c for c in args.text if not c.isspace()])
+        print(f"  the learner reads {args.text!r} as focus {f:.3f}: state {m.focus_state(f)}")
+    _save(m, args)
+    return 0
+
+
+def cmd_skip(args) -> int:
+    m = _machine(args)
+    m.skip = args.state == "on"
+    if args.margin is not None:
+        if args.margin < 0:
+            raise SystemExit("--margin must be >= 0")
+        m.skip_margin = args.margin
+    print(f"skips {'on' if m.skip else 'off'}, margin {m.skip_margin:g}; {m.skips} taken so far")
+    _save(m, args)
+    return 0
+
+
+def cmd_rearrange(args) -> int:
+    m = _machine(args)
+    if args.swap:
+        kind, i, j = args.swap
+        if kind == "states":
+            m.swap_states(int(i), int(j))
+        else:
+            m.swap_symbols(i, j)
+        print(f"swapped {kind} {i} and {j}")
+    else:
+        made = m.rearrange(full=args.full)
+        print(f"{len(made)} swaps toward the centre{' (until settled)' if args.full else ' (one pass)'}")
+    st = m.stats()
+    print(f"  states, top to bottom: {st['state_order']}  (start state {m.start})")
+    print(f"  symbols, in order: {''.join(st['symbol_order'])}")
     _save(m, args)
     return 0
 
@@ -323,6 +393,17 @@ def build_parser() -> argparse.ArgumentParser:
     q = add("stimulate", cmd_stimulate, "raise the stimulation by --amount, or set --level")
     q.add_argument("--amount", type=float, default=1.0)
     q.add_argument("--level", type=float, default=None)
+    q = add("focus", cmd_focus, "set the focus, or learn it from the input")
+    q.add_argument("--level", type=float, default=None, help="0..1")
+    q.add_argument("--none", action="store_true", help="no focus: runs start from the start state")
+    q.add_argument("--learn", choices=("on", "off"), default=None)
+    q.add_argument("--text", default=None, help="show the focus the learner reads off this input")
+    q = add("skip", cmd_skip, "let runs skip a node when a two-edge path is more efficient")
+    q.add_argument("state", choices=("on", "off"))
+    q.add_argument("--margin", type=float, default=None)
+    q = add("rearrange", cmd_rearrange, "let the nodes rearrange themselves toward the centre, or swap two")
+    q.add_argument("--full", action="store_true", help="passes until no swap is left")
+    q.add_argument("--swap", nargs=3, metavar=("states|symbols", "I", "J"), default=None)
     q = add("compress", cmd_compress, "fold the matrix into its central node and save the code")
     q.add_argument("--precision", choices=list(PRECISIONS), default=None, help="default exact: no loss")
     q.add_argument("--budget", type=int, default=None, help="bytes: the least lossy precision that fits")
