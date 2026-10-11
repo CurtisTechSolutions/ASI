@@ -17,6 +17,7 @@
     core-run    walk a string straight from a code, decoding only the cells the walk reaches
     network     machines connected into a network: new, fit, evaluate, predict, translate, encode, summary, make-data
     ngram       predict the next thing: train an N-gram model on a corpus or with Ollama, predict, generate
+    chain       one input to a node, the output node predicts the next: walks only as deep as confidence needs
     base64      encode anything (text, an image, a video) as base64, or decode it back
     experiment  the learning, stimulation, adaptation and compression experiments
     test        run the test suite
@@ -524,6 +525,108 @@ def cmd_ngram(args) -> int:
     return 0
 
 
+def _chain_data(args) -> list[str]:
+    return [p for d in (args.data or ["data/corpus"]) for p in d.split(",") if p]
+
+
+def _chain_test(m, args) -> list:
+    from .ngram import corpus_sequences, split_lines
+    test = []
+    for _, seqs in corpus_sequences(_chain_data(args), m.unit, m.lower):
+        test += split_lines(seqs, args.held_out)[1] if args.held_out else seqs
+    return test
+
+
+def _show(token) -> str:
+    return "\u00b7" if token is None else token
+
+
+def cmd_chain(args) -> int:
+    from .chain import Chain, load_chain
+    from .ngram import detokenize
+    if args.load and os.path.exists(args.load):
+        m = load_chain(args.load)
+    elif args.load and args.action != "train":
+        raise SystemExit(f"no chain at {args.load}")
+    else:
+        m = Chain(args.nodes, args.unit, lower=not args.keep_case, confidence=args.confidence)
+        if args.action != "train":
+            # nothing to load: learn the data first (every --held-out-th line kept back), quietly
+            m.train_paths(_chain_data(args), held_out=args.held_out, predict=False)
+    if args.set_confidence is not None:
+        m.confidence = args.set_confidence
+    what = "base64 letters" if m.unit == "base64" else m.unit + "s"
+    if args.action == "train":
+        _, test = m.train_paths(_chain_data(args), held_out=args.held_out, predict=not args.no_predict,
+                                credit=args.self_credit)
+        learned = m.reset_online()
+        st = m.stats()
+        print(f"a chain of {m.nodes} nodes ({m.depth} input nodes and the output node) over {what}: {st['tokens']} "
+              f"inputs, {st['vocab']} distinct, {st['contexts']} node contexts, from {st['sources']} sources")
+        if learned["predicted"]:
+            print(f"while training: predicted {learned['predicted']} inputs before learning each, first guess right "
+                  f"{_fmt(learned['accuracy'])}, perplexity {_fmt(learned['perplexity'], 2)}, "
+                  f"{_fmt(learned['depth'], 2)} input nodes traversed")
+        if test:
+            ev = m.evaluate(test)
+            print(f"held out ({len(test)} lines, {ev['tokens']} inputs) at confidence {m.confidence:.2f}: perplexity "
+                  f"{_fmt(ev['perplexity'], 2)}, accuracy {_fmt(ev['accuracy'])}, {_fmt(ev['depth'], 2)} of "
+                  f"{m.depth} input nodes traversed")
+    elif args.action == "predict":
+        for text in args.text or [""]:
+            e = m.explain(text, args.k)
+            print(f"after {text!r}:" if text else "at the start:")
+            print("  input nodes: " + " ".join(_show(t) for t in e["inputs"]))
+            steps = " > ".join(f"node {st['node']} " + ("(output)" if st["input"] is None else repr(st["input"])) +
+                               f" {st['confidence']:.3f}" for st in e["walk"])
+            gathered = e["walk"][-1]["gathered"] if e["walk"] else 0.0
+            print(f"  walk: {steps or '(nothing learned)'}; {e['depth']} of {m.depth} input nodes, "
+                  f"confidence gathered {gathered:.3f}")
+            for tok, p in e["next"]:
+                print(f"  {tok:<16} {p:.6f}")
+    elif args.action == "generate":
+        import random as _random
+        rng = _random.Random(args.seed)
+        for text in args.text or [""]:
+            start = m.prompt_tokens(text)
+            toks, depths = m.continue_tokens(start, args.max_tokens, args.temperature, rng)
+            if m.unit == "base64":
+                line = detokenize(start + toks, m.unit)
+            else:
+                line = f"{text}{' ' if text and toks and m.unit == 'word' else ''}{detokenize(toks, m.unit)}"
+            mean = sum(depths) / len(depths) if depths else 0.0
+            print(f"{line}\n  ({len(depths)} walks, {mean:.2f} input nodes traversed on average: "
+                  f"{' '.join(str(d) for d in depths)})")
+    elif args.action == "evaluate":
+        test = _chain_test(m, args)
+        ev = m.evaluate(test)
+        print(f"{len(test)} lines, {ev['tokens']} inputs at confidence {m.confidence:.2f}: perplexity "
+              f"{_fmt(ev['perplexity'], 6)}, bits {_fmt(ev['bits'], 6)}, accuracy {_fmt(ev['accuracy'], 6)}, "
+              f"input nodes traversed {_fmt(ev['depth'], 6)}; walks by depth: {' '.join(map(str, ev['depths']))}")
+    elif args.action == "sweep":
+        test = _chain_test(m, args)
+        thresholds = [float(t) for t in args.thresholds.split(",") if t.strip()]
+        print(f"{len(test)} held-out lines; the less confidence a walk needs, the fewer of the {m.depth} input nodes "
+              f"it traverses:")
+        for r in m.sweep(test, thresholds):
+            print(f"  confidence {r['confidence']:.2f}: accuracy {_fmt(r['accuracy'], 4)}, perplexity "
+                  f"{_fmt(r['perplexity'], 3)}, {_fmt(r['depth'], 3)} input nodes traversed")
+    elif args.action == "stats":
+        st = m.stats()
+        print(f"a chain of {m.nodes} nodes over {what}, confidence {m.confidence:.2f}: {st['tokens']} inputs, "
+              f"{st['vocab']} distinct, {st['contexts']} node contexts, {st['credited']} credited")
+        for d in st["depths"]:
+            print(f"  depth {d['depth']}: {d['contexts']} contexts, tested {d['tested']} times, right "
+                  f"{_fmt(d['accuracy'])}")
+    elif args.action == "credit":
+        for text in args.text:
+            print(f"credited {m.credit_text(text, args.amount)} nodes on the walks of {text!r} with {args.amount:+}")
+    if args.save and args.action in ("train", "credit"):
+        m.save(args.save)
+        print(f"saved {args.save}", file=sys.stderr)
+    return 0
+
+
 def cmd_base64(args) -> int:
     from . import b64
     for item in args.input or ["-"]:
@@ -755,6 +858,32 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--out", default=None, help="generate: write a base64 model's output, decoded, to this file")
     q.add_argument("--prefix-from", default=None, help="generate --out: start from the first bytes of this file")
     q.add_argument("--prefix-bytes", type=int, default=64)
+    q = add("chain", cmd_chain, "one input to a node, the output node predicts the next: walks only as deep as "
+            "confidence needs", machine=False, load=False)
+    q.add_argument("action", choices=("train", "predict", "generate", "evaluate", "sweep", "stats", "credit"))
+    q.add_argument("text", nargs="*", help="predict / generate / credit: the texts")
+    q.add_argument("--data", nargs="+", default=None, help="files or directories (default data/corpus)")
+    q.add_argument("--load", default=None, help="a saved chain (without one, the data is learned first)")
+    q.add_argument("--save", default=None, help="write the chain here (.json or .json.gz)")
+    q.add_argument("--nodes", type=int, default=8, help="input nodes + the output node (default 8)")
+    q.add_argument("--unit", choices=("word", "char", "sound", "base64"), default="char",
+                   help="what one node holds (default char: a letter)")
+    q.add_argument("--keep-case", action="store_true", help="do not lower-case")
+    q.add_argument("--confidence", type=float, default=0.9,
+                   help="the confidence a walk gathers before it stops (0: the output node alone, 1: as deep as it "
+                        "can; default 0.9)")
+    q.add_argument("--set-confidence", type=float, default=None, help="use this threshold with a loaded chain")
+    q.add_argument("--held-out", type=int, default=10, help="hold out every N-th line to measure on (0: none)")
+    q.add_argument("--no-predict", action="store_true", help="train: only learn (by default every input is "
+                   "predicted first)")
+    q.add_argument("--self-credit", type=float, default=0.0,
+                   help="train: reward the nodes behind a right first guess, punish those behind a wrong one")
+    q.add_argument("--thresholds", default="0,0.3,0.5,0.7,0.8,0.9,0.95,1", help="sweep: the confidences")
+    q.add_argument("-k", type=int, default=10, help="predict: how many next inputs")
+    q.add_argument("--max-tokens", type=int, default=40)
+    q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")
+    q.add_argument("--seed", type=int, default=1)
+    q.add_argument("--amount", type=float, default=1.0, help="credit: positive rewards, negative punishes")
     q = add("base64", cmd_base64, "encode anything (a file or a text) as base64, or decode it back", machine=False,
             load=False)
     q.add_argument("action", choices=("encode", "decode"))

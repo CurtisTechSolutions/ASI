@@ -1112,6 +1112,104 @@ class TestNGram(unittest.TestCase):
                 self.assertEqual(m.top(ctx), max(range(1, len(d)), key=lambda w: (d[w], -w)))
 
 
+class TestChain(unittest.TestCase):
+    """One input to a node, the output node predicts the next, and the walk back through the input nodes stops as
+    soon as it has gathered enough confidence - fewer nodes the more confident they are."""
+
+    def corpus(self, unit="char"):
+        from latticefsm.ngram import corpus_sequences, split_lines
+        seqs = [q for _, qs in corpus_sequences(["data/corpus/prose.txt"], unit) for q in qs]
+        return split_lines(seqs, 10)
+
+    def test_abc_fills_nodes_one_to_three_and_node_four_predicts(self):
+        from latticefsm.chain import Chain
+        m = Chain(4, "char", confidence=1.0)
+        m.train_lines(["abcd", "abcd", "abce", "abcd"])
+        e = m.explain("abc")
+        self.assertEqual(e["inputs"], ["a", "b", "c"])
+        self.assertEqual([st["node"] for st in e["walk"]], [4, 3, 2, 1])
+        self.assertEqual([st["input"] for st in e["walk"]], [None, "c", "b", "a"])
+        self.assertEqual(e["next"][0][0], "d")
+        self.assertEqual(Chain(4).explain("abc")["walk"], [])  # nothing learned, nothing to walk
+
+    def test_distributions_and_the_first_guess(self):
+        from latticefsm.chain import Chain
+        train, test = self.corpus()
+        m = Chain(6)
+        m.train_lines(train)
+        for tau in (0.0, 0.5, 0.9, 1.0):
+            for seq in test[:6]:
+                ids = m.history_ids(seq)
+                for i in range(1, len(ids) + 1):
+                    path = m.walk(ids[:i], tau)
+                    d = m._dist(path)
+                    self.assertAlmostEqual(sum(d), 1.0, places=12)
+                    self.assertEqual(d, [m._p(path, w) for w in range(len(d))])
+                    self.assertEqual(m._guess(path), max(range(1, len(d)), key=lambda w: (d[w], -w)))
+        ev0, ev1 = m.evaluate(test, 0.0), m.evaluate(test, 1.0)
+        self.assertEqual(ev0["depth"], 0.0)  # no confidence needed: the output node alone
+        self.assertEqual(ev0["depths"][0], ev0["tokens"])
+        self.assertGreater(ev1["depth"], 3)  # never confident enough: as deep as it can
+        self.assertGreater(ev1["accuracy"], ev0["accuracy"])
+
+    def test_the_more_confident_the_shorter_the_walk(self):
+        from latticefsm.chain import Chain
+        train, test = self.corpus()
+        m = Chain(8)
+        m.train_lines(train)
+        sweep = m.sweep(test, [0.3, 0.5, 0.7, 0.9, 1.0])
+        depths = [r["depth"] for r in sweep]
+        self.assertEqual(depths, sorted(depths))  # a lower threshold, a shorter walk
+        # more training makes the nodes more confident: the same held-out text walks shorter
+        before = m.evaluate(test)["depth"]
+        m.train_lines(train)
+        self.assertLess(m.evaluate(test)["depth"], before)
+        # a reward shortens the walks of what it rewards, a punishment lengthens them
+        text = "the brain is a directed cyclic graph"
+        ids = m.history_ids(m.tokens(text)) + [1]
+        walked = lambda: sum(len(m.walk(ids[:i])) for i in range(1, len(ids)))
+        start = walked()
+        self.assertGreater(m.credit_text(text, 2.0), 0)
+        rewarded = walked()
+        self.assertLess(rewarded, start)
+        m.credit_text(text, -6.0)
+        self.assertGreater(walked(), rewarded)
+
+    def test_predicting_while_learning_changes_nothing_learned(self):
+        from latticefsm.chain import Chain
+        train, _ = self.corpus("word")
+        plain, learner = Chain(4, "word"), Chain(4, "word")
+        plain.train_lines(train, predict=False)
+        n = learner.train_lines(train, predict=True)
+        self.assertEqual(plain.to_dict(), learner.to_dict())
+        online = learner.reset_online()
+        self.assertEqual(online["predicted"], n)
+        self.assertTrue(0 < online["accuracy"] < 1 and 0 < online["depth"] <= 3)
+        self.assertEqual(plain.reset_online()["predicted"], 0)
+        credited = Chain(4, "word")
+        credited.train_lines(train, credit=0.5)
+        self.assertGreater(credited.stats()["credited"], 0)
+
+    def test_the_file(self):
+        from latticefsm.chain import load_chain, Chain
+        train, _ = self.corpus()
+        m = Chain(5, confidence=0.8)
+        m.train_lines(train[:40])
+        m.credit_text("the brain", 1.5)
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("c.json", "c.json.gz"):
+                path = os.path.join(d, name)
+                m.save(path)
+                back = load_chain(path)
+                self.assertEqual(back.to_dict(), m.to_dict())
+                self.assertEqual(back.predict("the bra", 5), m.predict("the bra", 5))
+                self.assertEqual(back.complete("the", 30), m.complete("the", 30))
+        with self.assertRaises(ValueError):
+            Chain(1)
+        with self.assertRaises(ValueError):
+            Chain(4, confidence=1.5)
+
+
 class TestAutotrain(unittest.TestCase):
     """The corpus, then Ollama: sentences, continuations and a judge's credit, measured every round."""
 
@@ -1371,6 +1469,35 @@ class TestRustNGramParity(unittest.TestCase):
                 fake.close()
         self.assertEqual(results["py"], results["rs"])
         self.assertIn("round 2:", results["py"][0])
+
+
+class TestRustChainParity(unittest.TestCase):
+    """The chain is the same in both ports: a chain written by either walks, predicts, writes, sweeps and measures
+    the same in the other, for every unit."""
+
+    def cli(self, port, *args):
+        cmd = [sys.executable, "-m", "latticefsm"] if port == "py" else [RUST]
+        return subprocess.run([*cmd, *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
+
+    def test_chains_cross_both_ways(self):
+        with tempfile.TemporaryDirectory() as d:
+            for unit, nodes, data in (("char", 8, "data/corpus"), ("word", 4, "data/corpus"),
+                                      ("base64", 6, "data/corpus/sentences.txt")):
+                outs = {}
+                for writer in ("py", "rs"):
+                    path = os.path.join(d, f"{unit}-{writer}.json")
+                    trained = self.cli(writer, "chain", "train", "--unit", unit, "--nodes", str(nodes), "--data",
+                                       data, "--self-credit", "0.2", "--save", path)
+                    for reader in ("py", "rs"):
+                        outs[(writer, reader)] = (
+                            trained,
+                            self.cli(reader, "chain", "predict", "the bra", "", "--load", path, "-k", "5"),
+                            self.cli(reader, "chain", "generate", "the brain", "--load", path, "--max-tokens", "30"),
+                            self.cli(reader, "chain", "sweep", "--load", path, "--data", data, "--thresholds",
+                                     "0,0.5,0.9,1"),
+                            self.cli(reader, "chain", "credit", "the brain is", "--load", path))
+                self.assertEqual(len(set(outs.values())), 1, unit)
+                self.assertIn("input nodes traversed", outs[("py", "py")][0])
 
 
 class TestRustCompressionParity(unittest.TestCase):

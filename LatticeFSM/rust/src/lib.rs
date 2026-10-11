@@ -23,6 +23,7 @@
 
 pub mod autotrain;
 pub mod b64;
+pub mod chain;
 pub mod compress;
 pub mod edge;
 pub mod experiment;

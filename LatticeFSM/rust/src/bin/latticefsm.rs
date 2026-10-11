@@ -14,6 +14,7 @@
 //!     core-run    walk a string straight from a code, decoding only the cells the walk reaches
 //!     network     machines connected into a network: new, fit, evaluate, predict, translate, summary
 //!     ngram       predict the next thing: an N-gram model trained on a corpus or with Ollama
+//!     chain       one input to a node, the output node predicts the next: walks only as deep as confidence needs
 //!     experiment  the learning, stimulation, adaptation and compression experiments
 //!     serve       the HTTP API and the React frontend (frontend/dist) on --port
 //!
@@ -25,6 +26,7 @@ use std::process;
 
 use latticefsm::autotrain::{self, Ollama};
 use latticefsm::b64;
+use latticefsm::chain::{load_chain, Chain};
 use latticefsm::compress::{compress, expansion, fidelity, load_core, Core, Precision};
 use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
@@ -148,6 +150,14 @@ commands
               predict TEXT... [-k 10]   the likeliest next tokens        generate TEXT... [--temperature 0]
               evaluate --data ...       perplexity and next-token accuracy on held-out lines
               stats | credit TEXT --amount R | ollama (is it there, which models)
+  chain ACTION     one input to a node (\"abc\": a in node 1, b in node 2, c in node 3), the output node predicts the
+                   next, walking back only until it has gathered --confidence (latticefsm/chain.py, number for number):
+              train      --data ... --nodes 8 --unit char|word|sound|base64 --confidence 0.9 --held-out 10 --save F
+                         (--no-predict, --self-credit R as for ngram)
+              predict TEXT... [-k 10]   the input nodes, the walk and the likeliest next inputs
+              generate TEXT... [--max-tokens 40]   the continuation and how deep every walk went
+              evaluate | sweep [--thresholds 0,0.5,0.9,1]   accuracy and depth on held-out lines
+              stats | credit TEXT --amount R   (without --load the data is learned first; --set-confidence T)
   base64 encode|decode INPUT... [--out FILE]   anything (a file, or a text) as base64, or base64 back to bytes;
               ngram --unit base64 learns any file - text, image, audio, video - letter by letter
   experiment  --which learning|stimulation|adaptation|compression|walk|network|all, --out DIR
@@ -255,6 +265,7 @@ fn main() {
         "network" => network_cmd(&a),
         "base64" => base64_cmd(&a),
         "ngram" => ngram_cmd(&a),
+        "chain" => chain_cmd(&a),
         "accuracy" => accuracy(&a),
         "table" => table(&a),
         "stats" => machine(&a).map(|m| println!("{}", m.stats().pretty(1))),
@@ -1328,6 +1339,264 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
     }
     if matches!(action, "train" | "credit") {
         if let Some(path) = a.get("save") {
+            m.save(path)?;
+            eprintln!("saved {path}");
+        }
+    }
+    Ok(())
+}
+
+fn chain_test(m: &Chain, data: &[String], held_out: usize) -> Result<Vec<Vec<String>>, String> {
+    let mut test = Vec::new();
+    for (_, seqs) in corpus_sequences(data, &m.unit, m.lower)? {
+        if held_out > 0 {
+            test.extend(split_lines(&seqs, held_out).1);
+        } else {
+            test.extend(seqs);
+        }
+    }
+    Ok(test)
+}
+
+fn chain_cmd(a: &Args) -> Result<(), String> {
+    let action = a.positional.first().map(String::as_str).unwrap_or("stats");
+    let texts: Vec<String> = a.positional.iter().skip(1).cloned().collect();
+    let data: Vec<String> = match a.get("data") {
+        Some(d) => d.split(',').filter(|p| !p.is_empty()).map(String::from).collect(),
+        None => vec!["data/corpus".to_string()],
+    };
+    let held_out = a.num("held-out", 10.0) as usize;
+    let mut m = match a.get("load") {
+        Some(p) if std::path::Path::new(p).exists() => load_chain(p)?,
+        Some(p) if action != "train" => return Err(format!("no chain at {p}")),
+        _ => {
+            let mut m = Chain::new(
+                a.num("nodes", 8.0) as usize,
+                &a.str("unit", "char"),
+                !a.has("keep-case"),
+                a.num("confidence", 0.9),
+            )?;
+            if action != "train" {
+                // nothing to load: learn the data first (every --held-out-th line kept back), quietly
+                m.predict = false;
+                m.train_paths(&data, held_out)?;
+            }
+            m
+        }
+    };
+    if a.has("set-confidence") {
+        m.confidence = a.num("set-confidence", m.confidence);
+    }
+    m.predict = !a.has("no-predict");
+    m.self_credit = a.num("self-credit", 0.0);
+    let what = if m.unit == "base64" {
+        "base64 letters".to_string()
+    } else {
+        format!("{}s", m.unit)
+    };
+    let st = |m: &Chain, key: &str| m.stats().num(key, 0.0) as u64;
+    match action {
+        "train" => {
+            let (_, test) = m.train_paths(&data, held_out)?;
+            let learned = m.reset_online();
+            println!(
+                "a chain of {} nodes ({} input nodes and the output node) over {what}: {} inputs, {} distinct, {} node \
+                 contexts, from {} sources",
+                m.nodes,
+                m.depth(),
+                m.clock,
+                m.vocab.len() - 3,
+                st(&m, "contexts"),
+                m.sources.len()
+            );
+            if learned.predicted > 0 {
+                println!(
+                    "while training: predicted {} inputs before learning each, first guess right {}, perplexity {}, {} \
+                     input nodes traversed",
+                    learned.predicted,
+                    fmt_opt(learned.accuracy, 3),
+                    fmt_opt(learned.perplexity, 2),
+                    fmt_opt(learned.depth, 2)
+                );
+            }
+            if !test.is_empty() {
+                let ev = m.evaluate(&test, None);
+                println!(
+                    "held out ({} lines, {} inputs) at confidence {:.2}: perplexity {}, accuracy {}, {} of {} input \
+                     nodes traversed",
+                    test.len(),
+                    ev.tokens,
+                    m.confidence,
+                    fmt_opt(ev.perplexity, 2),
+                    fmt_opt(ev.accuracy, 3),
+                    fmt_opt(ev.depth, 2),
+                    m.depth()
+                );
+            }
+        }
+        "predict" => {
+            let k = a.num("k", 10.0) as usize;
+            for text in if texts.is_empty() {
+                vec![String::new()]
+            } else {
+                texts.clone()
+            } {
+                let toks = m.prompt_tokens(&text);
+                let e = m.explain(&toks, k, None);
+                if text.is_empty() {
+                    println!("at the start:");
+                } else {
+                    println!("after {}:", py_repr(&text));
+                }
+                let inputs: Vec<String> = e
+                    .get("inputs")
+                    .and_then(Json::as_array)
+                    .map(|v| v.iter().map(|t| t.as_str().unwrap_or("\u{b7}").to_string()).collect())
+                    .unwrap_or_default();
+                println!("  input nodes: {}", inputs.join(" "));
+                let walk = e.get("walk").and_then(Json::as_array).cloned().unwrap_or_default();
+                let steps: Vec<String> = walk
+                    .iter()
+                    .map(|s| {
+                        let input = s.get("input").and_then(Json::as_str).map(py_repr);
+                        format!(
+                            "node {} {} {:.3}",
+                            s.num("node", 0.0),
+                            input.unwrap_or_else(|| "(output)".to_string()),
+                            s.num("confidence", 0.0)
+                        )
+                    })
+                    .collect();
+                let gathered = walk.last().map(|s| s.num("gathered", 0.0)).unwrap_or(0.0);
+                let shown = if steps.is_empty() {
+                    "(nothing learned)".to_string()
+                } else {
+                    steps.join(" > ")
+                };
+                println!(
+                    "  walk: {shown}; {} of {} input nodes, confidence gathered {gathered:.3}",
+                    e.num("depth", 0.0),
+                    m.depth()
+                );
+                for n in e.get("next").and_then(Json::as_array).cloned().unwrap_or_default() {
+                    println!("  {:<16} {:.6}", n.str_or("token", ""), n.num("p", 0.0));
+                }
+            }
+        }
+        "generate" => {
+            let mut rng = Rng::new(a.num("seed", 1.0) as u64);
+            for text in if texts.is_empty() {
+                vec![String::new()]
+            } else {
+                texts.clone()
+            } {
+                let start = m.prompt_tokens(&text);
+                let (toks, depths) = m.continue_tokens(
+                    &start,
+                    a.num("max-tokens", 40.0) as usize,
+                    a.num("temperature", 0.0),
+                    &mut rng,
+                );
+                let line = if m.unit == "base64" {
+                    let mut all = start.clone();
+                    all.extend(toks);
+                    detokenize(&all, &m.unit)
+                } else {
+                    let sep = if !text.is_empty() && !toks.is_empty() && m.unit == "word" {
+                        " "
+                    } else {
+                        ""
+                    };
+                    format!("{text}{sep}{}", detokenize(&toks, &m.unit))
+                };
+                let mean = if depths.is_empty() {
+                    0.0
+                } else {
+                    depths.iter().sum::<usize>() as f64 / depths.len() as f64
+                };
+                let ds: Vec<String> = depths.iter().map(|d| d.to_string()).collect();
+                println!(
+                    "{line}\n  ({} walks, {mean:.2} input nodes traversed on average: {})",
+                    depths.len(),
+                    ds.join(" ")
+                );
+            }
+        }
+        "evaluate" => {
+            let test = chain_test(&m, &data, held_out)?;
+            let ev = m.evaluate(&test, None);
+            let ds: Vec<String> = ev.depths.iter().map(|d| d.to_string()).collect();
+            println!(
+                "{} lines, {} inputs at confidence {:.2}: perplexity {}, bits {}, accuracy {}, input nodes traversed {}; \
+                 walks by depth: {}",
+                test.len(),
+                ev.tokens,
+                m.confidence,
+                fmt_opt(ev.perplexity, 6),
+                fmt_opt(ev.bits, 6),
+                fmt_opt(ev.accuracy, 6),
+                fmt_opt(ev.depth, 6),
+                ds.join(" ")
+            );
+        }
+        "sweep" => {
+            let test = chain_test(&m, &data, held_out)?;
+            let thresholds: Vec<f64> = a
+                .str("thresholds", "0,0.3,0.5,0.7,0.8,0.9,0.95,1")
+                .split(',')
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| t.trim().parse::<f64>().map_err(|_| format!("not a number: {t}")))
+                .collect::<Result<_, _>>()?;
+            println!(
+                "{} held-out lines; the less confidence a walk needs, the fewer of the {} input nodes it traverses:",
+                test.len(),
+                m.depth()
+            );
+            for (t, ev) in m.sweep(&test, &thresholds) {
+                println!(
+                    "  confidence {t:.2}: accuracy {}, perplexity {}, {} input nodes traversed",
+                    fmt_opt(ev.accuracy, 4),
+                    fmt_opt(ev.perplexity, 3),
+                    fmt_opt(ev.depth, 3)
+                );
+            }
+        }
+        "stats" => {
+            let s = m.stats();
+            println!(
+                "a chain of {} nodes over {what}, confidence {:.2}: {} inputs, {} distinct, {} node contexts, {} credited",
+                m.nodes,
+                m.confidence,
+                m.clock,
+                m.vocab.len() - 3,
+                s.num("contexts", 0.0),
+                s.num("credited", 0.0)
+            );
+            for d in s.get("depths").and_then(Json::as_array).cloned().unwrap_or_default() {
+                println!(
+                    "  depth {}: {} contexts, tested {} times, right {}",
+                    d.num("depth", 0.0),
+                    d.num("contexts", 0.0),
+                    d.num("tested", 0.0),
+                    fmt_opt(d.get("accuracy").and_then(Json::as_f64), 3)
+                );
+            }
+        }
+        "credit" => {
+            let amount = a.num("amount", 1.0);
+            for text in &texts {
+                println!(
+                    "credited {} nodes on the walks of {} with {}",
+                    m.credit_text(text, amount),
+                    py_repr(text),
+                    py_signed(amount)
+                );
+            }
+        }
+        other => return Err(format!("unknown chain action {other:?}")),
+    }
+    if let Some(path) = a.get("save") {
+        if matches!(action, "train" | "credit") {
             m.save(path)?;
             eprintln!("saved {path}");
         }
