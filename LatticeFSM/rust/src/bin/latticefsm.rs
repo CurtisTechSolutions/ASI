@@ -15,6 +15,7 @@
 //!     network     machines connected into a network: new, fit, evaluate, predict, translate, summary
 //!     ngram       predict the next thing: an N-gram model trained on a corpus or with Ollama
 //!     chain       one input to a node, the output node predicts the next: walks only as deep as confidence needs
+//!     benchmark   generation tokens per second for the chain and N-gram models
 //!     experiment  the learning, stimulation, adaptation and compression experiments
 //!     serve       the HTTP API and the React frontend (frontend/dist) on --port
 //!
@@ -165,6 +166,9 @@ commands
               gz, html, xml, docx, odt, epub, jsonl opened) and its lines, or its base64 sequences
   base64 encode|decode INPUT... [--out FILE]   anything (a file, or a text) as base64, or base64 back to bytes;
               ngram --unit base64 learns any file - text, image, audio, video - letter by letter
+  benchmark   --model all|chain|ngram --data FILES/DIRS --unit word|char|sound|base64
+              --text \"the brain is\" --runs 100 --warmup 3 --max-tokens 128 --temperature 0 --seed 1
+              --order 3 --nodes 8 --confidence 0.9; --load FILE for one model; --json for raw results
   experiment  --which learning|stimulation|adaptation|compression|walk|network|all, --out DIR
   serve       the HTTP API and the frontend on --port (default 8000); --frontend-dir DIR (default: frontend/dist
               under the working directory, or ../frontend/dist)
@@ -271,6 +275,7 @@ fn main() {
         "base64" => base64_cmd(&a),
         "ngram" => ngram_cmd(&a),
         "chain" => chain_cmd(&a),
+        "benchmark" => benchmark_cmd(&a),
         "corpus" => corpus_cmd(&a),
         "guard" => guard_cmd(&a),
         "accuracy" => accuracy(&a),
@@ -1600,6 +1605,133 @@ fn corpus_cmd(a: &Args) -> Result<(), String> {
         }
     }
     println!("{docs} documents");
+    Ok(())
+}
+
+// The timed loop uses the same continuation methods as `ngram/chain generate`.
+// Setup, prompt tokenization, warmup and printing are outside the measurement.
+fn benchmark_cmd(a: &Args) -> Result<(), String> {
+    let count = |name: &str, default: usize, minimum: usize| -> Result<usize, String> {
+        match a.get(name) {
+            None => Ok(default),
+            Some(v) => v
+                .parse::<usize>()
+                .ok()
+                .filter(|&n| n >= minimum)
+                .ok_or_else(|| format!("--{name} must be an integer >= {minimum}")),
+        }
+    };
+    let kind = a.str("model", "all");
+    if !["all", "chain", "ngram"].contains(&kind.as_str()) {
+        return Err("--model must be all, chain or ngram".into());
+    }
+    if kind == "all" && a.has("load") {
+        return Err("--load requires --model chain or ngram".into());
+    }
+    let runs = count("runs", 100, 1)?;
+    let warmup = count("warmup", 3, 0)?;
+    let max_tokens = count("max-tokens", 128, 1)?;
+    runs.checked_mul(max_tokens).ok_or("runs * max-tokens is too large")?;
+    let temperature: f64 = a
+        .get("temperature")
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| "invalid --temperature")?;
+    if !temperature.is_finite() || temperature < 0.0 {
+        return Err("--temperature must be finite and >= 0".into());
+    }
+    let seed: u64 = a.get("seed").unwrap_or("1").parse().map_err(|_| "invalid --seed")?;
+    let text = a.str("text", "the brain is");
+    let unit = a.str("unit", "word");
+    let data: Vec<String> = a.str("data", "data/corpus").split(',').map(String::from).collect();
+    type Generate = Box<dyn FnMut(&mut Rng) -> usize>;
+    let mut reports = Vec::new();
+    for model in ["chain", "ngram"] {
+        if kind != "all" && kind != model {
+            continue;
+        }
+        let (model_unit, vocab, mut generate): (String, usize, Generate) = if model == "chain" {
+            let m = match a.get("load") {
+                Some(path) => load_chain(path)?,
+                None => {
+                    let confidence = a
+                        .get("confidence")
+                        .unwrap_or("0.9")
+                        .parse()
+                        .map_err(|_| "invalid --confidence")?;
+                    let mut m = Chain::new(count("nodes", 8, 2)?, &unit, true, confidence)?;
+                    m.predict = false;
+                    m.train_paths(&data, 10)?;
+                    m
+                }
+            };
+            // Both variants keep their model and pre-tokenized prompt inside the closure.
+            let prompt = m.prompt_tokens(&text);
+            (
+                m.unit.clone(),
+                m.vocab.len(),
+                Box::new(move |rng| {
+                    std::hint::black_box(m.continue_tokens(&prompt, max_tokens, temperature, rng))
+                        .0
+                        .len()
+                }),
+            )
+        } else {
+            let mut m = match a.get("load") {
+                Some(path) => load_ngram(path)?,
+                None => {
+                    let mut m = NGram::new(count("order", 3, 1)?, &unit, true, 1.0)?;
+                    m.predict = false;
+                    m.train_paths(&data, 10)?;
+                    m
+                }
+            };
+            let prompt = m.prompt_tokens(&text);
+            (
+                m.unit.clone(),
+                m.vocab.len(),
+                Box::new(move |rng| {
+                    std::hint::black_box(m.continue_tokens(&prompt, max_tokens, temperature, rng)).len()
+                }),
+            )
+        };
+        if vocab <= 3 {
+            return Err(format!(
+                "{model}: no training tokens; supply a nonempty corpus or model"
+            ));
+        }
+        let mut rng = Rng::new(seed);
+        for _ in 0..warmup {
+            generate(&mut rng);
+        }
+        // Warmup must not consume the measured run's random stream.
+        let mut rng = Rng::new(seed);
+        let start = std::time::Instant::now();
+        let tokens: usize = (0..runs).map(|_| generate(&mut rng)).sum();
+        let seconds = start.elapsed().as_secs_f64().max(f64::MIN_POSITIVE);
+        let rate = tokens as f64 / seconds;
+        if !a.has("json") {
+            println!("{model} ({model_unit}, {vocab} vocabulary entries): {tokens} generated tokens in {seconds:.6} s = {rate:.2} tokens/s ({runs} runs, {warmup} warmup)");
+        }
+        reports.push(
+            Json::object()
+                .with("model", model.into())
+                .with("unit", model_unit.into())
+                .with("vocabulary", vocab.into())
+                .with("runs", runs.into())
+                .with("warmup", warmup.into())
+                .with("max_tokens", max_tokens.into())
+                .with("temperature", temperature.into())
+                .with("seed", seed.to_string().into())
+                .with("prompt", text.clone().into())
+                .with("tokens", tokens.into())
+                .with("seconds", seconds.into())
+                .with("tokens_per_second", rate.into()),
+        );
+    }
+    if a.has("json") {
+        println!("{}", Json::Array(reports).pretty(2));
+    }
     Ok(())
 }
 

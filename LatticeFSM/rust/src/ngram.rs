@@ -138,7 +138,7 @@ pub fn detokenize(tokens: &[String], unit: &str) -> String {
             for t in toks {
                 let before = t.chars().count() == 1 && NO_SPACE_BEFORE.contains(t.as_str());
                 let after = out.chars().last().is_some_and(|c| NO_SPACE_AFTER.contains(c));
-                if !out.is_empty() && !(before || after) {
+                if !(out.is_empty() || before || after) {
                     out.push(' ');
                 }
                 out.push_str(t);

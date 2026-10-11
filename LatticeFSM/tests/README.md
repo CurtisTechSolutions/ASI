@@ -5,6 +5,7 @@ make test                          # the Rust tests, clippy and fmt; then these,
 make py-test                       # or: python3 -m unittest tests.test_latticefsm
 python3 -m latticefsm test         # the same, through the CLI
 make parity                        # TestRustParity alone (needs make build)
+make serve-test                    # macOS Bash-compatible launcher, child exits, Ctrl-C and SIGTERM
 ```
 
 Plain `unittest`, standard library, a few seconds, deterministic (67 tests; the
@@ -56,3 +57,10 @@ files (served from their directory, an unknown path answered as the app's
 own route, a path that climbs out refused). The frontend's tests
 (`frontend/test/*.test.mjs`, `make frontend-test`, plain `node --test`) cover
 its pure modules: the settings store and the matrix helpers.
+
+`rust/tests/benchmark.rs` checks the throughput CLI against tiny saved models
+and a corpus: actual output counts, early EOS, token caps, zero output,
+warmup exclusion, invalid options, empty data, and preserving saved files.
+`tests/test_serve.py` runs the actual make recipe with stand-in servers under
+`/bin/bash`, checking either child failing, a clean exit, Ctrl-C, SIGTERM,
+and termination of both servers and their descendants. Both run in `make test`.
