@@ -15,6 +15,10 @@ gram holds, and how far apart consecutive grams start:
 * ``Encoding(unit=ACOUSTIC)`` is the trigram of *acoustic units*: sounds learned
   from recordings with nothing written down (``q2 q28 q55``), heard from WAV
   files through the same tokenizer's codebook and spoken back through its vocoder.
+* ``Encoding(unit=BASE64)`` is the trigram of *base64 symbols*: anything - a text,
+  an image, a video, a recording - is read as its bytes and written in base64
+  (:func:`base64_text`), and the graph learns n-grams of those symbols; what the
+  model says is decoded back into bytes (:func:`base64_bytes`).
 
 :class:`Encoder` and :class:`Decoder` are the two halves of it kept as objects,
 because that is how the rest of the package holds them; ``Encoder(window=5)``
@@ -24,6 +28,8 @@ still means what it always did.  :meth:`Decoder.decode_path` reverses the
 
 from __future__ import annotations
 
+import base64
+import binascii
 import importlib
 import os
 import re
@@ -57,12 +63,29 @@ what the graph is built over, so a model learns from sound alone.  As text the u
 words (whitespace-separated tokens, any token accepted); there are no words to spell back, and what
 the model says is spoken through the vocoder (``radixnet speak``).
 """
+BASE64 = "base64"
+"""One unit is one *base64 symbol*: six bits of the bytes of anything - a text, an image, a video, a recording.
+
+Content becomes base64 where it enters (:func:`base64_text`): a text as its UTF-8 bytes, a file as the bytes
+it holds, written in the 64 symbols ``A-Z a-z 0-9 + /`` with no padding.  The graph is built over those
+symbols exactly as over characters, so the n-gram dials mean what they always do (``base64:4:4`` is one gram
+per three bytes), and what the model says is decoded back into bytes (:func:`base64_bytes`).  A text of the
+graph is already base64: the conversion happens once, where the content comes in, never inside the model.
+"""
 PHONETIC_UNITS = (PHONES, SYLLABLES)
 TOKEN_UNITS = (WORDS, ACOUSTIC)
 """The units that are whitespace-separated tokens taken as they come."""
-UNIT_KINDS = (CHARS, WORDS, PHONES, SYLLABLES, ACOUSTIC)
-_UNITS_NAMES = {CHARS: "chars", WORDS: "words", PHONES: "phones", SYLLABLES: "syllables", ACOUSTIC: "units"}
-_UNIT_WORDS = {CHARS: "character", WORDS: "word", PHONES: "phone", SYLLABLES: "syllable", ACOUSTIC: "unit"}
+CHARACTER_UNITS = (CHARS, BASE64)
+"""The units a text slices into code point by code point: characters, and base64 symbols."""
+UNIT_KINDS = (CHARS, WORDS, PHONES, SYLLABLES, ACOUSTIC, BASE64)
+_UNITS_NAMES = {CHARS: "chars", WORDS: "words", PHONES: "phones", SYLLABLES: "syllables", ACOUSTIC: "units",
+                BASE64: "symbols"}
+_UNIT_WORDS = {CHARS: "character", WORDS: "word", PHONES: "phone", SYLLABLES: "syllable", ACOUSTIC: "unit",
+               BASE64: "symbol"}
+
+BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+"""The 64 symbols of the base64 unit: RFC 4648's standard alphabet, in its order."""
+_NOT_BASE64 = re.compile(r"[^A-Za-z0-9+/]+")
 
 START_LABEL = "<s>"
 END_LABEL = "</s>"
@@ -170,6 +193,72 @@ def is_audio_file(path: str) -> bool:
     return path.lower().endswith(".wav")
 
 
+def base64_text(data: bytes) -> str:
+    """Bytes as base64 symbols: the standard alphabet, no padding (3 bytes -> 4 symbols, 1 -> 2, 2 -> 3).
+
+    This is the encoder of the base64 unit: a text is its UTF-8 bytes, a file the bytes it holds, and
+    either becomes the text a model over base64 symbols is built from.
+    """
+    return base64.b64encode(bytes(data)).decode("ascii").rstrip("=")
+
+
+def base64_prefix(data: bytes) -> str:
+    """The symbols every continuation of ``data`` shares: the first ``floor(8 * len(data) / 6)`` of its base64.
+
+    The last symbol of a text's base64 also holds bits of the bytes that would follow it, so a prefix given
+    as content is asked as the symbols it fixes: ``b"the c"`` -> ``"dGhlIG"`` and the walk writes on from
+    there - the bits of ``c`` that the next symbol carries included.
+    """
+    data = bytes(data)
+    return base64_text(data)[: len(data) * 8 // 6]
+
+
+def base64_bytes(text: str) -> bytes:
+    """Base64 symbols back to bytes, whatever was written: the decoder of the base64 unit.
+
+    Anything outside the 64 symbols is skipped (padding, whitespace, a stray character), a last symbol
+    that cannot complete a byte is dropped, and the bits a final partial group has over are ignored - so a
+    predicted or generated text always decodes, into ``floor(6 * symbols / 8)`` bytes.
+    """
+    clean = _NOT_BASE64.sub("", text)
+    if len(clean) % 4 == 1:
+        clean = clean[:-1]
+    if not clean:
+        return b""
+    try:
+        return base64.b64decode(clean + "=" * (-len(clean) % 4))
+    except (binascii.Error, ValueError):  # cannot happen on the cleaned symbols; refuse rather than guess
+        raise ValueError(f"not base64: {text[:40]!r}") from None
+
+
+def is_utf8(data: bytes) -> bool:
+    """Do these bytes read as UTF-8 text?  What decides whether a file is cut into lines or taken whole."""
+    try:
+        bytes(data).decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+_ASCII_SPACE = " \t\n\r\x0b\x0c"
+
+
+def base64_file_texts(data: bytes, whole_file: bool = False) -> list[str]:
+    """The texts a file gives a model of base64 symbols, each in its symbols (:func:`base64_text`).
+
+    A file that reads as UTF-8 text gives one text per line - split on ``\n``, each line's bytes as they are,
+    a line of nothing but ASCII whitespace skipped - unless ``whole_file``.  Anything else (an image, a
+    video, a recording, an archive), and any file taken whole, is one text: every byte it holds, so the
+    decoded text is the file again.  An empty file gives nothing.
+    """
+    data = bytes(data)
+    if not data:
+        return []
+    if not whole_file and is_utf8(data):
+        return [base64_text(line) for line in data.split(b"\n") if line.strip(_ASCII_SPACE.encode("ascii"))]
+    return [base64_text(data)]
+
+
 @dataclass(frozen=True)
 class Encoding:
     """How a text becomes grams, and how labels become text again.
@@ -177,7 +266,8 @@ class Encoding:
     Three dials, fixed for a graph's life (every label, every index key and
     every offset is measured in the units of the encoding that built it):
 
-    * ``unit`` - :data:`CHARS` or :data:`WORDS`.
+    * ``unit`` - :data:`CHARS`, :data:`WORDS`, a sound (:data:`PHONES`, :data:`SYLLABLES`,
+      :data:`ACOUSTIC`) or :data:`BASE64`.
     * ``n`` - units per gram: the *n* of the n-gram, any ``n >= 1``.
     * ``stride`` - units between two consecutive grams.  ``1`` slides the
       window, so consecutive grams share ``n - 1`` units, which is what lets
@@ -226,6 +316,11 @@ class Encoding:
         """Are the units sounds (:data:`PHONES` or :data:`SYLLABLES`) rather than letters or words?"""
         return self.unit in PHONETIC_UNITS
 
+    @property
+    def is_base64(self) -> bool:
+        """Are the units base64 symbols - six bits of the bytes of any content (:data:`BASE64`)?"""
+        return self.unit == BASE64
+
     def is_default(self) -> bool:
         """The character trigram of stride 1: what a model file leaves unwritten."""
         return self == Encoding()
@@ -265,7 +360,7 @@ class Encoding:
         of the graph - which is that text - cuts into the same units it was
         made of, and a text may even mix the two (``"the K AE1 T sat"``).
         """
-        if self.unit == CHARS:
+        if self.unit in CHARACTER_UNITS:
             return text
         if self.unit in TOKEN_UNITS:
             return split_words(text)
@@ -273,7 +368,7 @@ class Encoding:
 
     def length(self, text: str) -> int:
         """How many units a text holds."""
-        if self.unit == CHARS:
+        if self.unit in CHARACTER_UNITS:
             return len(text)
         if self.unit in TOKEN_UNITS:
             return len(split_words(text))
@@ -281,7 +376,8 @@ class Encoding:
 
     @property
     def units_name(self) -> str:
-        """What this encoding counts in: ``"chars"``, ``"words"``, ``"phones"`` or ``"syllables"``.
+        """What this encoding counts in: ``"chars"``, ``"words"``, ``"phones"``, ``"syllables"``, ``"units"``
+        (acoustic) or ``"symbols"`` (base64).
 
         Every length, count and score of a model is in these; a number whose
         unit depends on the encoding is a number that will be read wrong, so
@@ -348,7 +444,7 @@ class Encoding:
 
         Empty pieces are dropped, so a label contributing no unit adds no separator.
         """
-        if self.unit == CHARS:
+        if self.unit in CHARACTER_UNITS:
             return "".join(parts)
         if self.phonetic:  # a piece given as text joins as the sounds it makes, so a joined text is all sounds
             parts = tuple(" ".join(self.units(p)) for p in parts)
@@ -366,7 +462,7 @@ class Encoding:
         """
         if not prefix:
             return True
-        if self.unit == CHARS:
+        if self.unit in CHARACTER_UNITS:
             return text.startswith(prefix)
         if self.phonetic:  # a prefix given as text is looked for as the sounds it makes
             prefix = " ".join(self.units(prefix))
@@ -384,11 +480,42 @@ class Encoding:
         what training with ``reverse`` reads (``../SPEC-SearchAndTraining.md``
         §9), and what a query to a model trained that way must be turned into.
         """
-        if self.unit == CHARS:
+        if self.unit in CHARACTER_UNITS:  # base64 symbols too: the symbols backwards, not the bytes
             return text[::-1]
         # words, sounds or acoustic units: the units in reverse order (a phonetic unit reads the
         # text as sounds first, so a text read backwards is its sounds backwards)
         return " ".join(reversed(self.units(text)))
+
+    # -- content: what comes in, and what goes out ----------------------------
+
+    def content_text(self, data: bytes) -> str:
+        """Content - the bytes of a file - as the text this encoding reads.
+
+        Base64 writes the bytes in its symbols, whatever they hold (:func:`base64_text`); every other
+        unit reads them as UTF-8 text.
+        """
+        if self.unit == BASE64:
+            return base64_text(data)
+        return bytes(data).decode("utf-8")
+
+    def text_input(self, text: str) -> str:
+        """A text given in plain words - a sentence to train on, to score or to blame - as this encoding reads it.
+
+        Base64 writes its UTF-8 bytes in symbols; every other unit takes it as it is.
+        """
+        return base64_text(text.encode("utf-8")) if self.unit == BASE64 else text
+
+    def prefix_input(self, text: str) -> str:
+        """A prefix given in plain words, as this encoding asks it.
+
+        Base64 asks the symbols its UTF-8 bytes fix (:func:`base64_prefix`), so the walk writes on from
+        the last whole symbol; every other unit takes it as it is.
+        """
+        return base64_prefix(text.encode("utf-8")) if self.unit == BASE64 else text
+
+    def content_bytes(self, text: str) -> bytes:
+        """What a text of this encoding holds, as bytes: base64 symbols decoded, any other text as UTF-8."""
+        return base64_bytes(text) if self.unit == BASE64 else text.encode("utf-8")
 
     # -- encoder -------------------------------------------------------------
 
@@ -459,6 +586,44 @@ DEFAULT_ENCODING = Encoding()
 # ---------------------------------------------------------------------------
 # what a model of sounds said, in words
 # ---------------------------------------------------------------------------
+
+
+def _shared_bytes(a: bytes, b: bytes) -> int:
+    """How many leading bytes ``a`` and ``b`` have in common: a binary search over slice comparisons, so a prefix of
+    megabytes (a whole file given as one) costs a few ``memcmp`` rather than a Python loop over every byte."""
+    lo, hi = 0, min(len(a), len(b))
+    if a[:hi] == b[:hi]:
+        return hi
+    while hi - lo > 1:  # a[:lo] == b[:lo] and a[:hi] != b[:hi]
+        mid = (lo + hi) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def decoded_prediction(encoding: Encoding, full_text: str, prefix: bytes = b"") -> dict:
+    """What a text of a model of base64 symbols holds: ``{"decoded", "decoded_continuation", "decoded_bytes"}``.
+
+    ``decoded`` is the whole text - the prefix and what the walk wrote after it - decoded
+    (:func:`base64_bytes`) and read as UTF-8, a byte sequence that is not text showing as U+FFFD (one per
+    maximal invalid subpart, the Unicode Standard's practice); ``decoded_bytes`` is how many bytes that is.
+    ``decoded_continuation`` is what the model wrote that ``prefix`` - the content the walk was asked to
+    continue, as bytes - did not already hold: everything after the bytes the two have in common.  A prefix
+    that ends inside a symbol leaves its last byte to the walk, which may write it differently (asked ``the d``
+    it may say ``the log``), so the continuation starts where the model's bytes and the prefix's part.  Any
+    other encoding adds nothing.
+    """
+    if encoding.unit != BASE64:
+        return {}
+    whole = base64_bytes(full_text)
+    same = _shared_bytes(whole, bytes(prefix))
+    return {
+        "decoded": whole.decode("utf-8", "replace"),
+        "decoded_continuation": whole[same:].decode("utf-8", "replace"),
+        "decoded_bytes": len(whole),
+    }
 
 
 def spelled_prediction(encoding: Encoding, full_text: str, continuation: str) -> dict:
@@ -548,6 +713,7 @@ _UNIT_NAMES = {
     "phone": PHONES, "phones": PHONES, "phoneme": PHONES, "phonemes": PHONES, "sound": PHONES, "sounds": PHONES,
     "syllable": SYLLABLES, "syllables": SYLLABLES, "syl": SYLLABLES,
     "acoustic": ACOUSTIC, "acoustics": ACOUSTIC, "audio": ACOUSTIC, "unit": ACOUSTIC, "units": ACOUSTIC,
+    "base64": BASE64, "b64": BASE64,
 }
 
 
@@ -556,7 +722,8 @@ def parse_encoding(spec: str) -> Encoding:
 
     ``"char:3:1"`` is the default, ``"char:5:groups"`` (or ``"char:5:5"``)
     non-overlapping groups of five letters, ``"word:2"`` the word bigram,
-    ``"phone:3:1"`` the trigram of sounds and ``"syllable:2:1"`` the syllable bigram.
+    ``"phone:3:1"`` the trigram of sounds, ``"syllable:2:1"`` the syllable bigram and
+    ``"base64:4:4"`` one gram per three bytes of any content.
     """
     text = (spec or "").strip().lower()
     if text in _ALIASES:
@@ -565,7 +732,9 @@ def parse_encoding(spec: str) -> Encoding:
     if len(parts) > 3:
         raise ValueError(f"encoding {spec!r}: expected unit[:n[:stride]]")
     if parts[0] not in _UNIT_NAMES:
-        raise ValueError(f"encoding {spec!r}: unit must be char, word, phone, syllable or acoustic, got {parts[0]!r}")
+        raise ValueError(
+            f"encoding {spec!r}: unit must be char, word, phone, syllable, acoustic or base64, got {parts[0]!r}"
+        )
     unit = _UNIT_NAMES[parts[0]]
     n = WINDOW
     if len(parts) > 1 and parts[1]:

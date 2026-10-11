@@ -2,7 +2,18 @@ import { useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { asArray, countingKind, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines, yesNo } from "../util.js";
+import {
+  asArray,
+  countingKind,
+  fmtInt,
+  fmtNum,
+  jobIsRunning,
+  parseInteger,
+  parseNumber,
+  splitLines,
+  unitsOf,
+  yesNo,
+} from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
 import UploadPicker from "./UploadPicker.jsx";
@@ -145,6 +156,7 @@ export default function TwoNRLPanel({ status }) {
           disabled={running}
           title="Bad files"
           hint="Uploaded files used as garbage in the negative phase."
+          anyFile={unitsOf(status) === "symbols"}
         />
         <UploadPicker
           selected={goodFiles}
@@ -152,6 +164,7 @@ export default function TwoNRLPanel({ status }) {
           disabled={running}
           title="Good files"
           hint="Uploaded files used as correct data in the positive phase."
+          anyFile={unitsOf(status) === "symbols"}
         />
         <div className="row">
           <NumberField

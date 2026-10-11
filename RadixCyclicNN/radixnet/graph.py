@@ -38,7 +38,7 @@ from .attention import AttentionBand
 from .backend import CSR, NodeParams
 from .counter import COUNTER_LIMIT, CyclicCounter, as_float, carry_series, total
 from .encoding import (
-    BACK_LABEL, CHARS, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, Decoder, Encoder, Encoding, _piece,
+    BACK_LABEL, CHARACTER_UNITS, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, Decoder, Encoder, Encoding, _piece,
 )
 from .window import DynamicWindow
 
@@ -201,7 +201,7 @@ class RadixCyclicGraph:
         self._cost_cache_version = -1
         self._act_cache: list[float] = []
         self._act_cache_version = -1
-        self._n_is_chars = self.encoding.unit == CHARS
+        self._n_is_chars = self.encoding.unit in CHARACTER_UNITS  # a unit is a code point: characters, base64 symbols
         self._n = self.encoding.n
         self._ov = self.encoding.overlap
         self._stride = self.encoding.stride

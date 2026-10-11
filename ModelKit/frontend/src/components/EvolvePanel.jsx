@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines } from "../util.js";
+import { asArray, fmtInt, fmtNum, jobIsRunning, parseInteger, parseNumber, splitLines, unitsOf } from "../util.js";
 import UploadPicker from "./UploadPicker.jsx";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -124,6 +124,7 @@ export default function EvolvePanel({ status }) {
           disabled={running}
           title="Corpus files"
           hint="Uploaded files used as the real corpus (in addition to the texts above)."
+          anyFile={unitsOf(status) === "symbols"}
         />
         <div className="row">
           <NumberField

@@ -33,9 +33,20 @@ function describeArchive(archive) {
  * list shows the .zip itself - and the server unpacks its text files behind
  * the scenes whenever the archive is selected for training.
  *
- * Props: selected (array of upload names), onChange(names), disabled, title, hint.
+ * `anyFile` is for a model of base64 symbols, which learns the bytes of
+ * anything: every kind of file may be picked, and each goes up as the bytes it
+ * holds - an image, a video or a recording is kept byte for byte.
+ *
+ * Props: selected (array of upload names), onChange(names), disabled, title, hint, anyFile.
  */
-export default function UploadPicker({ selected, onChange, disabled = false, title = "Uploaded files", hint }) {
+export default function UploadPicker({
+  selected,
+  onChange,
+  disabled = false,
+  title = "Uploaded files",
+  hint,
+  anyFile = false,
+}) {
   const [uploads, setUploads] = useState([]);
   const [uploadDir, setUploadDir] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -90,7 +101,8 @@ export default function UploadPicker({ selected, onChange, disabled = false, tit
       const file = files[i];
       setUploading(`${i + 1} / ${files.length}: ${file.name}`);
       try {
-        const data = isArchive(file) ? await api.uploadFile(file) : await api.upload(file.name, await file.text());
+        const data =
+          anyFile || isArchive(file) ? await api.uploadFile(file) : await api.upload(file.name, await file.text());
         for (const record of asArray(data && data.uploads)) if (record && record.name) added.push(record.name);
         for (const archive of asArray(data && data.archives)) if (archive && archive.name) notes.push(describeArchive(archive));
       } catch (err) {
@@ -165,7 +177,7 @@ export default function UploadPicker({ selected, onChange, disabled = false, tit
         ref={inputRef}
         type="file"
         multiple
-        accept={ACCEPT}
+        accept={anyFile ? undefined : ACCEPT}
         hidden
         onChange={(e) => {
           uploadFiles(e.target.files);

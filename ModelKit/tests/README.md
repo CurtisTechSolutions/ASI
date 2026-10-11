@@ -32,7 +32,8 @@ carries the model's name and tests that side — `test_attention.py`,
 `test_window.py`, `test_penalty.py`, `test_countnet.py`, `test_negative.py`,
 `test_resonance.py`, `test_schedule.py`, `test_search_training.py` and
 `test_acoustic_units.py` here are the command line and the API of what the
-model's files of the same name test in the model.
+model's files of the same name test in the model, and `test_base64.py` is that
+side of the model's `test_base64_unit.py`.
 
 | file | covers |
 |---|---|
@@ -43,6 +44,7 @@ model's files of the same name test in the model.
 | `test_guard.py` | what the negative network stops on the way out, on every answer path |
 | `test_feedback.py` | ratings and the 2NRL phases they drive |
 | `test_api_uploads.py` | uploads through the API, including ZIP archives kept as one entry and unpacked behind the scenes |
+| `test_base64.py` | the **base64 unit** through the kit (D-094): `--units base64` trains on a text file and an image, `--prefix-file` continues a file and `--decode-to` writes it back byte for byte, every answer and sample decoded; the API keeps a binary upload byte for byte, converts inline texts and prefixes, and takes the model's own words back as they are with `symbols` |
 | `test_voice.py` | the **voice** (D-081): a walk reports every step and its END sentinel, and is heard as it goes; words and letters are read through the tokenizer; the `speak` command writes a WAV; the **output decoder** (D-088): `say` speaks any text in the model's units, the streaming form makes the same bytes, a walk heard as it walks and its text said afterwards are the same audio; `--speak FILE` on `predict` and `generate`, and `speech decode` |
 | `test_voicechat.py` | **talking with the model by voice** (D-089): one turn on the module alone, then over the API whole and streamed, the refusals, and `speech talk` on the command line with a conversation file |
 | `test_teaching_in_words.py` | the teaching loops of a model of sounds show the LLM words (`reader_text`, now `../modelkit/llm.py`) |

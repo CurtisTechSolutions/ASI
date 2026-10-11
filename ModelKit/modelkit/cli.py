@@ -37,8 +37,8 @@ from radixnet.penalty import DEFAULT_TRAVERSAL, TRAVERSALS
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, converse, repeats as dialogue_repeats, transcript
 from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS
 from radixnet.encoding import (
-    CHARS, WINDOW, WORDS, Encoding, hear_audio, is_audio_file, parse_encoding, spelled_prediction, spelled_thought,
-    spelled_turn, word_rows,
+    CHARACTER_UNITS, WINDOW, WORDS, Encoding, base64_file_texts, base64_prefix, decoded_prediction, hear_audio,
+    is_audio_file, parse_encoding, spelled_prediction, spelled_thought, spelled_turn, word_rows,
 )
 from .llm import DEFAULT_PROVIDER, PROVIDERS
 from radixnet.model import GraphModel, RadixNet, TrainConfig, load_model, model_class, model_kinds
@@ -638,7 +638,20 @@ def _is_zip_file(path: str) -> bool:
         return fh.read(4) in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
-def read_texts(paths: Sequence[str], whole_file: bool = False, what: str = "training") -> list[str]:
+def read_file_bytes(path: str) -> bytes:
+    """A file's bytes; a missing or unreadable file is a :class:`CliError`."""
+    if not os.path.isfile(path):
+        raise CliError(f"data file not found: {path}")
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except OSError as exc:
+        raise CliError(f"{path}: {exc}") from exc
+
+
+def read_texts(
+    paths: Sequence[str], whole_file: bool = False, what: str = "training", encoding: Encoding | None = None
+) -> list[str]:
     """Texts from files: one per non-blank line, or one per file with ``whole_file``.
 
     A ``.zip`` archive contributes every text entry it holds (unpacked in
@@ -647,8 +660,18 @@ def read_texts(paths: Sequence[str], whole_file: bool = False, what: str = "trai
     whole-file mode trailing line terminators are stripped and an archive
     entry counts as one file.  Raises :class:`CliError` when nothing usable
     was found.
+
+    A model of base64 symbols (``encoding``) reads every file as the bytes it holds instead - an image,
+    a video, a recording or an archive is one text, a UTF-8 text file one text per line
+    (:func:`radixnet.encoding.base64_file_texts`) - and nothing is unpacked or heard first.
     """
     texts: list[str] = []
+    if encoding is not None and encoding.is_base64:
+        for path in paths:
+            texts.extend(base64_file_texts(read_file_bytes(path), whole_file))
+        if not texts:
+            raise CliError(f"no {what} texts found in {', '.join(paths)}")
+        return texts
     for path in paths:
         if is_audio_file(path):  # a recording is heard as a text of acoustic units: one utterance, one text
             try:
@@ -790,12 +813,12 @@ def _finish_training(console: Console, model: GraphModel, out: str, interrupted:
 
 
 def cmd_train(args: argparse.Namespace, console: Console) -> dict:
-    texts = read_texts(args.data, args.whole_file)
     manager = checkpoint_manager(args)
     if args.resume and manager is None:
         raise CliError("--resume requires --checkpoint-dir")
     every = checkpoint_every(args, manager)
     model, origin = open_model(args, console, required=False, manager=manager if args.resume else None)
+    texts = read_texts(args.data, args.whole_file, encoding=model.encoding)  # a model of base64 symbols reads bytes
     config = TrainConfig(
         epochs=args.epochs, lr=args.lr, act_lr=args.act_lr, batch_size=args.batch_size,
         auto_compress=not args.no_compress, checkpoint_every=every,
@@ -853,8 +876,63 @@ def cmd_train(args: argparse.Namespace, console: Console) -> dict:
     }
 
 
+def _prefix_of(args: argparse.Namespace, enc: Encoding) -> tuple[str, bytes]:
+    """The prefix the model is asked, and the content it stands for, as bytes.
+
+    ``--prefix-file`` gives a prefix as the bytes of a file, ``--prefix`` as text (its UTF-8 bytes).  A model of
+    base64 symbols is asked the symbols those bytes fix (:func:`radixnet.encoding.base64_prefix`); any other
+    model reads the file as UTF-8 text and takes ``--prefix`` as it is.
+    """
+    path = args.prefix_file
+    if path:
+        data = read_file_bytes(path)
+        if enc.is_base64:
+            return base64_prefix(data), data
+        try:
+            return data.decode("utf-8"), data
+        except UnicodeDecodeError as exc:
+            raise CliError(f"{path} is not valid UTF-8 text: {exc}") from exc
+    text = args.prefix or ""
+    return enc.prefix_input(text), text.encode("utf-8")
+
+
+def _prefix_doc(args: argparse.Namespace, enc: Encoding, prefix: str) -> dict:
+    """What the JSON adds about a prefix: the file it came from, and the symbols a model of base64 symbols was asked."""
+    doc: dict = {}
+    if args.prefix_file:
+        doc["prefix_file"] = args.prefix_file
+    if enc.is_base64:
+        doc["prefix_symbols"] = prefix
+    return doc
+
+
+def _decode_to(path: str | None, enc: Encoding, texts: list[str], console: Console) -> list[dict] | None:
+    """``--decode-to PATH``: what each text holds, written as bytes - the output decoder of a model of base64 symbols.
+
+    One text is written to ``PATH``; several to ``PATH`` numbered before its extension (``out-1.png``,
+    ``out-2.png``, ...).  A model of base64 symbols writes the decoded bytes (an image, a video, a text
+    again); any other model its text as UTF-8.
+    """
+    if not path:
+        return None
+    root, ext = os.path.splitext(path)
+    written = []
+    for i, text in enumerate(texts):
+        target = path if len(texts) == 1 else f"{root}-{i + 1}{ext}"
+        data = enc.content_bytes(text)
+        try:
+            with open(target, "wb") as fh:
+                fh.write(data)
+        except OSError as exc:
+            raise CliError(f"{target}: {exc}") from exc
+        written.append({"path": target, "bytes": len(data)})
+        console.say(f"wrote {target} ({len(data)} bytes)")
+    return written
+
+
 def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
+    prefix, content = _prefix_of(args, model.encoding)
     mode = args.mode
     options = dict(
         length=args.length, mode=mode, step_penalty=args.step_penalty, temperature=args.temperature,
@@ -863,22 +941,33 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         **search_options(args),
     )
     options.update(k=args.k, beam=args.beam)
-    result = model.predict(args.prefix, **options)
+    result = model.predict(prefix, **options)
     pair = open_guard(args, console, model)
     guard: dict | None = None
     if pair is not None:
         # the guard re-ranks what the search already offered: the best continuation it does not veto
-        result, verdicts = pair.rank(args.prefix, result)
+        result, verdicts = pair.rank(prefix, result)
         guard = _guard_doc(pair, verdicts, candidates=len(verdicts),
                            kept=sum(v["decision"] != "reject" for v in verdicts))
+    enc = model.encoding
+    decoded = decoded_prediction(enc, result.full_text, content)
+    given = [("prefix", quote(args.prefix))] if args.prefix is not None else [("prefix file", args.prefix_file)]
+    if enc.is_base64:  # what the model was asked: the symbols the prefix fixes
+        given.append(("prefix symbols", quote(clip(prefix, 200))))
+    elif args.prefix is None:
+        given.append(("prefix", quote(clip(prefix, 200))))
     pairs = [
         ("model", kind_label(model)),
-        ("prefix", quote(args.prefix)),
+        *given,
         ("continuation", quote(result.text)),
         ("full text", quote(result.full_text)),
     ]
     if model.encoding.phonetic:  # a model that thinks in sounds: say what its answer spells
         pairs.append(("spelled", quote(model.encoding.spell(result.full_text))))
+    if decoded:  # a model of base64 symbols: what its answer holds
+        pairs += [("decoded", quote(clip(decoded["decoded"], 200))),
+                  ("decoded continuation", quote(clip(decoded["decoded_continuation"], 200))),
+                  ("decoded bytes", decoded["decoded_bytes"])]
     console.pairs(pairs + [
         ("cost", result.cost),
         ("probability", path_probability(result)),
@@ -896,7 +985,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     ]
     console.table(("step", "node", "cost", "label"), rows)
     doc = {
-        "prefix": args.prefix,
+        "prefix": args.prefix if args.prefix is not None else prefix,
         "kind": model.kind,
         "continuation": result.text,
         "full_text": result.full_text,
@@ -910,12 +999,12 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         "mode": mode,
         "traversal": args.traversal,
     }
-    doc.update(spelled_prediction(model.encoding, result.full_text, result.text))
+    doc.update(spelled_prediction(enc, result.full_text, result.text))
+    doc.update(_prefix_doc(args, enc, prefix), **decoded)
     if args.traversal != "reward":
         doc["traversal"] = args.traversal
         doc["punish"] = result.punish
     if isinstance(result, Prediction):
-        enc = model.encoding
         for title, paths in (("top", result.top), ("bottom", result.bottom)):
             console.say()
             console.say(f"{title} {len(paths)} continuation(s) (k={result.k}, beam={result.beam}):")
@@ -932,10 +1021,10 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
             )
         doc.update(
             k=result.k, beam=result.beam,
-            top=[{**r.to_dict(), "probability": path_probability(r), **spelled_prediction(enc, r.full_text, r.text)}
-                 for r in result.top],
-            bottom=[{**r.to_dict(), "probability": path_probability(r), **spelled_prediction(enc, r.full_text, r.text)}
-                    for r in result.bottom],
+            top=[{**r.to_dict(), "probability": path_probability(r), **spelled_prediction(enc, r.full_text, r.text),
+                  **decoded_prediction(enc, r.full_text, content)} for r in result.top],
+            bottom=[{**r.to_dict(), "probability": path_probability(r), **spelled_prediction(enc, r.full_text, r.text),
+                     **decoded_prediction(enc, r.full_text, content)} for r in result.bottom],
         )
     if guard is not None:
         _print_vetoes(console, guard, "continuations")
@@ -943,15 +1032,19 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     speech = _speak_outputs(args, console, model, [result.full_text])  # --speak FILE: the answer, heard
     if speech is not None:
         doc["speech"] = speech
+    written = _decode_to(args.decode_to, enc, [result.full_text], console)
+    if written is not None:  # --decode-to FILE: the answer, as the bytes it holds
+        doc["decoded_to"] = written
     return doc
 
 
 def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     model, _ = open_model(args, console, required=True)
     pair = open_guard(args, console, model)
+    prefix, content = _prefix_of(args, model.encoding)
     options = dict(
         max_length=args.max_length, mode=args.mode, temperature=args.temperature, seed=args.seed,
-        prefix=args.prefix, step_penalty=args.step_penalty, beam=args.beam,
+        prefix=prefix, step_penalty=args.step_penalty, beam=args.beam,
         traversal=args.traversal, penalty_scale=args.penalty_scale, merit_scale=args.merit_scale,
         **search_options(args),
     )
@@ -971,15 +1064,20 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         spelled = {i: model.encoding.spell(r.text) for i, r in enumerate(results)}
         console.say()
         console.table(("#", "spelled"), [[i + 1, quote(clip(s, 100))] for i, s in spelled.items()])
+    decoded = {i: decoded_prediction(model.encoding, r.full_text, content) for i, r in enumerate(results)}
+    if model.encoding.is_base64:  # what the symbols hold, sample by sample
+        console.say()
+        console.table(("#", "bytes", "decoded"),
+                      [[i + 1, d["decoded_bytes"], quote(clip(d["decoded"], 100))] for i, d in decoded.items()])
     if guard is not None:
         _print_vetoes(console, guard)
     doc = {
-        "samples": [{**r.to_dict(), "probability": path_probability(r), **({"spelled": spelled[i]} if i in spelled else {})}
-                    for i, r in enumerate(results)],
+        "samples": [{**r.to_dict(), "probability": path_probability(r),
+                     **({"spelled": spelled[i]} if i in spelled else {}), **decoded[i]} for i, r in enumerate(results)],
         "count": len(results),
         "mode": args.mode,
         "traversal": args.traversal,
-        "prefix": args.prefix,
+        "prefix": prefix if args.prefix_file else args.prefix,
         "max_length": args.max_length,
         "temperature": args.temperature,
         "guard": guard,
@@ -987,6 +1085,10 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     speech = _speak_outputs(args, console, model, [r.text for r in results])  # --speak FILE: every sample, heard
     if speech is not None:
         doc["speech"] = speech
+    doc.update(_prefix_doc(args, model.encoding, prefix))
+    written = _decode_to(args.decode_to, model.encoding, [r.full_text for r in results], console)
+    if written is not None:  # --decode-to FILE: every sample, as the bytes it holds
+        doc["decoded_to"] = written
     return doc
 
 
@@ -1563,8 +1665,12 @@ def cmd_talk(args: argparse.Namespace, console: Console) -> dict:
 
 
 def cmd_score(args: argparse.Namespace, console: Console) -> dict:
-    texts = [args.text] if args.text is not None else read_texts([args.data], what="scorable")
     model, _ = open_model(args, console, required=True)
+    enc = model.encoding
+    if args.text is not None:
+        texts = [enc.text_input(args.text)]  # a model of base64 symbols scores the bytes of the text
+    else:
+        texts = read_texts([args.data], what="scorable", encoding=enc)
     results = [{"text": t, **model.score(t)} for t in texts]
     mean_log_prob = sum(r["log_prob"] for r in results) / len(results)
     mean_per_char = sum(r["per_char"] for r in results) / len(results)
@@ -1601,9 +1707,9 @@ def _phase_pairs(model: GraphModel, args: argparse.Namespace) -> list[tuple[str,
 
 
 def cmd_two_nrl(args: argparse.Namespace, console: Console) -> dict:
-    bad = read_texts([args.bad], what="bad")
-    good = read_texts([args.good], what="good")
     model, origin = open_model(args, console, required=False)
+    bad = read_texts([args.bad], what="bad", encoding=model.encoding)
+    good = read_texts([args.good], what="good", encoding=model.encoding)
     out = args.out or args.model
     console.pairs([
         ("model", origin.describe()),
@@ -2280,20 +2386,19 @@ def _marks_label(raw: str | None) -> str:
 
 def cmd_feedback(args: argparse.Namespace, console: Console) -> dict:
     """Learn from rated texts: 2NRL when both kinds are given, reward on good alone, punish on bad alone."""
-    good = list(args.good_text or [])
-    bad = list(args.bad_text or [])
+    model, origin = open_model(args, console, required=False)
+    enc = model.encoding  # a model of base64 symbols learns the bytes of what it is given
+    good = [enc.text_input(t) for t in (args.good_text or []) if t.strip()]
+    bad = [enc.text_input(t) for t in (args.bad_text or []) if t.strip()]
     if args.good:
-        good += read_texts([args.good], what="good")
+        good += [t for t in read_texts([args.good], what="good", encoding=enc) if t.strip()]
     if args.bad:
-        bad += read_texts([args.bad], what="bad")
-    good = [t for t in good if t.strip()]
-    bad = [t for t in bad if t.strip()]
+        bad += [t for t in read_texts([args.bad], what="bad", encoding=enc) if t.strip()]
     if not good and not bad:
         raise CliError("nothing to learn from: give --good / --good-text (thumbs up) and/or --bad / --bad-text (thumbs down)")
     good_weights = _marks(args.good_ratings, good, "--good-ratings")
     bad_weights = _marks(args.bad_ratings, bad, "--bad-ratings")
     action = "2nrl" if good and bad else ("reward" if good else "punish")
-    model, origin = open_model(args, console, required=False)
     out = args.out or args.model
     if model.kind == "count":
         wording = {"2nrl": "2NRL: penalise the bad paths, then count + reward the good ones",
@@ -2442,7 +2547,7 @@ def cmd_words(args: argparse.Namespace, console: Console) -> dict:
     """A word encoding's alphabet: the words the graph has read and how many grams hold each."""
     model, origin = open_model(args, console, required=True)
     encoding = model.encoding
-    if encoding.unit == CHARS:
+    if encoding.unit in CHARACTER_UNITS:  # characters, or base64 symbols: no words to list
         raise CliError(
             f"{args.model} counts in {encoding.units_name}, so it has no words to list; an alphabet needs a word, "
             f"phone, syllable or acoustic encoding (train a new model with --encoding word:{encoding.n}:{encoding.stride})"
@@ -3333,10 +3438,10 @@ def cmd_compress(args: argparse.Namespace, console: Console) -> dict:
 
 
 def cmd_evolve(args: argparse.Namespace, console: Console) -> dict:
-    corpus = read_texts([args.data], what="corpus")
     manager = checkpoint_manager(args)
     every = checkpoint_every(args, manager)
     generator, origin = open_model(args, console, required=False)
+    corpus = read_texts([args.data], what="corpus", encoding=generator.encoding)
     discriminator: GraphModel | None = None
     disc_origin: Origin | None = None
     if args.discriminator:
@@ -4629,14 +4734,16 @@ def _add_global_options(parser: argparse.ArgumentParser, top_level: bool) -> Non
                             f"({DEFAULT_COUNT_MODEL}, {DEFAULT_NEGATIVE_MODEL}, {DEFAULT_RESONANT_MODEL})")
     group.add_argument("--encoding", metavar="SPEC", default=default(None),
                        help="encoding of a NEW model: unit[:n[:stride]] - what one unit of text is (char | word | "
-                            "phone | syllable | acoustic), how many units a gram holds (the n of the n-gram) and how far apart "
-                            "consecutive grams start (1 = the sliding window, n = non-overlapping groups of n).  "
-                            "char:3:1 is the default, char:5:5 groups of five letters, word:2:1 the word bigram, "
-                            "word:3:1 the word trigram, phone:3:1 the trigram of sounds (the text read through the "
-                            "phonetic tokenizer: the cat -> DH AH0 # K AE1 T), syllable:2:1 the syllable bigram; the "
-                            "names trigram | bigram | word-bigram | word-trigram work too.  A loaded file's own "
-                            "encoding always wins, and is fixed for its life")
-    group.add_argument("--units", choices=("char", "word", "phone", "syllable", "acoustic"), default=default(None),
+                            "phone | syllable | acoustic | base64), how many units a gram holds (the n of the n-gram) "
+                            "and how far apart consecutive grams start (1 = the sliding window, n = non-overlapping "
+                            "groups of n).  char:3:1 is the default, char:5:5 groups of five letters, word:2:1 the word "
+                            "bigram, word:3:1 the word trigram, phone:3:1 the trigram of sounds (the text read through "
+                            "the phonetic tokenizer: the cat -> DH AH0 # K AE1 T), syllable:2:1 the syllable bigram, "
+                            "base64:4:4 groups of four base64 symbols (three bytes each: every file - a text, an image, "
+                            "a video - is read as its bytes); the names trigram | bigram | word-bigram | word-trigram "
+                            "work too.  A loaded file's own encoding always wins, and is fixed for its life")
+    group.add_argument("--units", choices=("char", "word", "phone", "syllable", "acoustic", "base64"),
+                       default=default(None),
                        help="what one unit of a NEW model is (default char); --encoding sets this too")
     group.add_argument("--ngram", type=int, metavar="N", default=default(None),
                        help="units per gram of a NEW model: the n of the n-gram (default 3)")
@@ -4907,7 +5014,11 @@ def build_parser() -> argparse.ArgumentParser:
         "Continue --prefix.  dijkstra returns the cheapest path (cost = -log P per edge + step penalty)\n"
         "emitting at least --length characters or reaching the end; sample walks stochastically.",
     )
-    p.add_argument("--prefix", required=True, metavar="TEXT", help="text to continue")
+    given = p.add_mutually_exclusive_group(required=True)
+    given.add_argument("--prefix", metavar="TEXT", help="text to continue")
+    given.add_argument("--prefix-file", metavar="FILE",
+                       help="continue a file: its bytes are the prefix (a model of base64 symbols is asked the "
+                            "symbols they fix; any other model reads the file as text)")
     p.add_argument("--length", type=nonneg_int, default=20, help="characters to emit (dijkstra: minimum)")
     p.add_argument("--max-length", type=nonneg_int, metavar="N",
                    help="optional hard cap on emitted characters (default: no limit; dijkstra returns the whole cheapest path)")
@@ -4925,6 +5036,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speak", metavar="FILE",
                    help="also hear the answer: the full text spoken through the model's voice, written as a WAV "
                         "(the output decoder; `say` has the voice's dials)")
+    p.add_argument("--decode-to", metavar="FILE",
+                   help="write the answer as the bytes it holds: a model of base64 symbols decodes its full text "
+                        "(an image, a video, a text again); any other model writes its text")
     p.set_defaults(handler=cmd_predict)
 
     # generate -------------------------------------------------------------
@@ -4938,7 +5052,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-length", type=nonneg_int, default=60, help="maximum characters per text")
     p.add_argument("--mode", choices=("beam", "sample", "dijkstra", "kbest"), default="sample",
                    help="generation strategy (kbest: resonant model only - the exact K cheapest complete texts)")
-    p.add_argument("--prefix", default="", metavar="TEXT", help="start every text with this (default: from START)")
+    given = p.add_mutually_exclusive_group()
+    given.add_argument("--prefix", default="", metavar="TEXT", help="start every text with this (default: from START)")
+    given.add_argument("--prefix-file", metavar="FILE",
+                       help="start every text with a file's bytes (a model of base64 symbols: the symbols they fix)")
     p.add_argument("--temperature", type=nonneg_float, default=1.0, help="sample: softmax temperature (0 = greedy)")
     p.add_argument("--step-penalty", type=nonneg_float, default=0.0, help="beam / dijkstra: extra cost per edge")
     p.add_argument("--beam", type=pos_int, metavar="N", help="beam: beam width (default: max(4 * count, 16))")
@@ -4948,6 +5065,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--speak", metavar="FILE",
                    help="also hear the texts: every sample spoken through the model's voice, one utterance each, "
                         "written as a WAV (the output decoder; `say` has the voice's dials)")
+    p.add_argument("--decode-to", metavar="FILE",
+                   help="write every sample as the bytes it holds (FILE for one, FILE numbered before its extension "
+                        "for several): a model of base64 symbols decodes them; any other model writes its text")
     p.set_defaults(handler=cmd_generate)
 
     # speak ----------------------------------------------------------------

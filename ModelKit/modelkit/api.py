@@ -88,8 +88,9 @@ from .codegen import (
     parse_problems,
 )
 from radixnet.encoding import (
-    BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, CHARS, WORDS, Decoder, Encoder, Encoding, parse_encoding,
-    spelled_prediction, spelled_thought, spelled_turn, word_rows,
+    BACK_LABEL, CHARACTER_UNITS, END_LABEL, START_LABEL, THINK_LABEL, WINDOW, WORDS, Decoder, Encoder, Encoding,
+    base64_bytes, base64_file_texts, decoded_prediction, is_utf8, parse_encoding, spelled_prediction, spelled_thought, spelled_turn,
+    word_rows,
 )
 from .gan import EvolveConfig, Evolver
 from radixnet.graph import END, START, RadixCyclicGraph
@@ -831,7 +832,9 @@ class ModelService:
             **extra,
         }
 
-    def predict(self, prefix: str, *, guard: bool = True, provenance: bool | None = None, **options: Any) -> dict:
+    def predict(
+        self, prefix: str, *, guard: bool = True, provenance: bool | None = None, symbols: bool = False, **options: Any
+    ) -> dict:
         """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each).
 
         The negative network guards the answer (:meth:`guard`): the best
@@ -839,20 +842,26 @@ class ModelService:
         it vetoes every one of them nothing does - ``continuation`` is empty,
         ``full_text`` is the prefix alone and ``guard`` says why.
         ``guard=False`` hands out what the positive model wrote, unfiltered.
+
+        A model of base64 symbols is asked the symbols the prefix's bytes fix and says what its answer holds
+        (``prefix_symbols``, ``decoded``, ...); ``symbols`` says the prefix is written in them already
+        (:func:`_prefix_asked`).
         """
         with self.session() as model:
-            result = model.predict(prefix, **options)
+            enc = model.encoding
+            asked, content = _prefix_asked(enc, prefix, symbols)
+            result = model.predict(asked, **options)
             pair = self.guard(model, provenance) if guard else None
             report = None
             if pair is not None:
-                result, verdicts = pair.rank(prefix, result)  # the survivors, best first
+                result, verdicts = pair.rank(asked, result)  # the survivors, best first
                 report = self._guard_report(pair, verdicts, candidates=len(verdicts),
                                             kept=len(verdicts) - sum(v["decision"] == "reject" for v in verdicts))
             # a model of sounds: the words its answer spells, spelled under the lock like any read of the tokenizer
-            enc = model.encoding
             spelled = spelled_prediction(enc, result.full_text, result.text)
             ranked = (
-                {"top": [_path_dict(r, enc) for r in result.top], "bottom": [_path_dict(r, enc) for r in result.bottom]}
+                {"top": [_path_dict(r, enc, content) for r in result.top],
+                 "bottom": [_path_dict(r, enc, content) for r in result.bottom]}
                 if isinstance(result, Prediction) else {}
             )
         payload = {
@@ -868,13 +877,17 @@ class ModelService:
             "expanded": result.expanded,
             "reached_end": result.reached_end,
             **spelled,  # a model of sounds: spelled, spelled_continuation
+            **_base64_doc(enc, asked),  # a model of base64 symbols: the symbols it was asked
+            **decoded_prediction(enc, result.full_text, content),  # ... and what its answer holds
             "guard": report,
         }
         if isinstance(result, Prediction):
             payload.update(mode=result.mode, k=result.k, beam=result.beam, traversal=result.traversal, **ranked)
         return payload
 
-    def generate(self, guard: bool = True, provenance: bool | None = None, **options: Any) -> dict:
+    def generate(
+        self, guard: bool = True, provenance: bool | None = None, symbols: bool = False, **options: Any
+    ) -> dict:
         """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path.
 
         The negative network guards them (:meth:`guard`): the model is asked
@@ -885,14 +898,20 @@ class ModelService:
         ``guard=False`` returns what the positive model wrote, unfiltered.
         """
         with self.session() as model:
+            enc = model.encoding
+            # a model of base64 symbols starts from the symbols the prefix fixes (:func:`_prefix_asked`)
+            options["prefix"], content = _prefix_asked(enc, options.get("prefix") or "", symbols)
+            asked = _base64_doc(enc, options["prefix"])
             pair = self.guard(model, provenance) if guard else None
             if pair is None:
-                return {"samples": [_sample_dict(r, model.encoding) for r in model.generate(**options)], "guard": None}
+                samples = [_sample_dict(r, enc, content) for r in model.generate(**options)]
+                return {"samples": samples, **asked, "guard": None}
             count = options.pop("count", 1)
             outcome = pair.generate(count=count, **options)
-            samples = [_sample_dict(r, model.encoding) for r in outcome["results"]]
+            samples = [_sample_dict(r, enc, content) for r in outcome["results"]]
         return {
             "samples": samples,
+            **asked,
             "guard": self._guard_report(
                 pair, outcome["verdicts"], candidates=outcome["candidates"], kept=len(outcome["kept"]),
                 asked=outcome["asked"], rate=outcome["rate"],
@@ -1144,9 +1163,9 @@ class ModelService:
 
         return EventStream(run, OpenAIStream.error if dialect == OPENAI else AnthropicStream.error)
 
-    def score(self, text: str) -> dict:
-        with self.session() as model:
-            return model.score(text)
+    def score(self, text: str, symbols: bool = False) -> dict:
+        with self.session() as model:  # a model of base64 symbols scores the bytes of the text
+            return model.score(_inline_texts(model.encoding, [text], symbols)[0])
 
     def say(self, texts: list[str], **options: Any) -> dict:
         """The output decoder (``POST /api/say``): texts in the model's units as speech, one utterance each.
@@ -1227,7 +1246,7 @@ class ModelService:
             raise ApiError(400, f"'limit' must be >= 0 (got {limit})")
         with self.session() as model:
             encoding = model.encoding
-            if encoding.unit == CHARS:
+            if encoding.unit in CHARACTER_UNITS:  # characters, or base64 symbols: no words to list
                 raise ApiError(
                     400,
                     f"this model counts in {encoding.units_name}, so it has no words to list; "
@@ -1618,7 +1637,7 @@ class ModelService:
             ),
         }
 
-    def encoding_preview(self, text: str) -> dict:
+    def encoding_preview(self, text: str, symbols: bool = False) -> dict:
         """One text through the encoder and back through both decoders.
 
         ``windows`` is what the model's :class:`~radixnet.encoding.Encoding`
@@ -1639,12 +1658,15 @@ class ModelService:
         if not isinstance(text, str):
             raise ApiError(400, "'text' must be a string")
         enc = self.model.encoding
+        given = text
+        text = _inline_texts(enc, [text], symbols)[0]  # a model of base64 symbols reads the symbols of the bytes
         encoder, decoder = Encoder(encoding=enc), Decoder(encoding=enc)
         windows = encoder.encode(text)
         decoded = decoder.decode_trigrams(windows)
         info = {
             **self.encoding(),
-            "text": text,
+            "text": given,
+            **_base64_doc(enc, text, "symbols"),
             "chars": enc.length(text),
             "windows": windows,
             "count": len(windows),
@@ -1863,14 +1885,28 @@ class ModelService:
         return record
 
     def upload_bytes(self, name: str, data: bytes) -> dict:
-        """A binary upload: a ZIP archive is kept as one upload, anything else is stored as UTF-8 text.
+        """A binary upload: a ZIP archive is kept as one upload, a UTF-8 text file as its text, anything else as it is.
 
-        Returns ``{"uploads": [records], "archives": [summary]}`` (``archives``
+        A file that is not UTF-8 text - an image, a video, a recording - is kept byte for byte, so a model of
+        base64 symbols learns exactly what was sent; a text model reads it as text with the undecodable bytes
+        replaced, as it always did.  Returns ``{"uploads": [records], "archives": [summary]}`` (``archives``
         only for an archive).
         """
         if is_zip(name, data):
             return self.store_archive(name, data)
-        return {"uploads": [self.upload(name, _decode_text(data))]}
+        if is_utf8(data):
+            return {"uploads": [self.upload(name, _decode_text(data))]}
+        path = self._upload_path(name)
+        with self._upload_lock:
+            replaced = os.path.isfile(path)
+            part = path + ".part"
+            with open(part, "wb") as fh:
+                fh.write(data)
+            os.replace(part, path)
+            record = _upload_record(os.path.dirname(path), os.path.basename(path))
+        record["replaced"] = replaced
+        self._log(f"upload {record['name']} ({record['bytes']} bytes, binary)")
+        return {"uploads": [record]}
 
     def store_archive(self, name: str, data: bytes) -> dict:
         """Keep a ZIP archive as a single upload; its text entries are unpacked in memory whenever it is used.
@@ -1921,19 +1957,23 @@ class ModelService:
             self._archive_cache.pop(path, None)
         return {"deleted": os.path.basename(path)}
 
+    def upload_data(self, name: str) -> bytes:
+        """The bytes an upload holds, as they are stored."""
+        path = self._upload_path(name)
+        with self._upload_lock:
+            if not os.path.isfile(path):
+                raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
+            with open(path, "rb") as fh:
+                return fh.read()
+
     def upload_entries(self, name: str) -> list[tuple[str, str]]:
         """``[(file name, text)]`` of an upload: one pair for a text file, one per text entry of a ZIP archive.
 
         Archives are unpacked in memory here, behind the scenes: the upload
         directory only ever holds the ``.zip`` itself.
         """
-        path = self._upload_path(name)
-        with self._upload_lock:
-            if not os.path.isfile(path):
-                raise ApiError(404, f"no upload named {os.path.basename(path)!r}")
-            with open(path, "rb") as fh:
-                data = fh.read()
-        base = os.path.basename(path)
+        data = self.upload_data(name)
+        base = os.path.basename(self._upload_path(name))
         if is_zip(base, data):
             try:
                 extracted, _skipped = extract_texts(data, base)
@@ -1942,9 +1982,18 @@ class ModelService:
             return [(entry.path, entry.text) for entry in extracted]
         return [(base, _decode_text(data))]
 
-    def upload_texts(self, names: list[str], whole_file: bool = False) -> list[str]:
-        """Training texts read from uploads: one per non-blank line, or each file (archive entry) as one text."""
+    def upload_texts(self, names: list[str], whole_file: bool = False, encoding: Encoding | None = None) -> list[str]:
+        """Training texts read from uploads: one per non-blank line, or each file (archive entry) as one text.
+
+        A model of base64 symbols (``encoding``) reads each upload as the bytes it holds instead - an image, a
+        video or an archive is one text, a text file one per line - written in its symbols
+        (:func:`radixnet.encoding.base64_file_texts`).
+        """
         texts: list[str] = []
+        if encoding is not None and encoding.is_base64:
+            for name in names:
+                texts.extend(base64_file_texts(self.upload_data(name), whole_file))
+            return texts
         for name in names:
             for _entry, blob in self.upload_entries(name):
                 if whole_file:
@@ -2298,8 +2347,41 @@ class ModelService:
             sys.stderr.write(f"{message}\n{traceback.format_exc()}")
 
 
-def _sample_dict(result: PathResult, encoding: Encoding) -> dict:
-    """One generated text; a model of sounds adds the words it spells (``spelled``)."""
+def _inline_texts(encoding: Encoding, texts: list[str], symbols: bool = False) -> list[str]:
+    """Texts given in a request, as the model reads them.
+
+    A model of base64 symbols learns the bytes of a text: its UTF-8 bytes written in the symbols
+    (:meth:`Encoding.text_input`) - unless the request says the texts are symbols already (``symbols``: the
+    model's own words given back, a liked continuation or a rated sample), which are taken as they are.
+    Any other model takes every text as it is.
+    """
+    if symbols or not encoding.is_base64:
+        return list(texts)
+    return [encoding.text_input(t) for t in texts]
+
+
+def _prefix_asked(encoding: Encoding, prefix: str, symbols: bool = False) -> tuple[str, bytes]:
+    """A prefix as the model is asked it, and the content it stands for, as bytes.
+
+    A model of base64 symbols is asked the symbols the prefix's UTF-8 bytes fix (:meth:`Encoding.prefix_input`);
+    with ``symbols`` the prefix is written in them already, asked as it is and standing for the bytes it decodes
+    into.  Any other model is asked the prefix as it is.
+    """
+    if not encoding.is_base64:
+        return prefix, prefix.encode("utf-8")
+    if symbols:
+        return prefix, base64_bytes(prefix)
+    return encoding.prefix_input(prefix), prefix.encode("utf-8")
+
+
+def _base64_doc(encoding: Encoding, symbols: str, key: str = "prefix_symbols") -> dict:
+    """``{key: symbols}`` for a model of base64 symbols - what it was asked, in its symbols - and nothing else."""
+    return {key: symbols} if encoding.is_base64 else {}
+
+
+def _sample_dict(result: PathResult, encoding: Encoding, prefix: bytes = b"") -> dict:
+    """One generated text; a model of sounds adds the words it spells (``spelled``), a model of base64 symbols
+    what the text holds (``decoded``, ``decoded_continuation``, ``decoded_bytes``)."""
     doc = {
         "text": result.text,
         "full_text": result.full_text,
@@ -2312,11 +2394,13 @@ def _sample_dict(result: PathResult, encoding: Encoding) -> dict:
     }
     if encoding.phonetic:
         doc["spelled"] = encoding.spell(result.text)
+    doc.update(decoded_prediction(encoding, result.full_text, prefix))
     return doc
 
 
-def _path_dict(result: PathResult, encoding: Encoding) -> dict:
-    """One of the top / bottom continuations of a count-model prediction, spelled when it is sounds."""
+def _path_dict(result: PathResult, encoding: Encoding, prefix: bytes = b"") -> dict:
+    """One of the top / bottom continuations of a count-model prediction, spelled when it is sounds and decoded
+    when it is base64 symbols."""
     return {
         "continuation": result.text,
         "full_text": result.full_text,
@@ -2327,6 +2411,7 @@ def _path_dict(result: PathResult, encoding: Encoding) -> dict:
         "node_ids": list(result.node_ids),
         "reached_end": result.reached_end,
         **spelled_prediction(encoding, result.full_text, result.text),
+        **decoded_prediction(encoding, result.full_text, prefix),
     }
 
 
@@ -2706,11 +2791,17 @@ def _upload_body(body: bytes, content_type: str, query: dict[str, list[str]], de
 def _texts_and_files(
     svc: ModelService, fields: Fields, list_name: str, text_name: str, files_name: str, whole_file: bool = False
 ) -> list[str]:
-    """Texts given inline and/or read from uploaded files; at least one text is required."""
+    """Texts given inline and/or read from uploaded files; at least one text is required.
+
+    A model of base64 symbols learns the bytes of what it is given: an inline text as its UTF-8 bytes (or as it
+    is, with ``symbols``: :func:`_inline_texts`), an upload as the bytes it holds
+    (:meth:`ModelService.upload_texts`), each written in its symbols.
+    """
     names = fields.names(files_name)
-    texts = fields.texts_optional(list_name, text_name)
+    enc = svc.model.encoding  # fixed for the model's life: read without waiting for a running job
+    texts = _inline_texts(enc, fields.texts_optional(list_name, text_name), fields.flag("symbols", False))
     if names:
-        texts.extend(svc.upload_texts(names, whole_file=whole_file))
+        texts.extend(svc.upload_texts(names, whole_file=whole_file, encoding=enc))
     if not texts:
         if names:
             raise ApiError(400, f"'{files_name}' contains no texts")
@@ -2855,11 +2946,13 @@ def feedback_action(good: list[str], bad: list[str]) -> str | None:
 
 def _r_feedback(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     whole_file = f.flag("whole_file", False)
-    good = f.texts_optional("good", "good_text")
-    bad = f.texts_optional("bad", "bad_text")
+    enc = svc.model.encoding  # a model of base64 symbols learns the bytes of what it is given
+    symbols = f.flag("symbols", False)  # ... unless the texts are its own words, given back (a like, a rating)
+    good = _inline_texts(enc, f.texts_optional("good", "good_text"), symbols)
+    bad = _inline_texts(enc, f.texts_optional("bad", "bad_text"), symbols)
     for names, target in ((f.names("good_files"), good), (f.names("bad_files"), bad)):
         if names:
-            target.extend(svc.upload_texts(names, whole_file=whole_file))
+            target.extend(svc.upload_texts(names, whole_file=whole_file, encoding=enc))
     action = feedback_action(good, bad)
     if action is None:
         raise ApiError(
@@ -2995,6 +3088,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         prefix,
         guard=f.flag("guard", True),
         provenance=f.flag("provenance", None),
+        symbols=f.flag("symbols", False),
         length=f.integer("length", 20, minimum=0),
         mode=f.text("mode", "dijkstra"),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
@@ -3012,6 +3106,7 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
     return 200, svc.generate(
         guard=f.flag("guard", True),
         provenance=f.flag("provenance", None),
+        symbols=f.flag("symbols", False),
         count=f.integer("count", 1, minimum=0),
         max_length=f.integer("max_length", 60, minimum=0),
         mode=f.text("mode", "sample"),
@@ -3087,7 +3182,7 @@ def _r_converse_stream(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]
 
 
 def _r_score(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 200, svc.score(f.text("text"))
+    return 200, svc.score(f.text("text"), symbols=f.flag("symbols", False))
 
 
 def _r_two_nrl(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -3245,7 +3340,7 @@ def _r_encoding(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
 
 
 def _r_encoding_preview(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
-    return 200, svc.encoding_preview(f.text("text", "") or "")
+    return 200, svc.encoding_preview(f.text("text", "") or "", symbols=f.flag("symbols", False))
 
 
 def _r_model(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
@@ -4752,7 +4847,9 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "(the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the "
      "buffer's capacity from now on; 0 drops it), patience, min_delta (stop after `patience` full epochs without "
      "the loss improving by `min_delta`; 0 = off), reverse (read every text backwards, in the model's units - its "
-     "last character or word first - so the model learns what comes before; off by default)}"),
+     "last character or word first - so the model learns what comes before; off by default), symbols (a model of "
+     "base64 symbols: the texts are written in them already)}; a model of base64 symbols learns the bytes - a text "
+     "as its UTF-8 bytes, a file as every byte it holds - written in its symbols"),
     ("GET", "/api/schedule", _r_schedule, "what a learning-rate schedule expression may use: variables, functions, helpers, presets"),
     ("POST", "/api/schedule/preview", _r_schedule_preview,
      "the rate of every epoch for schedule expressions: {lr_schedule, act_lr_schedule, epochs, lr, act_lr, "
@@ -4770,15 +4867,18 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "(default on: the negative network vetoes the continuations it recognises as failures), provenance (false: "
      "the guard reports how many it vetoed, not which or why)}; a model of sounds adds spelled and "
      "spelled_continuation (the English, and the part of it the continuation wrote) to the answer and to every "
-     "top / bottom row"),
+     "top / bottom row; a model of base64 symbols is asked the symbols the prefix's bytes fix (symbols: true - the "
+     "prefix is written in them already) and adds prefix_symbols, and decoded, decoded_continuation and "
+     "decoded_bytes (what the answer holds) to the answer and to every row"),
     ("POST", "/api/generate", _r_generate,
      "generate whole texts with the prediction search: {count, max_length, mode: beam (the K most likely) | sample | "
      "dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, "
      "penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), "
      "guard (default on: the model over-samples and the "
      "negative network vetoes what it recognises as failure), provenance (default: the server's setting; false "
-     "reports how many candidates the guard vetoed, not which or why)}; a model of sounds adds spelled (the "
-     "English) to every sample"),
+     "reports how many candidates the guard vetoed, not which or why), symbols}; a model of sounds adds spelled (the "
+     "English) to every sample, a model of base64 symbols prefix_symbols and, to every sample, decoded, "
+     "decoded_continuation and decoded_bytes"),
     ("POST", "/api/converse", _r_converse,
      "the model converses with itself - each reply is the prediction search picking up the end of the previous "
      "line: {opening, turns, mode: beam | sample, max_length, context, temperature, k, beam, step_penalty, seed, "
@@ -4810,14 +4910,17 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
      "| think (what it triggered when it stopped), taught, handed_over, questions: [the same], cost, probability, "
      "labels, node_ids, step_costs}; a thought of a model of sounds, and each of its questions, adds spelled (the "
      "English)"),
-    ("POST", "/api/score", _r_score, "log-probability of a text: {text}"),
+    ("POST", "/api/score", _r_score,
+     "log-probability of a text: {text, symbols} (a model of base64 symbols scores the text's bytes, or the "
+     "symbols as they are with symbols: true)"),
     ("POST", "/api/2nrl", _r_two_nrl,
      "start a 2NRL job: {bad | bad_text, good | good_text, neg_epochs, pos_epochs, neg_lr, pos_lr, "
      "bad_weights | bad_ratings, good_weights | good_ratings (per text: how bad / how good)}"),
     ("POST", "/api/feedback", _r_feedback,
      "learn from rated texts: {good (thumbs up), bad (thumbs down), good_ratings / bad_ratings (marks out of 10, "
      "or good_weights / bad_weights as 0..1 shares), ...} -> 2NRL when both, reward on good alone, punish "
-     "(negative phase + invert) on bad alone; every text is learned in proportion to its rating"),
+     "(negative phase + invert) on bad alone; every text is learned in proportion to its rating; symbols: true - "
+     "the texts are a model of base64 symbols' own words, given back"),
     ("POST", "/api/invert", _r_invert, "invert the network"),
     ("POST", "/api/compress", _r_compress, "merge unary chains"),
     ("POST", "/api/evolve/start", _r_evolve_start,
@@ -4842,7 +4945,8 @@ _ENDPOINTS: tuple[tuple[str, str, RouteFn, str], ...] = (
     ("POST", "/api/encoding/preview", _r_encoding_preview,
      "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, "
      "round_trip, kind, path: {known, reason, labels, node_ids, decoded, nodes, compressed}} - path is the text "
-     "through the graph's own (possibly merged) node labels"),
+     "through the graph's own (possibly merged) node labels; a model of base64 symbols previews the symbols of the "
+     "text's bytes, returned as symbols (symbols: true - the text is written in them already)"),
     ("POST", "/api/model/weights", _r_model_weights,
      "change the active model's score function - count: {count_scale, global_scale, window_scale, reward_scale, "
      "path_scale, window}; resonant: {buckets, period, kick_scale, resonance_scale, amp_scale, reward_scale, "

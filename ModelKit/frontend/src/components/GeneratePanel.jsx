@@ -15,6 +15,8 @@ import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { problemText, searchProblemsFor } from "../settings.js";
 import { reverseUnits } from "../backwards.js";
 import { spelledParts } from "../spelled.js";
+import { decodedParts } from "../decoded.js";
+import SaveBytesButton from "./SaveBytesButton.jsx";
 
 /**
  * Generate whole texts with the prediction search (beam: the K most likely
@@ -189,9 +191,11 @@ export default function GeneratePanel({ status }) {
           <ol className="samples">
             {samples.map((s, i) => {
               // the model's own text is what a rating keeps and feedback trains on; backwards, it is shown turned
-              // back, and a model of sounds is shown as the words they spell (its sounds beneath them)
+              // back, a model of sounds is shown as the words they spell (its sounds beneath them), and a model of
+              // base64 symbols as what they hold (its symbols beneath it)
               const text = textOf(s);
-              const words = flip ? null : spelledParts(s);
+              const decoded = flip ? null : decodedParts(s);
+              const words = flip ? null : spelledParts(s) || decoded;
               const shown = flip ? reverseUnits(text, flip) : words ? words.whole : text;
               const rating = ratingOf(text);
               return (
@@ -213,6 +217,9 @@ export default function GeneratePanel({ status }) {
                       label={`sample ${i + 1}`}
                     />
                     <HearButton text={text} label={`sample ${i + 1}`} compact />
+                    {decoded ? (
+                      <SaveBytesButton text={text} name={`sample-${i + 1}`} label={`sample ${i + 1}`} compact />
+                    ) : null}
                   </div>
                 </li>
               );

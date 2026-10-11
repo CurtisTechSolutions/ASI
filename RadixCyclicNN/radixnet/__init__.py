@@ -37,8 +37,8 @@ from .backend import (
     torch_available,
 )
 from .encoding import (
-    ACOUSTIC, BACK_LABEL, CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, THINK_LABEL, WINDOW, WORDS, Decoder, Encoder,
-    Encoding, parse_encoding,
+    ACOUSTIC, BACK_LABEL, BASE64, CHARS, END_LABEL, PHONES, START_LABEL, SYLLABLES, THINK_LABEL, WINDOW, WORDS, Decoder,
+    Encoder, Encoding, base64_bytes, base64_file_texts, base64_prefix, base64_text, parse_encoding,
 )
 from .graph import BACK, END, FIRST, START, THINK, RadixCyclicGraph
 from .beam import Prediction, beam_predict
@@ -71,7 +71,8 @@ __all__ = [
     "DEFAULT_A", "DEFAULT_B", "DEFAULT_H", "DEFAULT_K",
     "edge_signal", "sine_activation", "sine_derivative", "sine_partials",
     "CSR", "Backend", "NodeParams", "PythonBackend",
-    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "Encoding", "parse_encoding",
+    "END_LABEL", "START_LABEL", "WINDOW", "CHARS", "WORDS", "PHONES", "SYLLABLES", "ACOUSTIC", "BASE64", "Encoding",
+    "parse_encoding", "base64_text", "base64_prefix", "base64_bytes", "base64_file_texts",
     "END", "START", "RadixCyclicGraph",
     "DynamicWindow", "WINDOW_TOP", "WINDOW_FLOOR",
     "PathResult", "dijkstra_predict", "sample_walk",

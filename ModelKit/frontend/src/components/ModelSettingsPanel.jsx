@@ -301,6 +301,11 @@ function EncodingCard({ status }) {
       {preview ? (
         <>
           <h3>The encoder</h3>
+          {typeof preview.symbols === "string" ? (
+            <p className="muted">
+              A model of base64 symbols reads the text&apos;s bytes, written in its symbols: <code>{preview.symbols}</code>
+            </p>
+          ) : null}
           <p className="muted">
             {fmtInt(preview.chars)} {units(preview.chars)} become {fmtInt(preview.count)} gram(s).
           </p>

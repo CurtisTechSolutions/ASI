@@ -104,19 +104,24 @@ export function countingKind(status) {
 }
 
 /**
- * What the active model counts in: "words" for the word n-gram model, whose
- * symbols are words, and "chars" for every other kind. Lengths, caps and
- * per-symbol scores are in those units, and a number whose unit depends on the
- * model is a number that will be read wrong (../../RadixCyclicNN/SPEC-WordNGrams.md section 9).
+ * What the active model counts in, as the servers say it (`units`): "words",
+ * "phones", "syllables", "units" (acoustic) or "symbols" (base64), and "chars"
+ * for anything else. Lengths, caps and per-symbol scores are in those units,
+ * and a number whose unit depends on the model is a number that will be read
+ * wrong (../../RadixCyclicNN/SPEC-WordNGrams.md section 9).
  */
 export function unitsOf(status) {
   const units = status && status.units;
-  return units === "words" || units === "phones" || units === "syllables" || units === "units" ? units : "chars";
+  return ["words", "phones", "syllables", "units", "symbols"].includes(units) ? units : "chars";
 }
 
-/** True when the active model's symbols are tokens set apart by spaces - words, sounds or acoustic units - rather than characters. */
+/**
+ * True when the active model's symbols are tokens set apart by spaces - words, sounds or acoustic units - rather
+ * than characters or base64 symbols, which are one code point each.
+ */
 export function wordKind(status) {
-  return unitsOf(status) !== "chars";
+  const units = unitsOf(status);
+  return units !== "chars" && units !== "symbols";
 }
 
 const UNIT_NAMES = Object.freeze({
@@ -125,9 +130,13 @@ const UNIT_NAMES = Object.freeze({
   phones: ["phone", "phones"],
   syllables: ["syllable", "syllables"],
   units: ["acoustic unit", "acoustic units"],
+  symbols: ["base64 symbol", "base64 symbols"],
 });
 
-/** The model's unit as an English word: "characters" / "words" / "phones" / "syllables" / "acoustic units" (`plural: false` for the singular). */
+/**
+ * The model's unit as an English word: "characters" / "words" / "phones" / "syllables" / "acoustic units" /
+ * "base64 symbols" (`plural: false` for the singular).
+ */
 export function unitName(status, plural = true) {
   return UNIT_NAMES[unitsOf(status)][plural ? 1 : 0];
 }

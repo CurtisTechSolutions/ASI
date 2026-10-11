@@ -141,6 +141,7 @@ test("a new model's encoding is checked before it is sent", () => {
   assert.deepEqual(encodingSpec("phone", "3", "1"), { spec: "phone:3:1" });
   assert.deepEqual(encodingSpec("syllable", "2", "1"), { spec: "syllable:2:1" });
   assert.deepEqual(encodingSpec("acoustic", 2, 2), { spec: "acoustic:2:2" });
+  assert.deepEqual(encodingSpec("base64", "4", "4"), { spec: "base64:4:4" });
   assert.ok(encodingSpec("rune", "3", "1").error);
   assert.ok(encodingSpec("char", "0", "1").error);
   assert.ok(encodingSpec("char", "2", "3").error, "a stride longer than the gram skips text");
@@ -164,7 +165,10 @@ test("an encoding reads as words", () => {
   assert.equal(describeEncoding("acoustic:3:1"), "acoustic unit trigram");
   assert.equal(describeEncoding("acoustic:4:4"), "groups of 4 acoustic units");
   assert.equal(describeEncoding("phone:5:2"), "5-grams of phones, stride 2");
-  assert.deepEqual(UNITS.map(([unit]) => unit), ["char", "word", "phone", "syllable", "acoustic"]);
+  assert.equal(describeEncoding("base64:3:1"), "base64 symbol trigram");
+  assert.equal(describeEncoding("base64:4:4"), "groups of 4 base64 symbols");
+  assert.deepEqual(UNITS.map(([unit]) => unit), ["char", "word", "phone", "syllable", "acoustic", "base64"]);
+  assert.ok(!soundUnit("base64"));
   assert.equal(unitWord("acoustic", false), "acoustic unit");
   assert.equal(unitWord("rune"), "characters");
   assert.ok(soundUnit("phone") && soundUnit("acoustic") && !soundUnit("word"));

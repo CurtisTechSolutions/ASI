@@ -45,7 +45,8 @@ follow; `../../../../RadixCyclicNN/README.md` documents what each panel actually
 | `LineChart.jsx` | a dependency-free SVG line chart. Non-finite points are dropped; an empty chart renders a placeholder |
 | `StatusBar.jsx` | the header readout, polling `/api/status` every 2 s |
 | `ModelSelector.jsx` | which of the three models is loaded, and where it came from |
-| `UploadPicker.jsx` | choosing and uploading training files, ZIP archives included |
+| `UploadPicker.jsx` | choosing and uploading training files, ZIP archives included; for a model of base64 symbols (`anyFile`) any file at all, sent as the bytes it holds |
+| `SaveBytesButton.jsx` | 💾 Save: a model of base64 symbols' answer decoded to its bytes and handed over as a file |
 | `RatingsCard.jsx` | 👍 / 👎 on an output, and training on the ratings collected |
 | `RecallCard.jsx` | what the model remembers of what it was shown |
 | `GuardNotice.jsx` | what the negative network stopped on the way out |

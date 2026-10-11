@@ -27,6 +27,8 @@ import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { problemText, searchProblemsFor } from "../settings.js";
 import { readingOrder, reverseUnits } from "../backwards.js";
 import { spelledParts } from "../spelled.js";
+import { decodedParts } from "../decoded.js";
+import SaveBytesButton from "./SaveBytesButton.jsx";
 
 const SENTINELS = new Set(["<s>", "</s>"]);
 
@@ -83,7 +85,8 @@ function Continued({ prefix, continuation, flip, spelled = null }) {
 }
 
 /**
- * The sounds a model of sounds said, beneath the words they spell: the model's
+ * The sounds a model of sounds said, beneath the words they spell - or the
+ * symbols a model of base64 symbols said, beneath what they hold: the model's
  * own text, which is what a like rewards and the voice speaks.
  */
 function Sounds({ text, status }) {
@@ -119,8 +122,10 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, fl
               {paths.map((p, i) => {
                 // the model's own text: what a like rewards, backwards or not
                 const text = String(p.full_text ?? `${prefix}${p.continuation ?? ""}`);
-                // a model of sounds: the words they spell (asked backwards, the sounds are read the other way)
-                const spelled = flip ? null : spelledParts(p);
+                // a model of sounds: the words they spell (asked backwards, the sounds are read the other way);
+                // a model of base64 symbols: what they hold
+                const decoded = flip ? null : decodedParts(p);
+                const spelled = flip ? null : spelledParts(p) || decoded;
                 return (
                   <tr key={i}>
                     <td>{i + 1}</td>
@@ -143,6 +148,14 @@ function PathTable({ title, hint, paths, prefix, liked, likeDisabled, onLike, fl
                     </td>
                     <td>
                       <HearButton text={text} label={`${title.toLowerCase().split(" ")[0]} continuation ${i + 1}`} compact />
+                      {decoded ? (
+                        <SaveBytesButton
+                          text={text}
+                          name={`${title.toLowerCase().split(" ")[0]}-${i + 1}`}
+                          label={`${title.toLowerCase().split(" ")[0]} continuation ${i + 1}`}
+                          compact
+                        />
+                      ) : null}
                     </td>
                   </tr>
                 );
@@ -208,7 +221,10 @@ export default function PredictPanel({ status }) {
     const trimmed = String(text ?? "");
     if (!trimmed.trim() || likeDisabled) return;
     setLastLiked(null);
-    const started = await start(() => api.feedback({ good: [trimmed], ...(countKind ? { strength: 1 } : {}) }));
+    // the model's own text, given back as it is: a model of base64 symbols is not to read it as new bytes
+    const started = await start(() =>
+      api.feedback({ good: [trimmed], symbols: true, ...(countKind ? { strength: 1 } : {}) }),
+    );
     if (started) {
       setLiked((prev) => new Set([...prev, trimmed]));
       setLastLiked(trimmed);
@@ -268,8 +284,10 @@ export default function PredictPanel({ status }) {
   const shownPrefix = result ? String(result.prefix ?? (flip ? reverseUnits(prefix, flip) : prefix)) : prefix;
   // the model's own text, which is what a like rewards: backwards when it was asked backwards
   const fullText = result ? String(result.full_text ?? `${shownPrefix}${result.continuation ?? ""}`) : "";
-  // a model of sounds answers in the words they spell; asked backwards, its sounds read the other way round
-  const spelled = result && !flip ? spelledParts(result) : null;
+  // a model of sounds answers in the words they spell, a model of base64 symbols in what they hold; asked
+  // backwards, its units read the other way round
+  const decoded = result && !flip ? decodedParts(result) : null;
+  const spelled = result && !flip ? spelledParts(result) || decoded : null;
 
   return (
     <>
@@ -417,7 +435,14 @@ export default function PredictPanel({ status }) {
                   : "Rewards the shown text: a positive-phase training pass (thumbs up)."}
               </span>
               <HearButton text={fullText} label="this prediction" />
+              {decoded ? <SaveBytesButton text={fullText} name="prediction" label="this prediction" /> : null}
             </div>
+            {decoded && decoded.bytes !== null ? (
+              <p className="muted">
+                The symbols hold {fmtInt(decoded.bytes)} bytes, shown above as text (U+FFFD where they are not text);
+                Save bytes writes them as they are.
+              </p>
+            ) : null}
             {job ? (
               <JobStatus job={job} emptyText="" />
             ) : null}

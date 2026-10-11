@@ -149,6 +149,7 @@ export default function RatingsCard({
     setLastAction(null);
     const result = await start(() =>
       api.feedback({
+        symbols: true, // the model's own texts, given back as they are (a model of base64 symbols reads no new bytes)
         ...(ups.length ? { good: ups.map((r) => r.text), good_ratings: ups.map((r) => clampMark(r.mark)) } : {}),
         ...(downs.length ? { bad: downs.map((r) => r.text), bad_ratings: downs.map((r) => clampMark(r.mark)) } : {}),
         neg_epochs: parseInteger(negEpochs, 2),

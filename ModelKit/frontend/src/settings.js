@@ -210,13 +210,16 @@ export const ENCODING_PRESETS = Object.freeze([
   ["phone:3:1", "phone trigram (the text as sounds)"],
   ["syllable:2:1", "syllable bigram"],
   ["acoustic:3:1", "acoustic unit trigram (sounds learned from recordings)"],
+  ["base64:3:1", "base64 symbol trigram (any file's bytes: text, images, video)"],
+  ["base64:4:4", "groups of 4 base64 symbols (3 bytes each)"],
   ["custom", "custom (unit, n, stride)"],
 ]);
 
 /**
  * What one unit of a model can be, as the servers name it, with what to call
- * it: characters and words, and the sounds the phonetic tokenizer reads -
- * phones and syllables from the text, acoustic units learned from recordings.
+ * it: characters and words, the sounds the phonetic tokenizer reads - phones
+ * and syllables from the text, acoustic units learned from recordings - and
+ * base64 symbols, six bits each of the bytes of any file.
  */
 export const UNITS = Object.freeze([
   ["char", "characters"],
@@ -224,6 +227,7 @@ export const UNITS = Object.freeze([
   ["phone", "phones (the text as sounds)"],
   ["syllable", "syllables"],
   ["acoustic", "acoustic units (learned from recordings)"],
+  ["base64", "base64 symbols (any file's bytes: text, images, video)"],
 ]);
 
 const UNIT_NAMES = Object.freeze({
@@ -232,6 +236,7 @@ const UNIT_NAMES = Object.freeze({
   phone: ["phone", "phones"],
   syllable: ["syllable", "syllables"],
   acoustic: ["acoustic unit", "acoustic units"],
+  base64: ["base64 symbol", "base64 symbols"],
 });
 
 /** True for a unit the servers know. */
@@ -257,7 +262,7 @@ export function soundUnit(unit) {
  */
 export function encodingSpec(unit, n, stride) {
   if (!isUnit(unit)) {
-    return { error: `The unit must be char, word, phone, syllable or acoustic, not ${JSON.stringify(unit)}.` };
+    return { error: `The unit must be char, word, phone, syllable, acoustic or base64, not ${JSON.stringify(unit)}.` };
   }
   const size = countOf(n);
   if (size === null || size < 1) return { error: "n must be a whole number of units, 1 or more." };

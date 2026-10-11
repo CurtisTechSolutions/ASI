@@ -12,6 +12,7 @@ import {
   parseNumber,
   splitLines,
   unitName,
+  unitsOf,
 } from "../util.js";
 import Alert from "./Alert.jsx";
 import JobStatus from "./JobStatus.jsx";
@@ -79,6 +80,8 @@ export default function TrainPanel({ status }) {
   // no learning rates, batches or schedules: the count and resonant models learn by counting
   const rateless = countingKind(status);
   const goEngine = Boolean(status && status.engine === "go");
+  // a model of base64 symbols learns the bytes of any file
+  const anyFile = unitsOf(status) === "symbols";
   // Go server: what one training text is (each text is handled by its own goroutine)
   const [split, setSplit] = useStoredState("train.split", "lines");
   const [pageLines, setPageLines] = useStoredState("train.pageLines", "50");
@@ -259,7 +262,13 @@ export default function TrainPanel({ status }) {
           onChange={setFiles}
           disabled={running}
           title="Training files"
-          hint="Upload text files and tick the ones to train on (in addition to the texts above)."
+          hint={
+            anyFile
+              ? "Upload any files - text, images, video, recordings - and tick the ones to train on: a text file is " +
+                "one text per line, anything else one text of every byte it holds."
+              : "Upload text files and tick the ones to train on (in addition to the texts above)."
+          }
+          anyFile={anyFile}
         />
         <CheckField
           label="Treat each selected file as one text (instead of one text per line)"
