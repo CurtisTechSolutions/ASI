@@ -12,7 +12,7 @@ import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-__all__ = ["ALPHABET", "LANGUAGES", "Language", "examples", "language"]
+__all__ = ["ALPHABET", "LANGUAGES", "Language", "all_strings", "examples", "language"]
 
 ALPHABET = "ab"
 
@@ -53,4 +53,14 @@ def examples(lang: Language, count: int, rng: random.Random, max_length: int = 6
     for _ in range(count):
         s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, max_length)))
         out.append((s, lang.member(s)))
+    return out
+
+
+def all_strings(max_length: int, alphabet: Sequence[str] = ALPHABET) -> list[str]:
+    """Every string of length 0 to ``max_length``, shortest first, each length in alphabetical order: a test set
+    both ports agree on (127 strings over ``ab`` up to length 6)."""
+    out, level = [""], [""]
+    for _ in range(max_length):
+        level = [s + a for s in level for a in alphabet]
+        out += level
     return out

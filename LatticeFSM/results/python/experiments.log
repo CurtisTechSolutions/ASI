@@ -163,3 +163,49 @@ even-b, taught plain, then left to rearrange itself until settled: 27 swaps; sta
 | 5 | 602 | 121 | 80 |
 | 6 | 866 | 217 | 96 |
 
+network: every language taught to each network for 4000 episodes (the learning experiment's strings), 5 seeds, 300 held-out strings; `>` one after another, `(a|b)` side by side (majority vote at the end), `f` writes only the final state
+
+| language | network | credit | layers | accuracy: mean | min | max | solved | touched edges |
+|---|---|---|---|---|---|---|---|---|
+| even-b | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| even-b | `3>3` | shared | 2 | **1.00** | 1.00 | 1.00 | 5/5 | 45 |
+| even-b | `3f>3` | shared | 2 | **1.00** | 1.00 | 1.00 | 5/5 | 27 |
+| even-b | `(3|3)>3` | shared | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 90 |
+| even-b | `(3|3|3)` | shared | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| even-b | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| even-b | `13` | shared | 1 | **0.82** | 0.53 | 1.00 | 2/5 | 338 |
+| even-b | `(13|13|13)` | own | 3 | **0.71** | 0.57 | 1.00 | 1/5 | 1014 |
+| contains-aa | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| contains-aa | `3>3` | shared | 2 | **0.89** | 0.71 | 1.00 | 3/5 | 45 |
+| contains-aa | `3f>3` | shared | 2 | **0.89** | 0.43 | 1.00 | 4/5 | 27 |
+| contains-aa | `(3|3)>3` | shared | 3 | **0.66** | 0.51 | 0.75 | 0/5 | 90 |
+| contains-aa | `(3|3|3)` | shared | 3 | **0.79** | 0.56 | 1.00 | 2/5 | 54 |
+| contains-aa | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| contains-aa | `13` | shared | 1 | **0.79** | 0.65 | 0.98 | 0/5 | 336 |
+| contains-aa | `(13|13|13)` | own | 3 | **0.73** | 0.66 | 0.78 | 0/5 | 1002 |
+| ends-ab | `3` | shared | 1 | **0.98** | 0.88 | 1.00 | 4/5 | 18 |
+| ends-ab | `3>3` | shared | 2 | **0.85** | 0.72 | 1.00 | 1/5 | 45 |
+| ends-ab | `3f>3` | shared | 2 | **0.97** | 0.86 | 1.00 | 4/5 | 27 |
+| ends-ab | `(3|3)>3` | shared | 3 | **0.91** | 0.82 | 1.00 | 2/5 | 90 |
+| ends-ab | `(3|3|3)` | shared | 3 | **0.96** | 0.79 | 1.00 | 4/5 | 54 |
+| ends-ab | `(3|3|3)` | own | 3 | **0.99** | 0.94 | 1.00 | 4/5 | 54 |
+| ends-ab | `13` | shared | 1 | **0.90** | 0.83 | 0.99 | 0/5 | 296 |
+| ends-ab | `(13|13|13)` | own | 3 | **0.95** | 0.85 | 1.00 | 1/5 | 827 |
+| mod3-a | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| mod3-a | `3>3` | shared | 2 | **0.76** | 0.53 | 1.00 | 2/5 | 45 |
+| mod3-a | `3f>3` | shared | 2 | **0.73** | 0.51 | 1.00 | 2/5 | 27 |
+| mod3-a | `(3|3)>3` | shared | 3 | **0.73** | 0.51 | 1.00 | 1/5 | 90 |
+| mod3-a | `(3|3|3)` | shared | 3 | **0.77** | 0.65 | 0.86 | 0/5 | 54 |
+| mod3-a | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| mod3-a | `13` | shared | 1 | **0.79** | 0.69 | 0.92 | 0/5 | 329 |
+| mod3-a | `(13|13|13)` | own | 3 | **0.71** | 0.69 | 0.77 | 0/5 | 979 |
+
+English to English: each task taught to each network for 20 epochs, every fourth pair held out; exact means every sound right
+
+| task | network | pairs taught / held out | sounds right while taught | exact: taught | held out | translations (taught, taught, held out, held out) |
+|---|---|---|---|---|---|---|
+| plural | `enc>dec` | 35 / 11 | 0.90 | **0.80** | 0.09 | cat → cats, dog → dogs, hat → hats, box → b ks z (boxes) |
+| plural | `enc>13>dec` | 35 / 11 | 0.16 | **0.11** | 0.00 | cat → ksiz (cats), dog → doors (dogs), hat → rus k (hats), box → benz s (boxes) |
+| past | `enc>dec` | 21 / 7 | 0.89 | **0.76** | 0.00 | walk → walked, play → played, jump → pt (jumped), look → l kt (looked) |
+| past | `enc>13>dec` | 21 / 7 | 0.12 | **0.05** | 0.00 | walk → want (walked), play → pt he (played), jump → wawnd w (jumped), look → wawld (looked) |
+

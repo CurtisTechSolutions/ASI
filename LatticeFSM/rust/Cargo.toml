@@ -1,9 +1,11 @@
 # latticefsm (Rust) - a finite state machine over a dense 3D matrix of adaptive edges.
 #
-# No dependencies, on purpose, like the other crates in this repository: the
-# Python implementation beside it is pure standard library, and so is this one.
-# Everything it needs - JSON, the RNG, the HTTP/1.1 server - is written out in
-# src/.
+# No dependencies from outside this repository, on purpose, like the other
+# crates in it: the Python implementation beside it is pure standard library,
+# and so is this one.  Everything it needs - JSON, the RNG, the HTTP/1.1
+# server - is written out in src/; the one dependency is the repository's own
+# phonetic tokenizer (../../PhoneticTokenizer/rust, itself standard library
+# only), which the network's encoder and decoder read and write English with.
 [package]
 name = "latticefsm"
 version = "0.1.0"
@@ -20,6 +22,9 @@ path = "src/lib.rs"
 [[bin]]
 name = "latticefsm"
 path = "src/bin/latticefsm.rs"
+
+[dependencies]
+phonetok = { path = "../../PhoneticTokenizer/rust" }
 
 [profile.release]
 opt-level = 3

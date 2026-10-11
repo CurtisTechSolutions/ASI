@@ -1,0 +1,759 @@
+{
+ "experiment": "network",
+ "settings": {
+  "episodes": 4000,
+  "seeds": [
+   1,
+   2,
+   3,
+   4,
+   5
+  ],
+  "life": 1000.0,
+  "tests": 300,
+  "networks": [
+   [
+    "3",
+    "shared"
+   ],
+   [
+    "3>3",
+    "shared"
+   ],
+   [
+    "3f>3",
+    "shared"
+   ],
+   [
+    "(3|3)>3",
+    "shared"
+   ],
+   [
+    "(3|3|3)",
+    "shared"
+   ],
+   [
+    "(3|3|3)",
+    "own"
+   ],
+   [
+    "13",
+    "shared"
+   ],
+   [
+    "(13|13|13)",
+    "own"
+   ]
+  ],
+  "layer_discount": 0.8,
+  "translators": [
+   "enc>dec",
+   "enc>13>dec"
+  ],
+  "epochs": 20
+ },
+ "rows": [
+  {
+   "language": "even-b",
+   "architecture": "3",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 18
+  },
+  {
+   "language": "even-b",
+   "architecture": "3>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 45
+  },
+  {
+   "language": "even-b",
+   "architecture": "3f>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 27
+  },
+  {
+   "language": "even-b",
+   "architecture": "(3|3)>3",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 90
+  },
+  {
+   "language": "even-b",
+   "architecture": "(3|3|3)",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 54
+  },
+  {
+   "language": "even-b",
+   "architecture": "(3|3|3)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 54
+  },
+  {
+   "language": "even-b",
+   "architecture": "13",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    0.9833333333333333,
+    1.0,
+    1.0,
+    0.5333333333333333,
+    0.6033333333333334
+   ],
+   "accuracy_mean": 0.8240000000000001,
+   "accuracy_min": 0.5333333333333333,
+   "accuracy_max": 1.0,
+   "solved": 2,
+   "touched": 338
+  },
+  {
+   "language": "even-b",
+   "architecture": "(13|13|13)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    0.57,
+    1.0,
+    0.7233333333333334,
+    0.62,
+    0.65
+   ],
+   "accuracy_mean": 0.7126666666666667,
+   "accuracy_min": 0.57,
+   "accuracy_max": 1.0,
+   "solved": 1,
+   "touched": 1014
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "3",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 18
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "3>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    0.71,
+    0.7533333333333333
+   ],
+   "accuracy_mean": 0.8926666666666666,
+   "accuracy_min": 0.71,
+   "accuracy_max": 1.0,
+   "solved": 3,
+   "touched": 45
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "3f>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    0.43,
+    1.0
+   ],
+   "accuracy_mean": 0.8859999999999999,
+   "accuracy_min": 0.43,
+   "accuracy_max": 1.0,
+   "solved": 4,
+   "touched": 27
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "(3|3)>3",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    0.7533333333333333,
+    0.7166666666666667,
+    0.6466666666666666,
+    0.5133333333333333,
+    0.6666666666666666
+   ],
+   "accuracy_mean": 0.6593333333333333,
+   "accuracy_min": 0.5133333333333333,
+   "accuracy_max": 0.7533333333333333,
+   "solved": 0,
+   "touched": 90
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "(3|3|3)",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    0.7466666666666667,
+    1.0,
+    0.6266666666666667,
+    1.0,
+    0.5633333333333334
+   ],
+   "accuracy_mean": 0.7873333333333333,
+   "accuracy_min": 0.5633333333333334,
+   "accuracy_max": 1.0,
+   "solved": 2,
+   "touched": 54
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "(3|3|3)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 54
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "13",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    0.9766666666666667,
+    0.72,
+    0.9233333333333333,
+    0.65,
+    0.6933333333333334
+   ],
+   "accuracy_mean": 0.7926666666666666,
+   "accuracy_min": 0.65,
+   "accuracy_max": 0.9766666666666667,
+   "solved": 0,
+   "touched": 336
+  },
+  {
+   "language": "contains-aa",
+   "architecture": "(13|13|13)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    0.7633333333333333,
+    0.72,
+    0.78,
+    0.6633333333333333,
+    0.7266666666666667
+   ],
+   "accuracy_mean": 0.7306666666666667,
+   "accuracy_min": 0.6633333333333333,
+   "accuracy_max": 0.78,
+   "solved": 0,
+   "touched": 1002
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "3",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    0.88,
+    1.0
+   ],
+   "accuracy_mean": 0.976,
+   "accuracy_min": 0.88,
+   "accuracy_max": 1.0,
+   "solved": 4,
+   "touched": 18
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "3>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    0.7233333333333334,
+    1.0,
+    0.9066666666666666,
+    0.81,
+    0.7933333333333333
+   ],
+   "accuracy_mean": 0.8466666666666667,
+   "accuracy_min": 0.7233333333333334,
+   "accuracy_max": 1.0,
+   "solved": 1,
+   "touched": 45
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "3f>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    0.8566666666666667,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 0.9713333333333333,
+   "accuracy_min": 0.8566666666666667,
+   "accuracy_max": 1.0,
+   "solved": 4,
+   "touched": 27
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "(3|3)>3",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    0.8166666666666667,
+    1.0,
+    0.86,
+    0.8833333333333333
+   ],
+   "accuracy_mean": 0.9119999999999999,
+   "accuracy_min": 0.8166666666666667,
+   "accuracy_max": 1.0,
+   "solved": 2,
+   "touched": 90
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "(3|3|3)",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    0.7866666666666666,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 0.9573333333333334,
+   "accuracy_min": 0.7866666666666666,
+   "accuracy_max": 1.0,
+   "solved": 4,
+   "touched": 54
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "(3|3|3)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    0.94,
+    1.0
+   ],
+   "accuracy_mean": 0.9879999999999999,
+   "accuracy_min": 0.94,
+   "accuracy_max": 1.0,
+   "solved": 4,
+   "touched": 54
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "13",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    0.9933333333333333,
+    0.83,
+    0.8866666666666667,
+    0.86,
+    0.9266666666666666
+   ],
+   "accuracy_mean": 0.8993333333333332,
+   "accuracy_min": 0.83,
+   "accuracy_max": 0.9933333333333333,
+   "solved": 0,
+   "touched": 296
+  },
+  {
+   "language": "ends-ab",
+   "architecture": "(13|13|13)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    0.9933333333333333,
+    1.0,
+    0.8466666666666667,
+    0.95,
+    0.9366666666666666
+   ],
+   "accuracy_mean": 0.9453333333333334,
+   "accuracy_min": 0.8466666666666667,
+   "accuracy_max": 1.0,
+   "solved": 1,
+   "touched": 827
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "3",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 18
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "3>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    0.5266666666666666,
+    0.5266666666666666,
+    1.0,
+    1.0,
+    0.7533333333333333
+   ],
+   "accuracy_mean": 0.7613333333333333,
+   "accuracy_min": 0.5266666666666666,
+   "accuracy_max": 1.0,
+   "solved": 2,
+   "touched": 45
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "3f>3",
+   "credit": "shared",
+   "layers": 2,
+   "accuracy": [
+    1.0,
+    0.5133333333333333,
+    0.5733333333333334,
+    1.0,
+    0.55
+   ],
+   "accuracy_mean": 0.7273333333333334,
+   "accuracy_min": 0.5133333333333333,
+   "accuracy_max": 1.0,
+   "solved": 2,
+   "touched": 27
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "(3|3)>3",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    0.7166666666666667,
+    0.72,
+    1.0,
+    0.5133333333333333,
+    0.7
+   ],
+   "accuracy_mean": 0.73,
+   "accuracy_min": 0.5133333333333333,
+   "accuracy_max": 1.0,
+   "solved": 1,
+   "touched": 90
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "(3|3|3)",
+   "credit": "shared",
+   "layers": 3,
+   "accuracy": [
+    0.8066666666666666,
+    0.8,
+    0.8566666666666667,
+    0.65,
+    0.7433333333333333
+   ],
+   "accuracy_mean": 0.7713333333333333,
+   "accuracy_min": 0.65,
+   "accuracy_max": 0.8566666666666667,
+   "solved": 0,
+   "touched": 54
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "(3|3|3)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "accuracy_mean": 1.0,
+   "accuracy_min": 1.0,
+   "accuracy_max": 1.0,
+   "solved": 5,
+   "touched": 54
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "13",
+   "credit": "shared",
+   "layers": 1,
+   "accuracy": [
+    0.77,
+    0.9233333333333333,
+    0.8566666666666667,
+    0.6933333333333334,
+    0.6866666666666666
+   ],
+   "accuracy_mean": 0.786,
+   "accuracy_min": 0.6866666666666666,
+   "accuracy_max": 0.9233333333333333,
+   "solved": 0,
+   "touched": 329
+  },
+  {
+   "language": "mod3-a",
+   "architecture": "(13|13|13)",
+   "credit": "own",
+   "layers": 3,
+   "accuracy": [
+    0.77,
+    0.72,
+    0.6966666666666667,
+    0.6933333333333334,
+    0.6866666666666666
+   ],
+   "accuracy_mean": 0.7133333333333333,
+   "accuracy_min": 0.6866666666666666,
+   "accuracy_max": 0.77,
+   "solved": 0,
+   "touched": 979
+  }
+ ],
+ "translation": [
+  {
+   "task": "plural",
+   "architecture": "enc>dec",
+   "taught": 35,
+   "held_out": 11,
+   "sounds": 0.9,
+   "exact": 0.8,
+   "held_out_exact": 0.09090909090909091,
+   "examples": [
+    [
+     "cat",
+     "cats",
+     "cats"
+    ],
+    [
+     "dog",
+     "dogs",
+     "dogs"
+    ],
+    [
+     "hat",
+     "hats",
+     "hats"
+    ],
+    [
+     "box",
+     "b ks z",
+     "boxes"
+    ]
+   ]
+  },
+  {
+   "task": "plural",
+   "architecture": "enc>13>dec",
+   "taught": 35,
+   "held_out": 11,
+   "sounds": 0.16111111111111112,
+   "exact": 0.11428571428571428,
+   "held_out_exact": 0.0,
+   "examples": [
+    [
+     "cat",
+     "ksiz",
+     "cats"
+    ],
+    [
+     "dog",
+     "doors",
+     "dogs"
+    ],
+    [
+     "hat",
+     "rus k",
+     "hats"
+    ],
+    [
+     "box",
+     "benz s",
+     "boxes"
+    ]
+   ]
+  },
+  {
+   "task": "past",
+   "architecture": "enc>dec",
+   "taught": 21,
+   "held_out": 7,
+   "sounds": 0.8938053097345132,
+   "exact": 0.7619047619047619,
+   "held_out_exact": 0.0,
+   "examples": [
+    [
+     "walk",
+     "walked",
+     "walked"
+    ],
+    [
+     "play",
+     "played",
+     "played"
+    ],
+    [
+     "jump",
+     "pt",
+     "jumped"
+    ],
+    [
+     "look",
+     "l kt",
+     "looked"
+    ]
+   ]
+  },
+  {
+   "task": "past",
+   "architecture": "enc>13>dec",
+   "taught": 21,
+   "held_out": 7,
+   "sounds": 0.12389380530973451,
+   "exact": 0.047619047619047616,
+   "held_out_exact": 0.0,
+   "examples": [
+    [
+     "walk",
+     "want",
+     "walked"
+    ],
+    [
+     "play",
+     "pt he",
+     "played"
+    ],
+    [
+     "jump",
+     "wawnd w",
+     "jumped"
+    ],
+    [
+     "look",
+     "wawld",
+     "looked"
+    ]
+   ]
+  }
+ ]
+}

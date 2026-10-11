@@ -32,6 +32,8 @@ pub mod json;
 pub mod languages;
 pub mod lattice;
 pub mod machine;
+pub mod network;
+pub mod phonetic;
 pub mod rng;
 pub mod server;
 

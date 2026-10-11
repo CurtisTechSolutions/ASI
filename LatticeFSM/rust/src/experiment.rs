@@ -22,7 +22,30 @@ use crate::languages::{examples, language, random_string, Language, ALPHABET, LA
 use crate::machine::{Machine, Settings, BASELINE, DISCOUNT, LIFE};
 use crate::rng::Rng;
 
-pub const EXPERIMENTS: [&str; 5] = ["learning", "stimulation", "adaptation", "compression", "walk"];
+pub const EXPERIMENTS: [&str; 6] = [
+    "learning",
+    "stimulation",
+    "adaptation",
+    "compression",
+    "walk",
+    "network",
+];
+
+/// The networks the network experiment compares: an architecture string and whose verdict its output layers are
+/// credited by.
+pub const NETWORKS: [(&str, &str); 8] = [
+    ("3", "shared"),
+    ("3>3", "shared"),
+    ("3f>3", "shared"),
+    ("(3|3)>3", "shared"),
+    ("(3|3|3)", "shared"),
+    ("(3|3|3)", "own"),
+    ("13", "shared"),
+    ("(13|13|13)", "own"),
+];
+
+/// The English-to-English networks the network experiment teaches each phonetic task to.
+pub const TRANSLATORS: [&str; 2] = ["enc>dec", "enc>13>dec"];
 
 fn alphabet() -> Vec<String> {
     ALPHABET.iter().map(|s| s.to_string()).collect()
@@ -771,8 +794,178 @@ fn compression_table(r: &Json) -> String {
     lines.join("\n")
 }
 
+/// Machines connected into networks: every language taught to each of [`NETWORKS`] from the learning experiment's
+/// strings, per seed; then each English-to-English task to each of [`TRANSLATORS`] for `epochs` epochs, every fourth
+/// pair held out.
+pub fn network(episodes: usize, seeds: &[u64], life: f64, tests: usize, epochs: usize) -> Result<Json, String> {
+    use crate::network::{teach_network, Credit, Merge, Network, Vote, LAYER_DISCOUNT};
+    use crate::phonetic::{past, plurals, split};
+    let settings = Settings {
+        life,
+        ..Settings::default()
+    };
+    let mut rows = Vec::new();
+    for lang in LANGUAGES.iter() {
+        for (arch, credit) in NETWORKS {
+            let (mut accs, mut touched, mut layers) = (Vec::new(), 0usize, 0usize);
+            for &seed in seeds {
+                let mut rng = Rng::new(seed);
+                let test = examples(lang, tests, &mut rng, 6);
+                let mut net =
+                    Network::from_architecture(arch, &alphabet(), seed, Merge::Concat, Vote::Majority, &settings)?;
+                net.compile(Some(lang.accepting), LAYER_DISCOUNT, 1.0, 1.0, Credit::parse(credit)?)?;
+                teach_network(&mut net, lang, episodes, &mut rng, 6);
+                accs.push(net.evaluate(&test)?);
+                layers = net.layers().len();
+                touched = touched.max(net.layers().iter().map(|l| l.machine.lattice.touched().count()).sum());
+            }
+            let mean = accs.iter().sum::<f64>() / accs.len() as f64;
+            rows.push(
+                Json::object()
+                    .with("language", lang.name.into())
+                    .with("architecture", arch.into())
+                    .with("credit", credit.into())
+                    .with("layers", layers.into())
+                    .with("accuracy", Json::numbers(&accs))
+                    .with("accuracy_mean", mean.into())
+                    .with(
+                        "accuracy_min",
+                        accs.iter().cloned().fold(f64::INFINITY, f64::min).into(),
+                    )
+                    .with(
+                        "accuracy_max",
+                        accs.iter().cloned().fold(f64::NEG_INFINITY, f64::max).into(),
+                    )
+                    .with("solved", accs.iter().filter(|&&a| a >= 0.999).count().into())
+                    .with("touched", touched.into()),
+            );
+        }
+    }
+    let mut translation = Vec::new();
+    for (task, pairs) in [("plural", plurals()), ("past", past())] {
+        let (train, test) = split(&pairs, 4);
+        for arch in TRANSLATORS {
+            let mut net =
+                Network::from_architecture(arch, &alphabet(), seeds[0], Merge::Concat, Vote::Majority, &settings)?;
+            let h = net.fit_pairs(&train, epochs, Some(&test))?;
+            let mut shown = Vec::new();
+            for (x, y) in train.iter().take(2).chain(test.iter().take(2)) {
+                shown.push(Json::strings(&[x.clone(), net.translate(x)?, y.clone()]));
+            }
+            translation.push(
+                Json::object()
+                    .with("task", task.into())
+                    .with("architecture", arch.into())
+                    .with("taught", train.len().into())
+                    .with("held_out", test.len().into())
+                    .with("sounds", h.sounds.last().copied().unwrap_or(0.0).into())
+                    .with("exact", h.exact.last().copied().unwrap_or(0.0).into())
+                    .with("held_out_exact", h.val_exact.last().copied().unwrap_or(0.0).into())
+                    .with("examples", Json::Array(shown)),
+            );
+        }
+    }
+    let nets: Vec<Json> = NETWORKS
+        .iter()
+        .map(|(a, c)| Json::strings(&[a.to_string(), c.to_string()]))
+        .collect();
+    Ok(Json::object()
+        .with("experiment", "network".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("episodes", episodes.into())
+                .with(
+                    "seeds",
+                    Json::numbers(&seeds.iter().map(|&s| s as f64).collect::<Vec<_>>()),
+                )
+                .with("life", life.into())
+                .with("tests", tests.into())
+                .with("networks", Json::Array(nets))
+                .with("layer_discount", LAYER_DISCOUNT.into())
+                .with("translators", Json::strings(&TRANSLATORS.map(String::from)))
+                .with("epochs", epochs.into()),
+        )
+        .with("rows", Json::Array(rows))
+        .with("translation", Json::Array(translation)))
+}
+
+fn network_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let seeds = arr(&s, "seeds").len();
+    let mut lines = vec![
+        format!(
+            "network: every language taught to each network for {} episodes (the learning experiment's strings), \
+             {seeds} seeds, {} held-out strings; `>` one after another, `(a|b)` side by side (majority vote at the \
+             end), `f` writes only the final state",
+            s.num("episodes", 0.0),
+            s.num("tests", 0.0)
+        ),
+        String::new(),
+        "| language | network | credit | layers | accuracy: mean | min | max | solved | touched edges |".to_string(),
+        "|---|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        lines.push(format!(
+            "| {} | `{}` | {} | {} | **{:.2}** | {:.2} | {:.2} | {}/{seeds} | {} |",
+            row.str_or("language", ""),
+            row.str_or("architecture", ""),
+            row.str_or("credit", ""),
+            row.num("layers", 0.0),
+            row.num("accuracy_mean", 0.0),
+            row.num("accuracy_min", 0.0),
+            row.num("accuracy_max", 0.0),
+            row.num("solved", 0.0),
+            row.num("touched", 0.0)
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "English to English: each task taught to each network for {} epochs, every fourth pair held out; exact means \
+         every sound right",
+        s.num("epochs", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push(
+        "| task | network | pairs taught / held out | sounds right while taught | exact: taught | held out | \
+         translations (taught, taught, held out, held out) |"
+            .to_string(),
+    );
+    lines.push("|---|---|---|---|---|---|---|".to_string());
+    for row in arr(r, "translation") {
+        let ex: Vec<String> = arr(row, "examples")
+            .iter()
+            .map(|e| {
+                let t: Vec<&str> = e
+                    .as_array()
+                    .map(|v| v.iter().filter_map(Json::as_str).collect())
+                    .unwrap_or_default();
+                let (x, got, want) = (t[0], t[1], t[2]);
+                if got == want {
+                    format!("{x} → {got}")
+                } else {
+                    format!("{x} → {got} ({want})")
+                }
+            })
+            .collect();
+        lines.push(format!(
+            "| {} | `{}` | {} / {} | {:.2} | **{:.2}** | {:.2} | {} |",
+            row.str_or("task", ""),
+            row.str_or("architecture", ""),
+            row.num("taught", 0.0),
+            row.num("held_out", 0.0),
+            row.num("sounds", 0.0),
+            row.num("exact", 0.0),
+            row.num("held_out_exact", 0.0),
+            ex.join(", ")
+        ));
+    }
+    lines.join("\n")
+}
+
 pub fn tables(record: &Json) -> String {
     match record.str_or("experiment", "") {
+        "network" => network_table(record),
         "learning" => learning_table(record),
         "stimulation" => stimulation_table(record),
         "compression" => compression_table(record),
@@ -943,6 +1136,7 @@ pub fn run(which: &[String], out: Option<&str>, episodes: usize, life: f64) -> R
             "adaptation" => adaptation(20, life, &[0.0, 1.0, 4.0]),
             "compression" => compression(episodes, 1, life, 300, 500)?,
             "walk" => walk(episodes, &[1, 2, 3], life, 300)?,
+            "network" => network(episodes, &[1, 2, 3, 4, 5], life, 300, 20)?,
             other => {
                 return Err(format!(
                     "no experiment named {other:?}; choose from {EXPERIMENTS:?} or all"

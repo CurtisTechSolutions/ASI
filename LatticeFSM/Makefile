@@ -10,6 +10,7 @@
 #
 #   make serve         the backend (the Rust API, :8000) and the frontend (Vite with hot reload, :5173) together
 #   make serve-prod    one process: the API and the built frontend/dist on :8000
+#   make translate-fit && make translate TEXT="cat bus"   English to English through a network of machines
 #
 # Override any variable on the command line, e.g. `make demo LANGUAGE=ends-ab STATES=3`.
 
@@ -51,6 +52,12 @@ SKIP      ?=
 REARRANGE ?= 0
 HOST      ?= 127.0.0.1
 RESULTS   ?= results
+ARCH      ?= 13>13
+NET       ?= network.json.gz
+NET_ALPHABET ?= ab
+TASK      ?=
+EPOCHS    ?=
+CREDIT_BY ?= shared
 
 MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseline $(BASELINE) --seed $(SEED) --language $(LANGUAGE) \
                $(if $(filter-out 0,$(EVERY)),--compress-every $(EVERY) --compress-precision $(PRECISION),) \
@@ -60,6 +67,7 @@ MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseli
 .PHONY: help all install build test check rust-test lint fmt demo train run teach accuracy table stats tick stimulate \
         serve serve-backend serve-frontend serve-prod experiments results \
         compress expand core-run focus skip rearrange swap \
+        network network-fit network-evaluate network-predict network-summary translate translate-fit py-network \
         py-test py-demo py-train py-run py-stats py-experiments parity \
         frontend-install frontend-build frontend-dev frontend-preview frontend-test clean distclean
 
@@ -150,6 +158,35 @@ rearrange: build ## Let MODEL's nodes rearrange themselves toward the centre unt
 swap: build ## Swap two of MODEL's nodes: AXIS=states|symbols, I and J (state numbers, or symbols like a g), and save it
 	$(BIN) rearrange --load $(MODEL) --swap $(AXIS) $(I) $(J) --save $(MODEL)
 
+##@ Networks of machines (ARCH like 13>(13|13)>13; enc / dec read and write English)
+NET_NEW = --arch "$(ARCH)" --alphabet $(NET_ALPHABET) --seed $(SEED) --life $(LIFE) --credit $(CREDIT_BY)
+network: build ## A fresh network of ARCH over NET_ALPHABET, saved to NET, and its summary
+	$(BIN) network new $(NET_NEW) --language $(LANGUAGE) --save $(NET)
+
+network-fit: build ## Teach LANGUAGE over EPISODES strings (EPOCHS times) to NET (fresh from ARCH if NET is missing), saved back
+	$(BIN) network fit $(if $(wildcard $(NET)),--load $(NET),$(NET_NEW)) --language $(LANGUAGE) --episodes $(EPISODES) \
+	  $(if $(EPOCHS),--epochs $(EPOCHS),) --save $(NET)
+
+network-evaluate: build ## NET's accuracy on every string of LANGUAGE up to 6 symbols (or TASK's exact translations)
+	$(BIN) network evaluate --load $(NET) $(if $(TASK),--task $(TASK),--language $(LANGUAGE))
+
+network-predict: build ## NET's verdict on TEXT, layer by layer
+	$(BIN) network predict "$(TEXT)" --load $(NET)
+
+network-summary: build ## NET's blocks, their matrices and what they write
+	$(BIN) network summary --load $(NET)
+
+translate-fit: build ## English to English: teach TASK (plural|past; default plural) to a fresh ARCH=enc>dec network, saved to NET
+	$(BIN) network fit --arch "$(if $(filter 13>13,$(ARCH)),enc>dec,$(ARCH))" --seed $(SEED) --task $(or $(TASK),plural) \
+	  $(if $(EPOCHS),--epochs $(EPOCHS),) --save $(NET)
+
+translate: build ## English in, English out: NET's translation of TEXT (e.g. make translate TEXT="cat dog")
+	$(BIN) network translate $(TEXT) --load $(NET)
+
+py-network: ## The same network fit from the Python package (ARCH, LANGUAGE or TASK), saved to NET
+	$(PY) -m latticefsm network fit $(NET_NEW) $(if $(TASK),--task $(TASK),--language $(LANGUAGE) --episodes $(EPISODES)) \
+	  $(if $(EPOCHS),--epochs $(EPOCHS),) --save $(NET)
+
 ##@ Serving
 # The backend serves the API (and the built frontend/dist) on HOST:PORT; the frontend dev server serves the app on
 # FRONTEND_HOST:FRONTEND_PORT with hot reload and proxies /api to the backend.  Each runs in its own process group, so
@@ -190,13 +227,13 @@ serve-prod: build ## One process, no npm: the API and the committed frontend/dis
 	$(SERVE_BACKEND)
 
 ##@ The experiments README.md quotes
-experiments: build ## Learning, stimulation, adaptation, compression and walk, written to RESULTS/ - two seconds
+experiments: build ## Learning, stimulation, adaptation, compression, walk and network, written to RESULTS/ - five seconds
 	mkdir -p $(RESULTS)
 	$(BIN) experiment --which all --life $(LIFE) --out $(RESULTS) | tee $(RESULTS)/experiments.log
 
 results: experiments py-experiments ## Both ports' experiments, every results file regenerated
 
-py-experiments: ## The same five from the Python reference, written to RESULTS/python/ - about three minutes
+py-experiments: ## The same six from the Python reference, written to RESULTS/python/ - about five minutes
 	mkdir -p $(RESULTS)/python
 	$(PY) -m latticefsm experiment --which all --life $(LIFE) --out $(RESULTS)/python | tee $(RESULTS)/python/experiments.log
 
@@ -216,8 +253,8 @@ py-run: ## Read TEXT from MODEL with the Python package
 py-stats: ## Size, memory, clock and settings of MODEL, from the Python package
 	$(PY) -m latticefsm stats --load $(MODEL)
 
-parity: build ## The two ports held to each other: the deterministic experiments and a machine file, both ways
-	$(PY) -m unittest tests.test_latticefsm.TestRustParity -v
+parity: build ## The two ports held to each other: the deterministic experiments, machine and network files, both ways
+	$(PY) -m unittest tests.test_latticefsm.TestRustParity tests.test_latticefsm.TestRustNetworkParity -v
 
 ##@ The frontend (React, Vite; frontend/dist is committed, so `make serve-prod` needs none of this)
 frontend-install: ## Install the frontend's dependencies (npm ci)

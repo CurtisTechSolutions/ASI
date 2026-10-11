@@ -75,3 +75,18 @@ pub fn examples(lang: &Language, count: usize, rng: &mut Rng, max_length: usize)
         })
         .collect()
 }
+
+/// Every string of length 0 to `max_length`, shortest first, each length in alphabetical order: a test set both
+/// ports agree on (127 strings over `ab` up to length 6).
+pub fn all_strings(max_length: usize) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut level = vec![String::new()];
+    for _ in 0..max_length {
+        level = level
+            .iter()
+            .flat_map(|s| ALPHABET.iter().map(move |a| format!("{s}{a}")))
+            .collect();
+        out.extend(level.iter().cloned());
+    }
+    out
+}

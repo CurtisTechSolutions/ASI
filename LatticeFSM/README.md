@@ -61,6 +61,7 @@ the same machine files:
 |---|---|---|
 | Rust | `rust/` | crate `latticefsm`: the model, the `latticefsm` CLI, and the HTTP server (`make serve`) |
 | Python | `latticefsm/` | the reference: the same model and CLI, and the experiments |
+| both | `network.py`, `network.rs` | networks of machines, Keras-style: layers in a row and side by side, English in and out through `../PhoneticTokenizer` |
 | JavaScript | `frontend/` | the React single-page app the server serves, in the shape of `../ModelKit/frontend` |
 
 `DESIGN.md` is the specification both are written to. `make parity` holds
@@ -106,6 +107,8 @@ make demo EVERY=500 PRECISION=float16   # fold into the central node every 500 t
 make train SKIP=1 && make focus FOCUS=0.8   # skips in training; runs start from node (10, g, 6)
 make rearrange && make compress         # busy nodes to the centre, then fold into the central node
 make demo LEARN_FOCUS=1                 # the focus read off each input, learned
+make network-fit ARCH="(3|3|3)" CREDIT_BY=own LANGUAGE=mod3-a   # three machines voting
+make translate-fit && make translate TEXT="cat dog"             # English to English: cat -> cats
 python3 -m latticefsm demo     # the same from the Python reference
 rust/target/release/latticefsm --help
 ```
@@ -413,6 +416,120 @@ two shells; after, the central node itself holds a learned edge and every
 shell carries some. The machine walks exactly as before from its start
 state — a swap is a relabelling — and the code is still exact.
 
+## Networks of machines
+
+`latticefsm/network.py` and `rust/src/network.rs` connect machines the way
+Keras connects layers. A **layer** is one machine that also *writes*: the
+state each move lands in, one letter per move (`a` for state 0, `b` for 1,
+...; `13f` writes only the final state), so the next machine reads the walk
+the previous one took, and is built over exactly those letters.
+
+```python
+from latticefsm.network import Network, Layer, Parallel, PhoneticDecoder, PhoneticEncoder
+
+net = Network("13>(13|13)>13", alphabet="ab")       # or Network([Layer(13), Parallel([Layer(13), Layer(13)]), Layer(13)])
+net.compile(accepting=[0], layer_discount=0.8, credit="shared")   # credit="own": each output branch by its own verdict
+history = net.fit(x, y, epochs=3, validation_data=(vx, vy))       # {"accuracy": [...], "val_accuracy": [...]}
+net.evaluate(vx, vy); net.predict(["abab"]); net.trace("abab"); print(net.summary())
+net.save("net.json.gz"); load_network("net.json.gz")              # the same file in the Rust crate
+
+translator = Network("enc>dec")                                   # English in, English out
+translator.fit_pairs([("cat", "cats"), ("bus", "buses"), ...], epochs=20)
+translator.translate("dog")                                       # 'dogs'
+```
+
+| block | what it is |
+|---|---|
+| `Layer(states, emit="states")` | one machine; any machine option (`life`, `skip`, `learn_focus`, ...) passes through |
+| `Sequential([...])`, `a>b` | blocks one after another |
+| `Parallel([...], merge, vote)`, `(a\|b)` | blocks side by side on the same input; what they write concatenated or interleaved, each branch's letters shifted past the ones before; as the last block, a `majority` / `any` / `all` vote |
+| `PhoneticEncoder()`, `enc` | English in: the text read as its sounds by this repository's phonetic tokenizer (`../PhoneticTokenizer`) - `cats` is `K AE T S` - plus two boundaries `#` of room; the first block only |
+| `PhoneticDecoder()`, `dec` | English out: a layer whose 43 states are the sounds (39 phonemes, `#`, `, . ?`), so what it writes is phonemes, spelled back as English |
+
+**Training** is the single machine's, spread over the layers: every machine
+walks, the network's verdict is the last block's, the network is rewarded
+when it is right and punished when wrong, and the credit travels back
+through the blocks - the last in full, each block before it
+`layer_discount` times the one after, every parallel branch the block's
+share - and each machine spends its share on its own path. A network of one
+layer *is* the machine it holds, edge for edge (a test in each port). A
+decoder has a right answer at every step, so it is taught step by step: a
+wrong sound is punished and the target's path is taught edge by edge; the
+blocks before it are *rewarded* by the share of sounds it got right, never
+punished (punishing them for the decoder's mistakes keeps reshuffling the
+walks the decoder is learning to read). Quiet greedy passes (`predict`,
+`evaluate`, `translate`) are deterministic: a tie goes to the lowest state
+and nothing is drawn, so a file classifies and translates every string the
+same way in both ports (`make parity`).
+
+```bash
+make network-fit ARCH="(3|3|3)" CREDIT_BY=own LANGUAGE=mod3-a   # NET=network.json.gz
+make network-predict TEXT=aab
+make translate-fit TASK=plural && make translate TEXT="cat dog bus"
+rust/target/release/latticefsm network fit --arch "enc>dec" --pairs my_pairs.tsv --epochs 30 --save t.json
+```
+
+network: every language taught to each network for 4000 episodes (the learning experiment's strings), 5 seeds, 300 held-out strings; `>` one after another, `(a|b)` side by side (majority vote at the end), `f` writes only the final state
+
+| language | network | credit | layers | accuracy: mean | min | max | solved | touched edges |
+|---|---|---|---|---|---|---|---|---|
+| even-b | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| even-b | `3>3` | shared | 2 | **1.00** | 1.00 | 1.00 | 5/5 | 45 |
+| even-b | `3f>3` | shared | 2 | **1.00** | 1.00 | 1.00 | 5/5 | 27 |
+| even-b | `(3|3)>3` | shared | 3 | **0.89** | 0.44 | 1.00 | 4/5 | 90 |
+| even-b | `(3|3|3)` | shared | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| even-b | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| even-b | `13` | shared | 1 | **0.81** | 0.51 | 1.00 | 3/5 | 338 |
+| even-b | `(13|13|13)` | own | 3 | **0.84** | 0.55 | 1.00 | 3/5 | 1014 |
+| contains-aa | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| contains-aa | `3>3` | shared | 2 | **0.77** | 0.50 | 1.00 | 2/5 | 45 |
+| contains-aa | `3f>3` | shared | 2 | **0.80** | 0.48 | 1.00 | 3/5 | 27 |
+| contains-aa | `(3|3)>3` | shared | 3 | **0.72** | 0.58 | 1.00 | 1/5 | 90 |
+| contains-aa | `(3|3|3)` | shared | 3 | **0.62** | 0.48 | 1.00 | 1/5 | 54 |
+| contains-aa | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| contains-aa | `13` | shared | 1 | **0.76** | 0.63 | 0.99 | 0/5 | 338 |
+| contains-aa | `(13|13|13)` | own | 3 | **0.75** | 0.63 | 0.99 | 0/5 | 1011 |
+| ends-ab | `3` | shared | 1 | **0.99** | 0.97 | 1.00 | 4/5 | 18 |
+| ends-ab | `3>3` | shared | 2 | **0.93** | 0.68 | 1.00 | 3/5 | 45 |
+| ends-ab | `3f>3` | shared | 2 | **0.99** | 0.95 | 1.00 | 4/5 | 27 |
+| ends-ab | `(3|3)>3` | shared | 3 | **0.95** | 0.83 | 1.00 | 3/5 | 90 |
+| ends-ab | `(3|3|3)` | shared | 3 | **0.86** | 0.69 | 1.00 | 2/5 | 54 |
+| ends-ab | `(3|3|3)` | own | 3 | **0.99** | 0.97 | 1.00 | 4/5 | 54 |
+| ends-ab | `13` | shared | 1 | **0.91** | 0.88 | 0.98 | 0/5 | 288 |
+| ends-ab | `(13|13|13)` | own | 3 | **0.95** | 0.92 | 0.98 | 0/5 | 851 |
+| mod3-a | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| mod3-a | `3>3` | shared | 2 | **0.75** | 0.43 | 1.00 | 2/5 | 45 |
+| mod3-a | `3f>3` | shared | 2 | **0.70** | 0.39 | 1.00 | 2/5 | 27 |
+| mod3-a | `(3|3)>3` | shared | 3 | **0.68** | 0.61 | 0.78 | 0/5 | 90 |
+| mod3-a | `(3|3|3)` | shared | 3 | **0.88** | 0.64 | 1.00 | 3/5 | 54 |
+| mod3-a | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| mod3-a | `13` | shared | 1 | **0.72** | 0.68 | 0.77 | 0/5 | 326 |
+| mod3-a | `(13|13|13)` | own | 3 | **0.73** | 0.68 | 0.78 | 0/5 | 968 |
+
+English to English: each task taught to each network for 20 epochs, every fourth pair held out; exact means every sound right
+
+| task | network | pairs taught / held out | sounds right while taught | exact: taught | held out | translations (taught, taught, held out, held out) |
+|---|---|---|---|---|---|---|
+| plural | `enc>dec` | 35 / 11 | 0.90 | **0.80** | 0.09 | cat → cats, dog → dogs, hat → hats, box → b ks z (boxes) |
+| plural | `enc>13>dec` | 35 / 11 | 0.11 | **0.03** | 0.00 | cat → ksiz (cats), dog → dawrs (dogs), hat → rocam (hats), box → boats g (boxes) |
+| past | `enc>dec` | 21 / 7 | 0.89 | **0.76** | 0.00 | walk → walked, play → played, jump → pt (jumped), look → l kt (looked) |
+| past | `enc>13>dec` | 21 / 7 | 0.04 | **0.00** | 0.00 | walk → st kt (walked), play → pulled (played), jump → fid st (jumped), look → cld s (looked) |
+
+What it says: three parallel branches each credited by their own verdict
+(`own`) do as well as one three-state machine (every language on 19 of the
+20 seed runs in this port) and far better than the same branches sharing one
+verdict, where a branch that was right is punished whenever the vote was
+wrong. A vote of three thirteen-state machines is a few points better than one
+on `even-b` and `ends-ab`, and level on the other two. Stacking does not
+help these four languages - one three-state machine already solves them, and
+a layer after it has to learn to read a code that is still changing. English
+to English, a decoder reading the sounds directly learns its pairs (most of
+them exactly, `cat → cats`, `walk → walked`) but generalises to unseen words
+hardly at all: its rows are `(sound before, sound read)` pairs, each learned
+on its own, and an unseen word brings unseen pairs. A hidden machine between
+the encoder and the decoder still loses the signal at 20 epochs; at a lower
+temperature and more epochs it reaches 0.4 of its pairs exactly (`Limits`).
+
 ## The pieces
 
 | file | what it holds |
@@ -424,13 +541,14 @@ state — a swap is a relabelling — and the code is still exact.
 | `rust/src/languages.rs`, `experiment.rs` | the four languages; the four experiments and their tables |
 | `rust/src/geometry.rs`, `compress.rs` | the cube's centre and shells, the centre-out order, the central vertical vector and focus; the code the central node holds, its precisions, the outward rebuild, the walk from the code, `fidelity` |
 | `rust/src/focus.rs` | the learned focus |
+| `rust/src/network.rs`, `phonetic.rs` | networks of machines: the blocks, the architecture string, compile / fit / evaluate / predict / translate, the file; English in and out through `../PhoneticTokenizer/rust` |
 | `rust/src/http.rs`, `server.rs` | the HTTP/1.1 server, the JSON routes, the static files of the frontend |
 | `frontend/` | the React app: `src/App.jsx`, the five panels in `src/components/`, `src/api.js`, `src/matrix.js`; `dist/` built and committed |
 | `rust/src/json.rs`, `gzip.rs`, `rng.rs` | JSON, gzip and the generator, written out: no dependencies |
-| `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, experiment, serve |
+| `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, compress, expand, core-run, focus, skip, rearrange, network, experiment, serve |
 | `rust/tests/` | the machine and the server over a real socket |
-| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `focus.py`, `compress.py`, `languages.py`, `experiment.py`, `cli.py` |
-| `tests/test_latticefsm.py` | 67 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
+| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `focus.py`, `compress.py`, `network.py`, `phonetic.py`, `languages.py`, `experiment.py`, `cli.py` |
+| `tests/test_latticefsm.py` | 78 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
 | `results/` | the measured numbers from both ports, with a README |
 
 ## Limits
@@ -449,6 +567,15 @@ state — a swap is a relabelling — and the code is still exact.
   seed; everything else agrees. A file written by one port reseeds the
   other's generator from the seed.
 * Stimulation is one level for the whole machine, not per state.
+* Networks: stacked layers learn less reliably than one machine on these
+  languages, and a hidden layer between an encoder and a decoder mostly
+  loses the signal (0.03-0.11 of the pairs exactly at 20 epochs; 0.4 at
+  temperature 0.3 over 40). A decoder writes one sound per symbol it reads,
+  so a translation is at most as many sounds as the input plus the
+  encoder's two boundaries; a parallel block in front of it doubles what it
+  reads. It generalises to unseen words hardly at all. Networks are a
+  library and CLI feature; the server and the frontend still hold one
+  machine.
 * A partial rebuild from the middle outward gives back nothing a taught
   machine learned until the last two shells, because the languages use the
   outermost symbols (`DESIGN.md` §11.4).

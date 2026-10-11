@@ -21,6 +21,8 @@ The five requirements, in the author's words, and where each is realised:
 | allow edges to skip one node if a more efficient path is found | §12.3: a skip reads two symbols in one move past the node between |
 | focus should also be a learned value based on the input | §12.2: `learn_focus`, a learner credited like the edges |
 | allow nodes to rearrange themselves and swap | §12.4: `swap_states`, `swap_symbols`, `rearrange`, `rearrange_every` |
+| a module like TensorFlow, to connect several of these together | §13.1–13.3: `Network`, `Layer`, `Sequential`, `Parallel`, the architecture string, compile / fit / evaluate / predict |
+| encoder and decoder layers: text to its phonetic representation with the repository's tokenizer, English in and out | §13.4: `PhoneticEncoder`, `PhoneticDecoder`, `translate`, `fit_pairs` |
 
 ## 1. The matrix
 
@@ -569,3 +571,98 @@ axis, and the touched edges reach every shell down to the central node
 * **Rearrangement swaps neighbours toward the centre,** a local rule, so the
   arrangement emerges from use; a swap's relabelling is exact, so it costs
   nothing in what the machine has learned.
+
+## 13. Networks of machines
+
+`network.py` and `network.rs`, the same in both ports, writing and reading the
+same `latticefsm-network` files.
+
+### 13.1 A layer writes
+
+A machine reads a string; a **layer** is a machine that also writes one. With
+`emit = "states"` it writes the state each move lands in (the target of every
+transition: one symbol per move, a skip one symbol for its two); with
+`emit = "final"` only the state the run ends in. State `i` is written as the
+`i`-th of `a-z A-Z 0-9`, so a layer has at most 62 states, and the block after
+it is built over exactly the letters it writes. Each layer's machine is
+seeded with the network's seed plus the layer's index, depth first.
+
+### 13.2 Blocks
+
+A block is built over an input alphabet, reads a string, writes one, and has a
+verdict. A `Layer`'s verdict is its run's. A `Sequential` passes what each
+block writes to the next; its verdict is the last block's. A `Parallel` gives
+each branch the same input and merges what they write - `concat` one branch
+after another, `interleave` position by position - with branch `k`'s letters
+shifted past the letters of the branches before it, so the merged alphabet is
+the branches' alphabets side by side (62 at most). Its verdict is a vote of its
+branches': `majority` (strictly more than half), `any` or `all`. The network's
+root is a `Sequential`; its verdict is the network's. The architecture string
+is `seq := atom ('>' atom)*`, `atom := N | Nf | 'enc' | 'dec' | '(' seq ('|' seq)* ')'`,
+a group of one being just that sequence.
+
+### 13.3 Credit
+
+`teach(x, y)` runs every machine on `x` (traversing), compares the network's
+verdict with `y`, and calls `credit(r)` on the root with `r = reward` when it
+is right and `-punish` when it is wrong. A `Sequential` credits its last block
+`r`, the one before it `r · layer_discount`, and so on back; a `Parallel` gives
+every branch `r`; a `Layer` spends `r` on its machine's path (§6). With
+`credit = "own"` the output layers - the last layer, or every branch's last in
+a final `Parallel` - are credited by their own verdicts instead
+(`reward` if theirs was `y`, else `-punish`); the layers before them by the
+network's, as always. A network of one layer is therefore exactly its machine:
+the same strings, the same credits, the same edges.
+
+Greedy passes (`predict`, `evaluate`, `trace`, `translate`) run quietly at
+temperature 0 with `Machine.greedy_first`: of tied targets the lowest is
+taken and nothing is drawn. A machine on its own still draws among ties
+(unchanged); a network's measurements are deterministic, leave the
+generators alone, and agree between the ports.
+
+### 13.4 English in and out
+
+`PhoneticEncoder` reads English with the repository's phonetic tokenizer
+(`../PhoneticTokenizer`: phoneme level, the portable lexicon - the core
+lexicon, the letter-to-sound rules and `PHONETOK_LEXICON` - which its Python
+and Rust ports read alike), keeps the tokens in its inventory - `#`, `, . ?`,
+then the 39 phonemes without stress (`stress=True` keeps the digits: 88) -
+and appends `pad = 2` boundaries `#`. It is the network's first block or
+nowhere; it has no machine and takes no credit.
+
+`PhoneticDecoder` is a layer whose states are that inventory, so what it
+writes is sounds; the network spells them back as English with the
+tokenizer's `decode`. It writes one sound per symbol, starts from `#` (state
+0), skips nothing and is never rearranged - a state *is* its sound. Before
+spelling, the tokenizer hears every word of every pair the network was taught
+(`words`, saved in the file), so a word it was taught comes back as itself
+from its memory in any process.
+
+`teach_pair(x, y)` runs every machine on `x`; the decoder's targets are `y`'s
+sounds, padded with `#` to the number of moves it made or cut to it. Each move
+whose target is not the target sound has its edge credited `-punish`; then
+the target path is taught edge by edge from `#` (`Machine.teach`, `+reward`).
+The blocks before the decoder are credited `reward · (right / moves) ·
+layer_discount`, discounted back as in §13.3 - a reward only: punishing them
+for the decoder's errors kept reshuffling the walks the decoder was learning
+to read, and no hidden layer learned at all (README). `evaluate_pairs` counts
+a pair right when the sounds written, trailing `#` dropped, are the target's.
+
+### 13.5 Decisions
+
+* **A layer writes its states,** the one thing every machine has: no output
+  alphabet to design, and the next machine reads the walk itself.
+* **Parallel letters are shifted, not shared,** so branch 1's state 0 and
+  branch 2's state 0 stay distinguishable to the block after.
+* **Credit travels back through blocks the way it travels back along a run,**
+  discounted, so a network adds one parameter (`layer_discount`) and no new
+  learning rule; `own` exists because shared credit punishes a branch that
+  was right whenever the vote was wrong.
+* **The decoder is supervised, the rest reinforced.** A target sound at every
+  step is information a single end-of-run verdict throws away, and the
+  decoder's state being its last sound makes the plural and the past tense -
+  a suffix chosen by the sound before it - a row each.
+* **Sounds, not letters,** between English and the machines: 43 symbols that
+  mean the same thing in every word, where spelling would make `-s`, `-es`
+  and `-ies` three rules.
+

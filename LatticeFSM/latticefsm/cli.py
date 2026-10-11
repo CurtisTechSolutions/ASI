@@ -15,6 +15,7 @@
     compress    fold the matrix into its central node (exact, float32 or float16) and save the code
     expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
     core-run    walk a string straight from a code, decoding only the cells the walk reaches
+    network     machines connected into a network: new, fit, evaluate, predict, translate, summary
     experiment  the learning, stimulation, adaptation and compression experiments
     test        run the test suite
 
@@ -30,7 +31,7 @@ import sys
 
 from . import experiment
 from .compress import PRECISIONS, compress, fidelity, load_core
-from .languages import LANGUAGES, examples, language
+from .languages import LANGUAGES, all_strings, examples, language
 from .machine import BASELINE, DEFAULT_ALPHABET, DEFAULT_STATES, DISCOUNT, LIFE, Machine, load_machine
 
 
@@ -287,6 +288,105 @@ def cmd_stimulate(args) -> int:
     return 0
 
 
+def _network(args):
+    from .network import Network, load_network
+    if args.load:
+        return load_network(args.load)
+    options = {"life": args.life, "temperature": args.temperature, "discount": args.discount}
+    if args.skip:
+        options["skip"] = True
+    if args.learn_focus:
+        options["learn_focus"] = True
+    net = Network(args.arch, alphabet=list(args.alphabet), seed=args.seed, merge=args.merge, vote=args.vote,
+                  layer_options=options)
+    if args.accepting is not None:
+        accepting = [int(s) for s in args.accepting.split(",") if s.strip()]
+    elif net.decoder is not None:
+        accepting = None
+    else:
+        accepting = list(language(args.language).accepting)
+    return net.compile(accepting=accepting, layer_discount=args.layer_discount, credit=args.credit)
+
+
+def _network_accuracy(net, lang, max_length: int) -> tuple[float, int]:
+    strings = all_strings(max_length)
+    return net.evaluate(strings, [lang.member(s) for s in strings]), len(strings)
+
+
+def _pairs(args) -> tuple[str, list[tuple[str, str]]]:
+    from .phonetic import TASKS
+    if args.pairs:
+        pairs = []
+        with open(args.pairs, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                if "\t" not in line:
+                    raise SystemExit(f"{args.pairs}: each line is input<TAB>target, got {line!r}")
+                x, y = line.split("\t", 1)
+                pairs.append((x.strip(), y.strip()))
+        return args.pairs, pairs
+    name = args.task or "plural"
+    if name not in TASKS:
+        raise SystemExit(f"no task {name!r}: plural or past")
+    return name, list(TASKS[name])
+
+
+def cmd_network(args) -> int:
+    from .phonetic import split
+    net = _network(args)
+    by_pairs = bool(args.task or args.pairs)
+    if args.action in ("new", "summary"):
+        print(net.summary())
+    elif args.action == "fit" and by_pairs:
+        name, pairs = _pairs(args)
+        train, test = split(pairs)
+        epochs = args.epochs if args.epochs is not None else 20
+        print(f"{name}: {len(train)} pairs taught x {epochs} epochs, {len(test)} held out")
+        print(f"  exact before: taught {net.evaluate_pairs(train):.6f}, held out {net.evaluate_pairs(test):.6f}")
+        for _ in range(epochs):
+            h = net.fit_pairs(train, epochs=1, validation_data=test)
+            print(f"  epoch {net.epochs}: sounds right while taught {h['sounds'][0]:.6f}, exact {h['exact'][0]:.6f}, "
+                  f"held out {h['val_exact'][0]:.6f}")
+        print(net.summary())
+    elif args.action == "fit":
+        lang = language(args.language)
+        epochs = args.epochs if args.epochs is not None else 1
+        rng = random.Random(args.seed)
+        train = examples(lang, args.episodes, rng, args.max_length)
+        acc, n = _network_accuracy(net, lang, args.max_length)
+        print(f"{lang.name} ({lang.description}): {args.episodes} strings x {epochs} epochs")
+        print(f"  accuracy on every string up to {args.max_length} symbols ({n}): before {acc:.6f}")
+        for _ in range(epochs):
+            hist = net.fit([s for s, _ in train], [m for _, m in train], epochs=1)
+            acc, _ = _network_accuracy(net, lang, args.max_length)
+            print(f"  epoch {net.epochs}: right while taught {hist['accuracy'][0]:.6f}, after {acc:.6f}")
+        print(net.summary())
+    elif args.action == "evaluate" and by_pairs:
+        name, pairs = _pairs(args)
+        train, test = split(pairs)
+        print(f"exact {name}: taught {net.evaluate_pairs(train):.6f}, held out {net.evaluate_pairs(test):.6f}")
+    elif args.action == "evaluate":
+        lang = language(args.language)
+        acc, n = _network_accuracy(net, lang, args.max_length)
+        print(f"accuracy {lang.name} on every string up to {args.max_length} symbols ({n}): {acc:.6f}")
+    elif args.action == "predict":
+        for text in args.text or [""]:
+            t = net.trace(text)
+            print(f"{text or '(empty)'}: {'accepted' if t['accepted'] else 'rejected'}")
+            for step in t["layers"]:
+                english = f' = "{step["english"]}"' if "english" in step else ""
+                print(f"  {step['layer']} read {step['read'] or '-'}, walked {' '.join(map(str, step['states'])) or '-'}, "
+                      f"wrote {step['wrote'] or '-'}{english}{' (accepting)' if step['accepted'] else ''}")
+    elif args.action == "translate":
+        for text in args.text:
+            print(f"{text} -> {net.translate(text)}  ({' '.join(net.sounds(text))})")
+    if args.save and args.action in ("new", "fit", "summary"):
+        net.save(args.save)
+        print(f"saved {args.save}", file=sys.stderr)
+    return 0
+
+
 def cmd_experiment(args) -> int:
     for rec in experiment.run(args.which, args.out, episodes=args.episodes, life=args.life):
         print(experiment.tables(rec))
@@ -420,6 +520,31 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--out", default=None, help="write <name>_results.json files here")
     q.add_argument("--episodes", type=int, default=4000)
     q.add_argument("--life", type=float, default=LIFE)
+    q = add("network", cmd_network, "machines connected into a network: new, fit, evaluate, predict, translate, summary",
+            machine=False)
+    q.add_argument("action", choices=("new", "fit", "evaluate", "predict", "translate", "summary"))
+    q.add_argument("text", nargs="*", help="predict / translate: the strings to read")
+    q.add_argument("--arch", default="13>13", help="e.g. 13>(13|13)>13: > in a row, (a|b) side by side, 13f final only; "
+                   "enc / dec: English in / out through the phonetic tokenizer (enc>13>dec)")
+    q.add_argument("--task", choices=("plural", "past"), default=None, help="fit / evaluate English to English pairs")
+    q.add_argument("--pairs", default=None, help="a file of input<TAB>target English pairs (every 4th held out)")
+    q.add_argument("--alphabet", default=DEFAULT_ALPHABET, help="the input's symbols, one character each")
+    q.add_argument("--accepting", default=None, help="the output layers' accepting states (default: the language's)")
+    q.add_argument("--language", default="even-b", choices=sorted(LANGUAGES))
+    q.add_argument("--credit", choices=("shared", "own"), default="shared",
+                   help="output layers credited by the network's verdict or their own")
+    q.add_argument("--merge", choices=("concat", "interleave"), default="concat")
+    q.add_argument("--vote", choices=("majority", "any", "all"), default="majority")
+    q.add_argument("--layer-discount", type=float, default=0.8)
+    q.add_argument("--seed", type=int, default=1)
+    q.add_argument("--life", type=float, default=LIFE)
+    q.add_argument("--temperature", type=float, default=1.0)
+    q.add_argument("--discount", type=float, default=DISCOUNT)
+    q.add_argument("--skip", action="store_true")
+    q.add_argument("--learn-focus", action="store_true")
+    q.add_argument("--episodes", type=int, default=4000)
+    q.add_argument("--epochs", type=int, default=None, help="default 1 for a language, 20 for pairs")
+    q.add_argument("--max-length", type=int, default=6)
     add("test", cmd_test, "run the test suite", machine=False, load=False)
     return p
 

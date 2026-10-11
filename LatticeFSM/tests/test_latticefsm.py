@@ -767,6 +767,145 @@ class TestCLI(unittest.TestCase):
             self.assertIn("swapped states 0 and 12", self.run_cli("rearrange", "--load", path, "--swap", "states", "0", "12"))
 
 
+class TestNetwork(unittest.TestCase):
+    """Machines connected into networks: the architecture, the wiring, the credit, the file, English in and out."""
+
+    def test_the_architecture_string(self):
+        from latticefsm.network import Layer, Network, Parallel, Sequential, parse_architecture
+        net = Network("13>(13|13f)>4", alphabet="ab")
+        blocks = net.root.blocks
+        self.assertEqual([type(b) for b in blocks], [Layer, Parallel, Layer])
+        self.assertEqual([l.machine.lattice.shape for l in net.layers()],
+                         [(13, 2, 13), (13, 13, 13), (13, 13, 13), (4, 26, 4)])
+        self.assertEqual([l.machine.seed for l in net.layers()], [1, 2, 3, 4])
+        self.assertEqual(blocks[1].branches[1].emit, "final")
+        self.assertIsInstance(parse_architecture("(3>3|3)"), Parallel)
+        self.assertIsInstance(parse_architecture("3>3"), Sequential)
+        for bad in ("", "13>", "(13|13", "13x", "(13|)", "0", "63"):
+            with self.assertRaises(ValueError, msg=bad):
+                Network(bad, alphabet="ab")
+        self.assertIn("4 layers", net.summary())
+
+    def test_one_layer_is_the_machine_it_holds(self):
+        from latticefsm.network import Network, teach_network
+        lang = language("mod3-a")
+        m = Machine(3, "ab", accepting=lang.accepting, seed=4)
+        experiment.teach_language(m, "mod3-a", 600, random.Random(4))
+        net = Network("3", alphabet="ab", seed=4).compile(accepting=lang.accepting)
+        teach_network(net, "mod3-a", 600, random.Random(4))
+        self.assertEqual(net.layers()[0].machine.to_dict()["lattice"], m.to_dict()["lattice"])
+
+    def test_the_wiring(self):
+        from latticefsm.network import Network
+        net = Network("(3|3)", alphabet="ab", merge="interleave")
+        out, _ = net.forward("ab", quiet=True, temperature=0.0)
+        a = [s for s, _ in zip("abc", range(3))]
+        self.assertEqual(len(out), 4)
+        self.assertTrue(all(o in a for o in out[0::2]) and all(o in "def" for o in out[1::2]), out)
+        net = Network("(3|3)", alphabet="ab", merge="concat")
+        out, _ = net.forward("ab", quiet=True, temperature=0.0)
+        self.assertTrue(all(o in "abc" for o in out[:2]) and all(o in "def" for o in out[2:]), out)
+        self.assertEqual(net.output_alphabet, list("abcdef"))
+        net = Network("3>2f", alphabet="ab")
+        self.assertEqual(len(net.forward("abab", quiet=True, temperature=0.0)[0]), 1)
+
+    def test_votes(self):
+        from latticefsm.network import Network
+        for vote, want in (("majority", True), ("any", True), ("all", False)):
+            net = Network("(2|2|2)", alphabet="a", vote=vote)
+            for i, layer in enumerate(net.layers()):
+                for st in layer.machine.lattice.states:
+                    st.accepting = i < 2
+            self.assertEqual(net.forward("", quiet=True)[1], want, vote)
+
+    def test_shared_and_own_credit(self):
+        from latticefsm.network import Network
+        # own: the branch that accepted wrongly is punished, the one that rejected rightly rewarded
+        net = Network("(2|2)", alphabet="a").compile(accepting=[0], credit="own")
+        net.layers()[1].machine.lattice.states[0].accepting = False
+        net.layers()[1].machine.lattice.states[1].accepting = False
+        net.teach("a", False)
+        a, b = net.layers()
+        self.assertEqual((sum(e.rewarded for e in a.machine.lattice), sum(e.punished for e in a.machine.lattice)),
+                         (0.0, 1.0) if a.last_accepted else (1.0, 0.0))
+        self.assertEqual(sum(e.rewarded for e in b.machine.lattice), 1.0)
+        # shared, one after another: the last block in full, the one before it layer_discount of that
+        net = Network("2>2", alphabet="a").compile(accepting=[0, 1], layer_discount=0.5)
+        net.teach("a", True)
+        hidden, out = net.layers()
+        self.assertEqual(sum(e.rewarded for e in out.machine.lattice), 1.0)
+        self.assertEqual(sum(e.rewarded for e in hidden.machine.lattice), 0.5)
+
+    def test_greedy_passes_are_deterministic_and_draw_nothing(self):
+        from latticefsm.network import Network
+        net = Network("13>13", alphabet="ab")
+        before = [l.machine.rng.getstate() for l in net.layers()]
+        first = [net.forward(s, quiet=True, temperature=0.0)[0] for s in ("ab", "bba", "")]
+        again = [net.forward(s, quiet=True, temperature=0.0)[0] for s in ("ab", "bba", "")]
+        self.assertEqual(first, again)
+        self.assertEqual(before, [l.machine.rng.getstate() for l in net.layers()])
+        self.assertEqual(first[0], ["a", "a"])  # a fresh row ties, and the tie goes to state 0
+
+    def test_the_file_round_trips(self):
+        from latticefsm.network import Network, load_network, teach_network
+        net = Network("(3|3)>3", alphabet="ab", seed=3).compile(accepting=[0], credit="own", layer_discount=0.6)
+        teach_network(net, "even-b", 300, random.Random(3))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.json.gz")
+            net.save(path)
+            back = load_network(path)
+        self.assertEqual(back.to_dict(), net.to_dict())
+        strings = ["", "a", "ab", "bab", "abba", "bbbb"]
+        self.assertEqual(back.predict(strings), net.predict(strings))
+
+    def test_english_in_and_out(self):
+        from latticefsm.network import Network, PhoneticDecoder, PhoneticEncoder, load_network
+        from latticefsm.phonetic import PLURALS, inventory, split
+        self.assertEqual(len(inventory()), 43)
+        net = Network("enc>dec")
+        self.assertIsInstance(net.encoder, PhoneticEncoder)
+        self.assertIsInstance(net.decoder, PhoneticDecoder)
+        self.assertEqual(net.encoder.encode("cats"), ["K", "AE", "T", "S", "#", "#"])
+        self.assertEqual(net.decoder.machine.lattice.shape, (43, 43, 43))
+        self.assertEqual(net.translate("cat"), "")  # untaught, every row ties and the tie is the boundary
+        train, test = split(PLURALS)
+        history = net.fit_pairs(train, epochs=10, validation_data=test)
+        self.assertGreater(history["exact"][-1], 0.6)
+        self.assertEqual(net.translate("cat"), "cats")
+        t = net.trace("dog")
+        self.assertEqual((t["layers"][0]["english"], t["output"]), ("dog", "dogs"))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.json")
+            net.save(path)
+            back = load_network(path)
+        self.assertEqual(back.evaluate_pairs(train), net.evaluate_pairs(train))
+        self.assertEqual(back.translate("hat"), net.translate("hat"))
+        for bad in ("13>enc", "(enc|13)", "enc"):
+            with self.assertRaises(ValueError, msg=bad):
+                Network(bad)
+        with self.assertRaises(ValueError):
+            Network("enc>13").translate("cat")
+        with self.assertRaises(ValueError):
+            PhoneticDecoder(skip=True)
+
+    def test_the_command_line(self):
+        def cli(*args):
+            out = subprocess.run([sys.executable, "-m", "latticefsm", "network", *args], cwd=ROOT,
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return out.stdout
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "n.json")
+            self.assertIn("2 layers", cli("new", "--arch", "3>3", "--alphabet", "ab", "--save", path))
+            self.assertIn("epoch 1", cli("fit", "--load", path, "--language", "even-b", "--episodes", "200", "--save", path))
+            self.assertIn("accuracy even-b on every string up to 6 symbols (127)", cli("evaluate", "--load", path))
+            self.assertIn("lattice_2 read", cli("predict", "ab", "--load", path))
+            t = os.path.join(d, "t.json")
+            self.assertIn("held out", cli("fit", "--arch", "enc>dec", "--task", "plural", "--epochs", "6", "--save", t))
+            self.assertIn("cat -> cats", cli("translate", "cat", "--load", t))
+            self.assertIn("exact plural", cli("evaluate", "--load", t, "--task", "plural"))
+
+
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
 class TestRustParity(unittest.TestCase):
     """The two ports agree on everything that does not draw: the stimulation and adaptation records, number for
@@ -794,6 +933,38 @@ class TestRustParity(unittest.TestCase):
             m.save(path2)
             out2 = subprocess.run([RUST, "stats", "--load", path2], check=True, capture_output=True, text=True).stdout
             self.assertIn(f'"clock": {m.clock}', out2)
+
+
+@unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+class TestRustNetworkParity(unittest.TestCase):
+    """A network file written by either port reads in the other, which then classifies, traces and translates every
+    string the same way: greedy passes draw nothing, so they do not depend on the two ports' different generators."""
+
+    def rust(self, *args):
+        return subprocess.run([RUST, "network", *args], check=True, capture_output=True, text=True).stdout
+
+    def py(self, *args):
+        return subprocess.run([sys.executable, "-m", "latticefsm", "network", *args], cwd=ROOT, check=True,
+                              capture_output=True, text=True).stdout
+
+    def test_a_language_network_crosses_both_ways(self):
+        with tempfile.TemporaryDirectory() as d:
+            for writer, reader in ((self.rust, self.py), (self.py, self.rust)):
+                path = os.path.join(d, f"n{writer.__name__}.json")
+                writer("fit", "--arch", "(3|3)>3", "--alphabet", "ab", "--language", "ends-ab", "--episodes", "600",
+                       "--credit", "own", "--save", path)
+                for cmd in (("evaluate", "--language", "ends-ab"), ("predict", "", "ab", "abab", "bbaab"),
+                            ("summary",)):
+                    self.assertEqual(writer(*cmd, "--load", path), reader(*cmd, "--load", path), cmd)
+
+    def test_a_translator_crosses_both_ways(self):
+        with tempfile.TemporaryDirectory() as d:
+            for writer, reader in ((self.rust, self.py), (self.py, self.rust)):
+                path = os.path.join(d, f"t{writer.__name__}.json.gz")
+                writer("fit", "--arch", "enc>13>dec", "--task", "plural", "--epochs", "4", "--save", path)
+                for cmd in (("evaluate", "--task", "plural"), ("translate", "cat", "glass", "drum", "The dog sat."),
+                            ("predict", "boxes")):
+                    self.assertEqual(writer(*cmd, "--load", path), reader(*cmd, "--load", path), cmd)
 
 
 class TestRustCompressionParity(unittest.TestCase):

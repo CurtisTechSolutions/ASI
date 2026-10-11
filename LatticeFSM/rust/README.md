@@ -21,6 +21,25 @@ make serve        # the server on :8000 and the Vite dev frontend on :5173 toget
 rust/target/release/latticefsm --help
 ```
 
+## Networks
+
+`latticefsm network ACTION` builds, teaches and reads networks of machines
+(`src/network.rs`, `../latticefsm/network.py`; `../README.md` "Networks of
+machines"):
+
+```bash
+latticefsm network new --arch "13>(13|13)>13" --alphabet ab --accepting 0 --save net.json
+latticefsm network fit --load net.json --language ends-ab --episodes 4000 --save net.json
+latticefsm network evaluate --load net.json --language ends-ab   # every string up to --max-length 6
+latticefsm network predict abab --load net.json                  # layer by layer
+latticefsm network fit --arch "enc>dec" --task plural --epochs 20 --save t.json   # or --pairs FILE.tsv
+latticefsm network translate cat dog bus --load t.json           # English in, English out
+```
+
+The encoder and decoder use the repository's phonetic tokenizer
+(`../../PhoneticTokenizer/rust`), this crate's one dependency, a path
+dependency on a crate of the same repository with none of its own.
+
 ## The API
 
 `latticefsm serve [--port 8000] [--host 127.0.0.1] [--frontend-dir DIR] [--load FILE | machine options]`
@@ -68,6 +87,7 @@ or 405. `tests/server.rs` exercises every route over a real socket.
 | `src/edge.rs` | `Edge`, `Weighting`, the features, the weight, traversal, credit, width |
 | `src/lattice.rs` | `Lattice`, `State`: the dense matrix and its JSON |
 | `src/machine.rs` | `Machine`, `Run`, `Transition`, `Settings`: the walk, the clock, credit, stimulation, the file |
+| `src/network.rs`, `src/phonetic.rs` | networks of machines; English in and out through the phonetic tokenizer |
 | `src/languages.rs` | the four regular languages and their examples |
 | `src/geometry.rs` | the cube's central node and shells; `center_out`, the order the code is laid out in |
 | `src/focus.rs` | `FocusLearner`: the focus read off the input, learned from credit |

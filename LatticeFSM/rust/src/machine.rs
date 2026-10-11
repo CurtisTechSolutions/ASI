@@ -207,6 +207,9 @@ pub struct Machine {
     pub reward_widening: f64,
     pub punish_narrowing: f64,
     pub weight_fn: Option<WeightFn>,
+    /// Greedy (temperature 0) choices take the lowest of tied targets instead of drawing among them, and draw
+    /// nothing: a network's quiet passes are deterministic and leave the generator alone.  Not saved.
+    pub greedy_first: bool,
     pub seed: u64,
     pub rng: Rng,
     /// Every traversal, plus time let pass.
@@ -297,6 +300,7 @@ impl Machine {
             reward_widening: settings.reward_widening,
             punish_narrowing: settings.punish_narrowing,
             weight_fn: None,
+            greedy_first: false,
             seed: settings.seed,
             compress_every: settings.compress_every,
             compress_precision: settings.compress_precision,
@@ -482,6 +486,10 @@ impl Machine {
         temperature: Option<f64>,
     ) -> (usize, f64) {
         let probs = self.probabilities(source, symbol, stimulation, temperature);
+        if self.greedy_first && temperature.unwrap_or(self.temperature) == 0.0 {
+            let t = argmax(&probs);
+            return (t, probs[t]);
+        }
         let r = self.rng.random();
         let mut acc = 0.0;
         for (t, p) in probs.iter().enumerate() {
@@ -1179,6 +1187,7 @@ impl Machine {
             reward_widening: st.num("reward_widening", 0.2),
             punish_narrowing: st.num("punish_narrowing", 0.2),
             weight_fn: None,
+            greedy_first: false,
             seed,
             rng,
             clock: v.num("clock", 0.0) as i64,

@@ -30,6 +30,10 @@ is deterministic given the seed.
   with a learned focus, with the nodes rearranging themselves, and from a
   fixed focus of 0.5 and of 1; and what letting the nodes rearrange
   themselves does to the shells the compressed code is laid out in.
+* :func:`network` - machines connected into networks (``network.py``): every
+  language taught to one machine, to two in a row, to three side by side
+  voting (credited by the network's verdict, or each by its own), and so on -
+  the same strings in the same order as the learning experiment's.
 """
 
 from __future__ import annotations
@@ -46,9 +50,17 @@ from .edge import Weighting
 from .languages import ALPHABET, LANGUAGES, examples, language
 from .machine import BASELINE, DISCOUNT, LIFE, Machine
 
-__all__ = ["EXPERIMENTS", "adaptation", "learning", "main", "run", "stimulation", "tables", "teach_language"]
+__all__ = ["EXPERIMENTS", "NETWORKS", "adaptation", "learning", "main", "network", "run", "stimulation", "tables", "teach_language"]
 
-EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk")
+EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk", "network")
+
+NETWORKS = (("3", "shared"), ("3>3", "shared"), ("3f>3", "shared"), ("(3|3)>3", "shared"), ("(3|3|3)", "shared"),
+            ("(3|3|3)", "own"), ("13", "shared"), ("(13|13|13)", "own"))
+"""The networks the network experiment compares: an architecture string and whose verdict its output layers are
+credited by."""
+
+TRANSLATORS = ("enc>dec", "enc>13>dec")
+"""The English-to-English networks the network experiment teaches each phonetic task to."""
 
 
 def _settings(**kw) -> dict:
@@ -303,8 +315,75 @@ def _edge_view(e, m: Machine) -> dict:
 
 # ---- rendering ---------------------------------------------------------------------------------------------------
 
+def network(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3, 4, 5), life: float = LIFE, tests: int = 300,
+            networks: Sequence[tuple[str, str]] = NETWORKS, translators: Sequence[str] = TRANSLATORS,
+            epochs: int = 20) -> dict:
+    """Every language taught to each network of ``networks`` from the learning experiment's strings, per seed; then
+    each English-to-English task (``phonetic.TASKS``) to each of ``translators`` for ``epochs`` epochs, every fourth
+    pair held out."""
+    from .network import Network, teach_network
+    from .phonetic import TASKS, split
+    rows = []
+    for name, lang in LANGUAGES.items():
+        for arch, credit in networks:
+            accs, touched, layers = [], 0, 0
+            for seed in seeds:
+                rng = random.Random(seed)
+                test = examples(lang, tests, rng)
+                net = Network(arch, alphabet=ALPHABET, seed=seed, layer_options={"life": life})
+                net.compile(accepting=lang.accepting, credit=credit)
+                teach_network(net, name, episodes, rng)
+                accs.append(net.evaluate([s for s, _ in test], [m for _, m in test]))
+                layers = len(net.layers())
+                touched = max(touched, sum(len(list(l.machine.lattice.touched())) for l in net.layers()))
+            rows.append({"language": name, "architecture": arch, "credit": credit, "layers": layers,
+                         "accuracy": accs, "accuracy_mean": sum(accs) / len(accs), "accuracy_min": min(accs),
+                         "accuracy_max": max(accs), "solved": sum(a >= 0.999 for a in accs), "touched": touched})
+    translation = []
+    for task, pairs in TASKS.items():
+        train, test = split(pairs)
+        for arch in translators:
+            net = Network(arch, seed=seeds[0], layer_options={"life": life})
+            h = net.fit_pairs(train, epochs=epochs, validation_data=test)
+            translation.append({"task": task, "architecture": arch, "taught": len(train), "held_out": len(test),
+                                "sounds": h["sounds"][-1], "exact": h["exact"][-1], "held_out_exact": h["val_exact"][-1],
+                                "examples": [[x, net.translate(x), y] for x, y in (train[:2] + test[:2])]})
+    return {
+        "experiment": "network",
+        "settings": _settings(episodes=episodes, seeds=list(seeds), life=life, tests=tests,
+                              networks=[list(n) for n in networks], layer_discount=0.8,
+                              translators=list(translators), epochs=epochs),
+        "rows": rows,
+        "translation": translation,
+    }
+
+
+def _network_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"network: every language taught to each network for {s['episodes']} episodes (the learning experiment's "
+             f"strings), {len(s['seeds'])} seeds, {s['tests']} held-out strings; `>` one after another, `(a|b)` side by "
+             "side (majority vote at the end), `f` writes only the final state", "",
+             "| language | network | credit | layers | accuracy: mean | min | max | solved | touched edges |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['language']} | `{row['architecture']}` | {row['credit']} | {row['layers']} | "
+                     f"**{row['accuracy_mean']:.2f}** | {row['accuracy_min']:.2f} | {row['accuracy_max']:.2f} | "
+                     f"{row['solved']}/{len(s['seeds'])} | {row['touched']} |")
+    lines += ["", f"English to English: each task taught to each network for {s['epochs']} epochs, every fourth pair "
+              "held out; exact means every sound right", "",
+              "| task | network | pairs taught / held out | sounds right while taught | exact: taught | held out | "
+              "translations (taught, taught, held out, held out) |", "|---|---|---|---|---|---|---|"]
+    for row in r["translation"]:
+        ex = ", ".join(f"{x} → {got}" + ("" if got == want else f" ({want})") for x, got, want in row["examples"])
+        lines.append(f"| {row['task']} | `{row['architecture']}` | {row['taught']} / {row['held_out']} | "
+                     f"{row['sounds']:.2f} | **{row['exact']:.2f}** | {row['held_out_exact']:.2f} | {ex} |")
+    return "\n".join(lines)
+
+
 def tables(record: dict) -> str:
     kind = record["experiment"]
+    if kind == "network":
+        return _network_table(record)
     if kind == "learning":
         return _learning_table(record)
     if kind == "stimulation":
@@ -431,6 +510,8 @@ def run(which: Sequence[str], out: str | None = None, **kw) -> list[dict]:
             rec = compression(life=kw.get("life", LIFE))
         elif name == "walk":
             rec = walk(life=kw.get("life", LIFE))
+        elif name == "network":
+            rec = network(episodes=kw.get("episodes", 4000), life=kw.get("life", LIFE))
         else:
             raise ValueError(f"no experiment named {name!r}; choose from {EXPERIMENTS} or all")
         records.append(rec)

@@ -12,6 +12,7 @@
 //!     compress    fold the matrix into its central node (exact, float32 or float16) and save the code
 //!     expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
 //!     core-run    walk a string straight from a code, decoding only the cells the walk reaches
+//!     network     machines connected into a network: new, fit, evaluate, predict, translate, summary
 //!     experiment  the learning, stimulation, adaptation and compression experiments
 //!     serve       the HTTP API and the React frontend (frontend/dist) on --port
 //!
@@ -24,8 +25,10 @@ use std::process;
 use latticefsm::compress::{compress, expansion, fidelity, load_core, Core, Precision};
 use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
-use latticefsm::languages::{examples, language, LANGUAGES};
+use latticefsm::languages::{all_strings, examples, language, LANGUAGES};
 use latticefsm::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
+use latticefsm::network::{load_network, Credit, Merge, Network, Vote, LAYER_DISCOUNT};
+use latticefsm::phonetic;
 use latticefsm::rng::Rng;
 use latticefsm::server;
 
@@ -110,7 +113,18 @@ commands
   stats       size, memory, clock and stimulation
   tick        let --ticks pass
   stimulate   raise the stimulation by --amount (or set --level)
-  experiment  --which learning|stimulation|adaptation|compression|all, --out DIR
+  network ACTION   machines connected into a network (latticefsm/network.py is the same):
+              new        --arch 13>(13|13)>13 (> in a row, (a|b) side by side, 13f final state only, enc / dec
+                         English in / out through the phonetic tokenizer)  --alphabet ab  --accepting 0
+                         --credit shared|own  --merge concat|interleave  --vote majority|any|all
+                         --layer-discount 0.8  --seed 1, and the machine options; --save FILE
+              fit        --language L --episodes N [--epochs E]: teach a language; or --task plural|past
+                         [--pairs FILE.tsv] [--epochs 20]: English to English pairs (every 4th held out)
+              evaluate   accuracy on every string up to --max-length (6), or exact translations of --task
+              predict TEXT...    each string's verdict, layer by layer
+              translate TEXT...  English in, English out
+              summary    the blocks, their matrices and what they write
+  experiment  --which learning|stimulation|adaptation|compression|walk|network|all, --out DIR
   serve       the HTTP API and the frontend on --port (default 8000); --frontend-dir DIR (default: frontend/dist
               under the working directory, or ../frontend/dist)
 
@@ -212,6 +226,7 @@ fn main() {
         "skip" => skip_cmd(&a),
         "rearrange" => rearrange_cmd(&a),
         "teach" => teach(&a),
+        "network" => network_cmd(&a),
         "accuracy" => accuracy(&a),
         "table" => table(&a),
         "stats" => machine(&a).map(|m| println!("{}", m.stats().pretty(1))),
@@ -822,4 +837,184 @@ fn demo(a: &Args) -> Result<(), String> {
         println!("  and the first language now: {:.3}", m.accuracy(&test, 0.0));
     }
     save_if_asked(&m, a)
+}
+
+fn network(a: &Args) -> Result<Network, String> {
+    if let Some(path) = a.get("load") {
+        return load_network(path);
+    }
+    let alphabet: Vec<String> = a
+        .str("alphabet", DEFAULT_ALPHABET)
+        .chars()
+        .map(|c| c.to_string())
+        .collect();
+    let mut net = Network::from_architecture(
+        &a.str("arch", "13>13"),
+        &alphabet,
+        a.num("seed", 1.0) as u64,
+        Merge::parse(&a.str("merge", "concat"))?,
+        Vote::parse(&a.str("vote", "majority"))?,
+        &settings(a),
+    )?;
+    let accepting: Vec<usize> = match a.get("accepting") {
+        Some(list) => list
+            .split(',')
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().parse().map_err(|_| format!("bad accepting state {s:?}")))
+            .collect::<Result<_, _>>()?,
+        None => language(&a.str("language", "even-b"))?.accepting.to_vec(),
+    };
+    let accepting = if net.decoder().is_some() && a.get("accepting").is_none() {
+        None
+    } else {
+        Some(accepting)
+    };
+    net.compile(
+        accepting.as_deref(),
+        a.num("layer-discount", LAYER_DISCOUNT),
+        1.0,
+        1.0,
+        Credit::parse(&a.str("credit", "shared"))?,
+    )?;
+    Ok(net)
+}
+
+fn network_accuracy(
+    net: &mut Network,
+    lang: &latticefsm::languages::Language,
+    max_length: usize,
+) -> Result<(f64, usize), String> {
+    let strings = all_strings(max_length);
+    let examples: Vec<(String, bool)> = strings.iter().map(|s| (s.clone(), (lang.member)(s))).collect();
+    Ok((net.evaluate(&examples)?, examples.len()))
+}
+
+fn pairs(a: &Args) -> Result<(String, Vec<(String, String)>), String> {
+    if let Some(path) = a.get("pairs") {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let pairs = text
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| {
+                l.split_once('\t')
+                    .map(|(x, y)| (x.trim().to_string(), y.trim().to_string()))
+                    .ok_or_else(|| format!("{path}: each line is input<TAB>target, got {l:?}"))
+            })
+            .collect::<Result<_, _>>()?;
+        return Ok((path.to_string(), pairs));
+    }
+    let name = a.str("task", "plural");
+    Ok((name.clone(), phonetic::task(&name)?))
+}
+
+fn network_cmd(a: &Args) -> Result<(), String> {
+    let action = a.positional.first().map(String::as_str).unwrap_or("summary");
+    let texts: Vec<String> = a.positional.iter().skip(1).cloned().collect();
+    let mut net = network(a)?;
+    let max_length = a.num("max-length", 6.0) as usize;
+    let by_pairs = a.has("task") || a.has("pairs");
+    match action {
+        "new" | "summary" => println!("{}", net.summary()),
+        "fit" if by_pairs => {
+            let (name, all) = pairs(a)?;
+            let (train, test) = phonetic::split(&all, 4);
+            let epochs = a.num("epochs", 20.0) as usize;
+            println!(
+                "{name}: {} pairs taught x {epochs} epochs, {} held out",
+                train.len(),
+                test.len()
+            );
+            println!(
+                "  exact before: taught {:.6}, held out {:.6}",
+                net.evaluate_pairs(&train)?,
+                net.evaluate_pairs(&test)?
+            );
+            for _ in 0..epochs {
+                let h = net.fit_pairs(&train, 1, Some(&test))?;
+                println!(
+                    "  epoch {}: sounds right while taught {:.6}, exact {:.6}, held out {:.6}",
+                    net.epochs, h.sounds[0], h.exact[0], h.val_exact[0]
+                );
+            }
+            println!("{}", net.summary());
+        }
+        "fit" => {
+            let lang = language(&a.str("language", "even-b"))?;
+            let episodes = a.num("episodes", 4000.0) as usize;
+            let epochs = a.num("epochs", 1.0) as usize;
+            let mut rng = Rng::new(a.num("seed", 1.0) as u64);
+            let train = examples(&lang, episodes, &mut rng, max_length);
+            let (acc, n) = network_accuracy(&mut net, &lang, max_length)?;
+            println!(
+                "{} ({}): {episodes} strings x {epochs} epochs",
+                lang.name, lang.description
+            );
+            println!("  accuracy on every string up to {max_length} symbols ({n}): before {acc:.6}");
+            for _ in 0..epochs {
+                let h = net.fit(&train, 1)?;
+                let (acc, _) = network_accuracy(&mut net, &lang, max_length)?;
+                println!("  epoch {}: right while taught {:.6}, after {acc:.6}", net.epochs, h[0]);
+            }
+            println!("{}", net.summary());
+        }
+        "evaluate" if by_pairs => {
+            let (name, all) = pairs(a)?;
+            let (train, test) = phonetic::split(&all, 4);
+            println!(
+                "exact {name}: taught {:.6}, held out {:.6}",
+                net.evaluate_pairs(&train)?,
+                net.evaluate_pairs(&test)?
+            );
+        }
+        "evaluate" => {
+            let lang = language(&a.str("language", "even-b"))?;
+            let (acc, n) = network_accuracy(&mut net, &lang, max_length)?;
+            println!(
+                "accuracy {} on every string up to {max_length} symbols ({n}): {acc:.6}",
+                lang.name
+            );
+        }
+        "predict" => {
+            let texts = if texts.is_empty() { vec![String::new()] } else { texts };
+            for text in &texts {
+                let (steps, _, accepted) = net.trace(text)?;
+                let shown = if text.is_empty() { "(empty)" } else { text.as_str() };
+                println!("{shown}: {}", if accepted { "accepted" } else { "rejected" });
+                for st in steps {
+                    let states: Vec<String> = st.states.iter().map(|s| s.to_string()).collect();
+                    println!(
+                        "  {} read {}, walked {}, wrote {}{}{}",
+                        st.layer,
+                        if st.read.is_empty() { "-" } else { &st.read },
+                        if states.is_empty() {
+                            "-".to_string()
+                        } else {
+                            states.join(" ")
+                        },
+                        if st.wrote.is_empty() { "-" } else { &st.wrote },
+                        st.english.map(|e| format!(" = \"{e}\"")).unwrap_or_default(),
+                        if st.accepted { " (accepting)" } else { "" }
+                    );
+                }
+            }
+        }
+        "translate" => {
+            for text in &texts {
+                let sounds = net.sounds(text)?;
+                println!("{text} -> {}  ({})", net.translate(text)?, sounds.join(" "));
+            }
+        }
+        other => {
+            return Err(format!(
+                "network {other:?}: new, fit, evaluate, predict, translate or summary"
+            ))
+        }
+    }
+    if matches!(action, "new" | "fit" | "summary") {
+        if let Some(path) = a.get("save") {
+            net.save(path)?;
+            eprintln!("saved {path}");
+        }
+    }
+    Ok(())
 }

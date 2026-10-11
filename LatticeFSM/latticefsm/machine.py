@@ -110,6 +110,8 @@ class Run:
 class Machine:
     """A finite state machine over a dense 3D matrix of adaptive edges."""
 
+    greedy_first = False
+
     def __init__(
         self,
         states: int = DEFAULT_STATES,
@@ -164,6 +166,9 @@ class Machine:
         self.reward_widening = float(reward_widening)
         self.punish_narrowing = float(punish_narrowing)
         self.weight_fn = weight_fn
+        self.greedy_first = False
+        """Greedy (temperature 0) choices take the lowest of tied targets instead of drawing among them, and draw
+        nothing: a network's quiet passes are deterministic and leave the generator alone.  Not saved."""
         self.seed = int(seed)
         if compress_every < 0:
             raise ValueError(f"compress_every must be >= 0 (0 never), got {compress_every}")
@@ -297,6 +302,9 @@ class Machine:
                temperature: float | None = None) -> tuple[int, float]:
         """Draw a target from the row, returning it and the probability it had."""
         probs = self.probabilities(source, symbol, stimulation, temperature)
+        if self.greedy_first and (self.temperature if temperature is None else temperature) == 0:
+            t = max(range(len(probs)), key=probs.__getitem__)
+            return t, probs[t]
         r = self.rng.random()
         acc = 0.0
         for t, p in enumerate(probs):
