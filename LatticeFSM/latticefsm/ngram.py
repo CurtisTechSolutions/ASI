@@ -216,6 +216,26 @@ def split_lines(lines: Sequence, every: int = 10) -> tuple[list, list]:
 
 # ---- the model -----------------------------------------------------------------------------------------------------
 
+class _Order:
+    """One order's Kneser-Ney table, kept current a count at a time: the counts by context, their totals, how many
+    distinct tokens each context has, and the count-of-counts the discount is read from."""
+
+    __slots__ = ("rows", "totals", "distinct", "n1", "n2")
+
+    def __init__(self, rows: dict) -> None:
+        self.rows = rows
+        self.totals = {h: sum(row.values()) for h, row in rows.items()}
+        self.distinct = {h: len(row) for h, row in rows.items()}
+        self.n1 = sum(1 for row in rows.values() for c in row.values() if c == 1)
+        self.n2 = sum(1 for row in rows.values() for c in row.values() if c == 2)
+
+    @property
+    def discount(self) -> float:
+        """Ney's ``n1 / (n1 + 2 n2)``; 0.75 when that is undefined or outside (0, 1)."""
+        d = self.n1 / (self.n1 + 2 * self.n2) if self.n1 > 0 and self.n2 > 0 else 0.75
+        return d if 0.0 < d < 1.0 else 0.75
+
+
 class NGram:
     """An N-gram model of order ``order`` over ``unit`` tokens: sparse adaptive edges, interpolated Kneser-Ney."""
 
@@ -242,7 +262,10 @@ class NGram:
         self.sentences = 0
         self.sources: list[list] = []
         self.history: list[dict] = []
-        self._tables: list | None = None
+        self._tables: list[_Order | None] | None = None
+        self._ranks: dict[int, list[int]] | None = None
+        """The order-1 continuation counts as buckets (count -> ids in order), for :meth:`top`; built when first
+        needed and kept current."""
 
     # ---- vocabulary and contexts -------------------------------------------------------------------------------
 
@@ -277,74 +300,160 @@ class NGram:
 
     # ---- training ----------------------------------------------------------------------------------------------
 
-    def train_tokens(self, tokens: Sequence[str]) -> int:
-        """One sequence: every ``(context, next)`` counted, ``</s>`` last.  Returns how many were counted."""
+    def train_tokens(self, tokens: Sequence[str], predict: bool = False, credit: float = 0.0) -> int:
+        """One sequence: every ``(context, next)`` counted, ``</s>`` last.  Returns how many were counted.
+
+        With ``predict``, every token is first *predicted* from what has been learned so far - the model's first
+        guess (:meth:`top`) and the probability it gave the true token are added to :attr:`online` - and then
+        learned; with ``credit`` as well, the guess is rewarded by ``credit`` when it was right and punished by it
+        when it was wrong, before the true token is counted.  Predicting changes nothing the counts hold, so a model
+        trained this way is the same model (unless it credits), and it has measured itself on every token on the way."""
         ids = [0] * (self.order - 1) + [self._id(t, True) for t in tokens] + [1]
         k = self.order - 1
+        tables = self._tables
         for i in range(k, len(ids)):
             ctx = tuple(ids[i - k:i])
-            row = self.grams.setdefault(ctx, {})
-            row[ids[i]] = row.get(ids[i], 0) + 1
+            w = ids[i]
+            if predict:
+                guess = self.top(ctx)
+                p = self.prob(ctx, w)
+                self.online[0] += guess == w
+                self.online[1] += 1
+                self.online[2] += math.log(max(p, 1e-300))
+                if credit:
+                    self.credit(ctx, w if guess == w else guess, credit if guess == w else -credit)
+                tables = self._tables
+            if tables is not None:
+                self._add(self.order, ctx, w)
+            else:
+                row = self.grams.setdefault(ctx, {})
+                row[w] = row.get(w, 0) + 1
             self.clock += 1
-            rec = self.edges.get(ctx, {}).get(ids[i])
+            rec = self.edges.get(ctx, {}).get(w)
             if rec is not None:
                 rec[3] = self.clock
         self.sentences += 1
-        self._tables = None
         return len(ids) - k
 
-    def train_lines(self, lines: Iterable[str | Sequence[str]], source: str | None = None) -> int:
-        """Every line (a text, or a sequence of tokens) one sequence; returns the tokens counted."""
+    def _add(self, k: int, h: tuple[int, ...], w: int) -> None:
+        """One more ``(h, w)`` in order ``k``'s table, the totals, distinct counts, count-of-counts (and the order-1
+        buckets) kept current; a pair new to order ``k`` is one more continuation for order ``k - 1``."""
+        t = self._tables[k]
+        row = t.rows.setdefault(h, {})
+        old = row.get(w, 0)
+        row[w] = old + 1
+        t.totals[h] = t.totals.get(h, 0) + 1
+        if old == 0:
+            t.distinct[h] = t.distinct.get(h, 0) + 1
+        t.n1 += (old + 1 == 1) - (old == 1)
+        t.n2 += (old + 1 == 2) - (old == 2)
+        if k == 1 and self._ranks is not None:
+            import bisect
+            if old:
+                bucket = self._ranks[old]
+                bucket.pop(bisect.bisect_left(bucket, w))
+                if not bucket:
+                    del self._ranks[old]
+            bisect.insort(self._ranks.setdefault(old + 1, []), w)
+        if old == 0 and k > 1:
+            self._add(k - 1, h[1:], w)
+
+    @property
+    def online(self) -> list:
+        """While training with ``predict``: ``[right first guesses, tokens predicted, sum of ln P(true token)]``."""
+        if not hasattr(self, "_online"):
+            self._online = [0, 0, 0.0]
+        return self._online
+
+    def reset_online(self) -> dict:
+        """What predicting while training measured since the last reset - ``accuracy`` (first guesses right),
+        ``perplexity`` and ``bits`` (of the true tokens, each predicted before it was learned) - and a fresh start."""
+        right, n, logp = self.online
+        self._online = [0, 0, 0.0]
+        if n == 0:
+            return {"predicted": 0, "accuracy": None, "perplexity": None, "bits": None}
+        return {"predicted": n, "accuracy": right / n, "perplexity": math.exp(-logp / n),
+                "bits": -logp / n / math.log(2)}
+
+    def train_lines(self, lines: Iterable[str | Sequence[str]], source: str | None = None, predict: bool = False,
+                    credit: float = 0.0) -> int:
+        """Every line (a text, or a sequence of tokens) one sequence; returns the tokens counted.  ``predict`` and
+        ``credit``: :meth:`train_tokens`."""
         n = count = 0
         for line in lines:
             toks = self._sequence(line)
             if toks:
-                n += self.train_tokens(toks)
+                n += self.train_tokens(toks, predict, credit)
                 count += 1
         if source is not None:
             self.sources.append([source, count, n])
         return n
 
-    def train_paths(self, paths: Iterable[str], held_out: int = 0) -> tuple[int, list[str]]:
+    def train_paths(self, paths: Iterable[str], held_out: int = 0, predict: bool = False,
+                    credit: float = 0.0) -> tuple[int, list[str]]:
         """Train on every file under ``paths`` (:func:`corpus_sequences`); with ``held_out = k`` every ``k``-th sequence
         is kept back and returned instead.  Returns (tokens counted, the held-out sequences)."""
         total, kept = 0, []
         for path, lines in corpus_sequences(paths, self.unit, self.lower):
             train, test = split_lines(lines, held_out) if held_out else (lines, [])
-            total += self.train_lines(train, source=path)
+            total += self.train_lines(train, source=path, predict=predict, credit=credit)
             kept += test
         return total, kept
 
     # ---- Kneser-Ney ----------------------------------------------------------------------------------------------
 
     def _derive(self) -> list:
-        """Per order k = 1..n: (table: context -> id -> count, totals, distinct, discount); the highest order from raw
-        counts, each lower one from continuation counts of the order above."""
+        """Per order k = 1..n an :class:`_Order`: the highest from raw counts, each lower one from the continuation
+        counts of the order above.  Built once, then kept current by :meth:`_add` as training goes on."""
         if self._tables is not None:
             return self._tables
         tables: list = [None] * (self.order + 1)
         table = self.grams
         for k in range(self.order, 0, -1):
-            totals = {h: sum(row.values()) for h, row in table.items()}
-            n1 = n2 = 0
-            for row in table.values():
-                for c in row.values():
-                    n1 += c == 1
-                    n2 += c == 2
-            d = n1 / (n1 + 2 * n2) if n1 > 0 and n2 > 0 else 0.75
-            if not (0.0 < d < 1.0):
-                d = 0.75
-            tables[k] = (table, totals, {h: len(row) for h, row in table.items()}, d)
+            tables[k] = _Order(table)
             if k > 1:
                 lower: dict[tuple[int, ...], dict[int, int]] = {}
                 for h, row in table.items():
-                    sub = h[1:]
-                    dst = lower.setdefault(sub, {})
+                    dst = lower.setdefault(h[1:], {})
                     for w in row:
                         dst[w] = dst.get(w, 0) + 1
                 table = lower
         self._tables = tables
+        self._ranks = None
         return tables
+
+    def top(self, ctx: tuple[int, ...]) -> int:
+        """The model's first guess after ``ctx``: the likeliest next id (ties: the lower id; never ``<s>``), found
+        without the whole distribution.  A token in none of the context's rows above order 1 and not credited there
+        has ``P = Λ · p_1`` with one ``Λ`` for all of them, so among those the order-1 ranking decides; only the
+        tokens of those rows, the credited ones and the best of the rest need weighing."""
+        tables = self._derive()
+        if self._ranks is None:
+            self._ranks = {}
+            for w, c in sorted(tables[1].rows.get((), {}).items()):
+                self._ranks.setdefault(c, []).append(w)
+        cand: set[int] = set()
+        for k in range(2, self.order + 1):
+            row = tables[k].rows.get(ctx[len(ctx) - (k - 1):])
+            if row:
+                cand.update(row)
+        if self.stimulation != 0.0:
+            cand.update(self.edges.get(ctx, ()))
+        cand.discard(0)
+        outside = None
+        for c in sorted(self._ranks, reverse=True):
+            for w in self._ranks[c]:
+                if w not in cand and w != 0:
+                    outside = w
+                    break
+            if outside is not None:
+                break
+        if outside is None:
+            seen = tables[1].rows.get((), {})
+            outside = next((w for w in range(1, len(self.vocab)) if w not in cand and w not in seen), None)
+        if outside is not None:
+            cand.add(outside)
+        return max(sorted(cand), key=lambda w: (self.prob(ctx, w), -w))
 
     def _floor(self, w: int) -> float:
         return 0.0 if w == 0 else 1.0 / (len(self.vocab) - 1)
@@ -354,13 +463,14 @@ class NGram:
         tables = self._derive()
         p = self._floor(w)
         for k in range(1, self.order + 1):
-            table, totals, distinct, d = tables[k]
+            t = tables[k]
             h = ctx[len(ctx) - (k - 1):] if k > 1 else ()
-            row = table.get(h)
+            row = t.rows.get(h)
             if row:
-                tot = totals[h]
+                tot = t.totals[h]
+                d = t.discount
                 c = row.get(w, 0)
-                p = max(c - d, 0.0) / tot + (d * distinct[h] / tot) * p
+                p = max(c - d, 0.0) / tot + (d * t.distinct[h] / tot) * p
         return p
 
     def _boost(self, ctx: tuple[int, ...]) -> tuple[dict[int, list[float]] | None, float]:
@@ -389,12 +499,13 @@ class NGram:
         out = [floor] * len(self.vocab)
         out[0] = 0.0
         for k in range(1, self.order + 1):
-            table, totals, distinct, d = tables[k]
+            t = tables[k]
             h = ctx[len(ctx) - (k - 1):] if k > 1 else ()
-            row = table.get(h)
+            row = t.rows.get(h)
             if row:
-                tot = totals[h]
-                f = d * distinct[h] / tot
+                tot = t.totals[h]
+                d = t.discount
+                f = d * t.distinct[h] / tot
                 out = [f * p for p in out]
                 for w, c in row.items():
                     out[w] = max(c - d, 0.0) / tot + out[w]
@@ -536,7 +647,7 @@ class NGram:
                 "contexts": len(self.grams), "ngrams": sum(len(r) for r in self.grams.values()),
                 "tokens": self.clock, "sentences": self.sentences, "stimulation": self.stimulation,
                 "credited_edges": sum(len(r) for r in self.edges.values()),
-                "discounts": [round(tables[k][3], 6) for k in range(1, self.order + 1)],
+                "discounts": [round(tables[k].discount, 6) for k in range(1, self.order + 1)],
                 "sources": len(self.sources)}
 
     # ---- the file ----------------------------------------------------------------------------------------------

@@ -38,13 +38,13 @@
 //! | `POST /api/load` | `{path}`: read a machine in place of the old |
 //! | `GET /api/ngram` | the N-gram model the server also holds (trigrams of words trained on `data/corpus` at start): stats, history |
 //! | `POST /api/ngram/new` | `{order?, unit?, stimulation?}`: a fresh model (word, char, sound or base64) |
-//! | `POST /api/ngram/train` | `{data?, held_out?}`: train on files or directories (default `data/corpus`); the held-out measure |
-//! | `POST /api/ngram/text` | `{text}`: train on pasted text, a line a sequence |
+//! | `POST /api/ngram/train` | `{data?, held_out?, predict?, self_credit?}`: train on files or directories (default `data/corpus`), each token predicted before it is learned; how well, and the held-out measure |
+//! | `POST /api/ngram/text` | `{text, predict?, self_credit?}`: train on pasted text, a line a sequence, predicting as it learns |
 //! | `POST /api/ngram/predict` | `{text, k?}`: the likeliest next tokens after `text` |
 //! | `POST /api/ngram/generate` | `{text, max_tokens?, temperature?, seed?}`: `text` continued |
 //! | `POST /api/ngram/credit` | `{text, amount}`: reward (positive) or punish the edges a text takes |
 //! | `GET /api/ngram/ollama` | `?url=&model=`: is Ollama there, which models |
-//! | `POST /api/ngram/autotrain` | `{data?, ollama?, model?, url?, topics?, rounds?, lines?, continuations?, judge?, patience?, fresh?}` |
+//! | `POST /api/ngram/autotrain` | `{data?, ollama?, model?, url?, topics?, rounds?, lines?, continuations?, judge?, patience?, fresh?, predict?, self_credit?}` |
 //! | `POST /api/ngram/save`, `/api/ngram/load` | `{path}`: write or read the model |
 //! | `GET /api/network` | the network the server also holds (`enc>dec` until another is made): its blocks and summary |
 //! | `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` |
@@ -951,6 +951,24 @@ fn eval_json(ev: &Evaluation) -> Json {
         .with("top5", ev.top5.map(Json::from).unwrap_or(Json::Null))
 }
 
+/// `{predict?, self_credit?}`: predict every token before learning it (the default), and credit the guess.
+fn learn_options(m: &mut NGram, b: &Json) {
+    m.predict = b.bool_or("predict", true);
+    m.self_credit = b.num("self_credit", 0.0);
+    m.reset_online();
+}
+
+/// How well the model predicted the tokens it was just trained on, each before it learned it.
+fn online_json(m: &mut NGram) -> Json {
+    let (n, acc, ppl, bits) = m.reset_online();
+    let opt = |v: Option<f64>| v.map(Json::from).unwrap_or(Json::Null);
+    Json::object()
+        .with("predicted", (n as usize).into())
+        .with("accuracy", opt(acc))
+        .with("perplexity", opt(ppl))
+        .with("bits", opt(bits))
+}
+
 fn ngram_info(m: &mut NGram) -> Json {
     m.stats().with("history", Json::Array(m.history.clone())).with(
         "sources",
@@ -1020,22 +1038,38 @@ fn ngram_route(m: &mut NGram, req: &Request) -> Result<Json, String> {
         }
         ("POST", "ngram/train") => {
             let paths = paths_of(b);
+            learn_options(m, b);
             let (n, test) = m.train_paths(&paths, b.num("held_out", 10.0) as usize)?;
+            let learned = online_json(m);
             let ev = m.evaluate(&test, 1000);
             m.history.push(
                 eval_json(&ev)
                     .with("round", m.history.len().into())
-                    .with("source", paths.join(",").as_str().into()),
+                    .with("source", paths.join(",").as_str().into())
+                    .with("learned", learned.get("predicted").cloned().unwrap_or(Json::Null))
+                    .with(
+                        "learned_accuracy",
+                        learned.get("accuracy").cloned().unwrap_or(Json::Null),
+                    )
+                    .with(
+                        "learned_perplexity",
+                        learned.get("perplexity").cloned().unwrap_or(Json::Null),
+                    ),
             );
             Ok(Json::object()
                 .with("trained", n.into())
+                .with("learned", learned)
                 .with("held_out", eval_json(&ev))
                 .with("model", ngram_info(m)))
         }
         ("POST", "ngram/text") => {
             let lines: Vec<String> = crate::ngram::split_text_lines(b.str_or("text", ""));
+            learn_options(m, b);
             let n = m.train_lines(&lines, Some("pasted text"));
-            Ok(Json::object().with("trained", n.into()).with("model", ngram_info(m)))
+            Ok(Json::object()
+                .with("trained", n.into())
+                .with("learned", online_json(m))
+                .with("model", ngram_info(m)))
         }
         ("POST", "ngram/predict") => Ok(ngram_predict(m, b)),
         ("POST", "ngram/generate") => {
@@ -1102,6 +1136,8 @@ fn ngram_route(m: &mut NGram, req: &Request) -> Result<Json, String> {
                 judge: b.num("judge", 10.0) as usize,
                 patience: b.num("patience", 2.0) as usize,
                 keep: b.get("keep").and_then(Json::as_str).map(String::from),
+                predict: b.bool_or("predict", true),
+                self_credit: b.num("self_credit", 0.0),
                 ..Default::default()
             };
             if b.bool_or("fresh", true) {

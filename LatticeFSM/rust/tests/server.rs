@@ -409,13 +409,22 @@ fn the_network_talks_and_learns() {
 
 #[test]
 fn the_ngram_model_predicts_and_learns() {
-    let addr = serve(8);
+    let addr = serve(9);
     let (status, info) = request(&addr, "GET", "/api/ngram", None).unwrap();
     assert_eq!(status, 200);
     assert_eq!(info.str_or("unit", ""), "word");
     let lines = parse(r#"{"text":"the cat sat on the mat\nthe cat ate the fish"}"#).unwrap();
     let (_, trained) = request(&addr, "POST", "/api/ngram/text", Some(&lines)).unwrap();
     assert!(trained.num("trained", 0.0) >= 13.0);
+    // every token was predicted before it was learned
+    let learned = trained.get("learned").unwrap();
+    assert_eq!(learned.num("predicted", 0.0), trained.num("trained", 0.0));
+    let acc = learned.num("accuracy", -1.0);
+    assert!((0.0..=1.0).contains(&acc));
+    assert!(learned.num("perplexity", 0.0) > 1.0);
+    let quiet = parse(r#"{"text":"the dog sat","predict":false}"#).unwrap();
+    let (_, t) = request(&addr, "POST", "/api/ngram/text", Some(&quiet)).unwrap();
+    assert_eq!(t.get("learned").unwrap().num("predicted", -1.0), 0.0);
     let (_, p) = request(
         &addr,
         "POST",

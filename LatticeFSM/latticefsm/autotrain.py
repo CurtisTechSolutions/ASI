@@ -197,32 +197,39 @@ def autotrain(model: NGram, data: Sequence[str] = ("data/corpus",), held_out: in
               ollama: Ollama | None = None, topics: Sequence[str] = (), rounds: int = 3, lines: int = 20,
               continuations: int = 20, judge: int = 10, prefix_words: int = 4, topics_per_round: int = 2,
               patience: int = 2, keep: str | None = None, save: str | None = None, seed: int = 1,
-              log: Callable[[str], None] | None = None) -> list[dict]:
+              log: Callable[[str], None] | None = None, predict: bool = True, self_credit: float = 0.0) -> list[dict]:
     """Train ``model`` on the corpus under ``data``, then for up to ``rounds`` rounds from Ollama (when given): new
     sentences, continuations of its own contexts, and a judge's credit on its own texts; measured on the held-out
-    corpus lines every round.  Returns the rounds' records (also appended to ``model.history``)."""
+    corpus lines every round.  Everything is learned by predicting each token first (``predict``; see
+    :meth:`NGram.train_tokens`, ``self_credit`` too), and each round records how well the model predicted what it
+    then learned.  Returns the rounds' records (also appended to ``model.history``)."""
     say = log or (lambda _msg: None)
     train: list[list[str]] = []
     test: list[list[str]] = []
     for path, file_lines in corpus_sequences(data, model.unit, model.lower):
         tr, te = split_lines(file_lines, held_out) if held_out else (file_lines, [])
-        model.train_lines(tr, source=path)
+        model.train_lines(tr, source=path, predict=predict, credit=self_credit)
         train += tr
         test += te
     records: list[dict] = []
 
     def record(r: int, added: dict) -> dict:
         ev = model.evaluate(test) if test else {"perplexity": None, "bits": None, "accuracy": None, "top5": None}
+        learned = model.reset_online()
         st = model.stats()
         rec = {"round": r, "tokens": st["tokens"], "vocab": st["vocab"], "ngrams": st["ngrams"],
                "credited_edges": st["credited_edges"], "perplexity": ev["perplexity"], "bits": ev["bits"],
-               "accuracy": ev["accuracy"], "top5": ev["top5"], "held_out": len(test), **added}
+               "accuracy": ev["accuracy"], "top5": ev["top5"], "held_out": len(test),
+               "learned": learned["predicted"], "learned_accuracy": learned["accuracy"],
+               "learned_perplexity": learned["perplexity"], **added}
         records.append(rec)
         model.history.append(rec)
         ppl = "-" if rec["perplexity"] is None else f"{rec['perplexity']:.2f}"
         acc = "-" if rec["accuracy"] is None else f"{rec['accuracy']:.3f}"
+        lacc = "-" if learned["accuracy"] is None else f"{learned['accuracy']:.3f}"
         say(f"round {r}: {st['tokens']} tokens, {st['vocab']} words, {st['ngrams']} n-grams; held out: perplexity "
-            f"{ppl}, next-token accuracy {acc}" + "".join(f", {k} {v}" for k, v in added.items()))
+            f"{ppl}, next-token accuracy {acc}; predicted {learned['predicted']} tokens while learning them, first "
+            f"guess right {lacc}" + "".join(f", {k} {v}" for k, v in added.items()))
         if save:
             model.save(save)
         return rec
@@ -240,7 +247,8 @@ def autotrain(model: NGram, data: Sequence[str] = ("data/corpus",), held_out: in
             reply = ollama.generate(CORPUS_PROMPT.format(n=lines, topic=topic), temperature=0.8,
                                     seed=seed * 1000 + r * 10 + j)
             got = parse_lines(reply, lines)
-            model.train_lines(got, source=f"ollama:{ollama.model}:corpus:{topic}")
+            model.train_lines(got, source=f"ollama:{ollama.model}:corpus:{topic}", predict=predict,
+                              credit=self_credit)
             written += got
         continued: list[str] = []
         for j, prefix in enumerate(_prefixes(model, train, continuations, prefix_words, r * 7919)):
@@ -249,7 +257,8 @@ def autotrain(model: NGram, data: Sequence[str] = ("data/corpus",), held_out: in
             rest = parse_lines(reply, 1)
             if rest:
                 continued.append(f"{prefix} {rest[0]}")
-        model.train_lines(continued, source=f"ollama:{ollama.model}:continuations")
+        model.train_lines(continued, source=f"ollama:{ollama.model}:continuations", predict=predict,
+                          credit=self_credit)
         approved = judged = 0
         if judge > 0:
             texts = [model.complete(p, max_tokens=24) for p in _prefixes(model, train, judge, 2, r * 104729)]

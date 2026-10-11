@@ -391,6 +391,10 @@ pub struct Options {
     pub keep: Option<String>,
     pub save: Option<String>,
     pub seed: u64,
+    /// Learn by predicting every token first (`NGram::train_tokens`); each round records how well it predicted.
+    pub predict: bool,
+    /// While predicting, reward a right first guess and punish a wrong one by this much.
+    pub self_credit: f64,
 }
 
 impl Default for Options {
@@ -409,6 +413,8 @@ impl Default for Options {
             keep: None,
             save: None,
             seed: 1,
+            predict: true,
+            self_credit: 0.0,
         }
     }
 }
@@ -425,6 +431,8 @@ pub fn autotrain(
     ollama: Option<&Ollama>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Vec<Json>, String> {
+    model.predict = o.predict;
+    model.self_credit = o.self_credit;
     let (mut train, mut test) = (Vec::new(), Vec::new());
     for (path, lines) in corpus_sequences(&o.data, &model.unit.clone(), model.lower)? {
         let (tr, te) = if o.held_out > 0 {
@@ -447,6 +455,7 @@ pub fn autotrain(
         } else {
             model.evaluate(&test, 2000)
         };
+        let (learned, lacc, lppl, _) = model.reset_online();
         let mut rec = Json::object()
             .with("round", r.into())
             .with("tokens", (model.clock as f64).into())
@@ -457,14 +466,20 @@ pub fn autotrain(
             .with("bits", ev.bits.map(Json::from).unwrap_or(Json::Null))
             .with("accuracy", ev.accuracy.map(Json::from).unwrap_or(Json::Null))
             .with("top5", ev.top5.map(Json::from).unwrap_or(Json::Null))
-            .with("held_out", test.len().into());
+            .with("held_out", test.len().into())
+            .with("learned", (learned as f64).into())
+            .with("learned_accuracy", lacc.map(Json::from).unwrap_or(Json::Null))
+            .with("learned_perplexity", lppl.map(Json::from).unwrap_or(Json::Null));
         let mut line = format!(
-            "round {r}: {} tokens, {} words, {} n-grams; held out: perplexity {}, next-token accuracy {}",
+            "round {r}: {} tokens, {} words, {} n-grams; held out: perplexity {}, next-token accuracy {}; predicted {} \
+             tokens while learning them, first guess right {}",
             model.clock,
             model.vocab.len() - 3,
             model.n_grams(),
             fmt_opt(ev.perplexity, 2),
-            fmt_opt(ev.accuracy, 3)
+            fmt_opt(ev.accuracy, 3),
+            learned,
+            fmt_opt(lacc, 3)
         );
         for (k, v) in added {
             rec = rec.with(k, v.into());

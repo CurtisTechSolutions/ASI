@@ -446,12 +446,26 @@ when it was last taken, what it was rewarded and punished, and a width.
   as base64 (`b64.py`, `b64.rs`), 76 letters a sequence, learned letter by
   letter and generated back to bytes. A prompt is encoded only as far as its
   bits are complete, so it is a true prefix of what continues it.
+* **It predicts every token while it learns it.** Training walks each
+  sequence once: the model first guesses the next token from what it has
+  learned so far, then counts it - so every training run also says how well
+  the model predicted text it had not yet seen ("predicted 12030 tokens
+  before learning each, first guess right 0.172, perplexity 170.17" for
+  word trigrams on `data/corpus`). The Kneser-Ney tables are kept up to date
+  token by token rather than rebuilt, and the first guess is found without
+  computing the whole distribution, so this costs little (Python: 1.6 s for
+  12k words). Predicting changes nothing that is learned. `--self-credit R`
+  also rewards a right guess and punishes a wrong one by `R`; it is off by
+  default because it measured worse (held-out perplexity, word trigrams:
+  180.07 off, 178.45 at 0.25, 190.5 at 1.0; char 5-grams: 4.485, 4.695,
+  5.085). `--no-predict` just counts.
 * Counts are integers and every probability is computed in one fixed order:
   both ports give the same probabilities, the same greedy texts and the same
   measurements, and read each other's files (`make parity`).
 
 ```bash
-make ngram-train                                  # trigrams of words on data/corpus, every 10th line held out
+make ngram-train                                  # trigrams of words on data/corpus, every 10th line held out;
+                                                  # each token predicted before it is learned
 make ngram-predict TEXT="the brain is"            # a 0.553, the 0.053, </s> 0.043, not 0.031, ...
 make ngram-generate TEXT="the brain"              # the brain is a directed cyclic graph can be.
 make ngram-train UNIT=base64 ORDER=8 CORPUS=media/  # any files, as base64

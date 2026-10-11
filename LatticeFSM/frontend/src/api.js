@@ -88,7 +88,7 @@ export const api = {
   ngram: () => get("/api/ngram"),
   ngramNew: (body) => post("/api/ngram/new", body),
   ngramTrain: (body) => post("/api/ngram/train", body),
-  ngramText: (text) => post("/api/ngram/text", { text }),
+  ngramText: (text, opts = {}) => post("/api/ngram/text", { text, ...opts }),
   ngramPredict: (text, k) => post("/api/ngram/predict", { text, k }),
   ngramGenerate: (body) => post("/api/ngram/generate", body),
   ngramCredit: (text, amount) => post("/api/ngram/credit", { text, amount }),

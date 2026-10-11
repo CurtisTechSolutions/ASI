@@ -181,3 +181,65 @@ fn autotrain_with_a_stand_in_ollama() {
     assert_eq!(log.len(), 3);
     assert!(Ollama::new(Some("127.0.0.1:9"), None).models().is_err());
 }
+
+fn corpus_lines() -> Vec<String> {
+    let text = std::fs::read_to_string("../data/corpus/prose.txt").unwrap();
+    text.lines().map(String::from).collect()
+}
+
+/// The likeliest id by the whole distribution, ties to the lower id, never `<s>`.
+fn argmax(m: &mut NGram, ctx: &[u32]) -> u32 {
+    let d = m.distribution(ctx);
+    let mut best = 1;
+    for (w, &p) in d.iter().enumerate().skip(1) {
+        if p > d[best] {
+            best = w;
+        }
+    }
+    best as u32
+}
+
+#[test]
+fn predicting_while_learning() {
+    let lines = corpus_lines();
+    for (unit, order) in [("word", 3), ("word", 1), ("char", 5)] {
+        let mut plain = NGram::new(order, unit, true, 1.0).unwrap();
+        plain.train_lines(&lines, None);
+        let mut learner = NGram::new(order, unit, true, 1.0).unwrap();
+        learner.predict = true;
+        let n = learner.train_lines(&lines, None);
+        // predicting first changes nothing that is learned
+        assert_eq!(learner.to_json().dump(), plain.to_json().dump(), "{unit} {order}");
+        let (predicted, acc, ppl, bits) = learner.reset_online();
+        assert_eq!(predicted as usize, n);
+        assert!(acc.unwrap() > 0.0 && acc.unwrap() < 1.0);
+        assert!(ppl.unwrap() > 1.0 && (bits.unwrap() - ppl.unwrap().log2()).abs() < 1e-9);
+        assert_eq!(learner.reset_online().0, 0);
+        // the first guess, found without the whole distribution, is its argmax, on the tables kept up to date
+        for line in lines.iter().take(40) {
+            let toks = learner.tokens(line);
+            for i in 0..toks.len() {
+                let ctx = learner.context(&toks[..i]);
+                assert_eq!(learner.top(&ctx), argmax(&mut learner, &ctx), "{unit} {order} {line}");
+            }
+        }
+    }
+}
+
+#[test]
+fn crediting_its_own_guesses() {
+    let lines = corpus_lines();
+    let mut m = NGram::new(3, "word", true, 1.0).unwrap();
+    m.predict = true;
+    m.self_credit = 0.5;
+    m.train_lines(&lines, None);
+    assert!(m.stats().num("credited_edges", 0.0) > 0.0);
+    // the guesses after a credited context still match the full distribution's
+    for line in lines.iter().take(20) {
+        let toks = m.tokens(line);
+        for i in 0..toks.len() {
+            let ctx = m.context(&toks[..i]);
+            assert_eq!(m.top(&ctx), argmax(&mut m, &ctx));
+        }
+    }
+}

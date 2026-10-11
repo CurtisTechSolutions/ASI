@@ -767,7 +767,37 @@ takes, `</s>` included: `r > 0` multiplies the width by `1 + 0.2 r` (at most
 20) and adds `r` to rewarded; `r < 0` divides it by `1 + 0.2 |r|` (at least
 0.05) and adds `|r|` to punished.
 
-### 15.5 Automatic training
+### 15.5 Predicting while training
+
+`train_tokens(tokens, predict, credit)` is prequential: at each position it
+takes `top(ctx)` and `P(w | ctx)` from the model as it stands, adds
+`[guess == w]`, `1` and `ln P` to the running `online` totals, and only then
+counts `(ctx, w)`. `reset_online()` returns the tokens predicted, the share of
+first guesses right, perplexity and bits, and starts over; `train`,
+`/api/ngram/train`, `/api/ngram/text` and every autotrain round (`learned`,
+`learned_accuracy`, `learned_perplexity`) report it.
+
+Two things make it cheap. **The tables are incremental:** once derived, each
+order keeps its rows, totals, distinct counts and `n1`, `n2`; adding `(h, w)`
+at order `k` adjusts those, and when it is the first time `w` follows `h`
+the continuation count of `(h[1:], w)` at order `k - 1` goes up by one, the
+same step recursively - the tables always equal a rebuild from the counts.
+**The first guess skips the distribution:** a token in no row of orders
+`2..N` along the context, and not credited there, gets `P = Λ · p_1(w)` with
+the same `Λ` for every such token, so among them the order-1 ranking decides.
+Order 1 is kept as buckets count → ids, so `top` scores only the tokens in
+those rows, the credited ones, and the best outsider by order 1 - the same
+id the full argmax picks (ties to the lower id, never `<s>`), which the
+tests check position by position.
+
+With `credit = R`, before the count a right guess has `(ctx, w)` credited
+`+R`, a wrong one `(ctx, guess)` credited `-R`. Measured on held-out lines it
+does not help (word trigrams: perplexity 180.07, 178.45, 190.5 at R = 0,
+0.25, 1; char 5-grams 4.485, 4.695, 5.085), so `R` defaults to 0 and
+prediction itself is on by default: it costs little and changes nothing the
+model learns.
+
+### 15.6 Automatic training
 
 `autotrain` trains on `corpus_sequences(data)` (every `held_out`-th sequence
 of every file kept back), records round 0, and for each round `r` with Ollama:
@@ -784,7 +814,7 @@ stripped); takes `continuations` prefixes - the first `prefix_words` tokens
 then records the round and stops after `patience` rounds without a lower
 held-out perplexity.
 
-### 15.6 Decisions
+### 15.7 Decisions
 
 * **Sparse, not dense.** The lattice's dense matrix holds a trigram over 13
   tokens and no more; an N-gram over a real vocabulary has to keep only the
@@ -792,6 +822,9 @@ held-out perplexity.
 * **Kneser-Ney, because it is the right baseline:** continuation counts are
   what make a low order useful, and the lattice's own credit sits on top of
   it rather than replacing it, so a model nobody has judged is a standard one.
+* **Predict before learning,** so every token of training is also a test
+  on text the model had not seen yet - a measure that comes free with
+  training and needs no held-out set.
 * **A held-out set that never changes during autotrain,** so each round's
   number means the same thing, and an early stop, so a teacher whose text
   hurts the corpus's likelihood is noticed instead of trusted.

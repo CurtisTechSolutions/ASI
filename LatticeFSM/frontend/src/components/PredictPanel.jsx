@@ -7,6 +7,17 @@ import Alert from "./Alert.jsx";
 import LineChart from "./LineChart.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
 
+/** "predicted 1200 tokens before learning each: first guess right 17.2%, perplexity 170.17" */
+function learnedNote(learned) {
+  if (!learned || !learned.predicted) return "";
+  return `; predicted ${learned.predicted} tokens before learning each: first guess right ${fmtNum(
+    (learned.accuracy || 0) * 100,
+    1,
+  )}%, perplexity ${fmtNum(learned.perplexity, 2)}`;
+}
+
+const pct = (v) => (v === null || v === undefined ? "-" : fmtNum(v * 100, 1) + "%");
+
 const UNITS = [
   ["word", "words"],
   ["char", "characters"],
@@ -21,7 +32,8 @@ function RoundRow({ r }) {
       <td>{r.round}</td>
       <td>{r.tokens !== undefined ? r.tokens : "-"}</td>
       <td>{r.perplexity === null || r.perplexity === undefined ? "-" : fmtNum(r.perplexity, 2)}</td>
-      <td>{r.accuracy === null || r.accuracy === undefined ? "-" : fmtNum(r.accuracy * 100, 1) + "%"}</td>
+      <td>{pct(r.accuracy)}</td>
+      <td>{r.learned ? `${pct(r.learned_accuracy)} of ${r.learned}` : "-"}</td>
       <td className="muted">
         {["corpus_lines", "ollama_lines", "continuations", "judged", "approved", "source"]
           .filter((k) => r[k] !== undefined)
@@ -52,6 +64,8 @@ export default function PredictPanel({ onMoved }) {
   const [topics, setTopics] = useStoredState("predict.topics", "");
   const [rounds, setRounds] = useStoredState("predict.rounds", "3");
   const [path, setPath] = useStoredState("predict.path", "ngram.json.gz");
+  const [predictFirst, setPredictFirst] = useStoredState("predict.first", true);
+  const [selfCredit, setSelfCredit] = useStoredState("predict.selfCredit", "0");
   const [next, setNext] = useState(null);
   const [completion, setCompletion] = useState(null);
   const [ollama, setOllama] = useState(null);
@@ -92,6 +106,8 @@ export default function PredictPanel({ onMoved }) {
       setBusy(false);
     }
   }
+
+  const learning = () => ({ predict: predictFirst, self_credit: predictFirst ? parseNumber(selfCredit, 0) : 0 });
 
   const refresh = async (r) => {
     setInfo(r && r.model ? r.model : await api.ngram());
@@ -197,6 +213,22 @@ export default function PredictPanel({ onMoved }) {
           <NumberField label="N" value={order} onChange={setOrder} min="1" max="12" step="1" hint="the context is N-1 units" />
           <TextField label="Data" value={data} onChange={setData} hint="files or directories on the server, comma-separated" />
         </div>
+        <div className="row">
+          <CheckField
+            label="Predict while learning"
+            checked={predictFirst}
+            onChange={setPredictFirst}
+            hint="guess every next token before it is learned, and measure the guesses"
+          />
+          <NumberField
+            label="Self-credit"
+            value={selfCredit}
+            onChange={setSelfCredit}
+            min="0"
+            step="0.05"
+            hint="reward a right guess, punish a wrong one, by this much (0: off)"
+          />
+        </div>
         <div className="actions">
           <button
             type="button"
@@ -216,12 +248,12 @@ export default function PredictPanel({ onMoved }) {
             disabled={busy}
             onClick={() =>
               act(async () => {
-                const r = await api.ngramTrain({ data });
+                const r = await api.ngramTrain({ data, ...learning() });
                 setNote(
-                  `trained ${r.trained} tokens; held out: perplexity ${fmtNum(r.held_out.perplexity, 2)}, next-token accuracy ${fmtNum(
-                    (r.held_out.accuracy || 0) * 100,
-                    1,
-                  )}%`,
+                  `trained ${r.trained} tokens${learnedNote(r.learned)}; held out: perplexity ${fmtNum(
+                    r.held_out.perplexity,
+                    2,
+                  )}, next-token accuracy ${pct(r.held_out.accuracy || 0)}`,
                 );
                 await refresh(r);
               })
@@ -237,8 +269,8 @@ export default function PredictPanel({ onMoved }) {
             disabled={busy || !paste.trim()}
             onClick={() =>
               act(async () => {
-                const r = await api.ngramText(paste);
-                setNote(`trained ${r.trained} tokens of pasted text`);
+                const r = await api.ngramText(paste, learning());
+                setNote(`trained ${r.trained} tokens of pasted text${learnedNote(r.learned)}`);
                 await refresh(r);
               })
             }
@@ -261,7 +293,8 @@ export default function PredictPanel({ onMoved }) {
           Round 0 trains a fresh model on the data, every tenth line held out. Each round after it a local language model
           (Ollama) writes sentences on the corpus's own topics, continues the model's own contexts, and judges texts the
           model wrote - what it approves is rewarded, what it rejects punished - and the model is measured on the held-out
-          lines again; it stops when that stops improving.
+          lines again; it stops when that stops improving. Every token it learns, it first tries to predict - the
+          guesses are measured as it goes.
         </p>
         <div className="row">
           <CheckField label="Use Ollama" checked={useOllama} onChange={setUseOllama} hint="off: the data only" />
@@ -284,6 +317,7 @@ export default function PredictPanel({ onMoved }) {
                   model: model || undefined,
                   topics,
                   rounds: parseNumber(rounds, 3),
+                  ...learning(),
                 });
                 setLog(r.log);
                 await refresh(r);
@@ -325,6 +359,7 @@ export default function PredictPanel({ onMoved }) {
                     <th>tokens</th>
                     <th>held-out perplexity</th>
                     <th>next-token accuracy</th>
+                    <th>guessed right while learning</th>
                     <th>what it learned from</th>
                   </tr>
                 </thead>

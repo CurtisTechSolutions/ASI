@@ -453,11 +453,15 @@ def cmd_ngram(args) -> int:
     m = _ngram(args)
     data = [p for d in (args.data or ["data/corpus"]) for p in d.split(",") if p]
     if args.action == "train":
-        _, test = m.train_paths(data, held_out=args.held_out)
+        _, test = m.train_paths(data, held_out=args.held_out, predict=not args.no_predict, credit=args.self_credit)
+        learned = m.reset_online()
         st = m.stats()
         what = "base64 letters" if st["unit"] == "base64" else st["unit"] + "s"
         print(f"{st['order']}-grams of {what}: {st['tokens']} tokens, {st['vocab']} distinct, {st['ngrams']} "
               f"n-grams in {st['contexts']} contexts, from {st['sources']} sources")
+        if learned["predicted"]:
+            print(f"while training: predicted {learned['predicted']} tokens before learning each, first guess right "
+                  f"{_fmt(learned['accuracy'])}, perplexity {_fmt(learned['perplexity'], 2)}")
         if test:
             ev = m.evaluate(test)
             print(f"held out ({len(test)} lines, {ev['tokens']} tokens): perplexity {_fmt(ev['perplexity'], 2)}, "
@@ -468,7 +472,8 @@ def cmd_ngram(args) -> int:
         try:
             autotrain(m, data, held_out=args.held_out, ollama=client, topics=topics, rounds=args.rounds,
                       lines=args.lines, continuations=args.continuations, judge=args.judge, patience=args.patience,
-                      keep=args.keep, save=args.save, seed=args.seed, log=print)
+                      keep=args.keep, save=args.save, seed=args.seed, log=print, predict=not args.no_predict,
+                      self_credit=args.self_credit)
         except OllamaError as e:
             print(f"error: {e}", file=sys.stderr)
             return 1
@@ -728,6 +733,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--keep-case", action="store_true", help="do not lower-case")
     q.add_argument("--stimulation", type=float, default=1.0, help="how much a credited edge's width counts")
     q.add_argument("--held-out", type=int, default=10, help="hold out every N-th line to measure on (0: none)")
+    q.add_argument("--no-predict", action="store_true",
+                   help="train / autotrain: only count (by default every token is predicted first, then learned)")
+    q.add_argument("--self-credit", type=float, default=0.0,
+                   help="while predicting: reward a right first guess, punish a wrong one by this much (default 0)")
     q.add_argument("-k", type=int, default=10, help="predict: how many next tokens")
     q.add_argument("--max-tokens", type=int, default=30)
     q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")

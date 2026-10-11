@@ -139,7 +139,9 @@ commands
                          (text, a WAV, a PNG / PPM / BMP, a directory of frames or a video file through ffmpeg)
               make-data  --kind text|image|audio|video --out DIR [--count 40]: a small synthetic labelled set
   ngram ACTION     predict the next thing (latticefsm/ngram.py is the same model, number for number):
-              train      --data FILES/DIRS (data/corpus) --order 3 --unit word|char|sound --held-out 10 --save F
+              train      --data FILES/DIRS (data/corpus) --order 3 --unit word|char|sound|base64 --held-out 10 --save F;
+                         every token is predicted before it is learned (--no-predict: only count; --self-credit R:
+                         reward a right first guess, punish a wrong one)
               autotrain  the corpus, then --ollama rounds: sentences on --topics (default: the corpus's own words),
                          continuations of its contexts, a judge's credit on its texts; --rounds 3 --lines 20
                          --continuations 20 --judge 10 --patience 2 --keep FILE --save F --model M --url U
@@ -1152,9 +1154,12 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
         None => vec!["data/corpus".to_string()],
     };
     let held_out = a.num("held-out", 10.0) as usize;
+    m.predict = !a.has("no-predict");
+    m.self_credit = a.num("self-credit", 0.0);
     match action {
         "train" => {
             let (_, test) = m.train_paths(&data, held_out)?;
+            let (learned, lacc, lppl, _) = m.reset_online();
             let st = m.stats();
             let what = if m.unit == "base64" {
                 "base64 letters".to_string()
@@ -1170,6 +1175,13 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
                 m.grams.len(),
                 st.num("sources", 0.0)
             );
+            if learned > 0 {
+                println!(
+                    "while training: predicted {learned} tokens before learning each, first guess right {}, perplexity {}",
+                    fmt_opt(lacc, 3),
+                    fmt_opt(lppl, 2)
+                );
+            }
             if !test.is_empty() {
                 let ev = m.evaluate(&test, 2000);
                 println!(
@@ -1205,6 +1217,8 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
                 keep: a.get("keep").map(String::from),
                 save: a.get("save").map(String::from),
                 seed: a.num("seed", 1.0) as u64,
+                predict: !a.has("no-predict"),
+                self_credit: a.num("self-credit", 0.0),
                 ..autotrain::Options::default()
             };
             autotrain::autotrain(&mut m, &o, client.as_ref(), &mut |line| println!("{line}"))?;

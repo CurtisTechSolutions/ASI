@@ -8,7 +8,7 @@
 //! renormalised.  Counts are integers and every probability is computed in the Python port's order, so the two
 //! ports give the same probabilities, the same greedy texts and the same measurements, and share their files.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -330,12 +330,80 @@ pub fn split_lines<T: Clone>(lines: &[T], every: usize) -> (Vec<T>, Vec<T>) {
 
 type Row = HashMap<u32, u64>;
 
-/// One order's Kneser-Ney table: counts by context, their totals, how many distinct tokens, the discount.
-struct Table {
+/// One order's Kneser-Ney table, kept current a count at a time: counts by context, their totals, how many distinct
+/// tokens each context has, and the count-of-counts the discount is read from.
+struct Order {
     rows: HashMap<Vec<u32>, Row>,
     totals: HashMap<Vec<u32>, u64>,
     distinct: HashMap<Vec<u32>, u64>,
-    discount: f64,
+    n1: u64,
+    n2: u64,
+}
+
+impl Order {
+    fn new(rows: HashMap<Vec<u32>, Row>) -> Order {
+        let totals = rows.iter().map(|(h, r)| (h.clone(), r.values().sum())).collect();
+        let distinct = rows.iter().map(|(h, r)| (h.clone(), r.len() as u64)).collect();
+        let (mut n1, mut n2) = (0u64, 0u64);
+        for r in rows.values() {
+            for &c in r.values() {
+                n1 += (c == 1) as u64;
+                n2 += (c == 2) as u64;
+            }
+        }
+        Order {
+            rows,
+            totals,
+            distinct,
+            n1,
+            n2,
+        }
+    }
+
+    /// Ney's `n1 / (n1 + 2 n2)`; 0.75 when that is undefined or outside (0, 1).
+    fn discount(&self) -> f64 {
+        let d = if self.n1 > 0 && self.n2 > 0 {
+            self.n1 as f64 / (self.n1 + 2 * self.n2) as f64
+        } else {
+            0.75
+        };
+        if d > 0.0 && d < 1.0 {
+            d
+        } else {
+            0.75
+        }
+    }
+}
+
+/// One more `(h, w)` in order `k`'s table; a pair new to order `k` is one more continuation for order `k - 1`.  The
+/// order-1 buckets (count -> ids) follow when they exist.
+fn add_to(tables: &mut [Order], ranks: &mut Option<BTreeMap<u64, BTreeSet<u32>>>, k: usize, h: &[u32], w: u32) {
+    let t = &mut tables[k];
+    let row = t.rows.entry(h.to_vec()).or_default();
+    let old = *row.get(&w).unwrap_or(&0);
+    row.insert(w, old + 1);
+    *t.totals.entry(h.to_vec()).or_insert(0) += 1;
+    if old == 0 {
+        *t.distinct.entry(h.to_vec()).or_insert(0) += 1;
+    }
+    t.n1 = t.n1 + (old + 1 == 1) as u64 - (old == 1) as u64;
+    t.n2 = t.n2 + (old + 1 == 2) as u64 - (old == 2) as u64;
+    if k == 1 {
+        if let Some(r) = ranks.as_mut() {
+            if old > 0 {
+                if let Some(b) = r.get_mut(&old) {
+                    b.remove(&w);
+                    if b.is_empty() {
+                        r.remove(&old);
+                    }
+                }
+            }
+            r.entry(old + 1).or_default().insert(w);
+        }
+    }
+    if old == 0 && k > 1 {
+        add_to(tables, ranks, k - 1, &h[1..], w);
+    }
 }
 
 /// What `evaluate` measured.
@@ -367,7 +435,14 @@ pub struct NGram {
     pub sentences: u64,
     pub sources: Vec<(String, usize, usize)>,
     pub history: Vec<Json>,
-    tables: Option<Vec<Table>>,
+    /// Train by first predicting every token from what has been learned so far (`train_tokens`); not saved.
+    pub predict: bool,
+    /// While predicting: reward a right first guess and punish a wrong one by this much; not saved.
+    pub self_credit: f64,
+    /// While predicting: [right first guesses, tokens predicted, sum of ln P(true token)].
+    pub online: (u64, u64, f64),
+    tables: Option<Vec<Order>>,
+    ranks: Option<BTreeMap<u64, BTreeSet<u32>>>,
 }
 
 impl NGram {
@@ -395,7 +470,11 @@ impl NGram {
             sentences: 0,
             sources: Vec::new(),
             history: Vec::new(),
+            predict: false,
+            self_credit: 0.0,
+            online: (0, 0, 0.0),
             tables: None,
+            ranks: None,
         })
     }
 
@@ -430,6 +509,10 @@ impl NGram {
     // ---- training ------------------------------------------------------------------------------------------------
 
     /// One sequence: every (context, next) counted, `</s>` last.  Returns how many were counted.
+    ///
+    /// With `predict`, every token is first predicted from what has been learned so far - the first guess (`top`) and
+    /// the probability given to the true token are added to `online` - and then learned; with `self_credit` as well,
+    /// the guess is rewarded when right and punished when wrong before the true token is counted.
     pub fn train_tokens(&mut self, tokens: &[String]) -> usize {
         let k = self.order - 1;
         let mut ids = vec![0u32; k];
@@ -440,15 +523,107 @@ impl NGram {
         ids.push(1);
         for i in k..ids.len() {
             let ctx = ids[i - k..i].to_vec();
-            *self.grams.entry(ctx.clone()).or_default().entry(ids[i]).or_insert(0) += 1;
+            let w = ids[i];
+            if self.predict {
+                let guess = self.top(&ctx);
+                let p = self.prob(&ctx, w);
+                self.online.0 += (guess == w) as u64;
+                self.online.1 += 1;
+                self.online.2 += p.max(1e-300).ln();
+                let c = self.self_credit;
+                if c != 0.0 {
+                    if guess == w {
+                        self.credit(&ctx, w, c);
+                    } else {
+                        self.credit(&ctx, guess, -c);
+                    }
+                }
+            }
+            *self.grams.entry(ctx.clone()).or_default().entry(w).or_insert(0) += 1;
+            if let Some(tables) = self.tables.as_mut() {
+                let n = self.order;
+                add_to(tables, &mut self.ranks, n, &ctx, w);
+            }
             self.clock += 1;
-            if let Some(rec) = self.edges.get_mut(&ctx).and_then(|r| r.get_mut(&ids[i])) {
+            if let Some(rec) = self.edges.get_mut(&ctx).and_then(|r| r.get_mut(&w)) {
                 rec[3] = self.clock as f64;
             }
         }
         self.sentences += 1;
-        self.tables = None;
         ids.len() - k
+    }
+
+    /// What predicting while training measured since the last reset: (tokens predicted, first guesses right as a
+    /// share, perplexity, bits a token); and a fresh start.
+    pub fn reset_online(&mut self) -> (u64, Option<f64>, Option<f64>, Option<f64>) {
+        let (right, n, logp) = self.online;
+        self.online = (0, 0, 0.0);
+        if n == 0 {
+            return (0, None, None, None);
+        }
+        let nf = n as f64;
+        (
+            n,
+            Some(right as f64 / nf),
+            Some((-logp / nf).exp()),
+            Some(-logp / nf / 2f64.ln()),
+        )
+    }
+
+    /// The model's first guess after `ctx`: the likeliest next id (ties: the lower id; never `<s>`), found without the
+    /// whole distribution - a token in none of the context's rows above order 1 and not credited there has
+    /// `P = Λ · p_1` with one `Λ` for all of them, so the order-1 ranking decides among those.
+    pub fn top(&mut self, ctx: &[u32]) -> u32 {
+        self.derive();
+        if self.ranks.is_none() {
+            let mut r: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
+            if let Some(row) = self.tables.as_ref().expect("derived")[1].rows.get(&Vec::new()) {
+                for (&w, &c) in row {
+                    r.entry(c).or_default().insert(w);
+                }
+            }
+            self.ranks = Some(r);
+        }
+        let mut cand: BTreeSet<u32> = BTreeSet::new();
+        {
+            let tables = self.tables.as_ref().expect("derived");
+            for (k, t) in tables.iter().enumerate().skip(2) {
+                if let Some(row) = t.rows.get(&ctx[ctx.len() - (k - 1)..]) {
+                    cand.extend(row.keys());
+                }
+            }
+        }
+        if self.stimulation != 0.0 {
+            if let Some(recs) = self.edges.get(ctx) {
+                cand.extend(recs.keys());
+            }
+        }
+        cand.remove(&0);
+        let mut outside = None;
+        'search: for (_, bucket) in self.ranks.as_ref().expect("built").iter().rev() {
+            for &w in bucket {
+                if w != 0 && !cand.contains(&w) {
+                    outside = Some(w);
+                    break 'search;
+                }
+            }
+        }
+        if outside.is_none() {
+            let seen = self.tables.as_ref().expect("derived")[1].rows.get(&Vec::new());
+            outside =
+                (1..self.vocab.len() as u32).find(|w| !cand.contains(w) && !seen.is_some_and(|r| r.contains_key(w)));
+        }
+        if let Some(w) = outside {
+            cand.insert(w);
+        }
+        let mut best = (0u32, f64::NEG_INFINITY);
+        for w in cand {
+            let p = self.prob(ctx, w);
+            if p > best.1 {
+                best = (w, p);
+            }
+        }
+        best.0
     }
 
     /// Every line one sequence; returns the tokens counted.
@@ -514,27 +689,10 @@ impl NGram {
         if self.tables.is_some() {
             return;
         }
-        let mut tables: Vec<Option<Table>> = (0..=self.order).map(|_| None).collect();
+        let mut tables: Vec<Option<Order>> = (0..=self.order).map(|_| None).collect();
         let mut table = self.grams.clone();
         for k in (1..=self.order).rev() {
-            let totals: HashMap<Vec<u32>, u64> = table.iter().map(|(h, r)| (h.clone(), r.values().sum())).collect();
-            let distinct: HashMap<Vec<u32>, u64> = table.iter().map(|(h, r)| (h.clone(), r.len() as u64)).collect();
-            let (mut n1, mut n2) = (0u64, 0u64);
-            for r in table.values() {
-                for &c in r.values() {
-                    n1 += (c == 1) as u64;
-                    n2 += (c == 2) as u64;
-                }
-            }
-            let mut d = if n1 > 0 && n2 > 0 {
-                n1 as f64 / (n1 + 2 * n2) as f64
-            } else {
-                0.75
-            };
-            if !(d > 0.0 && d < 1.0) {
-                d = 0.75;
-            }
-            let lower = if k > 1 {
+            let lower = (k > 1).then(|| {
                 let mut lower: HashMap<Vec<u32>, Row> = HashMap::new();
                 for (h, r) in &table {
                     let dst = lower.entry(h[1..].to_vec()).or_default();
@@ -542,24 +700,19 @@ impl NGram {
                         *dst.entry(w).or_insert(0) += 1;
                     }
                 }
-                Some(lower)
-            } else {
-                None
-            };
-            tables[k] = Some(Table {
-                rows: table,
-                totals,
-                distinct,
-                discount: d,
+                lower
             });
-            if let Some(l) = lower {
-                table = l;
-            } else {
-                table = HashMap::new();
-            }
+            tables[k] = Some(Order::new(table));
+            table = lower.unwrap_or_default();
         }
         // index 0 is unused; keep the vector dense for indexing by order
-        self.tables = Some(tables.into_iter().map(|t| t.unwrap_or_else(empty_table)).collect());
+        self.tables = Some(
+            tables
+                .into_iter()
+                .map(|t| t.unwrap_or_else(|| Order::new(HashMap::new())))
+                .collect(),
+        );
+        self.ranks = None;
     }
 
     fn floor(&self, w: u32) -> f64 {
@@ -581,7 +734,7 @@ impl NGram {
                 if !row.is_empty() {
                     let tot = t.totals[h] as f64;
                     let c = row.get(&w).copied().unwrap_or(0) as f64;
-                    let d = t.discount;
+                    let d = t.discount();
                     p = (c - d).max(0.0) / tot + (d * t.distinct[h] as f64 / tot) * p;
                 }
             }
@@ -630,7 +783,7 @@ impl NGram {
                 if let Some(row) = t.rows.get(h) {
                     if !row.is_empty() {
                         let tot = t.totals[h] as f64;
-                        let d = t.discount;
+                        let d = t.discount();
                         let f = d * t.distinct[h] as f64 / tot;
                         for p in out.iter_mut() {
                             *p *= f;
@@ -879,7 +1032,7 @@ impl NGram {
             .expect("derived")
             .iter()
             .skip(1)
-            .map(|t| t.discount)
+            .map(|t| t.discount())
             .collect()
     }
 
@@ -1052,15 +1205,6 @@ impl NGram {
         };
         let mut f = fs::File::create(path).map_err(|e| format!("{path}: {e}"))?;
         f.write_all(&bytes).map_err(|e| format!("{path}: {e}"))
-    }
-}
-
-fn empty_table() -> Table {
-    Table {
-        rows: HashMap::new(),
-        totals: HashMap::new(),
-        distinct: HashMap::new(),
-        discount: 0.75,
     }
 }
 

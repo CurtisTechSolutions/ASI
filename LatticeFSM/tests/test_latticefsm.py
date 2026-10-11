@@ -1074,6 +1074,43 @@ class TestNGram(unittest.TestCase):
             n, held = m.train_paths([d], held_out=2)
             self.assertEqual(held, [["four", "five"], ["eight"]])
 
+    def test_predicting_every_token_while_learning_it(self):
+        from latticefsm.ngram import NGram, corpus_lines
+        lines = corpus_lines(["data/corpus/prose.txt"])[0][1]
+        for unit, order in (("word", 3), ("word", 1), ("char", 5)):
+            plain = NGram(order, unit)
+            plain.train_lines(lines, predict=False)
+            learner = NGram(order, unit)
+            n = learner.train_lines(lines, predict=True)
+            # predicting first changes nothing that is learned
+            self.assertEqual(learner.to_dict(), plain.to_dict(), unit)
+            online = learner.reset_online()
+            self.assertEqual(online["predicted"], n)
+            self.assertTrue(0 < online["accuracy"] < 1)
+            self.assertAlmostEqual(online["bits"], math.log2(online["perplexity"]), places=9)
+            self.assertEqual(learner.reset_online()["predicted"], 0)
+            # the first guess, found without the whole distribution on the tables kept up to date, is its argmax
+            # (ties to the lower id)
+            for line in lines[:40]:
+                toks = learner.tokens(line)
+                for i in range(len(toks)):
+                    ctx = learner.context(toks[:i])
+                    d = learner.distribution(ctx)
+                    self.assertEqual(learner.top(ctx), max(range(1, len(d)), key=lambda w: (d[w], -w)))
+
+    def test_crediting_its_own_guesses(self):
+        from latticefsm.ngram import NGram, corpus_lines
+        lines = corpus_lines(["data/corpus/prose.txt"])[0][1]
+        m = NGram(3)
+        m.train_lines(lines, predict=True, credit=0.5)
+        self.assertGreater(m.stats()["credited_edges"], 0)
+        for line in lines[:20]:
+            toks = m.tokens(line)
+            for i in range(len(toks)):
+                ctx = m.context(toks[:i])
+                d = m.distribution(ctx)
+                self.assertEqual(m.top(ctx), max(range(1, len(d)), key=lambda w: (d[w], -w)))
+
 
 class TestAutotrain(unittest.TestCase):
     """The corpus, then Ollama: sentences, continuations and a judge's credit, measured every round."""
@@ -1294,6 +1331,14 @@ class TestRustNGramParity(unittest.TestCase):
                             self.cli(reader, "ngram", "generate", "the", "a dog", "--load", path, "--max-tokens", "40"),
                             self.cli(reader, "ngram", "evaluate", "--load", path, "--data", data))
                 self.assertEqual(len(set(outs.values())), 1, unit)
+
+    def test_predicting_while_training_measures_the_same(self):
+        for unit, order in (("word", 3), ("char", 5), ("base64", 8)):
+            args = ("ngram", "train", "--unit", unit, "--order", str(order), "--data", "data/corpus/sentences.txt",
+                    "--self-credit", "0.3")
+            out = self.cli("py", *args)
+            self.assertIn("while training: predicted", out)
+            self.assertEqual(out, self.cli("rs", *args), unit)
 
     def test_base64_and_bytes(self):
         with tempfile.TemporaryDirectory() as d:
