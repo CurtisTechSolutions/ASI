@@ -16,7 +16,8 @@ From `..`:
 ```bash
 make build        # cargo build --release -> rust/target/release/latticefsm
 make test         # cargo test, cargo clippy -D warnings, cargo fmt --check, then the Python tests with parity
-make serve        # the server on http://127.0.0.1:8000/
+make serve-prod   # the server and the committed frontend on http://127.0.0.1:8000/
+make serve        # the server on :8000 and the Vite dev frontend on :5173 together
 rust/target/release/latticefsm --help
 ```
 

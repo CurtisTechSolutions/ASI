@@ -3,10 +3,13 @@
 # Two ports of one model: the Rust crate in rust/ (the CLI and the HTTP server;
 # `cargo` is the whole dependency list, no crates) and the Python reference
 # package in latticefsm/ (standard library only) - and the React frontend in
-# frontend/ (Vite; `npm` only for rebuilding it, frontend/dist is committed and
-# served as it is).  The Rust targets are the default; the Python ones are
-# prefixed py-, the frontend's frontend-.  Every target is deterministic given
-# SEED.
+# frontend/ (Vite; `npm` for the dev server and for rebuilding it, while
+# frontend/dist is committed and served as it is).  The Rust targets are the
+# default; the Python ones are prefixed py-, the frontend's frontend-.  Every
+# target is deterministic given SEED.
+#
+#   make serve         the backend (the Rust API, :8000) and the frontend (Vite with hot reload, :5173) together
+#   make serve-prod    one process: the API and the built frontend/dist on :8000
 #
 # Override any variable on the command line, e.g. `make demo LANGUAGE=ends-ab STATES=3`.
 
@@ -26,11 +29,17 @@ SEED      ?= 1
 EPISODES  ?= 4000
 MODEL     ?= machine.json.gz
 TEXT      ?= abab
+AXIS      ?= states
+I         ?= 0
+J         ?= 12
 STIM      ?=
 CREDIT    ?=
 TICKS     ?= 1000
 AMOUNT    ?= 2
 PORT      ?= 8000
+FRONTEND_PORT ?= 5173
+FRONTEND_HOST ?= 127.0.0.1
+NPM       ?= npm
 CORE      ?= core.json.gz
 PRECISION ?= exact
 SHELLS    ?=
@@ -48,10 +57,11 @@ MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseli
                $(if $(FOCUS),--focus $(FOCUS),) $(if $(LEARN_FOCUS),--learn-focus,) $(if $(SKIP),--skip,) \
                $(if $(filter-out 0,$(REARRANGE)),--rearrange-every $(REARRANGE),)
 
-.PHONY: help build test check demo train run teach accuracy table stats tick stimulate serve experiments \
-        compress expand core-run focus rearrange \
-        py-test py-demo py-train py-run py-experiments parity \
-        frontend-install frontend-build frontend-dev frontend-test clean
+.PHONY: help all install build test check rust-test lint fmt demo train run teach accuracy table stats tick stimulate \
+        serve serve-backend serve-frontend serve-prod experiments results \
+        compress expand core-run focus skip rearrange swap \
+        py-test py-demo py-train py-run py-stats py-experiments parity \
+        frontend-install frontend-build frontend-dev frontend-preview frontend-test clean distclean
 
 help: ## Show this help
 	@echo "LatticeFSM make targets  (override like: make demo LANGUAGE=ends-ab STATES=3)"
@@ -59,9 +69,27 @@ help: ## Show this help
 	@echo
 	@echo "Defaults: LANGUAGE=$(LANGUAGE) STATES=$(STATES) ALPHABET=$(ALPHABET) LIFE=$(LIFE) BASELINE=$(BASELINE) SEED=$(SEED) EPISODES=$(EPISODES) MODEL=$(MODEL) PORT=$(PORT)"
 
+##@ Setting up
+install: build frontend/node_modules ## Build the Rust binary and install the frontend's dependencies: everything `make serve` needs
+
+all: build frontend-build ## Build the Rust binary and rebuild frontend/dist
+
+frontend/node_modules: frontend/package.json frontend/package-lock.json
+	cd frontend && $(NPM) ci --no-audit --no-fund
+	@touch $@
+
 ##@ Building and checking
 build: ## Build the Rust crate (release) into rust/target/release/latticefsm
 	cd rust && $(CARGO) build --release
+
+rust-test: ## The Rust tests alone
+	cd rust && $(CARGO) test
+
+lint: ## clippy with warnings denied, and the formatter check
+	cd rust && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
+
+fmt: ## Format the Rust code
+	cd rust && $(CARGO) fmt
 
 test: ## The Rust tests, clippy and the formatter check; the Python tests, parity included; the frontend's tests
 	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
@@ -113,17 +141,60 @@ core-run: build ## Walk TEXT straight from CORE (FROM_MIDDLE=1 starts from the m
 focus: build ## Set MODEL's focus to FOCUS (0..1: 0 the top node, 1 the bottom; empty: none), and save it
 	$(BIN) focus --load $(MODEL) $(if $(FOCUS),--level $(FOCUS),--none) $(if $(LEARN_FOCUS),--learn on,) --save $(MODEL)
 
+skip: build ## Turn MODEL's skips on (SKIP=1) or off (SKIP empty), and save it
+	$(BIN) skip $(if $(SKIP),on,off) --load $(MODEL) --save $(MODEL)
+
 rearrange: build ## Let MODEL's nodes rearrange themselves toward the centre until settled, and save it
 	$(BIN) rearrange --load $(MODEL) --full --save $(MODEL)
 
+swap: build ## Swap two of MODEL's nodes: AXIS=states|symbols, I and J (state numbers, or symbols like a g), and save it
+	$(BIN) rearrange --load $(MODEL) --swap $(AXIS) $(I) $(J) --save $(MODEL)
+
 ##@ Serving
-serve: build ## The HTTP API and the frontend on http://HOST:PORT/ (MODEL if it exists, else a fresh machine)
-	$(BIN) serve $(MACHINE_OPTS) --host $(HOST) --port $(PORT) --frontend-dir frontend/dist $(if $(wildcard $(MODEL)),--load $(MODEL),)
+# The backend serves the API (and the built frontend/dist) on HOST:PORT; the frontend dev server serves the app on
+# FRONTEND_HOST:FRONTEND_PORT with hot reload and proxies /api to the backend.  Each runs in its own process group, so
+# Ctrl-C - or either one exiting - stops both.
+SERVE_BACKEND = $(BIN) serve $(MACHINE_OPTS) --host $(HOST) --port $(PORT) --frontend-dir frontend/dist \
+                $(if $(wildcard $(MODEL)),--load $(MODEL),)
+SERVE_FRONTEND = cd frontend && VITE_PROXY_TARGET=http://$(HOST):$(PORT) exec $(NPM) run dev -- \
+                 --host $(FRONTEND_HOST) --port $(FRONTEND_PORT) --strictPort
+
+serve: build frontend/node_modules ## The backend and the frontend together: open http://FRONTEND_HOST:FRONTEND_PORT/ (Ctrl-C stops both)
+	@set -m; \
+	$(SERVE_BACKEND) & backend=$$!; \
+	stop() { for p in $$backend $${frontend:-}; do kill -- -$$p 2>/dev/null; kill $$p 2>/dev/null; done; wait 2>/dev/null; }; \
+	trap 'stop' EXIT; \
+	trap 'echo " stopping the backend and the frontend" >&2; trap - EXIT; stop; exit 0' INT TERM; \
+	for _ in $$(seq 1 100); do \
+	  (exec 3<>/dev/tcp/$(HOST)/$(PORT)) 2>/dev/null && break; \
+	  kill -0 $$backend 2>/dev/null || { echo "the backend did not start (is port $(PORT) free?)" >&2; exit 1; }; \
+	  sleep 0.1; \
+	done; \
+	( $(SERVE_FRONTEND) ) & frontend=$$!; \
+	echo ""; \
+	echo "  backend   http://$(HOST):$(PORT)/api/   (and the built app at http://$(HOST):$(PORT)/)"; \
+	echo "  frontend  http://$(FRONTEND_HOST):$(FRONTEND_PORT)/   - open this one: hot reload, /api proxied to the backend"; \
+	echo "  Ctrl-C stops both"; \
+	echo ""; \
+	wait -n; status=$$?; \
+	echo "one of the two stopped (exit $$status); stopping the other" >&2; \
+	exit $$status
+
+serve-backend: build ## The backend alone: the API and the built frontend/dist on http://HOST:PORT/ (MODEL if it exists)
+	$(SERVE_BACKEND)
+
+serve-frontend: frontend/node_modules ## The frontend dev server alone, proxying /api to a backend on HOST:PORT
+	$(SERVE_FRONTEND)
+
+serve-prod: build ## One process, no npm: the API and the committed frontend/dist on http://HOST:PORT/
+	$(SERVE_BACKEND)
 
 ##@ The experiments README.md quotes
 experiments: build ## Learning, stimulation, adaptation, compression and walk, written to RESULTS/ - two seconds
 	mkdir -p $(RESULTS)
 	$(BIN) experiment --which all --life $(LIFE) --out $(RESULTS) | tee $(RESULTS)/experiments.log
+
+results: experiments py-experiments ## Both ports' experiments, every results file regenerated
 
 py-experiments: ## The same five from the Python reference, written to RESULTS/python/ - about three minutes
 	mkdir -p $(RESULTS)/python
@@ -142,24 +213,32 @@ py-train: ## Teach LANGUAGE from the Python package, saved to MODEL
 py-run: ## Read TEXT from MODEL with the Python package
 	$(PY) -m latticefsm run "$(TEXT)" --load $(MODEL) $(if $(STIM),--stimulation $(STIM),) $(if $(CREDIT),--credit $(CREDIT),)
 
+py-stats: ## Size, memory, clock and settings of MODEL, from the Python package
+	$(PY) -m latticefsm stats --load $(MODEL)
+
 parity: build ## The two ports held to each other: the deterministic experiments and a machine file, both ways
 	$(PY) -m unittest tests.test_latticefsm.TestRustParity -v
 
-##@ The frontend (React, Vite; frontend/dist is committed, so none of this is needed to run `make serve`)
+##@ The frontend (React, Vite; frontend/dist is committed, so `make serve-prod` needs none of this)
 frontend-install: ## Install the frontend's dependencies (npm ci)
-	cd frontend && npm ci --no-audit --no-fund
+	cd frontend && $(NPM) ci --no-audit --no-fund
+	@touch frontend/node_modules
 
-frontend-build: ## Rebuild frontend/dist, which `make serve` serves
-	cd frontend && npm run build
+frontend-build: frontend/node_modules ## Rebuild frontend/dist, which the backend serves
+	cd frontend && $(NPM) run build
 
-frontend-dev: ## Vite dev server with hot reload on http://localhost:5173, proxying /api to VITE_PROXY_TARGET (default :8000)
-	cd frontend && npm run dev
+frontend-dev: serve-frontend ## The same as serve-frontend
+
+frontend-preview: frontend/node_modules ## Vite's preview of the built dist on FRONTEND_PORT, proxying /api to HOST:PORT
+	cd frontend && VITE_PROXY_TARGET=http://$(HOST):$(PORT) $(NPM) run preview -- --host $(FRONTEND_HOST) --port $(FRONTEND_PORT) --strictPort
 
 frontend-test: ## The frontend's unit tests (node --test; no npm install needed)
-	cd frontend && npm test
+	cd frontend && $(NPM) test
 
-clean: ## Remove build output, __pycache__, node_modules and saved machines (results and frontend/dist are kept)
+clean: ## Remove build output, __pycache__ and saved machines (results, frontend/dist and node_modules are kept)
 	cd rust && $(CARGO) clean
-	rm -rf frontend/node_modules
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 	rm -f machine.json machine.json.gz core.json core.json.gz
+
+distclean: clean ## clean, and the frontend's node_modules too
+	rm -rf frontend/node_modules

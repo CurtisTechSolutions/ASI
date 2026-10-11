@@ -95,7 +95,8 @@ number, and a machine file written by either reads in the other.
 cd LatticeFSM
 make test                      # cargo test + clippy + fmt, then the Python tests with parity
 make demo                      # learn a language, be stimulated, let time pass (Rust)
-make serve                     # http://127.0.0.1:8000/ - the React frontend: the matrix, runs, credit, training, time
+make serve                     # backend :8000 + frontend :5173 with hot reload - open http://127.0.0.1:5173/ (Ctrl-C stops both)
+make serve-prod                # one process, no npm: the API and the committed frontend on http://127.0.0.1:8000/
 make train LANGUAGE=ends-ab STATES=3 && make run TEXT=aab STIM=3 CREDIT=1
 make experiments               # the four sections below, a second
 make train && make compress    # fold the taught machine into its central node, exact; CORE=core.json.gz
@@ -148,7 +149,7 @@ others as routes it once tried.
 
 ## The web server and the frontend
 
-`make serve` (or `latticefsm serve --port 8000`) holds one machine behind a
+`make serve-prod` (or `latticefsm serve --port 8000`) holds one machine behind a
 lock, answers JSON under `/api/`, and serves the React frontend from
 `frontend/dist` at every other path. The frontend is the ModelKit one's
 shape — Vite, plain JSX, one stylesheet, no UI or chart libraries, settings
@@ -173,10 +174,17 @@ The status bar polls the machine every two seconds: shape, how much of the
 matrix is touched, the clock, the stimulation, the state, credits, and the
 widest and narrowest channel.
 
-`frontend/dist` is committed, so a checkout serves it with no build; `make
-frontend-install` and `make frontend-build` rebuild it, `make frontend-dev`
-runs Vite with hot reload against a running server, and `make frontend-test`
-runs the frontend's own tests. `rust/README.md` lists every API route, and
+`frontend/dist` is committed, so `make serve-prod` serves it with no build
+and no npm. `make serve` runs the backend (`make serve-backend`, on
+`HOST:PORT`, default 127.0.0.1:8000, loading `MODEL` when it exists) and the
+Vite dev server (`make serve-frontend`, on `FRONTEND_HOST:FRONTEND_PORT`,
+default 127.0.0.1:5173, proxying `/api` to the backend) together: open the
+frontend's address, edit `frontend/src` and the page reloads; Ctrl-C stops
+both, and if either stops the other is stopped too. `make install` builds
+the binary and installs the frontend's dependencies; `make frontend-build`
+rebuilds `dist/`, `make frontend-preview` serves that build through Vite,
+and `make frontend-test` runs the frontend's own tests. `make help` lists
+every target. `rust/README.md` lists every API route, and
 `curl` works as well as the page:
 
 ```bash

@@ -29,12 +29,14 @@ footer's "settings saved in this browser" resets them.
 
 ## Building and running
 
-`dist/` is committed and `latticefsm serve` serves it, so nothing here is
-needed to use the page. To change it, from `..`:
+`dist/` is committed and `latticefsm serve` (`make serve-prod`) serves it,
+so nothing here is needed to use the page. To change it, from `..`:
 
 ```bash
 make frontend-install      # npm ci
-make frontend-dev          # Vite on http://localhost:5173, proxying /api to a running `latticefsm serve` on :8000
+make serve                 # the backend on :8000 and Vite on http://127.0.0.1:5173 (hot reload, /api proxied); Ctrl-C stops both
+make serve-frontend        # Vite alone, against a backend already running on HOST:PORT
+make frontend-preview      # the built dist/ through Vite, /api proxied the same way
 make frontend-build        # rebuild dist/, then commit it
 make frontend-test         # node --test test/*.test.mjs - no install needed
 ```
