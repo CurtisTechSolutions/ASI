@@ -1,0 +1,89 @@
+{
+ "experiment": "media",
+ "settings": {
+  "count": 60,
+  "epochs": 30,
+  "seed": 1,
+  "discount": 0.95,
+  "life": 1000.0,
+  "networks": [
+   [
+    "text",
+    "text>13"
+   ],
+   [
+    "image",
+    "image>3"
+   ],
+   [
+    "audio",
+    "audio>3"
+   ],
+   [
+    "video",
+    "diff>3"
+   ],
+   [
+    "video",
+    "video>13"
+   ]
+  ]
+ },
+ "rows": [
+  {
+   "data": "text",
+   "architecture": "text>13",
+   "examples": 60,
+   "held_out": 12,
+   "symbols_mean": 18.383333333333333,
+   "alphabet": 43,
+   "held_out_before": 0.5,
+   "taught": 0.5833333333333334,
+   "held_out_after": 0.5833333333333334
+  },
+  {
+   "data": "image",
+   "architecture": "image>3",
+   "examples": 60,
+   "held_out": 12,
+   "symbols_mean": 64.0,
+   "alphabet": 4,
+   "held_out_before": 0.5,
+   "taught": 0.3541666666666667,
+   "held_out_after": 0.5
+  },
+  {
+   "data": "audio",
+   "architecture": "audio>3",
+   "examples": 60,
+   "held_out": 12,
+   "symbols_mean": 17.5,
+   "alphabet": 64,
+   "held_out_before": 0.5,
+   "taught": 0.9375,
+   "held_out_after": 0.6666666666666666
+  },
+  {
+   "data": "video",
+   "architecture": "diff>3",
+   "examples": 60,
+   "held_out": 12,
+   "symbols_mean": 455.0,
+   "alphabet": 6,
+   "held_out_before": 0.5,
+   "taught": 0.5,
+   "held_out_after": 0.5
+  },
+  {
+   "data": "video",
+   "architecture": "video>13",
+   "examples": 60,
+   "held_out": 12,
+   "symbols_mean": 533.3666666666667,
+   "alphabet": 74,
+   "held_out_before": 0.5,
+   "taught": 0.5416666666666666,
+   "held_out_after": 0.5
+  }
+ ]
+}

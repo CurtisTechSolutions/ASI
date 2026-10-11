@@ -63,8 +63,9 @@ from collections.abc import Iterable, Sequence
 
 from .machine import DEFAULT_ALPHABET, DEFAULT_STATES, Machine
 
-__all__ = ["CREDITS", "EMITS", "MERGES", "SYMBOLS", "VOTES", "Block", "Layer", "Network", "Parallel",
-           "PhoneticDecoder", "PhoneticEncoder", "Sequential",
+__all__ = ["CREDITS", "EMITS", "ENCODERS", "MERGES", "SYMBOLS", "VOTES", "AudioEncoder", "Block", "DiffEncoder",
+           "Encoder", "ImageEncoder", "Layer", "Network", "Parallel", "PhoneticDecoder", "PhoneticEncoder",
+           "Sequential", "TextEncoder", "VideoEncoder",
            "load_network", "parse_architecture", "state_symbols", "teach_network"]
 
 SYMBOLS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -272,40 +273,57 @@ class PhoneticDecoder(Layer):
         return d
 
 
-class PhoneticEncoder(Block):
-    """English in: the text as the sounds it is made of (``phonetic.tokenizer``), followed by ``pad`` boundaries
-    ``#`` - room for whatever comes after it to write more sounds than it read.  A network's first block."""
+class Encoder(Block):
+    """What a network reads, turned into symbols: its first block, with no machine and no credit.  ``labels`` is every
+    symbol it can write; ``encode`` turns one input - a text, or a file's path - into them."""
 
     kind = "encoder"
+    source = "encoder"
 
-    def __init__(self, stress: bool = False, pad: int = 2, name: str | None = None) -> None:
-        from .phonetic import inventory
-        if pad < 0:
-            raise ValueError(f"pad must be >= 0, got {pad}")
-        self.stress = bool(stress)
-        self.pad = int(pad)
+    def __init__(self, name: str | None = None) -> None:
         self.name = name or ""
-        self.labels = inventory(self.stress)
+        self.labels: list[str] = []
+        self.last_input = ""
+
+    def _set_labels(self, labels: Sequence[str]) -> None:
+        self.labels = list(labels)
         self._known = set(self.labels)
-        self.last_text = ""
 
-    def encode(self, text: str) -> list[str]:
-        from .phonetic import tokenizer
-        self.last_text = text
-        return [t for t in tokenizer(self.stress).tokens(text) if t in self._known] + ["#"] * self.pad
+    cache = False
+    """Keep each file's symbols, keyed by its path, size and modification time: a file is decoded once however many
+    epochs read it.  The media encoders cache; text is cheap to read again."""
 
-    def english(self, sounds: Sequence[str]) -> str:
-        from .phonetic import tokenizer
-        return tokenizer(self.stress).decode(list(sounds))
+    def encode(self, x: str) -> list[str]:
+        import os as _os
+        self.last_input = x
+        key = None
+        if self.cache and _os.path.exists(x):
+            st = _os.stat(x)
+            key = (_os.path.abspath(x), st.st_size, st.st_mtime_ns)
+            hit = self.__dict__.setdefault("_cached", {}).get(key)
+            if hit is not None:
+                return list(hit)
+        out = [s for s in self._symbols_of(x) if s in self._known]
+        if key is not None:
+            self._cached[key] = out
+        return list(out)
+
+    def _symbols_of(self, x: str) -> list[str]:
+        raise NotImplementedError
+
+    def describe(self) -> str:
+        return f"{self.source} -> {len(self.labels)} symbols"
 
     def build(self, alphabet, seeds, names):
         self._name(names)
         return list(self.labels)
 
+    def _step(self, symbols) -> dict:
+        return {"layer": self.name, "read": self.last_input, "states": [], "wrote": _text(symbols), "accepted": False}
+
     def forward(self, symbols, quiet, temperature, trace):
         if trace is not None:
-            trace.append({"layer": self.name, "read": self.last_text, "states": [], "wrote": _text(symbols),
-                          "accepted": False, "english": self.english(symbols)})
+            trace.append(self._step(symbols))
         return list(symbols), False
 
     def credit(self, amount, layer_discount, own=None):
@@ -317,8 +335,181 @@ class PhoneticEncoder(Block):
     def output_layers(self):
         return []
 
+    def options(self) -> dict:
+        return {}
+
     def to_dict(self):
-        return {"type": "encoder", "name": self.name, "stress": self.stress, "pad": self.pad}
+        return {"type": "encoder", "source": self.source, "name": self.name, **self.options()}
+
+
+class PhoneticEncoder(Encoder):
+    """English in: the text as the sounds it is made of (``phonetic.tokenizer``), followed by ``pad`` boundaries
+    ``#`` - room for whatever comes after it to write more sounds than it read."""
+
+    source = "phonetic"
+
+    def __init__(self, stress: bool = False, pad: int = 2, name: str | None = None) -> None:
+        from .phonetic import inventory
+        super().__init__(name)
+        if pad < 0:
+            raise ValueError(f"pad must be >= 0, got {pad}")
+        self.stress = bool(stress)
+        self.pad = int(pad)
+        self._set_labels(inventory(self.stress))
+
+    @property
+    def last_text(self) -> str:
+        return self.last_input
+
+    def _symbols_of(self, text: str) -> list[str]:
+        from .phonetic import tokenizer
+        return [t for t in tokenizer(self.stress).tokens(text) if t in self._known] + ["#"] * self.pad
+
+    def english(self, sounds: Sequence[str]) -> str:
+        from .phonetic import tokenizer
+        return tokenizer(self.stress).decode(list(sounds))
+
+    def describe(self) -> str:
+        return f"English -> {len(self.labels)} sounds"
+
+    def _step(self, symbols) -> dict:
+        step = super()._step(symbols)
+        step["english"] = self.english(symbols)
+        return step
+
+    def options(self) -> dict:
+        return {"stress": self.stress, "pad": self.pad}
+
+
+class TextEncoder(Encoder):
+    """Text in, character by character: ``a-z 0-9``, ``_`` for a space, ``. , ? ! ' -`` (``media.text_symbols``)."""
+
+    source = "text"
+
+    def __init__(self, name: str | None = None) -> None:
+        from .media import TEXT_SYMBOLS
+        super().__init__(name)
+        self._set_labels(TEXT_SYMBOLS)
+
+    def _symbols_of(self, text: str) -> list[str]:
+        from .media import text_symbols
+        return text_symbols(text)
+
+    def describe(self) -> str:
+        return f"text -> {len(self.labels)} characters"
+
+
+class AudioEncoder(Encoder):
+    """A WAV file in, heard as the phonetic tokenizer's 64 acoustic units (``media.audio_units``)."""
+
+    source = "audio"
+    cache = True
+
+    def __init__(self, name: str | None = None) -> None:
+        from .media import unit_names
+        super().__init__(name)
+        self._set_labels(unit_names())
+
+    def _symbols_of(self, path: str) -> list[str]:
+        from .media import audio_units
+        return audio_units(path)
+
+    def describe(self) -> str:
+        return f"audio -> {len(self.labels)} units"
+
+
+class ImageEncoder(Encoder):
+    """An image in (PNG, PPM / PGM, BMP): ``grid x grid`` cells by brightness, each one of ``levels`` symbols, read in
+    ``order`` (``rows`` or ``center-out``)."""
+
+    source = "image"
+    cache = True
+
+    def __init__(self, grid: int = 8, levels: int = 4, order: str = "rows", name: str | None = None) -> None:
+        from .media import level_symbols, order as order_of
+        super().__init__(name)
+        if not (1 <= grid <= 64) or not (2 <= levels <= 16):
+            raise ValueError("grid is 1 to 64 and levels 2 to 16")
+        order_of(grid, order)
+        self.grid, self.levels, self.order = int(grid), int(levels), order
+        self._set_labels(level_symbols(self.levels))
+
+    def _symbols_of(self, path: str) -> list[str]:
+        from .media import cells, image_symbols, read_image
+        return image_symbols(cells(read_image(path), self.grid), self.levels, self.order)
+
+    def describe(self) -> str:
+        return f"image {self.grid}x{self.grid} -> {self.levels} levels"
+
+    def options(self) -> dict:
+        return {"grid": self.grid, "levels": self.levels, "order": self.order}
+
+
+class DiffEncoder(Encoder):
+    """Frames in (a directory of images, or a video file): ``|`` and then, cell by cell, how each frame differs from
+    the one before (``media.DIFFS``)."""
+
+    source = "diff"
+    cache = True
+
+    def __init__(self, grid: int = 8, order: str = "rows", frames: int = 16, name: str | None = None) -> None:
+        from .media import DIFFS
+        super().__init__(name)
+        self.grid, self.order, self.frames = int(grid), order, int(frames)
+        self._set_labels(["|", *DIFFS])
+
+    def _symbols_of(self, path: str) -> list[str]:
+        import shutil as _sh
+        from .media import cells, diff_symbols, read_image, video_frames
+        paths, _, tmp = video_frames(path)
+        try:
+            grids = [cells(read_image(p), self.grid) for p in (paths[:self.frames] if self.frames else paths)]
+        finally:
+            if tmp:
+                _sh.rmtree(tmp, ignore_errors=True)
+        out = []
+        for a, b in zip(grids, grids[1:]):
+            out += ["|", *diff_symbols(a, b, self.order)]
+        return out
+
+    def describe(self) -> str:
+        return f"frames {self.grid}x{self.grid} -> {len(self.labels) - 1} changes"
+
+    def options(self) -> dict:
+        return {"grid": self.grid, "order": self.order, "frames": self.frames}
+
+
+class VideoEncoder(Encoder):
+    """A video in (a directory of frames with an optional ``audio.wav``, or a video file through ffmpeg): ``|`` before
+    every frame, the first (and every ``keyframe``-th) as an image, the rest as differences, each followed by the
+    audio units that sound during it (``media.video_symbols``)."""
+
+    source = "video"
+    cache = True
+
+    def __init__(self, grid: int = 8, levels: int = 4, order: str = "rows", keyframe: int = 0, frames: int = 16,
+                 audio: bool = True, fps: int = 8, name: str | None = None) -> None:
+        from .media import DIFFS, level_symbols, unit_names
+        super().__init__(name)
+        self.grid, self.levels, self.order = int(grid), int(levels), order
+        self.keyframe, self.frames, self.audio, self.fps = int(keyframe), int(frames), bool(audio), int(fps)
+        self._set_labels(["|", *level_symbols(self.levels), *DIFFS, *(unit_names() if self.audio else [])])
+
+    def _symbols_of(self, path: str) -> list[str]:
+        from .media import video_symbols
+        return video_symbols(path, self.grid, self.levels, self.order, self.keyframe, self.frames, self.audio,
+                             self.fps)
+
+    def describe(self) -> str:
+        return f"video {self.grid}x{self.grid}{' + audio' if self.audio else ''} -> {len(self.labels)} symbols"
+
+    def options(self) -> dict:
+        return {"grid": self.grid, "levels": self.levels, "order": self.order, "keyframe": self.keyframe,
+                "frames": self.frames, "audio": self.audio, "fps": self.fps}
+
+
+ENCODERS = {c.source: c for c in (PhoneticEncoder, TextEncoder, AudioEncoder, ImageEncoder, DiffEncoder, VideoEncoder)}
+"""Every kind of encoder, by the name the architecture string and the file use."""
 
 
 class Sequential(Block):
@@ -431,8 +622,8 @@ def _block_from_dict(data: dict) -> Block:
     if t in ("layer", "decoder"):
         return Layer._from_dict(data)
     if t == "encoder":
-        return PhoneticEncoder(stress=bool(data.get("stress", False)), pad=int(data.get("pad", 2)),
-                               name=data.get("name") or None)
+        options = {k: v for k, v in data.items() if k not in ("type", "source", "name")}
+        return ENCODERS[data.get("source", "phonetic")](name=data.get("name") or None, **options)
     if t == "sequential":
         return Sequential([_block_from_dict(b) for b in data["blocks"]], name=data.get("name") or None)
     if t == "parallel":
@@ -478,17 +669,20 @@ def parse_architecture(text: str, merge: str = "concat", vote: str = "majority",
                 fail("expected ')'")
             pos += 1
             return alts[0] if len(alts) == 1 else Parallel(alts, merge=merge, vote=vote)
-        for word in ("enc", "dec"):
+        for word in ("enc", "dec", "text", "audio", "image", "diff", "video"):
             if src.startswith(word, pos):
                 pos += len(word)
                 if word == "enc":
                     return PhoneticEncoder()
-                return PhoneticDecoder(**{k: v for k, v in layer_options.items() if k not in PhoneticDecoder._FIXED})
+                if word == "dec":
+                    return PhoneticDecoder(**{k: v for k, v in layer_options.items()
+                                              if k not in PhoneticDecoder._FIXED})
+                return ENCODERS[word]()
         start = pos
         while peek().isdigit():
             pos += 1
         if start == pos:
-            fail("expected a number of states, enc, dec or '('")
+            fail("expected a number of states, an encoder (enc text audio image diff video), dec or '('")
         states = int(src[start:pos])
         emit = "states"
         if peek() == "f":
@@ -533,7 +727,7 @@ class Network:
         encoders = _encoders(root)
         if encoders and encoders[0] is not root.blocks[0] or len(encoders) > 1:
             raise ValueError("an encoder can only be the network's first block")
-        self.encoder: PhoneticEncoder | None = encoders[0] if encoders else None
+        self.encoder: Encoder | None = encoders[0] if encoders else None
         if not root.layers():
             raise ValueError("a network needs at least one layer")
         self.alphabet = list(self.encoder.labels) if self.encoder else list(alphabet)
@@ -673,7 +867,7 @@ class Network:
     def _prime(self) -> None:
         from .phonetic import tokenizer
         for block in (self.encoder, self.decoder):
-            if block is not None and self.words and (block.stress, len(self.words)) not in self._primed:
+            if block is not None and hasattr(block, "stress") and self.words and (block.stress, len(self.words)) not in self._primed:
                 tokenizer(block.stress).tokens(" ".join(self.words))
                 self._primed.add((block.stress, len(self.words)))
 
@@ -758,8 +952,9 @@ class Network:
 
         def walk(b: Block, depth: int) -> None:
             pad = "  " * depth
-            if isinstance(b, PhoneticEncoder):
-                rows.append((f"{pad}{b.name}", f"English -> {len(b.labels)} sounds", "sounds", "", ""))
+            if isinstance(b, Encoder):
+                rows.append((f"{pad}{b.name}", b.describe(), "sounds" if isinstance(b, PhoneticEncoder) else "symbols",
+                             "", ""))
             elif isinstance(b, Layer):
                 m = b.machine
                 s, a, t = m.lattice.shape
@@ -783,7 +978,8 @@ class Network:
         fmt = lambda r: "  ".join(v.ljust(widths[i]) if i < 3 else v.rjust(widths[i]) for i, v in enumerate(r)).rstrip()
         layers = self.layers()
         accepting = sorted({i for l in self.root.output_layers() for i in l.machine.accepting})
-        reads = "English" if self.encoder else "".join(self.alphabet)
+        reads = ("English" if isinstance(self.encoder, PhoneticEncoder) else self.encoder.source if self.encoder
+                 else "".join(self.alphabet))
         writes = "English" if self.decoder else f"{len(self.output_alphabet)} symbols"
         lines = [f'network "{self.name}"' + (f" ({self.architecture})" if self.architecture else "")
                  + f": reads {reads}, writes {writes}",
@@ -837,15 +1033,15 @@ class Network:
 def _written(b: Block) -> list[str]:
     if isinstance(b, Layer):
         return list(b._out)
-    if isinstance(b, PhoneticEncoder):
+    if isinstance(b, Encoder):
         return list(b.labels)
     if isinstance(b, Sequential):
         return _written(b.blocks[-1])
     return state_symbols(sum(len(m) for m in b._maps))
 
 
-def _encoders(b: Block) -> list[PhoneticEncoder]:
-    if isinstance(b, PhoneticEncoder):
+def _encoders(b: Block) -> list[Encoder]:
+    if isinstance(b, Encoder):
         return [b]
     if isinstance(b, Sequential):
         return [e for c in b.blocks for e in _encoders(c)]

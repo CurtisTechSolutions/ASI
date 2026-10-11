@@ -58,6 +58,9 @@ NET_ALPHABET ?= ab
 TASK      ?=
 EPOCHS    ?=
 CREDIT_BY ?= shared
+KIND      ?= image
+DATA      ?= data/$(KIND)
+COUNT     ?= 60
 
 MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseline $(BASELINE) --seed $(SEED) --language $(LANGUAGE) \
                $(if $(filter-out 0,$(EVERY)),--compress-every $(EVERY) --compress-precision $(PRECISION),) \
@@ -68,6 +71,7 @@ MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseli
         serve serve-backend serve-frontend serve-prod experiments results \
         compress expand core-run focus skip rearrange swap \
         network network-fit network-evaluate network-predict network-summary translate translate-fit py-network \
+        media-data media-fit media-evaluate \
         py-test py-demo py-train py-run py-stats py-experiments parity \
         frontend-install frontend-build frontend-dev frontend-preview frontend-test clean distclean
 
@@ -187,6 +191,16 @@ py-network: ## The same network fit from the Python package (ARCH, LANGUAGE or T
 	$(PY) -m latticefsm network fit $(NET_NEW) $(if $(TASK),--task $(TASK),--language $(LANGUAGE) --episodes $(EPISODES)) \
 	  $(if $(EPOCHS),--epochs $(EPOCHS),) --save $(NET)
 
+media-data: build ## A synthetic labelled data set of KIND (text|image|audio|video) in DATA (COUNT examples)
+	$(BIN) network make-data --kind $(KIND) --out $(DATA) --count $(COUNT) --seed $(SEED)
+
+media-fit: build ## Teach DATA/labels.tsv to a fresh network (ARCH, default KIND>13), every 5th held out, saved to NET
+	$(BIN) network fit --arch "$(if $(filter 13>13,$(ARCH)),$(KIND)>13,$(ARCH))" --data $(DATA)/labels.tsv --seed $(SEED) \
+	  --discount 0.95 $(if $(EPOCHS),--epochs $(EPOCHS),) --save $(NET)
+
+media-evaluate: build ## NET's accuracy on DATA/labels.tsv, taught and held out
+	$(BIN) network evaluate --load $(NET) --data $(DATA)/labels.tsv
+
 ##@ Serving
 # The backend serves the API (and the built frontend/dist) on HOST:PORT; the frontend dev server serves the app on
 # FRONTEND_HOST:FRONTEND_PORT with hot reload and proxies /api to the backend.  Each runs in its own process group, so
@@ -227,13 +241,13 @@ serve-prod: build ## One process, no npm: the API and the committed frontend/dis
 	$(SERVE_BACKEND)
 
 ##@ The experiments README.md quotes
-experiments: build ## Learning, stimulation, adaptation, compression, walk and network, written to RESULTS/ - five seconds
+experiments: build ## Learning, stimulation, adaptation, compression, walk, network and media, written to RESULTS/ - seven seconds
 	mkdir -p $(RESULTS)
 	$(BIN) experiment --which all --life $(LIFE) --out $(RESULTS) | tee $(RESULTS)/experiments.log
 
 results: experiments py-experiments ## Both ports' experiments, every results file regenerated
 
-py-experiments: ## The same six from the Python reference, written to RESULTS/python/ - about five minutes
+py-experiments: ## The same seven from the Python reference, written to RESULTS/python/ - about six minutes
 	mkdir -p $(RESULTS)/python
 	$(PY) -m latticefsm experiment --which all --life $(LIFE) --out $(RESULTS)/python | tee $(RESULTS)/python/experiments.log
 
@@ -253,8 +267,9 @@ py-run: ## Read TEXT from MODEL with the Python package
 py-stats: ## Size, memory, clock and settings of MODEL, from the Python package
 	$(PY) -m latticefsm stats --load $(MODEL)
 
-parity: build ## The two ports held to each other: the deterministic experiments, machine and network files, both ways
-	$(PY) -m unittest tests.test_latticefsm.TestRustParity tests.test_latticefsm.TestRustNetworkParity -v
+parity: build ## The two ports held to each other: the deterministic experiments, machine and network files, media symbols
+	$(PY) -m unittest tests.test_latticefsm.TestRustParity tests.test_latticefsm.TestRustNetworkParity \
+	  tests.test_latticefsm.TestRustMediaParity -v
 
 ##@ The frontend (React, Vite; frontend/dist is committed, so `make serve-prod` needs none of this)
 frontend-install: ## Install the frontend's dependencies (npm ci)
@@ -275,7 +290,7 @@ frontend-test: ## The frontend's unit tests (node --test; no npm install needed)
 clean: ## Remove build output, __pycache__ and saved machines (results, frontend/dist and node_modules are kept)
 	cd rust && $(CARGO) clean
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-	rm -f machine.json machine.json.gz core.json core.json.gz
+	rm -f machine.json machine.json.gz core.json core.json.gz network.json network.json.gz
 
 distclean: clean ## clean, and the frontend's node_modules too
 	rm -rf frontend/node_modules

@@ -15,7 +15,7 @@
     compress    fold the matrix into its central node (exact, float32 or float16) and save the code
     expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
     core-run    walk a string straight from a code, decoding only the cells the walk reaches
-    network     machines connected into a network: new, fit, evaluate, predict, translate, summary
+    network     machines connected into a network: new, fit, evaluate, predict, translate, encode, summary, make-data
     experiment  the learning, stimulation, adaptation and compression experiments
     test        run the test suite
 
@@ -313,33 +313,65 @@ def _network_accuracy(net, lang, max_length: int) -> tuple[float, int]:
     return net.evaluate(strings, [lang.member(s) for s in strings]), len(strings)
 
 
-def _pairs(args) -> tuple[str, list[tuple[str, str]]]:
+def _reads_files(net) -> bool:
+    from .network import PhoneticEncoder, TextEncoder
+    return net.encoder is not None and not isinstance(net.encoder, (PhoneticEncoder, TextEncoder))
+
+
+def _pairs(args, net=None) -> tuple[str, list[tuple[str, str]]]:
+    from .media import read_labels
     from .phonetic import TASKS
     if args.pairs:
-        pairs = []
-        with open(args.pairs, encoding="utf-8") as f:
-            for line in f:
-                if not line.strip() or line.startswith("#"):
-                    continue
-                if "\t" not in line:
-                    raise SystemExit(f"{args.pairs}: each line is input<TAB>target, got {line!r}")
-                x, y = line.split("\t", 1)
-                pairs.append((x.strip(), y.strip()))
-        return args.pairs, pairs
+        return args.pairs, read_labels(args.pairs, resolve=net is not None and _reads_files(net))
     name = args.task or "plural"
     if name not in TASKS:
         raise SystemExit(f"no task {name!r}: plural or past")
     return name, list(TASKS[name])
 
 
+def _data(args, net) -> tuple[list[str], list[bool]]:
+    from .media import read_labels, verdict
+    rows = read_labels(args.data, resolve=_reads_files(net))
+    return [x for x, _ in rows], [verdict(y) for _, y in rows]
+
+
 def cmd_network(args) -> int:
     from .phonetic import split
+    if args.action == "make-data":
+        from .media import make_dataset
+        path = make_dataset(args.kind, args.out, count=args.count, seed=args.seed)
+        print(f"wrote {path}")
+        return 0
     net = _network(args)
     by_pairs = bool(args.task or args.pairs)
     if args.action in ("new", "summary"):
         print(net.summary())
+    elif args.action == "encode":
+        for x in args.text:
+            symbols = net._symbols(x)
+            print(f"{x}: {len(symbols)} symbols")
+            print(f"  {' '.join(symbols)}")
+    elif args.action == "fit" and args.data:
+        x, y = _data(args, net)
+        tr = [i for i in range(len(x)) if i % 5 != 4]
+        te = [i for i in range(len(x)) if i % 5 == 4]
+        xs, ys, vx, vy = [x[i] for i in tr], [y[i] for i in tr], [x[i] for i in te], [y[i] for i in te]
+        epochs = args.epochs if args.epochs is not None else 10
+        print(f"{args.data}: {len(xs)} examples taught x {epochs} epochs, {len(vx)} held out")
+        print(f"  accuracy before: taught {net.evaluate(xs, ys):.6f}, held out {net.evaluate(vx, vy):.6f}")
+        for _ in range(epochs):
+            h = net.fit(xs, ys, epochs=1)
+            print(f"  epoch {net.epochs}: right while taught {h['accuracy'][0]:.6f}, taught {net.evaluate(xs, ys):.6f}, "
+                  f"held out {net.evaluate(vx, vy):.6f}")
+        print(net.summary())
+    elif args.action == "evaluate" and args.data:
+        x, y = _data(args, net)
+        tr = [i for i in range(len(x)) if i % 5 != 4]
+        te = [i for i in range(len(x)) if i % 5 == 4]
+        print(f"accuracy {args.data}: taught {net.evaluate([x[i] for i in tr], [y[i] for i in tr]):.6f}, "
+              f"held out {net.evaluate([x[i] for i in te], [y[i] for i in te]):.6f}")
     elif args.action == "fit" and by_pairs:
-        name, pairs = _pairs(args)
+        name, pairs = _pairs(args, net)
         train, test = split(pairs)
         epochs = args.epochs if args.epochs is not None else 20
         print(f"{name}: {len(train)} pairs taught x {epochs} epochs, {len(test)} held out")
@@ -363,7 +395,7 @@ def cmd_network(args) -> int:
             print(f"  epoch {net.epochs}: right while taught {hist['accuracy'][0]:.6f}, after {acc:.6f}")
         print(net.summary())
     elif args.action == "evaluate" and by_pairs:
-        name, pairs = _pairs(args)
+        name, pairs = _pairs(args, net)
         train, test = split(pairs)
         print(f"exact {name}: taught {net.evaluate_pairs(train):.6f}, held out {net.evaluate_pairs(test):.6f}")
     elif args.action == "evaluate":
@@ -522,10 +554,18 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--life", type=float, default=LIFE)
     q = add("network", cmd_network, "machines connected into a network: new, fit, evaluate, predict, translate, summary",
             machine=False)
-    q.add_argument("action", choices=("new", "fit", "evaluate", "predict", "translate", "summary"))
-    q.add_argument("text", nargs="*", help="predict / translate: the strings to read")
+    q.add_argument("action", choices=("new", "fit", "evaluate", "predict", "translate", "encode", "summary",
+                                      "make-data"))
+    q.add_argument("text", nargs="*", help="predict / translate / encode: the inputs to read (texts or files)")
+    q.add_argument("--data", default=None, help="fit / evaluate: a file of input<TAB>verdict lines (1/0, yes/no); "
+                   "paths relative to it; every 5th held out")
+    q.add_argument("--kind", choices=("text", "image", "audio", "video"), default="image",
+                   help="make-data: which synthetic data set")
+    q.add_argument("--out", default="data", help="make-data: the directory to write it to")
+    q.add_argument("--count", type=int, default=40, help="make-data: how many examples")
     q.add_argument("--arch", default="13>13", help="e.g. 13>(13|13)>13: > in a row, (a|b) side by side, 13f final only; "
-                   "enc / dec: English in / out through the phonetic tokenizer (enc>13>dec)")
+                   "enc / dec: English in / out through the phonetic tokenizer (enc>13>dec); text, audio, image, diff, "
+                   "video: an encoder of that kind first (image>13)")
     q.add_argument("--task", choices=("plural", "past"), default=None, help="fit / evaluate English to English pairs")
     q.add_argument("--pairs", default=None, help="a file of input<TAB>target English pairs (every 4th held out)")
     q.add_argument("--alphabet", default=DEFAULT_ALPHABET, help="the input's symbols, one character each")

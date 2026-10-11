@@ -22,13 +22,23 @@ use crate::languages::{examples, language, random_string, Language, ALPHABET, LA
 use crate::machine::{Machine, Settings, BASELINE, DISCOUNT, LIFE};
 use crate::rng::Rng;
 
-pub const EXPERIMENTS: [&str; 6] = [
+pub const EXPERIMENTS: [&str; 7] = [
     "learning",
     "stimulation",
     "adaptation",
     "compression",
     "walk",
     "network",
+    "media",
+];
+
+/// The media experiment's networks: the kind of data set (`media::make_dataset`) and the architecture taught it.
+pub const MEDIA: [(&str, &str); 5] = [
+    ("text", "text>13"),
+    ("image", "image>3"),
+    ("audio", "audio>3"),
+    ("video", "diff>3"),
+    ("video", "video>13"),
 ];
 
 /// The networks the network experiment compares: an architecture string and whose verdict its output layers are
@@ -890,6 +900,118 @@ pub fn network(episodes: usize, seeds: &[u64], life: f64, tests: usize, epochs: 
         .with("translation", Json::Array(translation)))
 }
 
+/// Each synthetic data set written to a temporary directory and taught to a network that reads it, every fifth
+/// example held out: the accuracy on both after `epochs` epochs, and how many symbols an example is.
+pub fn media(count: usize, epochs: usize, seed: u64, discount: f64, life: f64) -> Result<Json, String> {
+    use crate::media::{make_dataset, read_labels, verdict};
+    use crate::network::{Credit, Merge, Network, Vote, LAYER_DISCOUNT};
+    let tmp = std::env::temp_dir().join(format!("latticefsm-media-{}", std::process::id()));
+    let settings = Settings {
+        life,
+        discount,
+        ..Settings::default()
+    };
+    let run = || -> Result<Vec<Json>, String> {
+        let mut rows = Vec::new();
+        let mut made: Vec<(&str, String)> = Vec::new();
+        for (kind, arch) in MEDIA {
+            let path = match made.iter().find(|(k, _)| *k == kind) {
+                Some((_, p)) => p.clone(),
+                None => {
+                    let p = make_dataset(kind, &tmp.join(kind).to_string_lossy(), count, seed)?;
+                    made.push((kind, p.clone()));
+                    p
+                }
+            };
+            let data = read_labels(&path, kind != "text")?;
+            let mut train = Vec::new();
+            let mut test = Vec::new();
+            for (i, (x, y)) in data.iter().enumerate() {
+                let e = (x.clone(), verdict(y)?);
+                if i % 5 == 4 {
+                    test.push(e)
+                } else {
+                    train.push(e)
+                }
+            }
+            let mut net =
+                Network::from_architecture(arch, &alphabet(), seed, Merge::Concat, Vote::Majority, &settings)?;
+            net.compile(Some(&[0]), LAYER_DISCOUNT, 1.0, 1.0, Credit::Shared)?;
+            let mut total = 0usize;
+            for (x, _) in &data {
+                total += net.tokenize(x)?.len();
+            }
+            let before = net.evaluate(&test)?;
+            net.fit(&train, epochs)?;
+            rows.push(
+                Json::object()
+                    .with("data", kind.into())
+                    .with("architecture", arch.into())
+                    .with("examples", data.len().into())
+                    .with("held_out", test.len().into())
+                    .with("symbols_mean", (total as f64 / data.len() as f64).into())
+                    .with("alphabet", net.alphabet.len().into())
+                    .with("held_out_before", before.into())
+                    .with("taught", net.evaluate(&train)?.into())
+                    .with("held_out_after", net.evaluate(&test)?.into()),
+            );
+        }
+        Ok(rows)
+    };
+    let rows = run();
+    let _ = fs::remove_dir_all(&tmp);
+    let nets: Vec<Json> = MEDIA
+        .iter()
+        .map(|(k, a)| Json::strings(&[k.to_string(), a.to_string()]))
+        .collect();
+    Ok(Json::object()
+        .with("experiment", "media".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("count", count.into())
+                .with("epochs", epochs.into())
+                .with("seed", (seed as f64).into())
+                .with("discount", discount.into())
+                .with("life", life.into())
+                .with("networks", Json::Array(nets)),
+        )
+        .with("rows", Json::Array(rows?)))
+}
+
+fn media_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let mut lines = vec![
+        format!(
+            "media: each synthetic data set taught to a network that reads it for {} epochs (discount {}), every \
+             fifth example held out; text: is there a negation, image: are the stripes vertical, audio: is the \
+             spoken noun plural, video: does the square move right",
+            s.num("epochs", 0.0),
+            s.num("discount", 0.0)
+        ),
+        String::new(),
+        "| data | network | examples (held out) | symbols per example | alphabet | held out before | taught after | \
+         held out after |"
+            .to_string(),
+        "|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        lines.push(format!(
+            "| {} | `{}` | {} ({}) | {:.0} | {} | {:.2} | {:.2} | **{:.2}** |",
+            row.str_or("data", ""),
+            row.str_or("architecture", ""),
+            row.num("examples", 0.0),
+            row.num("held_out", 0.0),
+            row.num("symbols_mean", 0.0),
+            row.num("alphabet", 0.0),
+            row.num("held_out_before", 0.0),
+            row.num("taught", 0.0),
+            row.num("held_out_after", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
 fn network_table(r: &Json) -> String {
     let s = r.get("settings").cloned().unwrap_or(Json::object());
     let seeds = arr(&s, "seeds").len();
@@ -966,6 +1088,7 @@ fn network_table(r: &Json) -> String {
 pub fn tables(record: &Json) -> String {
     match record.str_or("experiment", "") {
         "network" => network_table(record),
+        "media" => media_table(record),
         "learning" => learning_table(record),
         "stimulation" => stimulation_table(record),
         "compression" => compression_table(record),
@@ -1137,6 +1260,7 @@ pub fn run(which: &[String], out: Option<&str>, episodes: usize, life: f64) -> R
             "compression" => compression(episodes, 1, life, 300, 500)?,
             "walk" => walk(episodes, &[1, 2, 3], life, 300)?,
             "network" => network(episodes, &[1, 2, 3, 4, 5], life, 300, 20)?,
+            "media" => media(60, 30, 1, 0.95, life)?,
             other => {
                 return Err(format!(
                     "no experiment named {other:?}; choose from {EXPERIMENTS:?} or all"

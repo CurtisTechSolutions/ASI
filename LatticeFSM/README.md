@@ -62,6 +62,7 @@ the same machine files:
 | Rust | `rust/` | crate `latticefsm`: the model, the `latticefsm` CLI, and the HTTP server (`make serve`) |
 | Python | `latticefsm/` | the reference: the same model and CLI, and the experiments |
 | both | `network.py`, `network.rs` | networks of machines, Keras-style: layers in a row and side by side, English in and out through `../PhoneticTokenizer` |
+| both | `media.py`, `media.rs` | text, audio, images, frame differences and video as symbols, so a network trains on them |
 | JavaScript | `frontend/` | the React single-page app the server serves, in the shape of `../ModelKit/frontend` |
 
 `DESIGN.md` is the specification both are written to. `make parity` holds
@@ -530,6 +531,60 @@ on its own, and an unseen word brings unseen pairs. A hidden machine between
 the encoder and the decoder still loses the signal at 20 epochs; at a lower
 temperature and more epochs it reaches 0.4 of its pairs exactly (`Limits`).
 
+## Training on text, audio, images and video
+
+An **encoder** is a network's first block: it turns what the network reads
+into symbols (`latticefsm/media.py`, `rust/src/media.rs`, standard library
+only, exact integer arithmetic so both ports turn every file into the same
+symbols - a test holds them to it, every format and a real video file
+included).
+
+| encoder | reads | writes |
+|---|---|---|
+| `text` | any text | 43 characters: `a-z 0-9`, `_` for a space, `. , ? ! ' -` |
+| `enc` | English | its sounds (the phonetic tokenizer, above) |
+| `audio` | a WAV file | the phonetic tokenizer's 64 acoustic units `q0`-`q63` (`../PhoneticTokenizer`, learned from recordings) |
+| `image` | PNG (8-bit), PPM / PGM, BMP (24/32-bit) | a `grid x grid` (8) of brightness levels `L0`-`L3`, row by row or `center-out` |
+| `diff` | frames: a directory of images, or a video file | `|` and each frame's cell-by-cell change from the last: `D-2 D-1 D0 D+1 D+2` |
+| `video` | a directory of frames and its `audio.wav`, or a video file (ffmpeg splits it, when installed) | `|` per frame, the first frame as an image and the rest as differences (keyframe and deltas, as video codecs do), each followed by the audio units that sound during it |
+
+```bash
+make media-data KIND=video && make media-fit KIND=video ARCH="diff>3" EPOCHS=150
+latticefsm network make-data --kind audio --out data/audio          # spoken nouns, singular / plural
+latticefsm network fit --arch "audio>3" --data data/audio/labels.tsv --epochs 30 --save a.json
+latticefsm network encode clip.mp4 --arch "video>13"                # what the network reads
+```
+
+```python
+net = Network("image>13").compile(accepting=[0])
+net.fit(["a.png", "b.ppm", ...], [True, False, ...], epochs=30)
+Network([ImageEncoder(grid=16, levels=8, order="center-out"), Layer(13)])
+```
+
+A data file is `input<TAB>verdict` lines (`1/0`, `yes/no`), paths relative to
+it; `make-data` writes a synthetic one of each kind. A file is decoded once
+and its symbols kept (by path, size and time), however many epochs read it.
+
+media: each synthetic data set taught to a network that reads it for 30 epochs (discount 0.95), every fifth example held out; text: is there a negation, image: are the stripes vertical, audio: is the spoken noun plural, video: does the square move right
+
+| data | network | examples (held out) | symbols per example | alphabet | held out before | taught after | held out after |
+|---|---|---|---|---|---|---|---|
+| text | `text>13` | 60 (12) | 19 | 43 | 0.50 | 0.46 | **0.50** |
+| image | `image>3` | 60 (12) | 64 | 4 | 0.50 | 0.40 | **0.25** |
+| audio | `audio>3` | 60 (12) | 18 | 64 | 0.50 | 0.96 | **0.67** |
+| video | `diff>3` | 60 (12) | 455 | 6 | 0.50 | 0.54 | **0.58** |
+| video | `video>13` | 60 (12) | 533 | 74 | 0.50 | 0.50 | **0.50** |
+
+What it says: every kind of data goes in and trains, and one task learns
+clearly - spoken plurals, eighteen units a word, which a three-state machine
+fits (0.96) and partly generalises (0.67). The others stay near chance at
+30 epochs: a verdict credited once at the end of a 64-symbol picture or a
+500-symbol clip reaches back only as far as the discount lets it (0.95¹⁰⁰ is
+0.006), so a feature spread over the whole input is mostly not learned. Run
+longer, `diff>3` reaches 0.83 held out at 150 epochs on one seed, not
+reliably. A machine that reads a picture needs a reason to remember
+something across it, and these do not yet have one (`Limits`).
+
 ## The pieces
 
 | file | what it holds |
@@ -542,13 +597,14 @@ temperature and more epochs it reaches 0.4 of its pairs exactly (`Limits`).
 | `rust/src/geometry.rs`, `compress.rs` | the cube's centre and shells, the centre-out order, the central vertical vector and focus; the code the central node holds, its precisions, the outward rebuild, the walk from the code, `fidelity` |
 | `rust/src/focus.rs` | the learned focus |
 | `rust/src/network.rs`, `phonetic.rs` | networks of machines: the blocks, the architecture string, compile / fit / evaluate / predict / translate, the file; English in and out through `../PhoneticTokenizer/rust` |
+| `rust/src/media.rs` | text, WAV (acoustic units), PNG / PPM / BMP, frame differences and video (frames, ffmpeg) as symbols; the synthetic data sets |
 | `rust/src/http.rs`, `server.rs` | the HTTP/1.1 server, the JSON routes, the static files of the frontend |
 | `frontend/` | the React app: `src/App.jsx`, the five panels in `src/components/`, `src/api.js`, `src/matrix.js`; `dist/` built and committed |
 | `rust/src/json.rs`, `gzip.rs`, `rng.rs` | JSON, gzip and the generator, written out: no dependencies |
 | `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, compress, expand, core-run, focus, skip, rearrange, network, experiment, serve |
 | `rust/tests/` | the machine and the server over a real socket |
-| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `focus.py`, `compress.py`, `network.py`, `phonetic.py`, `languages.py`, `experiment.py`, `cli.py` |
-| `tests/test_latticefsm.py` | 78 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
+| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `focus.py`, `compress.py`, `network.py`, `phonetic.py`, `media.py`, `languages.py`, `experiment.py`, `cli.py` |
+| `tests/test_latticefsm.py` | 84 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
 | `results/` | the measured numbers from both ports, with a README |
 
 ## Limits
@@ -573,9 +629,13 @@ temperature and more epochs it reaches 0.4 of its pairs exactly (`Limits`).
   temperature 0.3 over 40). A decoder writes one sound per symbol it reads,
   so a translation is at most as many sounds as the input plus the
   encoder's two boundaries; a parallel block in front of it doubles what it
-  reads. It generalises to unseen words hardly at all. Networks are a
-  library and CLI feature; the server and the frontend still hold one
-  machine.
+  reads. It generalises to unseen words hardly at all.
+* Media: images, frame differences and video train but mostly stay near
+  chance (above); credit reaches back along a run only as far as its
+  discount, and a verdict about a whole picture is credited at its last
+  cell. Audio is read through one fixed codebook of 64 units learned from
+  the phonetic tokenizer's own voice; images are brightness only, no colour;
+  PNGs must be 8-bit and not interlaced; a video file needs ffmpeg.
 * A partial rebuild from the middle outward gives back nothing a taught
   machine learned until the last two shells, because the languages use the
   outermost symbols (`DESIGN.md` §11.4).

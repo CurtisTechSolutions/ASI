@@ -36,6 +36,12 @@ latticefsm network fit --arch "enc>dec" --task plural --epochs 20 --save t.json 
 latticefsm network translate cat dog bus --load t.json           # English in, English out
 ```
 
+`--arch "text>13"`, `audio>3`, `image>13`, `diff>3` or `video>13` read text, WAV
+files, PNG / PPM / BMP pictures, frame differences or video (a directory of
+frames and `audio.wav`, or a video file through ffmpeg); `network make-data
+--kind K --out DIR` writes a synthetic labelled set and `network fit --data
+DIR/labels.tsv` teaches it; `network encode INPUT` prints what is read.
+
 The encoder and decoder use the repository's phonetic tokenizer
 (`../../PhoneticTokenizer/rust`), this crate's one dependency, a path
 dependency on a crate of the same repository with none of its own.
@@ -88,6 +94,7 @@ or 405. `tests/server.rs` exercises every route over a real socket.
 | `src/lattice.rs` | `Lattice`, `State`: the dense matrix and its JSON |
 | `src/machine.rs` | `Machine`, `Run`, `Transition`, `Settings`: the walk, the clock, credit, stimulation, the file |
 | `src/network.rs`, `src/phonetic.rs` | networks of machines; English in and out through the phonetic tokenizer |
+| `src/media.rs` | text, audio, images, differences and video as symbols; the synthetic data sets |
 | `src/languages.rs` | the four regular languages and their examples |
 | `src/geometry.rs` | the cube's central node and shells; `center_out`, the order the code is laid out in |
 | `src/focus.rs` | `FocusLearner`: the focus read off the input, learned from credit |

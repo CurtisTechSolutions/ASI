@@ -27,6 +27,7 @@ use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
 use latticefsm::languages::{all_strings, examples, language, LANGUAGES};
 use latticefsm::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
+use latticefsm::media;
 use latticefsm::network::{load_network, Credit, Merge, Network, Vote, LAYER_DISCOUNT};
 use latticefsm::phonetic;
 use latticefsm::rng::Rng;
@@ -124,6 +125,11 @@ commands
               predict TEXT...    each string's verdict, layer by layer
               translate TEXT...  English in, English out
               summary    the blocks, their matrices and what they write
+              encode INPUT...    what the encoder turns each input (a text or a file) into
+              fit / evaluate --data FILE.tsv   input<TAB>verdict lines (1/0, yes/no), paths relative to the
+                         file, every 5th held out: with --arch text>13, audio>13, image>13, diff>13 or video>13
+                         (text, a WAV, a PNG / PPM / BMP, a directory of frames or a video file through ffmpeg)
+              make-data  --kind text|image|audio|video --out DIR [--count 40]: a small synthetic labelled set
   experiment  --which learning|stimulation|adaptation|compression|walk|network|all, --out DIR
   serve       the HTTP API and the frontend on --port (default 8000); --frontend-dir DIR (default: frontend/dist
               under the working directory, or ../frontend/dist)
@@ -889,34 +895,100 @@ fn network_accuracy(
     Ok((net.evaluate(&examples)?, examples.len()))
 }
 
-fn pairs(a: &Args) -> Result<(String, Vec<(String, String)>), String> {
+/// Whether the network's inputs are files (an audio, image, diff or video encoder), so paths in a data file are
+/// read relative to it.
+fn reads_files(net: &Network) -> bool {
+    net.encoder()
+        .is_some_and(|e| !matches!(e.source.kind(), "phonetic" | "text"))
+}
+
+fn pairs(a: &Args, net: &Network) -> Result<(String, Vec<(String, String)>), String> {
     if let Some(path) = a.get("pairs") {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        let pairs = text
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-            .map(|l| {
-                l.split_once('\t')
-                    .map(|(x, y)| (x.trim().to_string(), y.trim().to_string()))
-                    .ok_or_else(|| format!("{path}: each line is input<TAB>target, got {l:?}"))
-            })
-            .collect::<Result<_, _>>()?;
-        return Ok((path.to_string(), pairs));
+        return Ok((path.to_string(), media::read_labels(path, reads_files(net))?));
     }
     let name = a.str("task", "plural");
     Ok((name.clone(), phonetic::task(&name)?))
 }
 
+/// A data file's name, its taught examples and its held-out ones.
+type Data = (String, Vec<(String, bool)>, Vec<(String, bool)>);
+
+fn data(a: &Args, net: &Network) -> Result<Data, String> {
+    let path = a.get("data").expect("asked for");
+    let rows = media::read_labels(path, reads_files(net))?;
+    let mut train = Vec::new();
+    let mut test = Vec::new();
+    for (i, (x, y)) in rows.into_iter().enumerate() {
+        let example = (x, media::verdict(&y)?);
+        if i % 5 == 4 {
+            test.push(example);
+        } else {
+            train.push(example);
+        }
+    }
+    Ok((path.to_string(), train, test))
+}
+
 fn network_cmd(a: &Args) -> Result<(), String> {
     let action = a.positional.first().map(String::as_str).unwrap_or("summary");
     let texts: Vec<String> = a.positional.iter().skip(1).cloned().collect();
+    if action == "make-data" {
+        let path = media::make_dataset(
+            &a.str("kind", "image"),
+            &a.str("out", "data"),
+            a.num("count", 40.0) as usize,
+            a.num("seed", 1.0) as u64,
+        )?;
+        println!("wrote {path}");
+        return Ok(());
+    }
     let mut net = network(a)?;
     let max_length = a.num("max-length", 6.0) as usize;
     let by_pairs = a.has("task") || a.has("pairs");
+    let by_data = a.has("data");
     match action {
         "new" | "summary" => println!("{}", net.summary()),
+        "encode" => {
+            for x in &texts {
+                let symbols = net.tokenize(x)?;
+                let names: Vec<&str> = symbols.iter().map(|&i| net.alphabet[i].as_str()).collect();
+                println!("{x}: {} symbols", names.len());
+                println!("  {}", names.join(" "));
+            }
+        }
+        "fit" if by_data => {
+            let (path, train, test) = data(a, &net)?;
+            let epochs = a.num("epochs", 10.0) as usize;
+            println!(
+                "{path}: {} examples taught x {epochs} epochs, {} held out",
+                train.len(),
+                test.len()
+            );
+            println!(
+                "  accuracy before: taught {:.6}, held out {:.6}",
+                net.evaluate(&train)?,
+                net.evaluate(&test)?
+            );
+            for _ in 0..epochs {
+                let h = net.fit(&train, 1)?;
+                let (taught, held) = (net.evaluate(&train)?, net.evaluate(&test)?);
+                println!(
+                    "  epoch {}: right while taught {:.6}, taught {taught:.6}, held out {held:.6}",
+                    net.epochs, h[0]
+                );
+            }
+            println!("{}", net.summary());
+        }
+        "evaluate" if by_data => {
+            let (path, train, test) = data(a, &net)?;
+            println!(
+                "accuracy {path}: taught {:.6}, held out {:.6}",
+                net.evaluate(&train)?,
+                net.evaluate(&test)?
+            );
+        }
         "fit" if by_pairs => {
-            let (name, all) = pairs(a)?;
+            let (name, all) = pairs(a, &net)?;
             let (train, test) = phonetic::split(&all, 4);
             let epochs = a.num("epochs", 20.0) as usize;
             println!(
@@ -958,7 +1030,7 @@ fn network_cmd(a: &Args) -> Result<(), String> {
             println!("{}", net.summary());
         }
         "evaluate" if by_pairs => {
-            let (name, all) = pairs(a)?;
+            let (name, all) = pairs(a, &net)?;
             let (train, test) = phonetic::split(&all, 4);
             println!(
                 "exact {name}: taught {:.6}, held out {:.6}",

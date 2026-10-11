@@ -209,3 +209,13 @@ English to English: each task taught to each network for 20 epochs, every fourth
 | past | `enc>dec` | 21 / 7 | 0.89 | **0.76** | 0.00 | walk → walked, play → played, jump → pt (jumped), look → l kt (looked) |
 | past | `enc>13>dec` | 21 / 7 | 0.04 | **0.00** | 0.00 | walk → st kt (walked), play → pulled (played), jump → fid st (jumped), look → cld s (looked) |
 
+media: each synthetic data set taught to a network that reads it for 30 epochs (discount 0.95), every fifth example held out; text: is there a negation, image: are the stripes vertical, audio: is the spoken noun plural, video: does the square move right
+
+| data | network | examples (held out) | symbols per example | alphabet | held out before | taught after | held out after |
+|---|---|---|---|---|---|---|---|
+| text | `text>13` | 60 (12) | 19 | 43 | 0.50 | 0.46 | **0.50** |
+| image | `image>3` | 60 (12) | 64 | 4 | 0.50 | 0.40 | **0.25** |
+| audio | `audio>3` | 60 (12) | 18 | 64 | 0.50 | 0.96 | **0.67** |
+| video | `diff>3` | 60 (12) | 455 | 6 | 0.50 | 0.54 | **0.58** |
+| video | `video>13` | 60 (12) | 533 | 74 | 0.50 | 0.50 | **0.50** |
+

@@ -105,10 +105,9 @@ pub enum Spec {
         vote: Vote,
         name: Option<String>,
     },
-    /// English in: the text as sounds, followed by `pad` boundaries `#`.  Only a network's first block.
+    /// What the network reads, turned into symbols ([`Source`]): only a network's first block.
     Encoder {
-        stress: bool,
-        pad: usize,
+        source: Source,
         name: Option<String>,
     },
     /// English out: a layer whose states are the sounds, starting from `#`, skipping nothing, never rearranged.
@@ -188,12 +187,266 @@ impl Layer {
     }
 }
 
-/// English in: the text as the sounds it is made of, then `pad` boundaries.
+/// What an encoder reads (`media.rs`, `phonetic.rs`; the Python port's encoder classes).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Source {
+    /// English as the sounds it is made of, then `pad` boundaries `#`.
+    Phonetic { stress: bool, pad: usize },
+    /// Text, character by character.
+    Text,
+    /// A WAV file as acoustic units.
+    Audio,
+    /// An image as a `grid x grid` of `levels` brightness levels.
+    Image { grid: usize, levels: usize, order: String },
+    /// Frames as their differences.
+    Diff { grid: usize, order: String, frames: usize },
+    /// A video: keyframes, differences and audio units.
+    Video {
+        grid: usize,
+        levels: usize,
+        order: String,
+        keyframe: usize,
+        frames: usize,
+        audio: bool,
+        fps: usize,
+    },
+}
+
+impl Source {
+    /// Its name in the architecture string and the file.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Source::Phonetic { .. } => "phonetic",
+            Source::Text => "text",
+            Source::Audio => "audio",
+            Source::Image { .. } => "image",
+            Source::Diff { .. } => "diff",
+            Source::Video { .. } => "video",
+        }
+    }
+
+    /// The defaults of a kind.
+    pub fn of(kind: &str) -> Result<Source, String> {
+        Ok(match kind {
+            "phonetic" | "enc" => Source::Phonetic { stress: false, pad: 2 },
+            "text" => Source::Text,
+            "audio" => Source::Audio,
+            "image" => Source::Image {
+                grid: 8,
+                levels: 4,
+                order: "rows".into(),
+            },
+            "diff" => Source::Diff {
+                grid: 8,
+                order: "rows".into(),
+                frames: 16,
+            },
+            "video" => Source::Video {
+                grid: 8,
+                levels: 4,
+                order: "rows".into(),
+                keyframe: 0,
+                frames: 16,
+                audio: true,
+                fps: 8,
+            },
+            other => {
+                return Err(format!(
+                    "no encoder {other:?}: phonetic, text, audio, image, diff or video"
+                ))
+            }
+        })
+    }
+
+    /// Every symbol it can write.
+    pub fn labels(&self) -> Vec<String> {
+        use crate::media::{level_symbols, unit_names, DIFFS, TEXT_SYMBOLS};
+        match self {
+            Source::Phonetic { stress, .. } => inventory(*stress),
+            Source::Text => TEXT_SYMBOLS.iter().map(|s| s.to_string()).collect(),
+            Source::Audio => unit_names(),
+            Source::Image { levels, .. } => level_symbols(*levels),
+            Source::Diff { .. } => std::iter::once("|").chain(DIFFS).map(String::from).collect(),
+            Source::Video { levels, audio, .. } => {
+                let mut v = vec!["|".to_string()];
+                v.extend(level_symbols(*levels));
+                v.extend(DIFFS.iter().map(|s| s.to_string()));
+                if *audio {
+                    v.extend(unit_names());
+                }
+                v
+            }
+        }
+    }
+
+    /// The phonetic encoder's stress setting; `None` for the others.
+    pub fn stress(&self) -> Option<bool> {
+        match self {
+            Source::Phonetic { stress, .. } => Some(*stress),
+            _ => None,
+        }
+    }
+
+    fn describe(&self, n: usize) -> String {
+        match self {
+            Source::Phonetic { .. } => format!("English -> {n} sounds"),
+            Source::Text => format!("text -> {n} characters"),
+            Source::Audio => format!("audio -> {n} units"),
+            Source::Image { grid, levels, .. } => format!("image {grid}x{grid} -> {levels} levels"),
+            Source::Diff { grid, .. } => format!("frames {grid}x{grid} -> {} changes", n - 1),
+            Source::Video { grid, audio, .. } => {
+                format!(
+                    "video {grid}x{grid}{} -> {n} symbols",
+                    if *audio { " + audio" } else { "" }
+                )
+            }
+        }
+    }
+
+    fn to_json(&self, j: Json) -> Json {
+        match self {
+            Source::Phonetic { stress, pad } => j.with("stress", (*stress).into()).with("pad", (*pad).into()),
+            Source::Text | Source::Audio => j,
+            Source::Image { grid, levels, order } => j
+                .with("grid", (*grid).into())
+                .with("levels", (*levels).into())
+                .with("order", order.as_str().into()),
+            Source::Diff { grid, order, frames } => j
+                .with("grid", (*grid).into())
+                .with("order", order.as_str().into())
+                .with("frames", (*frames).into()),
+            Source::Video {
+                grid,
+                levels,
+                order,
+                keyframe,
+                frames,
+                audio,
+                fps,
+            } => j
+                .with("grid", (*grid).into())
+                .with("levels", (*levels).into())
+                .with("order", order.as_str().into())
+                .with("keyframe", (*keyframe).into())
+                .with("frames", (*frames).into())
+                .with("audio", (*audio).into())
+                .with("fps", (*fps).into()),
+        }
+    }
+
+    fn from_json(v: &Json) -> Result<Source, String> {
+        let n = |k: &str, d: f64| v.num(k, d) as usize;
+        let order = v.str_or("order", "rows").to_string();
+        Ok(match v.str_or("source", "phonetic") {
+            "phonetic" => Source::Phonetic {
+                stress: v.bool_or("stress", false),
+                pad: n("pad", 2.0),
+            },
+            "text" => Source::Text,
+            "audio" => Source::Audio,
+            "image" => Source::Image {
+                grid: n("grid", 8.0),
+                levels: n("levels", 4.0),
+                order,
+            },
+            "diff" => Source::Diff {
+                grid: n("grid", 8.0),
+                order,
+                frames: n("frames", 16.0),
+            },
+            "video" => Source::Video {
+                grid: n("grid", 8.0),
+                levels: n("levels", 4.0),
+                order,
+                keyframe: n("keyframe", 0.0),
+                frames: n("frames", 16.0),
+                audio: v.bool_or("audio", true),
+                fps: n("fps", 8.0),
+            },
+            other => return Err(format!("unknown encoder source {other:?}")),
+        })
+    }
+
+    /// One input's symbols, before they are checked against the labels (the phonetic one is done by the network,
+    /// which holds the tokenizer).
+    fn symbols_of(&self, x: &str) -> Result<Vec<String>, String> {
+        use crate::media;
+        match self {
+            Source::Phonetic { .. } => Err("the network reads English itself".to_string()),
+            Source::Text => Ok(media::text_symbols(x)),
+            Source::Audio => media::audio_units(x),
+            Source::Image { grid, levels, order } => {
+                media::image_symbols(&media::cells(&media::read_image(x)?, *grid), *levels, order)
+            }
+            Source::Diff { grid, order, frames } => media::diff_stream(x, *grid, order, *frames),
+            Source::Video {
+                grid,
+                levels,
+                order,
+                keyframe,
+                frames,
+                audio,
+                fps,
+            } => media::video_symbols(x, *grid, *levels, order, *keyframe, *frames, *audio, *fps),
+        }
+    }
+
+    fn caches(&self) -> bool {
+        !matches!(self, Source::Phonetic { .. } | Source::Text)
+    }
+}
+
+/// What the network reads, turned into symbols: its first block, with no machine and no credit.
 pub struct Encoder {
     pub name: String,
-    pub stress: bool,
-    pub pad: usize,
+    pub source: Source,
     pub labels: Vec<String>,
+    cache: crate::media::Cache,
+}
+
+impl Encoder {
+    pub fn new(source: Source, name: String) -> Result<Encoder, String> {
+        if let Source::Image { grid, levels, order }
+        | Source::Video {
+            grid, levels, order, ..
+        } = &source
+        {
+            if !(1..=64).contains(grid) || !(2..=16).contains(levels) {
+                return Err("grid is 1 to 64 and levels 2 to 16".to_string());
+            }
+            crate::media::order(*grid, order)?;
+        }
+        let labels = source.labels();
+        Ok(Encoder {
+            name,
+            source,
+            labels,
+            cache: Default::default(),
+        })
+    }
+
+    /// The phonetic encoder's stress setting; `None` for the others.
+    pub fn stress(&self) -> Option<bool> {
+        self.source.stress()
+    }
+
+    /// One input (a text, or a file's path) as this encoder's symbols - the media read once per file and kept.
+    fn encode_media(&mut self, x: &str) -> Result<Vec<usize>, String> {
+        if self.source.caches() {
+            if let Some(hit) = self.cache.get(x) {
+                return Ok(hit);
+            }
+        }
+        let symbols = self.source.symbols_of(x)?;
+        let out: Vec<usize> = symbols
+            .iter()
+            .filter_map(|t| self.labels.iter().position(|l| l == t))
+            .collect();
+        if self.source.caches() {
+            self.cache.put(x, &out);
+        }
+        Ok(out)
+    }
 }
 
 /// A built block.
@@ -275,18 +528,11 @@ impl Block {
         names: &mut HashMap<String, usize>,
     ) -> Result<(Block, Vec<String>), String> {
         match spec {
-            Spec::Encoder { stress, pad, name } => {
+            Spec::Encoder { source, name } => {
                 let name = name_of(name, "encoder", names);
-                let labels = inventory(*stress);
-                Ok((
-                    Block::Encoder(Encoder {
-                        name,
-                        stress: *stress,
-                        pad: *pad,
-                        labels: labels.clone(),
-                    }),
-                    labels,
-                ))
+                let e = Encoder::new(source.clone(), name)?;
+                let labels = e.labels.clone();
+                Ok((Block::Encoder(e), labels))
             }
             Spec::Decoder {
                 stress,
@@ -437,7 +683,7 @@ impl Block {
                         wrote: text_of(symbols, &e.labels),
                         accepted: false,
                         english: None,
-                        stress: Some(e.stress),
+                        stress: e.stress(),
                     });
                 }
                 (symbols.to_vec(), false)
@@ -580,11 +826,12 @@ impl Block {
 
     pub fn to_json(&self) -> Json {
         match self {
-            Block::Encoder(e) => Json::object()
-                .with("type", "encoder".into())
-                .with("name", e.name.as_str().into())
-                .with("stress", e.stress.into())
-                .with("pad", e.pad.into()),
+            Block::Encoder(e) => e.source.to_json(
+                Json::object()
+                    .with("type", "encoder".into())
+                    .with("source", e.source.kind().into())
+                    .with("name", e.name.as_str().into()),
+            ),
             Block::Layer(l) => {
                 let mut j = Json::object()
                     .with("type", if l.is_decoder() { "decoder" } else { "layer" }.into())
@@ -619,15 +866,7 @@ impl Block {
     pub fn from_json(v: &Json) -> Result<Block, String> {
         let name = v.str_or("name", "").to_string();
         match v.str_or("type", "") {
-            "encoder" => {
-                let stress = v.bool_or("stress", false);
-                Ok(Block::Encoder(Encoder {
-                    name,
-                    stress,
-                    pad: v.num("pad", 2.0) as usize,
-                    labels: inventory(stress),
-                }))
-            }
+            "encoder" => Ok(Block::Encoder(Encoder::new(Source::from_json(v)?, name)?)),
             kind @ ("layer" | "decoder") => {
                 let states = v.num("states", 0.0) as usize;
                 let mut machine = Machine::from_json(v.get("machine").ok_or("a layer without its machine")?)?;
@@ -761,14 +1000,13 @@ pub fn parse_architecture(text: &str, merge: Merge, vote: Vote, settings: &Setti
                 }
             });
         }
-        for word in ["enc", "dec"] {
+        for word in ["enc", "dec", "text", "audio", "image", "diff", "video"] {
             let w: Vec<char> = word.chars().collect();
-            if src.len() >= *pos + 3 && src[*pos..*pos + 3] == w[..] {
-                *pos += 3;
-                return Ok(if word == "enc" {
+            if src.len() >= *pos + w.len() && src[*pos..*pos + w.len()] == w[..] {
+                *pos += w.len();
+                return Ok(if word != "dec" {
                     Spec::Encoder {
-                        stress: false,
-                        pad: 2,
+                        source: Source::of(word)?,
                         name: None,
                     }
                 } else {
@@ -788,7 +1026,8 @@ pub fn parse_architecture(text: &str, merge: Merge, vote: Vote, settings: &Setti
         }
         if start == *pos {
             return Err(format!(
-                "architecture {text:?}: expected a number of states, enc, dec or '(' at position {pos}"
+                "architecture {text:?}: expected a number of states, an encoder (enc text audio image diff video), dec or \
+                 '(' at position {pos}"
             ));
         }
         let states: usize = src[start..*pos]
@@ -939,6 +1178,16 @@ impl Network {
         }
     }
 
+    fn encoder_mut(&mut self) -> Option<&mut Encoder> {
+        match &mut self.root {
+            Block::Sequential { blocks, .. } => match blocks.first_mut() {
+                Some(Block::Encoder(e)) => Some(e),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn decoder_mut(&mut self) -> Option<&mut Layer> {
         match &mut self.root {
             Block::Sequential { blocks, .. } => match blocks.last_mut() {
@@ -960,10 +1209,13 @@ impl Network {
     }
 
     fn prime(&mut self) {
-        let stresses: Vec<bool> = [self.encoder().map(|e| e.stress), self.decoder().map(|d| d.stress)]
-            .into_iter()
-            .flatten()
-            .collect();
+        let stresses: Vec<bool> = [
+            self.encoder().and_then(Encoder::stress),
+            self.decoder().map(|d| d.stress),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         for stress in stresses {
             let key = (stress, self.words.len());
             if !self.words.is_empty() && !self.primed.contains(&key) {
@@ -1031,7 +1283,10 @@ impl Network {
     /// per character, whitespace skipped.
     pub fn tokenize(&mut self, text: &str) -> Result<Vec<usize>, String> {
         if let Some(e) = self.encoder() {
-            let (stress, pad, labels) = (e.stress, e.pad, e.labels.clone());
+            let (source, labels) = (e.source.clone(), e.labels.clone());
+            let Source::Phonetic { stress, pad } = source else {
+                return self.encoder_mut().expect("there is one").encode_media(text);
+            };
             let tokens = self.tokenizer(stress).tokens(text);
             let mut out: Vec<usize> = tokens
                 .iter()
@@ -1063,11 +1318,13 @@ impl Network {
         let symbols = self.tokenize(text)?;
         let mut steps = Vec::new();
         let (out, accepted) = self.root.forward(&symbols, true, Some(0.0), &mut Some(&mut steps));
+        if self.encoder().is_some() {
+            if let Some(first) = steps.first_mut() {
+                first.read = text.to_string();
+            }
+        }
         for step in steps.iter_mut() {
             if let Some(stress) = step.stress {
-                if step.states.is_empty() {
-                    step.read = text.to_string();
-                }
                 step.english = Some(self.english(&sounds_of(&step.wrote), stress));
             }
         }
@@ -1290,8 +1547,8 @@ impl Network {
                 Block::Encoder(e) => {
                     rows.push([
                         format!("{pad}{}", e.name),
-                        format!("English -> {} sounds", e.labels.len()),
-                        "sounds".into(),
+                        e.source.describe(e.labels.len()),
+                        if e.stress().is_some() { "sounds" } else { "symbols" }.into(),
                         "".into(),
                         "".into(),
                     ]);
@@ -1374,10 +1631,10 @@ impl Network {
             format!(
                 "network \"{}\"{arch}: reads {}, writes {}",
                 self.name,
-                if self.encoder().is_some() {
-                    "English".to_string()
-                } else {
-                    self.alphabet.concat()
+                match self.encoder() {
+                    Some(e) if e.stress().is_some() => "English".to_string(),
+                    Some(e) => e.source.kind().to_string(),
+                    None => self.alphabet.concat(),
                 },
                 if self.decoder().is_some() {
                     "English".to_string()

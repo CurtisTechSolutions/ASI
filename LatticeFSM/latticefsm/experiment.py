@@ -50,9 +50,12 @@ from .edge import Weighting
 from .languages import ALPHABET, LANGUAGES, examples, language
 from .machine import BASELINE, DISCOUNT, LIFE, Machine
 
-__all__ = ["EXPERIMENTS", "NETWORKS", "adaptation", "learning", "main", "network", "run", "stimulation", "tables", "teach_language"]
+__all__ = ["EXPERIMENTS", "MEDIA", "NETWORKS", "adaptation", "learning", "main", "media", "network", "run", "stimulation", "tables", "teach_language"]
 
-EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk", "network")
+EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk", "network", "media")
+
+MEDIA = (("text", "text>13"), ("image", "image>3"), ("audio", "audio>3"), ("video", "diff>3"), ("video", "video>13"))
+"""The media experiment's networks: the kind of data set (``media.make_dataset``) and the architecture taught it."""
 
 NETWORKS = (("3", "shared"), ("3>3", "shared"), ("3f>3", "shared"), ("(3|3)>3", "shared"), ("(3|3|3)", "shared"),
             ("(3|3|3)", "own"), ("13", "shared"), ("(13|13|13)", "own"))
@@ -358,6 +361,56 @@ def network(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3, 4, 5), life: 
     }
 
 
+def media(count: int = 60, epochs: int = 30, seed: int = 1, discount: float = 0.95, life: float = LIFE,
+          networks: Sequence[tuple[str, str]] = MEDIA) -> dict:
+    """Each synthetic data set (text, images, spoken words, video clips; ``media.make_dataset``) written to a temporary
+    directory and taught to a network that reads it, every fifth example held out: the accuracy on both after
+    ``epochs`` epochs, and how many symbols an example is."""
+    import shutil
+    import tempfile
+    from .media import make_dataset, read_labels, verdict
+    from .network import Network
+    rows, tmp = [], tempfile.mkdtemp(prefix="latticefsm-media-")
+    try:
+        paths = {}
+        for kind, arch in networks:
+            if kind not in paths:
+                paths[kind] = make_dataset(kind, os.path.join(tmp, kind), count=count, seed=seed)
+            data = read_labels(paths[kind], resolve=kind != "text")
+            x, y = [a for a, _ in data], [verdict(b) for _, b in data]
+            tr = [i for i in range(len(x)) if i % 5 != 4]
+            te = [i for i in range(len(x)) if i % 5 == 4]
+            net = Network(arch, seed=seed, layer_options={"life": life, "discount": discount}).compile(accepting=[0])
+            lengths = [len(net._symbols(x[i])) for i in range(len(x))]
+            before = net.evaluate([x[i] for i in te], [y[i] for i in te])
+            net.fit([x[i] for i in tr], [y[i] for i in tr], epochs=epochs)
+            rows.append({"data": kind, "architecture": arch, "examples": len(x), "held_out": len(te),
+                         "symbols_mean": sum(lengths) / len(lengths), "alphabet": len(net.alphabet),
+                         "held_out_before": before,
+                         "taught": net.evaluate([x[i] for i in tr], [y[i] for i in tr]),
+                         "held_out_after": net.evaluate([x[i] for i in te], [y[i] for i in te])})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return {"experiment": "media",
+            "settings": _settings(count=count, epochs=epochs, seed=seed, discount=discount, life=life,
+                                  networks=[list(n) for n in networks]),
+            "rows": rows}
+
+
+def _media_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"media: each synthetic data set taught to a network that reads it for {s['epochs']} epochs (discount "
+             f"{s['discount']:g}), every fifth example held out; text: is there a negation, image: are the stripes "
+             "vertical, audio: is the spoken noun plural, video: does the square move right", "",
+             "| data | network | examples (held out) | symbols per example | alphabet | held out before | taught after | "
+             "held out after |", "|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['data']} | `{row['architecture']}` | {row['examples']} ({row['held_out']}) | "
+                     f"{row['symbols_mean']:.0f} | {row['alphabet']} | {row['held_out_before']:.2f} | "
+                     f"{row['taught']:.2f} | **{row['held_out_after']:.2f}** |")
+    return "\n".join(lines)
+
+
 def _network_table(r: dict) -> str:
     s = r["settings"]
     lines = [f"network: every language taught to each network for {s['episodes']} episodes (the learning experiment's "
@@ -384,6 +437,8 @@ def tables(record: dict) -> str:
     kind = record["experiment"]
     if kind == "network":
         return _network_table(record)
+    if kind == "media":
+        return _media_table(record)
     if kind == "learning":
         return _learning_table(record)
     if kind == "stimulation":
@@ -512,6 +567,8 @@ def run(which: Sequence[str], out: str | None = None, **kw) -> list[dict]:
             rec = walk(life=kw.get("life", LIFE))
         elif name == "network":
             rec = network(episodes=kw.get("episodes", 4000), life=kw.get("life", LIFE))
+        elif name == "media":
+            rec = media(life=kw.get("life", LIFE))
         else:
             raise ValueError(f"no experiment named {name!r}; choose from {EXPERIMENTS} or all")
         records.append(rec)

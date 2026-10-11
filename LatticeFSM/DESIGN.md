@@ -23,6 +23,7 @@ The five requirements, in the author's words, and where each is realised:
 | allow nodes to rearrange themselves and swap | §12.4: `swap_states`, `swap_symbols`, `rearrange`, `rearrange_every` |
 | a module like TensorFlow, to connect several of these together | §13.1–13.3: `Network`, `Layer`, `Sequential`, `Parallel`, the architecture string, compile / fit / evaluate / predict |
 | encoder and decoder layers: text to its phonetic representation with the repository's tokenizer, English in and out | §13.4: `PhoneticEncoder`, `PhoneticDecoder`, `translate`, `fit_pairs` |
+| train on text, audio, images and video (images / differences and audio) | §14: the text, audio, image, diff and video encoders |
 
 ## 1. The matrix
 
@@ -665,4 +666,47 @@ a pair right when the sounds written, trailing `#` dropped, are the target's.
 * **Sounds, not letters,** between English and the machines: 43 symbols that
   mean the same thing in every word, where spelling would make `-s`, `-es`
   and `-ies` three rules.
+
+## 14. Text, audio, images and video
+
+An encoder (§13.4) is any first block that turns an input into symbols;
+`media.py` and `media.rs` add five, in exact integer arithmetic so the ports
+agree symbol for symbol.
+
+* **text**: lower-cased; whitespace is `_`; kept are `a-z 0-9 _ . , ? ! ' -`.
+* **audio**: a WAV file through the phonetic tokenizer's `AcousticTokenizer`
+  (its bundled 64-unit codebook, a run of one unit folded into one).
+* **image**: decoded to brightness `Y = (299 R + 587 G + 114 B) // 1000`
+  (PNG 8-bit of every colour type, unfiltered with all five filters; PPM /
+  PGM `P2 P3 P5 P6`, scaled by `255 // max`; BMP 24/32-bit, bottom-up or
+  top-down); averaged into `grid x grid` cells, cell `(cy, cx)` covering rows
+  `cy·h // grid` up to `max(that + 1, (cy + 1)·h // grid)` and likewise
+  columns, the integer mean; each cell's level `value · levels // 256`;
+  read row by row, or `center-out`: by ring `max(|2r - (g-1)|, |2c - (g-1)|)`,
+  then row, then column.
+* **diff**: for consecutive grids, `d = after - before`; `|d| < 8` is `D0`,
+  `< 48` is `D±1`, else `D±2`, the sign of `d`; each frame's after a `|`.
+* **video**: frames are a directory's images in name order (and its
+  `audio.wav`), or a video file ffmpeg turns into `fps` (8) frames a second of
+  64 x 64 and a 16 kHz mono track; the first `frames` (16) are read; frame
+  `t` is `|`, then itself as an image if `t = 0` or `t` is a multiple of
+  `keyframe` (0: never again), else its difference from frame `t - 1`, then
+  the audio units `units[t·U // F : (t+1)·U // F]`.
+
+A media encoder keeps each file's symbols by absolute path, size and
+modification time. Labels come from `input<TAB>verdict` files, paths
+relative to the file; every fifth example is held out (every fourth would
+hold out one class of the alternating synthetic sets). The synthetic sets
+(`make_dataset`) are drawn from each port's own generator.
+
+### 14.1 Decisions
+
+* **Symbols, not features.** A machine reads a string; everything is turned
+  into one, so nothing about the machine changes for a new kind of data.
+* **Keyframes and deltas for video,** the representation video codecs use:
+  most of a clip is what changed, and what changed is what a moving thing is.
+* **Integers throughout,** so a picture is the same string in both ports and
+  a network file classifies it the same way in either.
+* **The repository's own acoustic units for audio,** the tokenizer the
+  network already uses for English, rather than a second front end.
 

@@ -906,6 +906,87 @@ class TestNetwork(unittest.TestCase):
             self.assertIn("exact plural", cli("evaluate", "--load", t, "--task", "plural"))
 
 
+class TestMedia(unittest.TestCase):
+    """Text, audio, images and video as symbols, and networks taught from them."""
+
+    def test_every_image_format_reads_the_same_picture(self):
+        from latticefsm.media import cells, read_image
+        with tempfile.TemporaryDirectory() as d:
+            f = media_files(d)
+            rgb = read_image(f["rgb.png"])
+            self.assertEqual(rgb[:2], (13, 11))
+            for other in ("rgb.bmp", "rgb.ppm", "rgba.png"):
+                self.assertEqual(read_image(f[other]), rgb, other)
+            w, h, px = read_image(f["gray.png"])
+            self.assertEqual(px[:3], [0, 23, 46])
+            self.assertEqual(read_image(f["pal.png"])[2][:4], [0, 76, 149, 255])
+            self.assertEqual(len(cells(rgb, 4)), 16)
+            with self.assertRaises(ValueError):
+                read_image(b"GIF89a")
+
+    def test_cells_orders_and_differences(self):
+        from latticefsm.media import cells, diff_symbols, image_symbols, order, text_symbols
+        self.assertEqual(order(3, "center-out")[0], 4)
+        self.assertEqual(sorted(order(4, "center-out")), list(range(16)))
+        self.assertEqual(order(4, "center-out")[:4], [5, 6, 9, 10])
+        img = (4, 4, [0] * 8 + [255] * 8)
+        self.assertEqual(cells(img, 2), [0, 0, 255, 255])
+        self.assertEqual(image_symbols([0, 63, 64, 255], 4), ["L0", "L0", "L1", "L3"])
+        self.assertEqual(diff_symbols([100] * 4, [107, 108, 52, 151]), ["D0", "D+1", "D-2", "D+2"])
+        self.assertEqual(diff_symbols([100] * 4, [93, 92, 148, 147]), ["D0", "D-1", "D+2", "D+1"])
+        self.assertEqual(text_symbols("Hi, Bob!\t2"), list("hi,_bob!_2"))
+
+    def test_a_video_is_keyframes_differences_and_its_sound(self):
+        from latticefsm.media import audio_units, video_symbols
+        with tempfile.TemporaryDirectory() as d:
+            f = media_files(d)
+            units = audio_units(f["wav"])
+            self.assertTrue(units and all(u.startswith("q") for u in units))
+            v = video_symbols(f["clip"])
+            self.assertEqual(v.count("|"), 8)
+            self.assertEqual(v[1:65], [s for s in v[1:65] if s.startswith("L")])
+            self.assertTrue(any(s.startswith("D+") for s in v) and any(s.startswith("D-") for s in v))
+            self.assertEqual([s for s in v if s.startswith("q")], units)
+            quiet = video_symbols(f["clip"], audio=False)
+            self.assertFalse(any(s.startswith("q") for s in quiet))
+
+    def test_networks_read_every_kind_and_keep_them_in_the_file(self):
+        from latticefsm.network import ENCODERS, Network, load_network
+        with tempfile.TemporaryDirectory() as d:
+            f = media_files(d)
+            inputs = {"text": "the cat sat", "audio": f["wav"], "image": f["rgb.png"], "diff": f["clip"],
+                      "video": f["clip"], "enc": "the cat sat"}
+            for kind, x in inputs.items():
+                net = Network(f"{kind}>3").compile(accepting=[0])
+                self.assertIsInstance(net.encoder, ENCODERS["phonetic" if kind == "enc" else kind])
+                net.fit([x, x], [True, False], epochs=2)
+                path = os.path.join(d, f"{kind}.json")
+                net.save(path)
+                back = load_network(path)
+                self.assertEqual(back.to_dict(), net.to_dict(), kind)
+                self.assertEqual(back.predict([x]), net.predict([x]), kind)
+                self.assertEqual(back.encoder._symbols_of(x) if kind != "enc" else back._symbols(x),
+                                 net.encoder._symbols_of(x) if kind != "enc" else net._symbols(x))
+            img = Network("image>3")
+            img.encoder.encode(f["rgb.png"])
+            self.assertEqual(len(img.encoder._cached), 1)
+
+    def test_the_command_line(self):
+        def cli(*args):
+            out = subprocess.run([sys.executable, "-m", "latticefsm", "network", *args], cwd=ROOT,
+                                 capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            return out.stdout
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIn("labels.tsv", cli("make-data", "--kind", "image", "--out", d, "--count", "10"))
+            out = cli("fit", "--arch", "image>3", "--data", os.path.join(d, "labels.tsv"), "--epochs", "2",
+                      "--save", os.path.join(d, "n.json"))
+            self.assertIn("8 examples taught x 2 epochs, 2 held out", out)
+            self.assertIn("accuracy", cli("evaluate", "--load", os.path.join(d, "n.json"), "--data",
+                                          os.path.join(d, "labels.tsv")))
+            self.assertIn("64 symbols", cli("encode", os.path.join(d, "img000.ppm"), "--arch", "image>3"))
+
+
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
 class TestRustParity(unittest.TestCase):
     """The two ports agree on everything that does not draw: the stimulation and adaptation records, number for
@@ -965,6 +1046,35 @@ class TestRustNetworkParity(unittest.TestCase):
                 for cmd in (("evaluate", "--task", "plural"), ("translate", "cat", "glass", "drum", "The dog sat."),
                             ("predict", "boxes")):
                     self.assertEqual(writer(*cmd, "--load", path), reader(*cmd, "--load", path), cmd)
+
+
+@unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+class TestRustMediaParity(unittest.TestCase):
+    """Both ports turn every file into the same symbols: every image format and PNG filter, frames and their
+    differences, a sound track, a video file through ffmpeg - so a network file reads the same data the same way."""
+
+    def encode(self, cmd, arch, x):
+        return subprocess.run([*cmd, "network", "encode", x, "--arch", arch], cwd=ROOT, check=True,
+                              capture_output=True, text=True).stdout
+
+    def test_the_same_symbols(self):
+        py, rust = [sys.executable, "-m", "latticefsm"], [RUST]
+        with tempfile.TemporaryDirectory() as d:
+            f = media_files(d)
+            cases = [("image>3", f[k]) for k in ("rgb.png", "gray.png", "rgba.png", "pal.png", "rgb.bmp", "rgb.ppm",
+                                                  "gray.pgm")]
+            cases += [("audio>3", f["wav"]), ("diff>3", f["clip"]), ("video>3", f["clip"]),
+                      ("text>3", "Hello, World! It's 42.")]
+            import shutil as sh
+            if sh.which("ffmpeg"):
+                mp4 = os.path.join(d, "clip.mp4")
+                made = subprocess.run(["ffmpeg", "-loglevel", "error", "-framerate", "8", "-i",
+                                       os.path.join(f["clip"], "frame%02d.ppm"), "-i", f["wav"], "-pix_fmt", "yuv420p",
+                                       "-shortest", mp4], capture_output=True)
+                if made.returncode == 0:
+                    cases.append(("video>3", mp4))
+            for arch, x in cases:
+                self.assertEqual(self.encode(py, arch, x), self.encode(rust, arch, x), (arch, x))
 
 
 class TestRustCompressionParity(unittest.TestCase):
@@ -1060,6 +1170,80 @@ class TestRustWalkParity(unittest.TestCase):
                                      text=True).stdout
                 states, _ = core.run(text)
                 self.assertTrue(out.startswith(" -> ".join(map(str, states))), (text, out, states))
+
+
+def write_png(path, width, height, rgb, ctype=2, palette=None):
+    """A PNG written the long way, every row with the next of the five filters, for the readers to undo."""
+    import struct as st
+    import zlib as zl
+    ch = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype]
+    stride = width * ch
+    raw, prev = bytearray(), bytes(stride)
+    for y in range(height):
+        line = bytes(rgb[y * stride:(y + 1) * stride])
+        f = y % 5
+        out = bytearray([f])
+        for i in range(stride):
+            a = line[i - ch] if i >= ch else 0
+            b, c = prev[i], prev[i - ch] if i >= ch else 0
+            pred = [0, a, b, (a + b) // 2, None][f]
+            if f == 4:
+                p_ = a + b - c
+                pa, pb, pc = abs(p_ - a), abs(p_ - b), abs(p_ - c)
+                pred = a if pa <= pb and pa <= pc else b if pb <= pc else c
+            out.append((line[i] - pred) & 255)
+        raw += out
+        prev = line
+
+    def chunk(tag, body):
+        return st.pack(">I", len(body)) + tag + body + st.pack(">I", zl.crc32(tag + body) & 0xFFFFFFFF)
+    data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", st.pack(">IIBBBBB", width, height, 8, ctype, 0, 0, 0))
+    if palette is not None:
+        data += chunk(b"PLTE", bytes(palette))
+    data += chunk(b"IDAT", zl.compress(bytes(raw))) + chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def write_bmp(path, width, height, rgb):
+    import struct as st
+    stride = (width * 3 + 3) // 4 * 4
+    body = bytearray()
+    for y in reversed(range(height)):
+        row = bytearray()
+        for x in range(width):
+            r, g, b = rgb[(y * width + x) * 3:(y * width + x) * 3 + 3]
+            row += bytes([b, g, r])
+        body += row + bytes(stride - len(row))
+    header = b"BM" + st.pack("<IHHI", 54 + len(body), 0, 0, 54) + st.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0,
+                                                                         len(body), 0, 0, 0, 0)
+    with open(path, "wb") as f:
+        f.write(header + body)
+
+
+def media_files(d):
+    """One picture in every format the readers take, a directory of frames with a sound track, and a spoken word."""
+    from latticefsm.media import make_dataset
+    w, h = 13, 11
+    rgb = [(x * 19 + y * 7 + c * 50) % 256 for y in range(h) for x in range(w) for c in range(3)]
+    gray = [(x * 23 + y * 11) % 256 for y in range(h) for x in range(w)]
+    files = {}
+    write_png(os.path.join(d, "rgb.png"), w, h, rgb)
+    write_png(os.path.join(d, "gray.png"), w, h, gray, ctype=0)
+    write_png(os.path.join(d, "rgba.png"), w, h, [v for i in range(w * h) for v in rgb[i * 3:i * 3 + 3] + [128]], ctype=6)
+    write_png(os.path.join(d, "pal.png"), w, h, [i % 4 for i in range(w * h)], ctype=3,
+              palette=[0, 0, 0, 255, 0, 0, 0, 255, 0, 255, 255, 255])
+    write_bmp(os.path.join(d, "rgb.bmp"), w, h, rgb)
+    with open(os.path.join(d, "rgb.ppm"), "wb") as f:
+        f.write(f"P6\n# a comment\n{w} {h}\n255\n".encode() + bytes(rgb))
+    with open(os.path.join(d, "gray.pgm"), "w") as f:
+        f.write(f"P2\n{w} {h}\n15\n" + " ".join(str(v * 15 // 255) for v in gray) + "\n")
+    for name in ("rgb.png", "gray.png", "rgba.png", "pal.png", "rgb.bmp", "rgb.ppm", "gray.pgm"):
+        files[name] = os.path.join(d, name)
+    clips = make_dataset("video", os.path.join(d, "video"), count=2)
+    files["clip"] = os.path.join(os.path.dirname(clips), "clip000")
+    files["wav"] = os.path.join(files["clip"], "audio.wav")
+    return files
 
 
 def strip(value):
