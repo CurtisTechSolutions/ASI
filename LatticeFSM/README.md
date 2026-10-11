@@ -99,6 +99,7 @@ cd LatticeFSM
 make test                      # cargo test + clippy + fmt, then the Python tests with parity
 make ngram-train && make ngram-predict TEXT="the brain is"   # predict the next thing
 make autotrain                 # the corpus, then rounds with a local LLM through Ollama
+make benchmark                 # generation tokens/second for the chain and N-gram models
 make demo                      # learn a language, be stimulated, let time pass (Rust)
 make serve                     # backend :8000 + frontend :5173 with hot reload - open http://127.0.0.1:5173/ (Ctrl-C stops both)
 make serve-prod                # one process, no npm: the API and the committed frontend on http://127.0.0.1:8000/
@@ -116,6 +117,45 @@ make translate-fit && make translate TEXT="cat dog"             # English to Eng
 python3 -m latticefsm demo     # the same from the Python reference
 rust/target/release/latticefsm --help
 ```
+
+`make serve` works with macOS's bundled Bash 3.2 as well as newer Bash.
+It waits for the backend to accept connections before starting Vite. Ctrl-C,
+SIGTERM, or either server exiting stops both process groups; a server failure
+is reported to make. `make serve-test` checks this without Rust or npm builds.
+
+### Generation throughput
+
+```bash
+make benchmark
+make benchmark BENCH_MODEL=chain UNIT=char BENCH_RUNS=500 BENCH_TOKENS=256
+make benchmark BENCH_MODEL=ngram CORPUS=data/corpus BENCH_TEXT="the brain is" TEMPERATURE=0.7 SEED=1
+# Measure an existing model, with machine-readable results:
+rust/target/release/latticefsm benchmark --model chain --load chain.json.gz --json
+```
+
+The release-build benchmark trains fresh models on `CORPUS` (every tenth
+sequence held out, prediction during training disabled), then times repeated
+continuations of `BENCH_TEXT`. It uses the same generation methods as the
+`chain generate` and `ngram generate` commands. Building, reading/training or
+loading models, tokenizing the prompt, the `BENCH_WARMUP` warmup runs (default
+3), and printing results are excluded. No model files are written.
+
+Each line reports the model, token unit, vocabulary size (including the three
+special entries), **actual generated tokens**, elapsed seconds and tokens/s.
+Prompt tokens, end-of-sequence markers and warmup output are not counted.
+Generation stops at end-of-sequence, so `BENCH_TOKENS` (default 128) is a cap
+per run, not the number used in the numerator. If every continuation is empty,
+throughput is zero. The denominator includes the work to detect sequence end
+and the generation method's output allocations; it measures serial in-process
+generation, not HTTP or UI throughput.
+
+`BENCH_MODEL=all` (default) runs chain and N-gram; `BENCH_RUNS=100` controls
+measured repetitions. `UNIT=word`, `ORDER=3`, `NODES=8`, `CONFIDENCE=0.9`,
+`TEMPERATURE=0` and `SEED=1` use the existing make settings. The random stream
+is reset after warmup. Use the same corpus, prompt, unit, model settings and
+hardware when comparing runs; word-token and character-token rates measure
+different work. Increase `BENCH_RUNS` for more stable timings. With `--load`,
+the saved model supplies its unit and architecture.
 
 The demo, abridged:
 

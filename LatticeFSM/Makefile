@@ -79,13 +79,18 @@ OUT       ?=
 KIND      ?= image
 DATA      ?= data/$(KIND)
 COUNT     ?= 60
+BENCH_MODEL ?= all
+BENCH_RUNS ?= 100
+BENCH_WARMUP ?= 3
+BENCH_TOKENS ?= 128
+BENCH_TEXT ?= the brain is
 
 MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseline $(BASELINE) --seed $(SEED) --language $(LANGUAGE) \
                $(if $(filter-out 0,$(EVERY)),--compress-every $(EVERY) --compress-precision $(PRECISION),) \
                $(if $(FOCUS),--focus $(FOCUS),) $(if $(LEARN_FOCUS),--learn-focus,) $(if $(SKIP),--skip,) \
                $(if $(filter-out 0,$(REARRANGE)),--rearrange-every $(REARRANGE),)
 
-.PHONY: help all install build test check rust-test lint fmt demo train run teach accuracy table stats tick stimulate \
+.PHONY: help all install build test check rust-test lint fmt benchmark serve-test demo train run teach accuracy table stats tick stimulate \
         serve serve-backend serve-frontend serve-prod experiments results \
         compress expand core-run focus skip rearrange swap \
         network network-fit network-evaluate network-predict network-summary translate translate-fit py-network \
@@ -127,10 +132,18 @@ fmt: ## Format the Rust code
 test: ## The Rust tests, clippy and the formatter check; the Python tests, parity included; the frontend's tests
 	cd rust && $(CARGO) test && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 	$(MAKE) --no-print-directory build
-	$(PY) -m unittest tests.test_latticefsm
+	$(PY) -m unittest tests.test_latticefsm tests.test_serve
 	cd frontend && npm test
 
 check: test ## The same
+
+benchmark: build ## Generation tokens/second (BENCH_MODEL=all|chain|ngram, BENCH_RUNS=100, BENCH_TOKENS=128)
+	$(BIN) benchmark --model $(BENCH_MODEL) --data "$(CORPUS)" --unit $(UNIT) --order $(ORDER) \
+	  --nodes $(NODES) --confidence $(CONFIDENCE) --seed $(SEED) --temperature $(or $(TEMPERATURE),0) \
+	  --runs $(BENCH_RUNS) --warmup $(BENCH_WARMUP) --max-tokens $(BENCH_TOKENS) --text "$(BENCH_TEXT)"
+
+serve-test: ## Check the two-process launcher with the system Bash (including macOS Bash 3.2)
+	$(PY) -m unittest tests.test_serve -v
 
 ##@ Looking at it (Rust)
 demo: build ## Learn LANGUAGE by reward and punishment, be stimulated, let time pass
@@ -303,21 +316,24 @@ SERVE_FRONTEND = cd frontend && VITE_PROXY_TARGET=http://$(HOST):$(PORT) exec $(
 serve: build frontend/node_modules ## The backend and the frontend together: open http://FRONTEND_HOST:FRONTEND_PORT/ (Ctrl-C stops both)
 	@set -m; \
 	$(SERVE_BACKEND) & backend=$$!; \
-	stop() { for p in $$backend $${frontend:-}; do kill -- -$$p 2>/dev/null; kill $$p 2>/dev/null; done; wait 2>/dev/null; }; \
+	stop() { trap - EXIT; trap '' INT TERM; for p in $$backend $${frontend:-}; do kill -TERM -- -$$p 2>/dev/null; done; wait $$backend $${frontend:-} 2>/dev/null; }; \
 	trap 'stop' EXIT; \
-	trap 'echo " stopping the backend and the frontend" >&2; trap - EXIT; stop; exit 0' INT TERM; \
+	trap 'echo " stopping the backend and the frontend" >&2; exit 0' INT TERM; \
+	ready=0; \
 	for _ in $$(seq 1 100); do \
-	  (exec 3<>/dev/tcp/$(HOST)/$(PORT)) 2>/dev/null && break; \
+	  (exec 3<>/dev/tcp/$(HOST)/$(PORT)) 2>/dev/null && { ready=1; break; }; \
 	  kill -0 $$backend 2>/dev/null || { echo "the backend did not start (is port $(PORT) free?)" >&2; exit 1; }; \
 	  sleep 0.1; \
 	done; \
+	[ $$ready -eq 1 ] || { echo "the backend did not become ready on $(HOST):$(PORT)" >&2; exit 1; }; \
 	( $(SERVE_FRONTEND) ) & frontend=$$!; \
 	echo ""; \
 	echo "  backend   http://$(HOST):$(PORT)/api/   (and the built app at http://$(HOST):$(PORT)/)"; \
 	echo "  frontend  http://$(FRONTEND_HOST):$(FRONTEND_PORT)/   - open this one: hot reload, /api proxied to the backend"; \
 	echo "  Ctrl-C stops both"; \
 	echo ""; \
-	wait -n; status=$$?; \
+	while kill -0 $$backend 2>/dev/null && kill -0 $$frontend 2>/dev/null; do sleep 0.1; done; \
+	if kill -0 $$backend 2>/dev/null; then wait $$frontend; else wait $$backend; fi; status=$$?; \
 	echo "one of the two stopped (exit $$status); stopping the other" >&2; \
 	exit $$status
 
@@ -343,7 +359,7 @@ py-experiments: ## The same eight from the Python reference, written to RESULTS/
 
 ##@ The Python reference
 py-test: ## The Python tests (parity with the Rust crate included when it is built)
-	$(PY) -m unittest tests.test_latticefsm
+	$(PY) -m unittest tests.test_latticefsm tests.test_serve
 
 py-demo: ## The demo from the Python package
 	$(PY) -m latticefsm demo $(MACHINE_OPTS) --episodes $(EPISODES)
