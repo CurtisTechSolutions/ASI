@@ -157,11 +157,13 @@ others as routes it once tried.
 lock, answers JSON under `/api/`, and serves the React frontend from
 `frontend/dist` at every other path. The frontend is the ModelKit one's
 shape — Vite, plain JSX, one stylesheet, no UI or chart libraries, settings
-remembered in the browser — with five tabs for this model:
+remembered in the browser — with these tabs:
 
 | tab | what it does |
 |---|---|
+| **Talk** | talk to a network of machines the server holds beside the machine: type English and a translator (`enc>dec` by default) answers in English - or a classifier yes or no - with how each layer got there; reinforce a reply or correct it and it learns on the spot; make another network from an architecture string, teach it the plural or past-tense task (or a language, or a labels file), save and load it |
 | **Matrix** | the matrix one symbol-slice at a time: each row a state, each cell the probability of moving to that column's state, shaded by it, with the channel's width and `seen` beneath; click a cell for every field of the edge and its weighting function |
+| **3D** | the whole matrix as a cube of cells - source top to bottom, symbol into the page, target across - drawn on a canvas by hand: drag to turn, scroll to zoom, hover to read, click for the edge's record; colour by probability, seen, width or net; only the inner shells, the touched edges or one symbol; the central node, the central vertical vector and the focus node outlined |
 | **Run** | read a string at a stimulation of your choosing, traversing it or asking quietly; reward or punish the last run |
 | **Train** | teach a language for some episodes, with the accuracy curve and the greedy table it ends in |
 | **Time** | let ticks pass; raise or set the stimulation |
@@ -629,7 +631,8 @@ something across it, and these do not yet have one (`Limits`).
   temperature 0.3 over 40). A decoder writes one sound per symbol it reads,
   so a translation is at most as many sounds as the input plus the
   encoder's two boundaries; a parallel block in front of it doubles what it
-  reads. It generalises to unseen words hardly at all.
+  reads. It generalises to unseen words hardly at all. The server holds one
+  network beside its machine (the Talk tab); the other tabs show the machine.
 * Media: images, frame differences and video train but mostly stay near
   chance (above); credit reaches back along a run only as far as its
   discount, and a verdict about a whole picture is credited at its last

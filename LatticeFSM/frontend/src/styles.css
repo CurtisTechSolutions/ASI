@@ -2269,3 +2269,25 @@ pre.code.wrap {
   color: var(--accent-2, #b8862b);
   font-weight: 700;
 }
+
+/* The 3D view of the matrix: a canvas the page's width, square-ish */
+.cube-canvas {
+  display: block;
+  width: 100%;
+  height: min(72vh, 720px);
+  margin: 0.4rem 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  touch-action: none;
+  cursor: grab;
+}
+
+.cube-canvas:active {
+  cursor: grabbing;
+}
+
+.cube-readout {
+  min-height: 1.4em;
+  font-size: 12px;
+}

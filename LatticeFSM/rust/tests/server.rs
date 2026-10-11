@@ -351,3 +351,58 @@ fn query_strings_decode() {
         ]
     );
 }
+
+#[test]
+fn the_network_talks_and_learns() {
+    let addr = serve(9);
+    let (status, info) = request(&addr, "GET", "/api/network", None).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(info.str_or("architecture", ""), "enc>dec");
+    assert!(info.bool_or("translator", false));
+
+    let talk = parse(r#"{"text":"cat"}"#).unwrap();
+    let (_, reply) = request(&addr, "POST", "/api/network/talk", Some(&talk)).unwrap();
+    assert_eq!(reply.str_or("reply", "?"), "");
+    assert_eq!(reply.get("trace").unwrap().as_array().unwrap().len(), 2);
+
+    let teach = parse(r#"{"text":"cat","reply":"cats","times":6}"#).unwrap();
+    let (status, taught) = request(&addr, "POST", "/api/network/teach", Some(&teach)).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(taught.get("after").unwrap().str_or("reply", ""), "cats");
+
+    let fit = parse(r#"{"task":"plural","epochs":6}"#).unwrap();
+    let (_, fitted) = request(&addr, "POST", "/api/network/fit", Some(&fit)).unwrap();
+    assert!(
+        fitted
+            .get("exact")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .as_f64()
+            .unwrap()
+            > 0.5
+    );
+    let (_, reply) = request(
+        &addr,
+        "POST",
+        "/api/network/talk",
+        Some(&parse(r#"{"text":"dog"}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(reply.str_or("reply", ""), "dogs");
+    let decoder = &reply.get("trace").unwrap().as_array().unwrap()[1];
+    assert_eq!(decoder.str_or("english", ""), "dogs");
+
+    let new = parse(r#"{"arch":"text>3"}"#).unwrap();
+    let (_, info) = request(&addr, "POST", "/api/network/new", Some(&new)).unwrap();
+    assert!(!info.bool_or("translator", true));
+    let teach = parse(r#"{"text":"hello","reply":"yes","times":2}"#).unwrap();
+    let (status, taught) = request(&addr, "POST", "/api/network/teach", Some(&teach)).unwrap();
+    assert_eq!(status, 200);
+    assert!(["yes", "no"].contains(&taught.get("after").unwrap().str_or("reply", "")));
+    let bad = parse(r#"{"arch":"13>"}"#).unwrap();
+    let (status, _) = request(&addr, "POST", "/api/network/new", Some(&bad)).unwrap();
+    assert_eq!(status, 400);
+}

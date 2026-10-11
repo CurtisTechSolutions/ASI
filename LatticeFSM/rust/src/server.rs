@@ -15,6 +15,7 @@
 //! | `GET /api/stats` | [`Machine::stats`] |
 //! | `GET /api/matrix?symbol=a` | the `S × S` slice for one symbol: probabilities and a summary of every edge |
 //! | `GET /api/edge?source=&symbol=&target=` | one edge, every field |
+//! | `GET /api/cube` | the whole matrix at once, for the 3D view: every cell's probability, seen, width and net, row-major |
 //! | `GET /api/table` | the greedy transition table |
 //! | `GET /api/languages` | the languages `train` knows |
 //! | `POST /api/run` | `{text, stimulation?, temperature?, quiet?}`: a run, traversed unless quiet |
@@ -35,6 +36,12 @@
 //! | `POST /api/rearrange` | `{full?}` or `{axis, i, j}`: let the nodes rearrange themselves toward the centre, or swap two |
 //! | `POST /api/save` | `{path}`: write the machine |
 //! | `POST /api/load` | `{path}`: read a machine in place of the old |
+//! | `GET /api/network` | the network the server also holds (`enc>dec` until another is made): its blocks and summary |
+//! | `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` |
+//! | `POST /api/network/talk` | `{text}`: the network's reply - English from a translator, yes / no from a classifier - and its trace |
+//! | `POST /api/network/teach` | `{text, reply, times?}`: teach it that `reply` is the answer to `text` |
+//! | `POST /api/network/fit` | `{task?, epochs?}` (plural, past), `{language, episodes?}`, or `{data, epochs?}` (a labels file) |
+//! | `POST /api/network/save`, `/api/network/load` | `{path}`: write or read the network |
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -45,12 +52,14 @@ use crate::http::{self, Handler, Request, Response};
 use crate::json::Json;
 use crate::languages::{examples, language, LANGUAGES};
 use crate::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
+use crate::network::{load_network, Credit, Merge, Network, Step, Vote, LAYER_DISCOUNT};
 use crate::rng::Rng;
 use crate::VERSION;
 
-/// The machine behind the server, and where the prebuilt frontend lives.
+/// The machine behind the server, the network beside it (made on first use), and where the prebuilt frontend lives.
 pub struct Service {
     pub machine: Mutex<Machine>,
+    pub network: Mutex<Option<Network>>,
     pub frontend: Option<PathBuf>,
 }
 
@@ -58,6 +67,7 @@ impl Service {
     pub fn new(machine: Machine) -> Arc<Service> {
         Arc::new(Service {
             machine: Mutex::new(machine),
+            network: Mutex::new(None),
             frontend: None,
         })
     }
@@ -66,6 +76,7 @@ impl Service {
     pub fn with_frontend(machine: Machine, dir: Option<PathBuf>) -> Arc<Service> {
         Arc::new(Service {
             machine: Mutex::new(machine),
+            network: Mutex::new(None),
             frontend: dir,
         })
     }
@@ -80,6 +91,9 @@ impl Service {
         if !req.path.starts_with("/api/") {
             return self.serve_static(req);
         }
+        if req.path == "/api/network" || req.path.starts_with("/api/network/") {
+            return self.network_route(req);
+        }
         let mut m = match self.machine.lock() {
             Ok(m) => m,
             Err(_) => return Response::error(500, "the machine's lock is poisoned"),
@@ -91,6 +105,7 @@ impl Service {
                 .with("shape", m.stats().get("shape").cloned().unwrap_or(Json::Null))),
             ("GET", "stats") => Ok(m.stats()),
             ("GET", "matrix") => matrix(&m, req.param("symbol")),
+            ("GET", "cube") => Ok(cube(&m)),
             ("GET", "edge") => edge(&m, req),
             ("GET", "table") => Ok(table(&m)),
             ("GET", "languages") => Ok(Json::Array(
@@ -198,6 +213,46 @@ impl Service {
 }
 
 impl Service {
+    fn network_route(&self, req: &Request) -> Response {
+        let mut guard = match self.network.lock() {
+            Ok(g) => g,
+            Err(_) => return Response::error(500, "the network's lock is poisoned"),
+        };
+        if guard.is_none() {
+            match new_network(&Json::object()) {
+                Ok(n) => *guard = Some(n),
+                Err(e) => return Response::error(500, &e),
+            }
+        }
+        let net = guard.as_mut().expect("made above");
+        let result = match (req.method.as_str(), &req.path[5..]) {
+            ("GET", "network") => Ok(network_info(net)),
+            ("POST", "network/new") => new_network(&req.body).map(|fresh| {
+                *net = fresh;
+                network_info(net)
+            }),
+            ("POST", "network/talk") => talk(net, req.body.str_or("text", "")),
+            ("POST", "network/teach") => network_teach(net, &req.body),
+            ("POST", "network/fit") => network_fit(net, &req.body),
+            ("POST", "network/save") => {
+                let path = req.body.str_or("path", "network.json.gz").to_string();
+                net.save(&path)
+                    .map(|_| Json::object().with("saved", path.as_str().into()))
+            }
+            ("POST", "network/load") => load_network(req.body.str_or("path", "network.json.gz")).map(|loaded| {
+                *net = loaded;
+                network_info(net)
+            }),
+            ("GET", _) | ("POST", _) => Err("no such route".to_string()),
+            _ => return Response::error(405, "method not allowed"),
+        };
+        match result {
+            Ok(v) => Response::ok(&v),
+            Err(msg) if msg == "no such route" => Response::error(404, &msg),
+            Err(msg) => Response::error(400, &msg),
+        }
+    }
+
     fn serve_static(&self, req: &Request) -> Response {
         let Some(root) = &self.frontend else {
             return Response::error(
@@ -305,6 +360,45 @@ fn matrix(m: &Machine, symbol: Option<&str>) -> Result<Json, String> {
             Json::Array(m.accepting().into_iter().map(Json::from).collect()),
         )
         .with("rows", Json::Array(rows)))
+}
+
+/// The whole matrix at once: per cell `(s, a, t)`, row-major, its probability in its row, `seen`, width and net;
+/// with the shape, the symbols, the central node, the focus node, each cell's shell and where the machine is.
+fn cube(m: &Machine) -> Json {
+    use crate::geometry::{center, focus_node, shell};
+    let shape = m.lattice.shape();
+    let (clock, life) = (m.clock, m.life);
+    let (mut prob, mut seen, mut width, mut net, mut shells) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for s in 0..shape.0 {
+        for a in 0..shape.1 {
+            let probs = m.probabilities(s, a, None, None);
+            for (e, p) in m.lattice.row(s, a).iter().zip(probs) {
+                prob.push(p);
+                seen.push(e.seen as f64);
+                width.push(e.width_at(clock, life));
+                net.push(e.net());
+                shells.push(shell(shape, s, a, e.target) as f64);
+            }
+        }
+    }
+    let triple = |(x, y, z): (usize, usize, usize)| Json::Array(vec![x.into(), y.into(), z.into()]);
+    Json::object()
+        .with("shape", triple(shape))
+        .with("symbols", Json::strings(m.alphabet()))
+        .with("center", triple(center(shape)))
+        .with("focus", m.focus().map(Json::from).unwrap_or(Json::Null))
+        .with("focus_node", triple(focus_node(shape, m.focus())))
+        .with("state", m.state.into())
+        .with(
+            "accepting",
+            Json::Array(m.accepting().into_iter().map(Json::from).collect()),
+        )
+        .with("probability", Json::numbers(&prob))
+        .with("seen", Json::numbers(&seen))
+        .with("width", Json::numbers(&width))
+        .with("net", Json::numbers(&net))
+        .with("shell", Json::numbers(&shells))
 }
 
 fn edge(m: &Machine, req: &Request) -> Result<Json, String> {
@@ -622,4 +716,183 @@ pub fn default_frontend_dir() -> Option<PathBuf> {
         .iter()
         .map(PathBuf::from)
         .find(|dir| dir.join("index.html").is_file())
+}
+
+/// A network from `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}`;
+/// without `arch`, `enc>dec`: English in, English out.
+pub fn new_network(body: &Json) -> Result<Network, String> {
+    let alphabet: Vec<String> = body
+        .str_or("alphabet", DEFAULT_ALPHABET)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_string())
+        .collect();
+    let d = Settings::default();
+    let settings = Settings {
+        temperature: body.num("temperature", d.temperature),
+        discount: body.num("discount", d.discount),
+        life: body.num("life", d.life),
+        ..d
+    };
+    let mut net = Network::from_architecture(
+        body.str_or("arch", "enc>dec"),
+        &alphabet,
+        body.num("seed", 1.0) as u64,
+        Merge::parse(body.str_or("merge", "concat"))?,
+        Vote::parse(body.str_or("vote", "majority"))?,
+        &settings,
+    )?;
+    let accepting: Option<Vec<usize>> = body
+        .get("accepting")
+        .and_then(Json::as_array)
+        .map(|a| a.iter().filter_map(|v| v.as_f64().map(|n| n as usize)).collect());
+    let accepting = accepting.or_else(|| net.decoder().is_none().then(|| vec![0]));
+    net.compile(
+        accepting.as_deref(),
+        body.num("layer_discount", LAYER_DISCOUNT),
+        1.0,
+        1.0,
+        Credit::parse(body.str_or("credit", "shared"))?,
+    )?;
+    Ok(net)
+}
+
+fn network_info(net: &Network) -> Json {
+    let layers: Vec<Json> = net
+        .layers()
+        .iter()
+        .map(|l| {
+            let (s, a, t) = l.machine.lattice.shape();
+            Json::object()
+                .with("name", l.name.as_str().into())
+                .with("shape", Json::Array(vec![s.into(), a.into(), t.into()]))
+                .with("touched", l.machine.lattice.touched().count().into())
+                .with("decoder", l.is_decoder().into())
+        })
+        .collect();
+    Json::object()
+        .with("architecture", net.architecture.as_str().into())
+        .with("reads", net.encoder().map_or("symbols", |e| e.source.kind()).into())
+        .with("translator", (net.decoder().is_some()).into())
+        .with("layers", Json::Array(layers))
+        .with("words", net.words.len().into())
+        .with("examples", (net.examples as f64).into())
+        .with("epochs", (net.epochs as f64).into())
+        .with("credit", net.credit.as_str().into())
+        .with("summary", net.summary().into())
+}
+
+fn step_json(s: &Step) -> Json {
+    Json::object()
+        .with("layer", s.layer.as_str().into())
+        .with("read", s.read.as_str().into())
+        .with("states", Json::Array(s.states.iter().map(|&x| x.into()).collect()))
+        .with("wrote", s.wrote.as_str().into())
+        .with("accepted", s.accepted.into())
+        .with("english", s.english.as_deref().map(Json::from).unwrap_or(Json::Null))
+}
+
+/// The network's reply to `text`: what a translator writes, in English, or a classifier's yes or no; and its trace.
+fn talk(net: &mut Network, text: &str) -> Result<Json, String> {
+    let (steps, output, accepted) = net.trace(text)?;
+    let translator = net.decoder().is_some();
+    let mut j = Json::object()
+        .with("text", text.into())
+        .with("translator", translator.into())
+        .with("accepted", accepted.into())
+        .with("trace", Json::Array(steps.iter().map(step_json).collect()));
+    if translator {
+        let sounds = net.sounds(text)?;
+        j = j
+            .with("reply", net.translate(text)?.into())
+            .with("sounds", Json::strings(&sounds));
+    } else {
+        j = j
+            .with("reply", if accepted { "yes" } else { "no" }.into())
+            .with("output", output.into());
+    }
+    Ok(j)
+}
+
+/// `{text, reply, times?}`: a translator taught the pair, a classifier the verdict (yes / no); then its new reply.
+fn network_teach(net: &mut Network, body: &Json) -> Result<Json, String> {
+    let text = body.str_or("text", "").to_string();
+    let reply = body.str_or("reply", "").to_string();
+    let times = (body.num("times", 1.0) as usize).clamp(1, 1000);
+    let mut right = 0;
+    let mut of = 0;
+    if net.decoder().is_some() {
+        for _ in 0..times {
+            let (r, n) = net.teach_pair(&text, &reply)?;
+            right += r;
+            of += n;
+        }
+    } else {
+        let label = crate::media::verdict(&reply)?;
+        for _ in 0..times {
+            right += net.teach(&text, label)? as usize;
+            of += 1;
+        }
+    }
+    let after = talk(net, &text)?;
+    Ok(Json::object()
+        .with("right", right.into())
+        .with("of", of.into())
+        .with("after", after))
+}
+
+/// Examples taught and held out.
+type Split = (Vec<(String, bool)>, Vec<(String, bool)>);
+
+/// `{task, epochs?}` for a translator, `{language, episodes?}` or `{data, epochs?}` for a classifier.
+fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
+    if let Some(task) = body.get("task").and_then(Json::as_str) {
+        let pairs = crate::phonetic::task(task)?;
+        let (train, test) = crate::phonetic::split(&pairs, 4);
+        let h = net.fit_pairs(&train, body.num("epochs", 20.0) as usize, Some(&test))?;
+        let mut shown = Vec::new();
+        for (x, y) in train.iter().take(3).chain(test.iter().take(3)) {
+            shown.push(Json::strings(&[x.clone(), net.translate(x)?, y.clone()]));
+        }
+        return Ok(Json::object()
+            .with("sounds", Json::numbers(&h.sounds))
+            .with("exact", Json::numbers(&h.exact))
+            .with("held_out", Json::numbers(&h.val_exact))
+            .with("examples", Json::Array(shown))
+            .with("network", network_info(net)));
+    }
+    let (train, test): Split = if let Some(path) = body.get("data").and_then(Json::as_str) {
+        let files = net
+            .encoder()
+            .is_some_and(|e| !matches!(e.source.kind(), "phonetic" | "text"));
+        let rows = crate::media::read_labels(path, files)?;
+        let mut tr = Vec::new();
+        let mut te = Vec::new();
+        for (i, (x, y)) in rows.into_iter().enumerate() {
+            let e = (x, crate::media::verdict(&y)?);
+            if i % 5 == 4 {
+                te.push(e)
+            } else {
+                tr.push(e)
+            }
+        }
+        (tr, te)
+    } else {
+        let lang = language(body.str_or("language", "even-b"))?;
+        let mut rng = Rng::new(body.num("seed", 1.0) as u64);
+        let tr = examples(&lang, body.num("episodes", 2000.0) as usize, &mut rng, 6);
+        let te = examples(&lang, 200, &mut rng, 6);
+        (tr, te)
+    };
+    let epochs = body.num("epochs", 1.0) as usize;
+    let mut held = Vec::new();
+    let mut taught = Vec::new();
+    for _ in 0..epochs {
+        taught.push(net.fit(&train, 1)?[0]);
+        held.push(net.evaluate(&test)?);
+    }
+    Ok(Json::object()
+        .with("taught", Json::numbers(&taught))
+        .with("held_out", Json::numbers(&held))
+        .with("network", network_info(net)))
 }

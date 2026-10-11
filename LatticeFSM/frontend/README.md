@@ -6,7 +6,13 @@ in `../rust/README.md`). It is the ModelKit frontend's shape
 (`../../ModelKit/frontend`): the same stylesheet, form fields, alert, SVG
 line chart, settings store and status-bar pattern, with this model's panels.
 
-Tabs: **Walk** (the focus - a slider over the central vertical vector, none,
+Tabs: **Talk** (a chat with the network the server holds: type English, a
+translator answers in English - or a classifier yes or no - with each layer's
+part; reinforce or correct a reply and it learns; make, teach, save and load
+networks), **3D** (the whole matrix as a cube drawn on a canvas by hand: drag,
+zoom, hover, click; colour by probability, seen, width or net; shells,
+touched edges, one symbol; the centre, the vector and the focus node
+outlined), **Walk** (the focus - a slider over the central vertical vector, none,
 or learned from the input, with what the learner reads off a string - skips
 and their margin, and the nodes rearranging themselves or two of them
 swapped), **Matrix** (one symbol-slice of the matrix at a time — on the default
@@ -50,8 +56,9 @@ the API URLs in a build that is served from another origin.
 |---|---|
 | `src/App.jsx` | the shell: header, status bar, the tab strip, the panels (all mounted, the active one shown) |
 | `src/api.js` | the fetch wrapper: one `ApiError` shape, one function per route |
-| `src/matrix.js` | pure helpers: cell shading, a run written out, curve points, the greedy table's rows |
+| `src/matrix.js` | pure helpers: cell shading, a run written out, curve points, the greedy table's rows, a cube cell's index, value and projection |
 | `src/components/MatrixPanel.jsx`, `EdgeCard.jsx` | the slice and the edge's record |
+| `src/components/TalkPanel.jsx`, `CubePanel.jsx` | the conversation with a network; the 3D view of the matrix |
 | `src/components/RunPanel.jsx`, `WalkPanel.jsx`, `TrainPanel.jsx`, `TimePanel.jsx`, `CompressPanel.jsx`, `MachinePanel.jsx` | the other tabs |
 | `src/components/StatusBar.jsx` | the poll of `/api/stats` |
 | `src/components/Fields.jsx`, `Alert.jsx`, `LineChart.jsx`, `src/hooks/useStoredState.js`, `src/storage.js`, `src/util.js`, `src/styles.css` | ModelKit's, as they are (the storage prefix renamed; `util.js` cut to what this app uses; a block for the matrix added to the stylesheet) |

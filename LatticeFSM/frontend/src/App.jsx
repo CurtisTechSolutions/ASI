@@ -9,9 +9,13 @@ import TimePanel from "./components/TimePanel.jsx";
 import MachinePanel from "./components/MachinePanel.jsx";
 import CompressPanel from "./components/CompressPanel.jsx";
 import WalkPanel from "./components/WalkPanel.jsx";
+import TalkPanel from "./components/TalkPanel.jsx";
+import CubePanel from "./components/CubePanel.jsx";
 
 const TABS = [
+  { id: "talk", label: "Talk", Component: TalkPanel },
   { id: "matrix", label: "Matrix", Component: MatrixPanel },
+  { id: "cube", label: "3D", Component: CubePanel },
   { id: "run", label: "Run", Component: RunPanel },
   { id: "walk", label: "Walk", Component: WalkPanel },
   { id: "train", label: "Train", Component: TrainPanel },

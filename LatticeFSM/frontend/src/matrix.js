@@ -80,3 +80,33 @@ export function stimulationFrom(text) {
   const n = Number(text);
   return Number.isFinite(n) && n >= 0 ? n : undefined;
 }
+
+/** The cell at row-major index `i` of an `S x A x S` cube: `[source, symbol, target]`. */
+export function cellAt(shape, i) {
+  const [, a, t] = shape;
+  return [Math.floor(i / (a * t)), Math.floor(i / t) % a, i % t];
+}
+
+/**
+ * A cube value mapped onto 0..1 for drawing (net onto -1..1): probability as it is, seen on a log scale against the
+ * busiest edge, width on a log scale between its bounds (0.05 .. 20; the rest width 1 is 0.5), net clipped.
+ */
+export function cubeValue(mode, v, max = 1) {
+  if (!Number.isFinite(v)) return 0;
+  if (mode === "seen") return max > 0 ? Math.log1p(Math.max(0, v)) / Math.log1p(max) : 0;
+  if (mode === "width") return Math.min(1, Math.max(0, (Math.log(Math.max(v, 1e-9)) + Math.log(20)) / (2 * Math.log(20))));
+  if (mode === "net") return Math.min(1, Math.max(-1, v));
+  return Math.min(1, Math.max(0, v));
+}
+
+/** A point turned by `yaw` about the vertical axis and `pitch` about the horizontal, then seen in perspective from
+ * `distance` along z: `[screen x, screen y, depth, scale]` with the centre of the view at the origin. */
+export function project([x, y, z], yaw, pitch, distance, focal) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const x1 = cy * x + sy * z;
+  const z1 = -sy * x + cy * z;
+  const y2 = cp * y - sp * z1;
+  const z2 = sp * y + cp * z1;
+  const scale = focal / Math.max(1e-6, distance - z2);
+  return [x1 * scale, -y2 * scale, z2, scale];
+}

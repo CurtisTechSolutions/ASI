@@ -82,6 +82,13 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/rearrange` | `{full?}` or `{axis, i, j}` | let the nodes rearrange themselves toward the centre (one pass, or until settled), or swap two states or symbols |
 | `POST /api/save` | `{path}` | write the machine (`.json` or `.json.gz`) |
 | `POST /api/load` | `{path}` | read a machine in place of the old |
+| `GET /api/cube` | | the whole matrix at once, for the 3D view: per cell (row-major) its probability, seen, width, net and shell; the shape, symbols, centre and focus node |
+| `GET /api/network` | | the network the server holds beside the machine (`enc>dec` until another is made): architecture, layers, summary |
+| `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` | a fresh network |
+| `POST /api/network/talk` | `{text}` | its reply - English from a translator (with its sounds), yes / no from a classifier - and the trace, layer by layer |
+| `POST /api/network/teach` | `{text, reply, times?}` | teach it that `reply` answers `text` (a pair, or a verdict); its reply after |
+| `POST /api/network/fit` | `{task, epochs?}`, `{language, episodes?, epochs?}` or `{data, epochs?}` | teach it a task (plural, past), a language, or a labels file |
+| `POST /api/network/save`, `/api/network/load` | `{path}` | write or read the network |
 
 Errors are `{"error": "..."}` with 400 (a bad request), 404 (no such route)
 or 405. `tests/server.rs` exercises every route over a real socket.

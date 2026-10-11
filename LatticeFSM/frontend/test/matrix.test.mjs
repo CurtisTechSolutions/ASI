@@ -4,6 +4,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  cellAt,
+  cubeValue,
+  project,
   cellStyle,
   curvePoints,
   describeRun,
@@ -90,4 +93,31 @@ test("the stimulation field is a number or nothing", () => {
   assert.equal(stimulationFrom(""), undefined);
   assert.equal(stimulationFrom("-1"), undefined);
   assert.equal(stimulationFrom("abc"), undefined);
+});
+
+test("cellAt reads a row-major cube index back as source, symbol, target", () => {
+  assert.deepEqual(cellAt([13, 13, 13], 0), [0, 0, 0]);
+  assert.deepEqual(cellAt([13, 13, 13], 6 * 169 + 6 * 13 + 6), [6, 6, 6]);
+  assert.deepEqual(cellAt([3, 2, 3], 17), [2, 1, 2]);
+});
+
+test("cubeValue maps each measure onto 0..1, net onto -1..1", () => {
+  assert.equal(cubeValue("probability", 0.25), 0.25);
+  assert.equal(cubeValue("probability", 2), 1);
+  assert.equal(cubeValue("seen", 0, 10), 0);
+  assert.equal(cubeValue("seen", 10, 10), 1);
+  assert.ok(Math.abs(cubeValue("width", 1) - 0.5) < 1e-12);
+  assert.equal(cubeValue("width", 20), 1);
+  assert.equal(cubeValue("net", -3), -1);
+  assert.equal(cubeValue("probability", NaN), 0);
+});
+
+test("project turns and sees a point in perspective", () => {
+  const [x, y, z, s] = project([1, 0, 0], 0, 0, 10, 100);
+  assert.ok(Math.abs(x - 10) < 1e-9 && Math.abs(y) < 1e-9 && z === 0 && Math.abs(s - 10) < 1e-9);
+  const [x2, , z2] = project([1, 0, 0], Math.PI / 2, 0, 10, 100);
+  assert.ok(Math.abs(x2) < 1e-9 && Math.abs(z2 + 1) < 1e-9);
+  const near = project([0, 0, 5], 0, 0, 10, 100)[3];
+  const far = project([0, 0, -5], 0, 0, 10, 100)[3];
+  assert.ok(near > far);
 });

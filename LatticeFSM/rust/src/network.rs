@@ -478,6 +478,7 @@ pub struct Step {
     pub accepted: bool,
     pub english: Option<String>,
     stress: Option<bool>,
+    sounds: Vec<String>,
 }
 
 /// Symbols written out: run together when each is one character, else separated by spaces.
@@ -684,6 +685,7 @@ impl Block {
                         accepted: false,
                         english: None,
                         stress: e.stress(),
+                        sounds: symbols.iter().map(|&i| e.labels[i].clone()).collect(),
                     });
                 }
                 (symbols.to_vec(), false)
@@ -710,6 +712,10 @@ impl Block {
                         accepted: run.accepted,
                         english: None,
                         stress: l.labels.as_ref().map(|_| l.stress),
+                        sounds: match &l.labels {
+                            Some(labels) => out.iter().map(|&i| labels[i].clone()).collect(),
+                            None => Vec::new(),
+                        },
                     });
                 }
                 (out, run.accepted)
@@ -1095,11 +1101,6 @@ fn count_encoders(b: &Block) -> usize {
     }
 }
 
-/// The sounds as text, back as tokens.
-fn sounds_of(text: &str) -> Vec<String> {
-    text.split_whitespace().map(String::from).collect()
-}
-
 impl Network {
     /// Build `spec` over `alphabet`.  Each layer's machine is seeded `seed` plus its index, depth first, unless its
     /// spec says otherwise.
@@ -1325,7 +1326,8 @@ impl Network {
         }
         for step in steps.iter_mut() {
             if let Some(stress) = step.stress {
-                step.english = Some(self.english(&sounds_of(&step.wrote), stress));
+                let sounds = step.sounds.clone();
+                step.english = Some(self.english(&sounds, stress));
             }
         }
         let written = self.root.written();
