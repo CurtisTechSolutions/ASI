@@ -81,7 +81,7 @@ there · D-081 the stream: turns commit, the window streams apart
 D-075 the least-punished traversal
 
 **Part XVI — The encoding** · D-071 the encoding is a dial, and it belongs to the model ·
-D-073 words as symbols (superseded by it)
+D-073 words as symbols (superseded by it) · D-094 anything is bytes, and its bytes are base64 symbols
 
 **Part XVII — A third implementation** · D-072 the Rust port · D-074 how parity is measured ·
 D-076 HTTPS through the system curl · D-077 the rest of Python, by area
@@ -2888,6 +2888,77 @@ versioned and defended.
 **Lives in** `radixnet/wordnet.py`, `radixnet/encoding.py` (the alphabet),
 `go/radixnet/words.go`, `rust/src/words.rs`, `SPEC-WordNGrams.md`,
 `Makefile` (`word-*`)
+
+---
+
+### D-094 — Anything is bytes, and its bytes are base64 symbols: one unit for text, images and video alike
+
+**Status** Accepted · 2026-10-11 · **Layer** representation · **Extends** D-071 (the dial), D-082 (content
+converted where it comes in)
+
+**Context — my reason** *"Add an option for a new encoder/decoder. Let's add in a base64 encoder and decoder that
+encodes everything from text, images, videos, etc... to base64, then do an N-gram learning method."* Every unit
+the dial had read text: letters, words, the sounds of words, or - the acoustic units - a recording heard through a
+tokenizer. Content that is not text had nowhere to go. A picture could become a media text (`img:...`, D-036) with
+an encoder of its own in front of it, and anything else - a video, an archive, a binary - could not be learned.
+
+**Decision** A sixth unit, `base64` (`b64`), in all three ports, their command lines, their servers and the
+frontend:
+* **A unit is one base64 symbol** of RFC 4648's standard alphabet, six bits of the content's bytes, with no
+  padding. The graph is built over the symbols exactly as over letters (`CHARACTER_UNITS`: one code point, one
+  unit), so the dials mean what they always did: `base64:3:1` is a sliding window of 18 bits, `base64:4:4` one
+  gram per three bytes. The model file carries `{"unit": "base64", "n", "stride"}`.
+* **Content is converted where it comes in, never inside.** A data file, a text given inline and a prefix become
+  symbols once, at the boundary - the acoustic units' rule, which hear a `.wav` at data load. `units()` stays the
+  identity on a text of symbols, because base64 is not idempotent: a label of the graph, already symbols, must cut
+  into the symbols it was made of.
+* **A file is texts by what it holds.** A UTF-8 file gives one text per line, each line's bytes as they are,
+  blank lines skipped. Anything else, and any file under `--whole-file`, gives one text of every byte it holds,
+  so its decoding is the file again. A `.zip` is not unpacked and a `.wav` is not heard: they are bytes too.
+* **A prefix is the symbols its bytes fix**, `floor(8n / 6)` of them, and the walk finishes the byte the last one
+  leaves open. What the model wrote is measured from where its bytes part from the prefix's: asked `the d`, an
+  answer of `the log` reports `log`, not `og`.
+* **Whatever comes back decodes.** The decoder takes whatever was written: strays are skipped, a dangling symbol
+  is dropped and leftover bits are ignored. Every answer therefore carries `decoded` (its bytes as UTF-8, one
+  U+FFFD per maximal invalid subpart, the same text in all three ports), `decoded_continuation` and
+  `decoded_bytes`. `--decode-to FILE` and the frontend's 💾 Save bytes write the bytes themselves.
+* **The model's own words go back as they are.** Over HTTP an inline text is content, unless the request says
+  `"symbols": true`. The frontend's likes and ratings say it, because what they hand the model is what it said.
+* **An upload keeps its bytes.** One that is not UTF-8 text is stored as it was sent, not as replaced text. A model
+  of symbols learns the file, and a text model reads it as it always did.
+
+**Alternatives rejected**
+* **Converting inside `units()`.** Every label and every prefix the graph handles would be encoded a second time.
+* **Asking a prefix with its padded last symbol.** The padding is zeros, so the walk would start from a symbol the
+  training data rarely holds; the floor leaves the open bits to the model, which has seen what follows them.
+* **Holding the walk's first step to the prefix's open bits.** It is right, and it is a new constraint in every
+  search of three ports. Measuring the continuation from where the bytes part keeps the report honest without it.
+* **A media format per kind of file** (`img:`, `aud:`, ... `vid:`). Each needs its own encoder, size and decoder.
+  Base64 needs none and takes everything, at the price of learning bytes rather than pictures.
+* **Guessing whether an inline text is symbols already.** `hello` is both, so the request says.
+
+**Consequences** The n-gram is as short-sighted in symbols as it is in letters.
+* A model of one file walks that file back, byte for byte.
+* A model of many files mixes them wherever their grams meet.
+* The same bytes are written three ways, one per offset modulo three, and the model learns all three.
+* Content grows by a third and every symbol is a step, so a large video is a long walk, and slow to train in
+  Python (Q-8).
+* The commands that work on the model's own words (`converse`, `correct`, the LLM teaching loops) convert nothing.
+* `words` refuses a model of symbols as it refuses one of letters.
+
+**Lives in**
+* Python: `radixnet/encoding.py`, `radixnet/graph.py`, `../ModelKit/modelkit/cli.py`, `../ModelKit/modelkit/api.py`.
+* Go: `go/radixnet/encoding.go`, `go/radixnet/base64.go` (the codec, `LossyUTF8`, `UTF8Check`),
+  `go/radixnet/source.go`, `go/radixnet/diff.go`, `go/radixnet/words.go`, `go/radixnet/model.go`,
+  `../ModelKit/go/cmd/radixnet-count/main.go`, `../ModelKit/go/server/service.go`, `../ModelKit/go/server/http.go`,
+  `../ModelKit/go/server/uploads.go`.
+* Rust: `rust/src/encoding.rs`, `rust/src/model.rs`, `rust/src/report.rs`, `../ModelKit/rust/src/cli.rs`,
+  `../ModelKit/rust/src/bin/radixnet.rs`, `../ModelKit/rust/src/service.rs`, `../ModelKit/rust/src/multipart.rs`,
+  `../ModelKit/rust/src/gan.rs`.
+* Frontend: `../ModelKit/frontend/src/decoded.js`, `../ModelKit/frontend/src/components/SaveBytesButton.jsx`, the
+  Predict and Generate panels, and the upload boxes.
+* Tests: `tests/test_base64_unit.py`, `../ModelKit/tests/test_base64.py`, `../ModelKit/frontend/test/decoded.test.mjs`
+  and the parity suites.
 
 ---
 

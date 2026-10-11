@@ -171,6 +171,8 @@ the full account of the dial in both implementations. Everything below is that d
 WINDOW = 3               # the default n of the n-gram
 CHARS, WORDS = "char", "word"   # what one unit is
 PHONES, SYLLABLES = "phone", "syllable"   # ... or a sound, or a syllable: the text read through ../PhoneticTokenizer
+BASE64 = "base64"        # ... or a base64 symbol: six bits of the bytes of any content (D-094)
+CHARACTER_UNITS = (CHARS, BASE64)          # the units a text slices into code point by code point
 START_LABEL = "<s>"      # reserved label of the START node (id 0)
 END_LABEL   = "</s>"     # reserved label of the END node   (id 1)
 
@@ -235,6 +237,30 @@ Not the model's (it lives in `../ModelKit/modelkit/media.py` since D-093, beside
 network **predicted** is rarely clean, so characters outside the alphabet are dropped, a single dangling character
 goes with them, the padding is completed and `repaired` reports whether any of that changed the text. The payload is
 returned as it decodes; each format pads or truncates it to the length it needs.
+
+```python
+BASE64_ALPHABET = "ABC...xyz0123456789+/"   # RFC 4648's standard alphabet, the 64 symbols in their order
+def base64_text(data: bytes) -> str          # bytes -> symbols, no padding: 3 bytes -> 4 symbols, 1 -> 2, 2 -> 3
+def base64_prefix(data: bytes) -> str        # the symbols every continuation of data shares: floor(8 * len / 6)
+def base64_bytes(text: str) -> bytes         # symbols -> bytes, whatever was written: strays skipped, a dangling
+                                             # symbol dropped, the bits a final partial group has over ignored
+def is_utf8(data: bytes) -> bool
+def base64_file_texts(data, whole_file=False) -> list[str]   # UTF-8: one text per line (the line's bytes as they
+                                             # are, ASCII-blank lines skipped); anything else, or whole_file: one
+def decoded_prediction(encoding, full_text, prefix=b"") -> dict   # {decoded, decoded_continuation, decoded_bytes}
+# Encoding.is_base64; text_input / prefix_input (content given as text, in), content_text (a file's bytes, in),
+# content_bytes (a text of the model, out) - the identity, or UTF-8, for every other unit
+```
+
+The **base64 unit** (D-094): content becomes symbols where it comes in - a data file, a text given inline, a
+prefix - and the graph learns the n-grams of the symbols exactly as it learns letters (`CHARACTER_UNITS`: `units`,
+`length`, `join`, `has_unit_prefix`, `reverse` and the graph's fast path treat both alike). The conversion is never
+inside `units()`: base64 is not idempotent, so a label of the graph, already symbols, must cut into the same
+symbols it was made of. A prefix is asked as the symbols its bytes fix; its last byte is usually split across two
+symbols and the walk finishes it, so `decoded_continuation` is what the answer holds past the bytes it shares with
+the prefix. `decoded` reads the bytes as UTF-8 with one U+FFFD per maximal invalid subpart - Python's `replace`,
+Rust's `from_utf8_lossy`, and a decoder written out in Go - so the three ports print the same text. Not to be
+confused with `repair_base64` above: that reads the payload of a media text, padding and all, and is the kit's.
 
 ---
 
@@ -767,11 +793,11 @@ output only, one JSON document on stdout).
 
 | command | args | behaviour |
 |---|---|---|
-| `train` | `--data FILE [FILE...]` (one training text per line; `--whole-file` treats each file as one text), `--epochs`, `--lr`, `--act-lr`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume` (load latest checkpoint from dir first), `--out` (defaults to --model) | trains (loads --model first if it exists), prints per-epoch loss/perplexity/nodes/edges/compression, saves model |
-| `predict` | `--prefix TEXT`, `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature` | prints continuation + full text + cost + path; beam: top / bottom tables |
-| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT`, `--temperature`, `--step-penalty`, `--beam` | prints samples (#, cost, probability, reached END, text) |
+| `train` | `--data FILE [FILE...]` (one training text per line; `--whole-file` treats each file as one text; a model of base64 symbols reads every file as its bytes, `base64_file_texts`), `--epochs`, `--lr`, `--act-lr`, `--batch-size`, `--no-compress`, `--checkpoint-dir`, `--checkpoint-every`, `--keep`, `--resume` (load latest checkpoint from dir first), `--out` (defaults to --model) | trains (loads --model first if it exists), prints per-epoch loss/perplexity/nodes/edges/compression, saves model |
+| `predict` | `--prefix TEXT` or `--prefix-file FILE` (one is required), `--length N`, `--mode dijkstra\|beam\|sample`, `--k`, `--beam`, `--to-end`, `--step-penalty`, `--temperature`, `--decode-to FILE` | prints continuation + full text + cost + path; beam: top / bottom tables. A model of base64 symbols is asked the symbols the prefix's bytes fix and adds `prefix_symbols`, `decoded`, `decoded_continuation`, `decoded_bytes` (and `prefix_file`, `decoded_to`) - section 4, D-094 |
+| `generate` | `--count`, `--max-length`, `--mode beam\|sample\|dijkstra`, `--prefix TEXT` or `--prefix-file FILE`, `--temperature`, `--step-penalty`, `--beam`, `--decode-to FILE` | prints samples (#, cost, probability, reached END, text); a model of base64 symbols also what each holds, and `--decode-to` writes every sample as its bytes (`FILE-1.ext`, `FILE-2.ext`, ...) |
 | `say TEXT [TEXT...]` | `--data FILE` (one text per line, `-` for stdin), `--out FILE`, `--play`, `--raw`, `--rate`, `--pitch`, `--tempo`, `--gain`, `--polish N` | the output decoder (section 4.1, D-088): every text spoken in the model's units, one utterance each, closed by the END sentinel; needs no model file (`--encoding` says how a text is read); JSON: `texts`, `utterances` (`text`, `spelled`, `tokens`, `samples`, `seconds`), `count`, `seconds`, `rate`, `sink`, `encoding`, `decoder`, `polish`. `predict --speak FILE` and `generate --speak FILE` add a `speech` block (the same record plus `out`) and write their outputs as speech; `speech decode` speaks a text that carries no waveform |
-| `score` | `--text` or `--data FILE` | log-prob per text |
+| `score` | `--text` or `--data FILE` | log-prob per text (a model of base64 symbols: of the bytes) |
 | `converse` | `--opening TEXT`, `--turns 6`, `--mode beam\|sample`, `--context 12`, `--max-length 60`, `--k 5`, `--beam`, `--temperature`, `--step-penalty`, `--speakers A,B`, `--partner FILE`, `--allow-repeats`, `--allow-word-repeats`, `--explore 3`, `--no-learn`, `--save` / `--out`, `--stream` | the model talks to itself (section 22); prints `speaker: text` lines with cost, probability, the picked-up words and flags (given / new topic / repeat), then the `radixnet feedback --bad-text …` command that punishes the duplicates it could not avoid; JSON: `turns`, `count`, `speakers`, `mode`, `opening`, `kind`, `partner_kind`, `repeats`, `transcript`. `--stream` prints the conversation as it happens (section 22.1): each turn the moment it is spoken and, dimmed on a terminal, the window before it - the context it continues, the draft it caught itself on, where it backed up to, what it found; with `--json` one JSON object per line and the document last, as `{"event": "done", ...}` |
 | `2nrl` | `--bad FILE`, `--good FILE`, `--neg-epochs`, `--pos-epochs`, `--neg-lr`, `--pos-lr`, `--out` | runs two_nrl, saves |
 | `invert` | `--out` | inverts and saves |
@@ -805,8 +831,8 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/train` | `{"texts": [...]}` or `{"text": "..."}` (split on newlines, blank lines dropped) + `"epochs","lr","act_lr","batch_size","auto_compress"` | `{"job": {...}}` (async) |
 | GET `/api/job` | | current/last job status |
 | POST `/api/job/stop` | | sets the stop event; returns job status |
-| POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode`; a model of sounds: plus `spelled`, `spelled_continuation` on the answer and every row (D-090) |
-| POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search; a model of sounds: plus `spelled` on every sample (D-090) |
+| POST `/api/predict` | `{"prefix","length","mode","to_end","step_penalty","temperature"}`; `mode: "beam"` (both models): `k`, `beam` | `{"prefix","continuation","full_text","cost","step_costs","path","node_ids","expanded","reached_end"}`; beam: plus `top`, `bottom`, `k`, `beam`, `mode`; a model of sounds: plus `spelled`, `spelled_continuation` on the answer and every row (D-090); a model of base64 symbols: the prefix asked as the symbols its bytes fix (as it is with `"symbols": true`), plus `prefix_symbols`, and `decoded`, `decoded_continuation`, `decoded_bytes` on the answer and every row (D-094) |
+| POST `/api/generate` | `{"count","max_length","mode": "beam"\|"sample"\|"dijkstra","prefix","temperature","step_penalty","beam","seed"}` | `{"samples": [{"text","full_text","cost","probability","path","node_ids","step_costs","reached_end"}]}` — beam: the `count` most likely complete texts from the prediction search; a model of sounds: plus `spelled` on every sample (D-090); a model of base64 symbols: plus `prefix_symbols`, and the decoded fields on every sample (D-094) |
 | POST `/api/converse` | `{"opening","turns","mode","context","max_length","k","beam","temperature","step_penalty","seed","speakers","history","partner","avoid_repeats","avoid_word_repeats","explore","learn","think","think_depth"}` | `{"kind","partner","speakers","count","turns": [Turn.to_dict()],"repeats"}` — `partner` names another kind kept in memory (400 when it is not loaded); `history` continues a conversation and only the new turns are returned; `repeats` are the duplicates spoken anyway, ready for POST `/api/feedback` `bad` (section 22); `think` (default on) has a voice that caught itself repeating think before it backs up, `think_depth` deep, and its `rethink` carries the `thought` (section 36); a turn of a model of sounds carries `spelled` and `spelled_reply` (D-090) |
 | POST `/api/converse/stream` | the same body as `/api/converse` | the same conversation as it happens (section 22.1): `application/x-ndjson`, one JSON object per line - `look` / `draft` / `caught` / `backtrack` / `found` / `stuck` (the window) and `turn` (the answer), each with `index` and `speaker`, then `{"event": "done", ...}` with the `/api/converse` document; a request refused before the first line is an ordinary 400, a failure after it the last line `{"event": "error", "error"}`. `ApiHandler._send_stream` writes it chunked, the headers waiting for the first event (`StreamedResponse`) |
 | POST `/api/say` | `{"texts" \| "text" (one per line), "rate", "pitch", "tempo", "gain", "polish"}` | `{"wav_base64", "rate", "samples", "seconds", "encoding", "decoder": "voice" \| "vocoder", "count", "utterances": [{"text", "spelled", "tokens", "samples", "seconds"}]}` — the output decoder (section 4.1, D-088): the texts spoken in the model's units, one utterance each; only the encoding is read under the model's lock. `POST /api/speech/decode` answers the same way for a text that carries no waveform (and adds `"decoder": "waveform"` to what it decodes). 400 for no texts, a pitch or tempo of 0, or a token that is not a unit of the acoustic codebook |
@@ -814,9 +840,9 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/voice/turn` | the recording (the audio forms) and / or `{"transcript", "history", "answer", "train", "epochs", "lr", "batch_size", "learn_reply", "persona", "topic", "url", "ollama_model", "timeout", "mode", "max_length", "context", "k", "beam", "temperature", "seed", "explore", "learn", "guard", "provenance", "speak", "voice_rate", "pitch", "tempo", "gain", "polish", "rate", "codec", "pair", "unique", "normalise", "waveform", "backend", "language"}` | `{"transcript", "line", "token", "texts", "audio", "units", "asr", "trained", "reply": {"by", "text", "spelled", "turn", "ollama_error"}, "by", "spoken", "taught", "history", "encoding", "answer", "seconds", "rate", "wav_base64"}` — one turn of talking with the model by voice (section 25.9, D-089): heard, trained on, answered, spoken, the reply taught when Ollama wrote it; 400 for nothing said, a bad option or unreadable audio, 409 while a job runs |
 | POST `/api/voice/turn/stream` | the same body | `application/x-ndjson`: `heard`, `trained`, `reply`, `audio` (`pcm_base64` chunks of 16-bit PCM at `rate`), `spoken`, `taught`, then `{"event": "done", ...}` with the document (without `wav_base64`) |
 | POST `/api/think` | `{"about","mode","k","beam","max_length","temperature","step_penalty","seed","depth","questions","learn"}` | `{"kind", **Thought.to_dict()}` — one thought from the `THINK` sentinel (`thinking.think`, section 36): `about` thinks at the node where that text ends and teaches the model to stop and think there (`learn`, default on - a thought changes the model); `depth` / `questions` bound how it questions itself; 400 for a mode, a depth or a node that is not one; a thought of a model of sounds, and each question, carries `spelled` (D-090) |
-| POST `/api/score` | `{"text"}` | score dict |
+| POST `/api/score` | `{"text", "symbols"}` | score dict (a model of base64 symbols: of the text's bytes, unless `symbols`) |
 | GET `/api/encoding` | | `{"window","stride","overlap","start_label","end_label","back_label","think_label","configurable": false,"note"}` — the text encoding every kind shares. Read-only: the window is part of the model format, not a setting (section 31.4) |
-| POST `/api/encoding/preview` | `{"text"}` | the same document plus `{"chars","windows","count","decoded","round_trip","unknown_windows","kind","path": {"known","reason","labels","node_ids","decoded","nodes","compressed"}}` — one text through the encoder, back through `Decoder.decode_trigrams`, and through the graph's own (possibly merged) node labels with `Decoder.decode_path`. `path.known` is false with the reason: shorter than one window, windows never seen (listed in `unknown_windows`), or a text every window of which is known that still does not run from START to END |
+| POST `/api/encoding/preview` | `{"text", "symbols"}` (a model of base64 symbols previews the symbols of the text's bytes and adds `symbols`) | the same document plus `{"chars","windows","count","decoded","round_trip","unknown_windows","kind","path": {"known","reason","labels","node_ids","decoded","nodes","compressed"}}` — one text through the encoder, back through `Decoder.decode_trigrams`, and through the graph's own (possibly merged) node labels with `Decoder.decode_path`. `path.known` is false with the reason: shorter than one window, windows never seen (listed in `unknown_windows`), or a text every window of which is known that still does not run from START to END |
 | GET `/api/model/attention` | | `{"kind","attention": {"on","blur","weights","ngram","stride","unit","units","applies","default_blur"}}` — the active model's attention band (section 38); `weights` is the band over one gram, null while it is off; `applies` is false for a kind that is never corrected |
 | POST `/api/model/attention` | `{"on","blur"}` | `{"kind","attention","stats"}` — a blur alone switches the band on, `on: true` without one uses the blur it had (else `default_blur`), `on: false` switches it off; 400 for a blur outside `[0, 1]` and for a kind that is never corrected |
 | POST `/api/model/attention/preview` | `{"wrong","right","blur"}` | `{"kind","attention","blur","weights","changes","wrong","right"}`, each side `{"text","units","grams","spans","writer","charges","focus","end"}` — where one correction would land, gram by gram, under the writer rule and under a band (`blur`, else the model's, else the default); changes nothing |
@@ -848,7 +874,7 @@ as a **job** (one at a time; a second request gets 409). Job status:
 | POST `/api/images/tutor` | the same image forms *or* `{"texts": ["img:…"]}`, + `size`, `encoder`, `lead`, `length`, `attempts`, `mode`, `temperature`, `threshold`, `blame` | the same, for a picture it was shown |
 | POST `/api/speech/decode` | `{"text", "codec"}` | `{"wav_base64", "codec", "rate", "channels", "samples", "seconds", "bytes", "repaired"}` — an encoded *or predicted* waveform as playable audio |
 
-`/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required.
+`/api/train`, `/api/2nrl` and `/api/evolve/start` also accept upload names: `"files"` (train), `"bad_files"` / `"good_files"` (2NRL), `"corpus_files"` (evolve), each read as one text per non-blank line, or as one text per file with `"whole_file": true`. Inline texts and files combine; at least one text is required. A model of base64 symbols (D-094) reads an inline text as its UTF-8 bytes - unless the request says `"symbols": true`, the model's own words given back (the frontend's likes and ratings send it to `/api/feedback`) - and an upload as the bytes it holds (`base64_file_texts`); an upload that is not UTF-8 text is stored byte for byte, so it holds exactly what was sent.
 | GET `/` and other paths | | serves `frontend_dir` if it exists (SPA fallback to `index.html`, correct mime types, no path traversal), else a minimal built-in HTML page explaining how to build the frontend |
 
 `create_server(host, port, model_path=None, checkpoint_dir=None, frontend_dir=None, backend="auto", device=None, seed=0) -> (server, service)`
@@ -2140,10 +2166,11 @@ func ParseEncoding(spec string) (Encoding, error)   // "word:2:1", "char:5:group
 | `char:6:3` | groups of six, half of each shared with the next |
 | `word:2:1`, `word:3:1` | word bigrams and word trigrams |
 | `word:1:1` | one word per node |
+| `base64:3:1`, `base64:4:4` | n-grams of base64 symbols - any content's bytes, six bits a symbol; groups of four are three bytes each (D-094) |
 
 **Units, not characters.** `Encoding.Units(text)` returns a `Units` view - the normalised text plus the byte
-offset of every unit - so `Slice(from, to)` is O(1) whichever the unit is. For `Chars` a unit is a code point and
-the text is untouched; for `Words` a unit is a `strings.Fields` word and the text is normalised to single spaces
+offset of every unit - so `Slice(from, to)` is O(1) whichever the unit is. For `Chars` (and `Base64`, whose symbols are
+code points too) a unit is a code point and the text is untouched; for `Words` a unit is a `strings.Fields` word and the text is normalised to single spaces
 (a word encoding keeps the words, not the layout). Everything the graph measures moves to units:
 
 | quantity | was | is |
@@ -2168,7 +2195,7 @@ The three structural operations generalise exactly:
 **Persistence.** The `encoding` block of the graph document is written **only when it is not the default**, so an
 ordinary model file is byte for byte what it always was and the existing parity tests are unaffected. Both sides
 read the block, so a word model written by either continues in the other:
-`../ModelKit/tests/test_go_parity.py::TestGoEncodingParity` trains the same corpus under nine encodings on both sides and
+`../ModelKit/tests/test_go_parity.py::TestGoEncodingParity` trains the same corpus under fourteen encodings on both sides and
 compares labels, counts, edges, weights and the RNG state, has each side continue the other's file, and holds the
 two to the same prediction in words.
 
