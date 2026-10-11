@@ -6,7 +6,10 @@ in `../rust/README.md`). It is the ModelKit frontend's shape
 (`../../ModelKit/frontend`): the same stylesheet, form fields, alert, SVG
 line chart, settings store and status-bar pattern, with this model's panels.
 
-Tabs: **Talk** (a chat with the network the server holds: type English, a
+Tabs: **Predict** (the N-gram model: type and the likeliest next tokens
+follow as bars, a click takes one; continue the text and reward or punish
+what it wrote; train on files or pasted text, or auto-train with Ollama, the
+held-out perplexity charted round by round), **Talk** (a chat with the network the server holds: type English, a
 translator answers in English - or a classifier yes or no - with each layer's
 part; reinforce or correct a reply and it learns; make, teach, save and load
 networks), **3D** (the whole matrix as a cube drawn on a canvas by hand: drag,
@@ -58,6 +61,7 @@ the API URLs in a build that is served from another origin.
 | `src/api.js` | the fetch wrapper: one `ApiError` shape, one function per route |
 | `src/matrix.js` | pure helpers: cell shading, a run written out, curve points, the greedy table's rows, a cube cell's index, value and projection |
 | `src/components/MatrixPanel.jsx`, `EdgeCard.jsx` | the slice and the edge's record |
+| `src/components/PredictPanel.jsx` | next-token prediction, generation, training and autotrain |
 | `src/components/TalkPanel.jsx`, `CubePanel.jsx` | the conversation with a network; the 3D view of the matrix |
 | `src/components/RunPanel.jsx`, `WalkPanel.jsx`, `TrainPanel.jsx`, `TimePanel.jsx`, `CompressPanel.jsx`, `MachinePanel.jsx` | the other tabs |
 | `src/components/StatusBar.jsx` | the poll of `/api/stats` |

@@ -11,6 +11,8 @@
 #   make serve         the backend (the Rust API, :8000) and the frontend (Vite with hot reload, :5173) together
 #   make serve-prod    one process: the API and the built frontend/dist on :8000
 #   make translate-fit && make translate TEXT="cat bus"   English to English through a network of machines
+#   make ngram-train && make ngram-predict TEXT="the brain is"   predict the next thing
+#   make autotrain                 the corpus, then rounds with a local LLM through Ollama
 #
 # Override any variable on the command line, e.g. `make demo LANGUAGE=ends-ab STATES=3`.
 
@@ -58,6 +60,15 @@ NET_ALPHABET ?= ab
 TASK      ?=
 EPOCHS    ?=
 CREDIT_BY ?= shared
+UNIT      ?= word
+ORDER     ?= 3
+NGRAM     ?= ngram.json.gz
+CORPUS    ?= data/corpus
+ROUNDS    ?= 3
+OLLAMA_MODEL ?=
+TOPICS    ?=
+FILE      ?=
+OUT       ?=
 KIND      ?= image
 DATA      ?= data/$(KIND)
 COUNT     ?= 60
@@ -72,6 +83,8 @@ MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseli
         compress expand core-run focus skip rearrange swap \
         network network-fit network-evaluate network-predict network-summary translate translate-fit py-network \
         media-data media-fit media-evaluate \
+        ngram-train ngram-predict ngram-generate ngram-evaluate autotrain autotrain-corpus ollama-check fake-ollama \
+        py-autotrain base64-encode base64-decode \
         py-test py-demo py-train py-run py-stats py-experiments parity \
         frontend-install frontend-build frontend-dev frontend-preview frontend-test clean distclean
 
@@ -201,6 +214,42 @@ media-fit: build ## Teach DATA/labels.tsv to a fresh network (ARCH, default KIND
 media-evaluate: build ## NET's accuracy on DATA/labels.tsv, taught and held out
 	$(BIN) network evaluate --load $(NET) --data $(DATA)/labels.tsv
 
+##@ Predicting the next thing (N-grams; UNIT=word|char|sound|base64, ORDER=N, CORPUS=files or dirs)
+ngram-train: build ## Train an ORDER-gram model of UNITs on CORPUS (every 10th line held out and measured), saved to NGRAM
+	$(BIN) ngram train --unit $(UNIT) --order $(ORDER) --data $(CORPUS) --save $(NGRAM)
+
+ngram-predict: build ## NGRAM's likeliest next tokens after TEXT
+	$(BIN) ngram predict "$(TEXT)" --load $(NGRAM)
+
+ngram-generate: build ## TEXT continued by NGRAM (TEMPERATURE=0: the likeliest each time; OUT=file: a base64 model's bytes)
+	$(BIN) ngram generate "$(TEXT)" --load $(NGRAM) --temperature $(or $(TEMPERATURE),0) $(if $(OUT),--out $(OUT) --max-tokens 4096,)
+
+ngram-evaluate: build ## NGRAM's held-out perplexity and next-token accuracy on CORPUS
+	$(BIN) ngram evaluate --load $(NGRAM) --data $(CORPUS)
+
+autotrain: build ## Train on CORPUS, then ROUNDS rounds with Ollama (OLLAMA_MODEL, TOPICS); keeps what it wrote in CORPUS/ollama.txt
+	$(BIN) ngram autotrain --ollama --unit $(UNIT) --order $(ORDER) --data $(CORPUS) --rounds $(ROUNDS) \
+	  $(if $(OLLAMA_MODEL),--model $(OLLAMA_MODEL),) $(if $(TOPICS),--topics "$(TOPICS)",) --save $(NGRAM)
+
+autotrain-corpus: build ## The same without Ollama: the corpus only, measured
+	$(BIN) ngram autotrain --unit $(UNIT) --order $(ORDER) --data $(CORPUS) --save $(NGRAM)
+
+py-autotrain: ## autotrain from the Python package
+	$(PY) -m latticefsm ngram autotrain --ollama --unit $(UNIT) --order $(ORDER) --data $(CORPUS) --rounds $(ROUNDS) \
+	  $(if $(OLLAMA_MODEL),--model $(OLLAMA_MODEL),) $(if $(TOPICS),--topics "$(TOPICS)",) --save $(NGRAM)
+
+ollama-check: build ## Is Ollama there ($$OLLAMA_HOST or 127.0.0.1:11434), which models, which autotrain would use
+	$(BIN) ngram ollama $(if $(OLLAMA_MODEL),--model $(OLLAMA_MODEL),)
+
+fake-ollama: ## A stand-in Ollama on :11500 for trying autotrain without a model (OLLAMA_HOST=127.0.0.1:11500 make autotrain)
+	$(PY) tests/fake_ollama.py --port 11500
+
+base64-encode: build ## FILE (any kind) as base64, to OUT or the screen
+	$(BIN) base64 encode $(FILE) $(if $(OUT),--out $(OUT),)
+
+base64-decode: build ## FILE of base64 back to bytes, to OUT or the screen
+	$(BIN) base64 decode $(FILE) $(if $(OUT),--out $(OUT),)
+
 ##@ Serving
 # The backend serves the API (and the built frontend/dist) on HOST:PORT; the frontend dev server serves the app on
 # FRONTEND_HOST:FRONTEND_PORT with hot reload and proxies /api to the backend.  Each runs in its own process group, so
@@ -241,13 +290,13 @@ serve-prod: build ## One process, no npm: the API and the committed frontend/dis
 	$(SERVE_BACKEND)
 
 ##@ The experiments README.md quotes
-experiments: build ## Learning, stimulation, adaptation, compression, walk, network and media, written to RESULTS/ - seven seconds
+experiments: build ## Learning, stimulation, adaptation, compression, walk, network, media and ngram, written to RESULTS/ - ten seconds
 	mkdir -p $(RESULTS)
 	$(BIN) experiment --which all --life $(LIFE) --out $(RESULTS) | tee $(RESULTS)/experiments.log
 
 results: experiments py-experiments ## Both ports' experiments, every results file regenerated
 
-py-experiments: ## The same seven from the Python reference, written to RESULTS/python/ - about six minutes
+py-experiments: ## The same eight from the Python reference, written to RESULTS/python/ - about six minutes
 	mkdir -p $(RESULTS)/python
 	$(PY) -m latticefsm experiment --which all --life $(LIFE) --out $(RESULTS)/python | tee $(RESULTS)/python/experiments.log
 
@@ -269,7 +318,7 @@ py-stats: ## Size, memory, clock and settings of MODEL, from the Python package
 
 parity: build ## The two ports held to each other: the deterministic experiments, machine and network files, media symbols
 	$(PY) -m unittest tests.test_latticefsm.TestRustParity tests.test_latticefsm.TestRustNetworkParity \
-	  tests.test_latticefsm.TestRustMediaParity -v
+	  tests.test_latticefsm.TestRustMediaParity tests.test_latticefsm.TestRustNGramParity -v
 
 ##@ The frontend (React, Vite; frontend/dist is committed, so `make serve-prod` needs none of this)
 frontend-install: ## Install the frontend's dependencies (npm ci)
@@ -290,7 +339,7 @@ frontend-test: ## The frontend's unit tests (node --test; no npm install needed)
 clean: ## Remove build output, __pycache__ and saved machines (results, frontend/dist and node_modules are kept)
 	cd rust && $(CARGO) clean
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-	rm -f machine.json machine.json.gz core.json core.json.gz network.json network.json.gz
+	rm -f machine.json machine.json.gz core.json core.json.gz network.json network.json.gz ngram.json ngram.json.gz
 
 distclean: clean ## clean, and the frontend's node_modules too
 	rm -rf frontend/node_modules

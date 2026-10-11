@@ -50,9 +50,13 @@ from .edge import Weighting
 from .languages import ALPHABET, LANGUAGES, examples, language
 from .machine import BASELINE, DISCOUNT, LIFE, Machine
 
-__all__ = ["EXPERIMENTS", "MEDIA", "NETWORKS", "adaptation", "learning", "main", "media", "network", "run", "stimulation", "tables", "teach_language"]
+__all__ = ["EXPERIMENTS", "MEDIA", "NETWORKS", "NGRAMS", "ngram", "adaptation", "learning", "main", "media", "network", "run", "stimulation", "tables", "teach_language"]
 
-EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk", "network", "media")
+EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk", "network", "media", "ngram")
+
+NGRAMS = (("word", 1), ("word", 2), ("word", 3), ("word", 4), ("char", 3), ("char", 5), ("char", 7), ("sound", 3),
+          ("sound", 5), ("base64", 4), ("base64", 8), ("base64", 12))
+"""The N-gram models the ngram experiment measures: a unit and an order."""
 
 MEDIA = (("text", "text>13"), ("image", "image>3"), ("audio", "audio>3"), ("video", "diff>3"), ("video", "video>13"))
 """The media experiment's networks: the kind of data set (``media.make_dataset``) and the architecture taught it."""
@@ -411,6 +415,58 @@ def _media_table(r: dict) -> str:
     return "\n".join(lines)
 
 
+def ngram(data: Sequence[str] = ("data/corpus",), held_out: int = 10, models: Sequence[tuple[str, int]] = NGRAMS,
+          max_ranked: int = 2000) -> dict:
+    """Every model of ``models`` trained on the corpus under ``data``, every ``held_out``-th line (or base64 sequence)
+    held out, measured on it: perplexity, bits a token, next-token accuracy (first guess, first five) and - to compare
+    units - bits a byte of the held-out text.  Draws nothing: both ports give the same numbers."""
+    from .b64 import decode, file_sequences
+    from .ngram import NGram, corpus_lines, split_lines, tokenize
+    rows = []
+    for unit, order in models:
+        m = NGram(order, unit)
+        test: list[list[str]] = []
+        nbytes = 0
+        if unit == "base64":
+            for path, seqs in file_sequences(data):
+                tr, te = split_lines(seqs, held_out)
+                m.train_lines([list(q) for q in tr], source=path)
+                test += [list(q) for q in te]
+                nbytes += sum(len(decode(q)) for q in te)
+        else:
+            for path, lines in corpus_lines(data):
+                tr, te = split_lines(lines, held_out)
+                m.train_lines(tr, source=path)
+                for line in te:
+                    toks = tokenize(line, unit, True)
+                    if toks:
+                        test.append(toks)
+                        nbytes += len(line.encode("utf-8")) + 1
+        ev = m.evaluate(test, max_ranked)
+        st = m.stats()
+        rows.append({"unit": unit, "order": order, "vocab": st["vocab"], "ngrams": st["ngrams"], "tokens": st["tokens"],
+                     "held_out_tokens": ev["tokens"], "held_out_bytes": nbytes, "perplexity": ev["perplexity"],
+                     "bits": ev["bits"], "bits_per_byte": ev["bits"] * ev["tokens"] / nbytes if nbytes else None,
+                     "accuracy": ev["accuracy"], "top5": ev["top5"]})
+    return {"experiment": "ngram",
+            "settings": _settings(data=list(data), held_out=held_out, models=[list(x) for x in models],
+                                  max_ranked=max_ranked),
+            "rows": rows}
+
+
+def _ngram_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"ngram: interpolated Kneser-Ney on {', '.join(s['data'])}, every {s['held_out']}th line (base64: every "
+             f"{s['held_out']}th 76-letter sequence of the files) held out; accuracy over the first {s['max_ranked']} "
+             "held-out positions; bits a byte to compare the units", "",
+             "| unit | N | vocabulary | n-grams | held-out perplexity | bits a token | **bits a byte** | next-token accuracy "
+             "| top 5 |", "|---|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['unit']} | {row['order']} | {row['vocab']} | {row['ngrams']} | {row['perplexity']:.2f} | "
+                     f"{row['bits']:.3f} | **{row['bits_per_byte']:.3f}** | {row['accuracy']:.3f} | {row['top5']:.3f} |")
+    return "\n".join(lines)
+
+
 def _network_table(r: dict) -> str:
     s = r["settings"]
     lines = [f"network: every language taught to each network for {s['episodes']} episodes (the learning experiment's "
@@ -439,6 +495,8 @@ def tables(record: dict) -> str:
         return _network_table(record)
     if kind == "media":
         return _media_table(record)
+    if kind == "ngram":
+        return _ngram_table(record)
     if kind == "learning":
         return _learning_table(record)
     if kind == "stimulation":
@@ -569,6 +627,8 @@ def run(which: Sequence[str], out: str | None = None, **kw) -> list[dict]:
             rec = network(episodes=kw.get("episodes", 4000), life=kw.get("life", LIFE))
         elif name == "media":
             rec = media(life=kw.get("life", LIFE))
+        elif name == "ngram":
+            rec = ngram()
         else:
             raise ValueError(f"no experiment named {name!r}; choose from {EXPERIMENTS} or all")
         records.append(rec)

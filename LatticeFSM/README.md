@@ -61,6 +61,7 @@ the same machine files:
 |---|---|---|
 | Rust | `rust/` | crate `latticefsm`: the model, the `latticefsm` CLI, and the HTTP server (`make serve`) |
 | Python | `latticefsm/` | the reference: the same model and CLI, and the experiments |
+| both | `ngram.py`, `ngram.rs` | predicting the next thing: N-grams over adaptive edges, trained from `data/corpus` and through Ollama; base64 for any file |
 | both | `network.py`, `network.rs` | networks of machines, Keras-style: layers in a row and side by side, English in and out through `../PhoneticTokenizer` |
 | both | `media.py`, `media.rs` | text, audio, images, frame differences and video as symbols, so a network trains on them |
 | JavaScript | `frontend/` | the React single-page app the server serves, in the shape of `../ModelKit/frontend` |
@@ -96,6 +97,8 @@ number, and a machine file written by either reads in the other.
 ```bash
 cd LatticeFSM
 make test                      # cargo test + clippy + fmt, then the Python tests with parity
+make ngram-train && make ngram-predict TEXT="the brain is"   # predict the next thing
+make autotrain                 # the corpus, then rounds with a local LLM through Ollama
 make demo                      # learn a language, be stimulated, let time pass (Rust)
 make serve                     # backend :8000 + frontend :5173 with hot reload - open http://127.0.0.1:5173/ (Ctrl-C stops both)
 make serve-prod                # one process, no npm: the API and the committed frontend on http://127.0.0.1:8000/
@@ -161,6 +164,7 @@ remembered in the browser — with these tabs:
 
 | tab | what it does |
 |---|---|
+| **Predict** | the N-gram model: type, and the likeliest next tokens follow as bars - click one to take it; continue the text; reward or punish what it wrote; train it on files or pasted text, or let it train itself with Ollama round after round, with the held-out perplexity charted |
 | **Talk** | talk to a network of machines the server holds beside the machine: type English and a translator (`enc>dec` by default) answers in English - or a classifier yes or no - with how each layer got there; reinforce a reply or correct it and it learns on the spot; make another network from an architecture string, teach it the plural or past-tense task (or a language, or a labels file), save and load it |
 | **Matrix** | the matrix one symbol-slice at a time: each row a state, each cell the probability of moving to that column's state, shaded by it, with the channel's width and `seen` beneath; click a cell for every field of the edge and its weighting function |
 | **3D** | the whole matrix as a cube of cells - source top to bottom, symbol into the page, target across - drawn on a canvas by hand: drag to turn, scroll to zoom, hover to read, click for the edge's record; colour by probability, seen, width or net; only the inner shells, the touched edges or one symbol; the central node, the central vertical vector and the focus node outlined |
@@ -419,6 +423,118 @@ two shells; after, the central node itself holds a learned edge and every
 shell carries some. The machine walks exactly as before from its start
 state — a swap is a relabelling — and the code is still exact.
 
+## Predicting the next thing
+
+The main use: an **N-gram model** that predicts the next token
+(`latticefsm/ngram.py`, `rust/src/ngram.rs`). A finite state machine whose
+states are the last `N - 1` tokens *is* an N-gram model; this one keeps that
+machine sparse - an edge exists once `(context, token)` has been seen - and
+gives every edge the parts of a lattice edge that matter here: its count,
+when it was last taken, what it was rewarded and punished, and a width.
+
+* The next-token distribution is **interpolated Kneser-Ney**: the highest
+  order from raw counts, every lower order from continuation counts (how
+  many different contexts a token follows), Ney's discount per order,
+  interpolated down to a uniform floor - every token has some probability,
+  and a token seen in many places outranks one seen often in one.
+* **Credit** widens or narrows edges as it does a lattice edge, and the
+  **stimulation** weighs each credited edge by `width ^ stimulation`,
+  renormalised; at stimulation 0, or before any credit, it is plain
+  Kneser-Ney. A judge (you, in the Predict tab, or an LLM) supplies it.
+* Tokens are `word`s, `char`s, `sound`s (phonemes, spelled back as
+  English), or **`base64` letters**: any file - text, image, audio, video -
+  as base64 (`b64.py`, `b64.rs`), 76 letters a sequence, learned letter by
+  letter and generated back to bytes. A prompt is encoded only as far as its
+  bits are complete, so it is a true prefix of what continues it.
+* Counts are integers and every probability is computed in one fixed order:
+  both ports give the same probabilities, the same greedy texts and the same
+  measurements, and read each other's files (`make parity`).
+
+```bash
+make ngram-train                                  # trigrams of words on data/corpus, every 10th line held out
+make ngram-predict TEXT="the brain is"            # a 0.553, the 0.053, </s> 0.043, not 0.031, ...
+make ngram-generate TEXT="the brain"              # the brain is a directed cyclic graph can be.
+make ngram-train UNIT=base64 ORDER=8 CORPUS=media/  # any files, as base64
+make ngram-generate OUT=out.bin                   # a base64 model's letters decoded to bytes
+make base64-encode FILE=photo.png OUT=photo.b64 && make base64-decode FILE=photo.b64 OUT=back.png
+```
+
+```python
+from latticefsm.ngram import NGram
+m = NGram(3, "word")
+m.train_paths(["data/corpus"], held_out=10)
+m.predict("the brain is", k=5)        # [('a', 0.5527), ('the', 0.0530), ...]
+m.complete("the brain")               # 'is a directed cyclic graph can be.'
+m.credit_text("the brain is a graph", +1)   # widen the edges this text takes
+```
+
+### Training it automatically: a corpus, and Ollama
+
+`autotrain` (`latticefsm/autotrain.py`, `rust/src/autotrain.rs`) is the
+whole loop. **Round 0** trains on every file under `data/corpus` (drop more
+in; `.txt`, `.md`, `.jsonl`, `.json`, gzipped too - or any file at all for
+`base64`), every tenth line held out, and measures the model on what was
+held out. **Each round after it**, with a local language model served by
+[Ollama](https://ollama.com):
+
+1. the LLM writes sentences about the round's topics - given, or the
+   corpus's own most frequent words (`graph`, `cycle`, `function`, ...) -
+   and the model trains on them;
+2. the model's own contexts (the first words of training lines) are handed
+   to the LLM to continue, and the model trains on the continuations - the
+   LLM shows what comes next exactly where the model asks;
+3. the model writes texts of its own and the LLM judges which are fluent,
+   sensible English; approved texts' edges are rewarded, rejected ones'
+   punished;
+
+then it is measured on the same held-out lines, checkpointed, and stopped
+once the held-out perplexity has not improved for `patience` rounds.
+
+```bash
+ollama serve & ollama pull llama3.2               # once
+make ollama-check                                 # is it there, which models
+make autotrain ROUNDS=5 TOPICS="graphs,the brain" # or OLLAMA_MODEL=qwen3; NGRAM=ngram.json.gz
+latticefsm ngram autotrain --ollama --rounds 5 --keep data/corpus/ollama.txt --save ngram.json.gz
+make fake-ollama &  OLLAMA_HOST=127.0.0.1:11500 make autotrain   # a stand-in, to try the loop without a model
+```
+
+The address is `OLLAMA_HOST` (Ollama's own convention) or
+`http://127.0.0.1:11434`; the model `--model`, `LATTICEFSM_OLLAMA_MODEL` or
+`llama3.2`. The prompts and seeds are the same in both ports - a test runs
+both against the stand-in and compares every prompt and every round. Ollama
+was not available where this was built, so the loop is tested against the
+stand-in (`tests/fake_ollama.py`, which answers like Ollama and records what
+it is asked), not against a real model: what a real one does to the held-out
+perplexity is not measured here. With the stand-in's repetitive text it
+rises, as it should - text unlike the corpus makes the corpus less likely -
+and the loop stops itself.
+
+ngram: interpolated Kneser-Ney on data/corpus, every 10th line (base64: every 10th 76-letter sequence of the files) held out; accuracy over the first 2000 held-out positions; bits a byte to compare the units
+
+| unit | N | vocabulary | n-grams | held-out perplexity | bits a token | **bits a byte** | next-token accuracy | top 5 |
+|---|---|---|---|---|---|---|---|---|
+| word | 1 | 1811 | 1812 | 360.80 | 8.495 | **1.882** | 0.069 | 0.261 |
+| word | 2 | 1811 | 7210 | 195.87 | 7.614 | **1.687** | 0.170 | 0.371 |
+| word | 3 | 1811 | 10269 | 180.07 | 7.492 | **1.660** | 0.181 | 0.382 |
+| word | 4 | 1811 | 11051 | 178.39 | 7.479 | **1.657** | 0.185 | 0.387 |
+| char | 3 | 79 | 4449 | 7.23 | 2.855 | **2.838** | 0.418 | 0.800 |
+| char | 5 | 79 | 18577 | 4.48 | 2.165 | **2.152** | 0.588 | 0.860 |
+| char | 7 | 79 | 31171 | 4.32 | 2.112 | **2.100** | 0.602 | 0.863 |
+| sound | 3 | 43 | 5179 | 7.60 | 2.926 | **2.511** | 0.413 | 0.766 |
+| sound | 5 | 43 | 19784 | 5.28 | 2.400 | **2.059** | 0.536 | 0.812 |
+| base64 | 4 | 63 | 15989 | 4.91 | 2.295 | **3.101** | 0.520 | 0.887 |
+| base64 | 8 | 63 | 50119 | 4.28 | 2.099 | **2.835** | 0.614 | 0.897 |
+| base64 | 12 | 63 | 62754 | 4.29 | 2.103 | **2.840** | 0.610 | 0.897 |
+
+What it says: on this corpus more context helps words up to trigrams and
+characters up to 7-grams, then flattens - a 56 KB corpus has few 4-grams to
+learn from. Word trigrams guess the next word right 18% of the time, the
+next character 60% of the time at N = 7. Bits a byte compare the units on
+the same text: words compress it best, but words, characters and sounds are
+lower-cased (and sounds forget spelling), while base64 keeps every byte -
+case, punctuation, line ends - and still comes within a bit a byte of
+characters, from an alphabet of 64 letters that each carry 6 bits.
+
 ## Networks of machines
 
 `latticefsm/network.py` and `rust/src/network.rs` connect machines the way
@@ -599,14 +715,16 @@ something across it, and these do not yet have one (`Limits`).
 | `rust/src/geometry.rs`, `compress.rs` | the cube's centre and shells, the centre-out order, the central vertical vector and focus; the code the central node holds, its precisions, the outward rebuild, the walk from the code, `fidelity` |
 | `rust/src/focus.rs` | the learned focus |
 | `rust/src/network.rs`, `phonetic.rs` | networks of machines: the blocks, the architecture string, compile / fit / evaluate / predict / translate, the file; English in and out through `../PhoneticTokenizer/rust` |
+| `rust/src/ngram.rs`, `autotrain.rs`, `b64.rs` | the N-gram model (Kneser-Ney over adaptive edges; words, characters, sounds, base64), automatic training from a corpus and through Ollama, base64 for anything |
 | `rust/src/media.rs` | text, WAV (acoustic units), PNG / PPM / BMP, frame differences and video (frames, ffmpeg) as symbols; the synthetic data sets |
 | `rust/src/http.rs`, `server.rs` | the HTTP/1.1 server, the JSON routes, the static files of the frontend |
 | `frontend/` | the React app: `src/App.jsx`, the five panels in `src/components/`, `src/api.js`, `src/matrix.js`; `dist/` built and committed |
 | `rust/src/json.rs`, `gzip.rs`, `rng.rs` | JSON, gzip and the generator, written out: no dependencies |
 | `rust/src/bin/latticefsm.rs` | the CLI: demo, train, run, teach, accuracy, table, stats, tick, stimulate, compress, expand, core-run, focus, skip, rearrange, network, experiment, serve |
 | `rust/tests/` | the machine and the server over a real socket |
-| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `focus.py`, `compress.py`, `network.py`, `phonetic.py`, `media.py`, `languages.py`, `experiment.py`, `cli.py` |
-| `tests/test_latticefsm.py` | 84 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
+| `latticefsm/` | the Python reference: `edge.py`, `lattice.py`, `machine.py`, `geometry.py`, `focus.py`, `compress.py`, `network.py`, `phonetic.py`, `media.py`, `ngram.py`, `autotrain.py`, `b64.py`, `languages.py`, `experiment.py`, `cli.py` |
+| `data/corpus/` | what the N-gram model trains on by default: prose and sentences (copies), and whatever is dropped in |
+| `tests/test_latticefsm.py` | 98 tests, parity with the Rust crate among them; `frontend/test/` the frontend's (`tests/README.md`) |
 | `results/` | the measured numbers from both ports, with a README |
 
 ## Limits
@@ -625,6 +743,14 @@ something across it, and these do not yet have one (`Limits`).
   seed; everything else agrees. A file written by one port reseeds the
   other's generator from the seed.
 * Stimulation is one level for the whole machine, not per state.
+* N-grams: autotrain with Ollama is tested against a stand-in, not a real
+  model, so its effect on held-out perplexity is unmeasured here. The corpus
+  is small (56 KB) and hard-wrapped, so a line often ends mid-sentence and
+  `</s>` is often a likely guess. Vocabulary grows without limit (no pruning
+  or cut-off); the whole distribution is computed per query, `O(V · N)`.
+  Words, characters and sounds are lower-cased; sounds lose spelling.
+  Sampling at a temperature draws from each port's own generator, so only
+  greedy generation matches across ports.
 * Networks: stacked layers learn less reliably than one machine on these
   languages, and a hidden layer between an encoder and a decoder mostly
   loses the signal (0.03-0.11 of the pairs exactly at 20 epochs; 0.4 at

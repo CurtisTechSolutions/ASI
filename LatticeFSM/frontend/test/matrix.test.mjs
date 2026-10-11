@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  appendToken,
+  showToken,
   cellAt,
   cubeValue,
   project,
@@ -120,4 +122,17 @@ test("project turns and sees a point in perspective", () => {
   const near = project([0, 0, 5], 0, 0, 10, 100)[3];
   const far = project([0, 0, -5], 0, 0, 10, 100)[3];
   assert.ok(near > far);
+});
+
+test("appendToken takes a predicted token the way the unit writes it", () => {
+  assert.equal(appendToken("the brain", "is", "word"), "the brain is");
+  assert.equal(appendToken("the brain ", "is", "word"), "the brain is");
+  assert.equal(appendToken("it ends", ".", "word"), "it ends.");
+  assert.equal(appendToken("", "the", "word"), "the");
+  assert.equal(appendToken("ca", "t", "char"), "cat");
+  assert.equal(appendToken("cat", "_", "char"), "cat ");
+  assert.equal(appendToken("the", "K", "sound"), "the K");
+  assert.equal(appendToken("the", "</s>", "word"), "the");
+  assert.equal(showToken("_", "char"), "␣");
+  assert.equal(showToken("</s>", "word"), "⏎ end");
 });

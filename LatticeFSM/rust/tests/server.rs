@@ -406,3 +406,52 @@ fn the_network_talks_and_learns() {
     let (status, _) = request(&addr, "POST", "/api/network/new", Some(&bad)).unwrap();
     assert_eq!(status, 400);
 }
+
+#[test]
+fn the_ngram_model_predicts_and_learns() {
+    let addr = serve(8);
+    let (status, info) = request(&addr, "GET", "/api/ngram", None).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(info.str_or("unit", ""), "word");
+    let lines = parse(r#"{"text":"the cat sat on the mat\nthe cat ate the fish"}"#).unwrap();
+    let (_, trained) = request(&addr, "POST", "/api/ngram/text", Some(&lines)).unwrap();
+    assert!(trained.num("trained", 0.0) >= 13.0);
+    let (_, p) = request(
+        &addr,
+        "POST",
+        "/api/ngram/predict",
+        Some(&parse(r#"{"text":"the cat","k":3}"#).unwrap()),
+    )
+    .unwrap();
+    let next = p.get("next").unwrap().as_array().unwrap();
+    assert_eq!(next.len(), 3);
+    assert!(next[0].num("p", 0.0) >= next[1].num("p", 0.0));
+    let (_, g) = request(
+        &addr,
+        "POST",
+        "/api/ngram/generate",
+        Some(&parse(r#"{"text":"the cat","max_tokens":5}"#).unwrap()),
+    )
+    .unwrap();
+    assert!(!g.get("tokens").unwrap().as_array().unwrap().is_empty());
+    let (_, c) = request(
+        &addr,
+        "POST",
+        "/api/ngram/credit",
+        Some(&parse(r#"{"text":"the cat sat","amount":1}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(c.num("credited", 0.0), 4.0);
+    let (_, fresh) = request(
+        &addr,
+        "POST",
+        "/api/ngram/new",
+        Some(&parse(r#"{"order":4,"unit":"base64"}"#).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(fresh.num("order", 0.0), 4.0);
+    let (_, o) = request(&addr, "GET", "/api/ngram/ollama?url=127.0.0.1:9", None).unwrap();
+    assert!(!o.bool_or("available", true));
+    let (status, _) = request(&addr, "POST", "/api/ngram/new", Some(&parse(r#"{"order":0}"#).unwrap())).unwrap();
+    assert_eq!(status, 400);
+}

@@ -1183,11 +1183,14 @@ class TestRustParity(unittest.TestCase):
 
     def test_the_deterministic_experiments_agree(self):
         with tempfile.TemporaryDirectory() as d:
-            subprocess.run([RUST, "experiment", "--which", "stimulation,adaptation", "--out", d], check=True,
-                           capture_output=True)
-            for name, rec in (("stimulation", experiment.stimulation()), ("adaptation", experiment.adaptation())):
+            subprocess.run([RUST, "experiment", "--which", "stimulation,adaptation,ngram", "--out", d], check=True,
+                           capture_output=True, cwd=ROOT)
+            for name, rec in (("stimulation", experiment.stimulation()), ("adaptation", experiment.adaptation()),
+                              ("ngram", experiment.ngram(data=(os.path.join(ROOT, "data", "corpus"),)))):
                 with open(os.path.join(d, f"{name}_results.json")) as f:
                     rust = json.load(f)
+                if name == "ngram":
+                    rust, rec = rust["rows"], rec["rows"]
                 self.assertEqual(strip(rust), strip(rec), name)
 
     def test_a_machine_file_crosses(self):

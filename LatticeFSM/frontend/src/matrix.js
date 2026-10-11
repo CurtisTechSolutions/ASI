@@ -110,3 +110,21 @@ export function project([x, y, z], yaw, pitch, distance, focal) {
   const scale = focal / Math.max(1e-6, distance - z2);
   return [x1 * scale, -y2 * scale, z2, scale];
 }
+
+const NO_SPACE_BEFORE = new Set([".", ",", "!", "?", ";", ":", ")", "]", "}", "%", "'", '"']);
+
+/** A predicted token as it is shown: a space character as ␣, the end of a sequence as "end". */
+export function showToken(token, unit) {
+  if (token === "</s>") return "⏎ end";
+  if (unit === "char" && token === "_") return "␣";
+  return token;
+}
+
+/** `text` with a predicted token taken: a word after a space (punctuation without one), a character as it is (␣ a
+ * space), a sound after a space (the tokenizer reads its own sounds back). */
+export function appendToken(text, token, unit) {
+  if (token === "</s>" || token === "<s>" || token === "<unk>") return text;
+  if (unit === "char") return text + (token === "_" ? " " : token);
+  if (unit === "word" && NO_SPACE_BEFORE.has(token)) return text.replace(/\s+$/, "") + token;
+  return text === "" || /\s$/.test(text) ? text + token : `${text} ${token}`;
+}

@@ -10,8 +10,9 @@ The numbers in `../README.md`, committed beside the code that produced them.
 | `walk_results.json` | the node each focus picks; every language taught plain, with skips, with a learned focus, rearranging every 500 transitions, and from focus 0.5 and 1, on three seeds; a taught machine rearranged until settled, shell by shell before and after |
 | `network_results.json` | every language taught to eight networks (one machine, two in a row, three voting with shared or own credit, ...) on five seeds; the plural and past-tense English-to-English tasks taught to `enc>dec` and `enc>13>dec` for 20 epochs |
 | `media_results.json` | synthetic text, images, spoken words and video clips taught to networks that read them, every fifth example held out |
+| `ngram_results.json` | N-gram models of words, characters, sounds and base64 letters, several orders each, trained on `data/corpus` and measured on held-out lines: perplexity, bits a token and a byte, next-token accuracy - the same in both ports |
 | `adaptation_results.json` | two edges from one prototype, one rewarded and one punished on every use: every field at six stages, and the two weighting functions |
-| `experiments.log` | the seven experiments' tables as `make experiments` printed them |
+| `experiments.log` | the eight experiments' tables as `make experiments` printed them |
 | `python/` | the same three from the Python reference (`make py-experiments`) |
 
 The records in this directory are the Rust crate's. `stimulation` and

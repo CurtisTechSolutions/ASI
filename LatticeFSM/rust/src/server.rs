@@ -36,6 +36,16 @@
 //! | `POST /api/rearrange` | `{full?}` or `{axis, i, j}`: let the nodes rearrange themselves toward the centre, or swap two |
 //! | `POST /api/save` | `{path}`: write the machine |
 //! | `POST /api/load` | `{path}`: read a machine in place of the old |
+//! | `GET /api/ngram` | the N-gram model the server also holds (trigrams of words trained on `data/corpus` at start): stats, history |
+//! | `POST /api/ngram/new` | `{order?, unit?, stimulation?}`: a fresh model (word, char, sound or base64) |
+//! | `POST /api/ngram/train` | `{data?, held_out?}`: train on files or directories (default `data/corpus`); the held-out measure |
+//! | `POST /api/ngram/text` | `{text}`: train on pasted text, a line a sequence |
+//! | `POST /api/ngram/predict` | `{text, k?}`: the likeliest next tokens after `text` |
+//! | `POST /api/ngram/generate` | `{text, max_tokens?, temperature?, seed?}`: `text` continued |
+//! | `POST /api/ngram/credit` | `{text, amount}`: reward (positive) or punish the edges a text takes |
+//! | `GET /api/ngram/ollama` | `?url=&model=`: is Ollama there, which models |
+//! | `POST /api/ngram/autotrain` | `{data?, ollama?, model?, url?, topics?, rounds?, lines?, continuations?, judge?, patience?, fresh?}` |
+//! | `POST /api/ngram/save`, `/api/ngram/load` | `{path}`: write or read the model |
 //! | `GET /api/network` | the network the server also holds (`enc>dec` until another is made): its blocks and summary |
 //! | `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` |
 //! | `POST /api/network/talk` | `{text}`: the network's reply - English from a translator, yes / no from a classifier - and its trace |
@@ -46,6 +56,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::autotrain::Ollama;
 use crate::compress::{compress, expansion, fidelity, load_core, Precision};
 use crate::experiment::teach_language;
 use crate::http::{self, Handler, Request, Response};
@@ -53,6 +64,7 @@ use crate::json::Json;
 use crate::languages::{examples, language, LANGUAGES};
 use crate::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
 use crate::network::{load_network, Credit, Merge, Network, Step, Vote, LAYER_DISCOUNT};
+use crate::ngram::{load_ngram, Evaluation, NGram};
 use crate::rng::Rng;
 use crate::VERSION;
 
@@ -60,6 +72,7 @@ use crate::VERSION;
 pub struct Service {
     pub machine: Mutex<Machine>,
     pub network: Mutex<Option<Network>>,
+    pub ngram: Mutex<Option<NGram>>,
     pub frontend: Option<PathBuf>,
 }
 
@@ -68,6 +81,7 @@ impl Service {
         Arc::new(Service {
             machine: Mutex::new(machine),
             network: Mutex::new(None),
+            ngram: Mutex::new(None),
             frontend: None,
         })
     }
@@ -77,6 +91,7 @@ impl Service {
         Arc::new(Service {
             machine: Mutex::new(machine),
             network: Mutex::new(None),
+            ngram: Mutex::new(None),
             frontend: dir,
         })
     }
@@ -93,6 +108,19 @@ impl Service {
         }
         if req.path == "/api/network" || req.path.starts_with("/api/network/") {
             return self.network_route(req);
+        }
+        if req.path == "/api/ngram" || req.path.starts_with("/api/ngram/") {
+            let mut guard = match self.ngram.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::error(500, "the N-gram model's lock is poisoned"),
+            };
+            let m = guard.get_or_insert_with(default_ngram);
+            return match ngram_route(m, req) {
+                Ok(v) => Response::ok(&v),
+                Err(msg) if msg == "no such route" => Response::error(404, &msg),
+                Err(msg) if msg == "method not allowed" => Response::error(405, &msg),
+                Err(msg) => Response::error(400, &msg),
+            };
         }
         let mut m = match self.machine.lock() {
             Ok(m) => m,
@@ -895,4 +923,209 @@ fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
         .with("taught", Json::numbers(&taught))
         .with("held_out", Json::numbers(&held))
         .with("network", network_info(net)))
+}
+
+/// The model the server starts with: trigrams of words, trained on `data/corpus` (or `../data/corpus`) when there is
+/// one, every tenth line held out.
+pub fn default_ngram() -> NGram {
+    let mut m = NGram::new(3, "word", true, 1.0).expect("valid");
+    for dir in ["data/corpus", "../data/corpus"] {
+        if std::path::Path::new(dir).is_dir() {
+            if let Ok((_, test)) = m.train_paths(&[dir.to_string()], 10) {
+                let ev = m.evaluate(&test, 500);
+                m.history
+                    .push(eval_json(&ev).with("round", 0usize.into()).with("source", dir.into()));
+            }
+            break;
+        }
+    }
+    m
+}
+
+fn eval_json(ev: &Evaluation) -> Json {
+    Json::object()
+        .with("tokens", ev.tokens.into())
+        .with("perplexity", ev.perplexity.map(Json::from).unwrap_or(Json::Null))
+        .with("bits", ev.bits.map(Json::from).unwrap_or(Json::Null))
+        .with("accuracy", ev.accuracy.map(Json::from).unwrap_or(Json::Null))
+        .with("top5", ev.top5.map(Json::from).unwrap_or(Json::Null))
+}
+
+fn ngram_info(m: &mut NGram) -> Json {
+    m.stats().with("history", Json::Array(m.history.clone())).with(
+        "sources",
+        Json::Array(
+            m.sources
+                .iter()
+                .map(|(s, c, n)| {
+                    Json::object()
+                        .with("source", s.as_str().into())
+                        .with("lines", (*c).into())
+                        .with("tokens", (*n).into())
+                })
+                .collect(),
+        ),
+    )
+}
+
+fn paths_of(body: &Json) -> Vec<String> {
+    match body.get("data") {
+        Some(Json::String(s)) => s
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+            .collect(),
+        Some(Json::Array(a)) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        _ => vec![if std::path::Path::new("data/corpus").is_dir() {
+            "data/corpus"
+        } else {
+            "../data/corpus"
+        }
+        .to_string()],
+    }
+}
+
+fn ngram_predict(m: &mut NGram, body: &Json) -> Json {
+    let text = body.str_or("text", "");
+    let k = (body.num("k", 10.0) as usize).clamp(1, 200);
+    let context: Vec<String> = {
+        let toks = m.prompt_tokens(text);
+        let ctx = m.context(&toks);
+        ctx.iter().map(|&i| m.vocab[i as usize].clone()).collect()
+    };
+    let next: Vec<Json> = m
+        .predict(text, k)
+        .into_iter()
+        .map(|(t, p)| Json::object().with("token", t.as_str().into()).with("p", p.into()))
+        .collect();
+    Json::object()
+        .with("text", text.into())
+        .with("unit", m.unit.as_str().into())
+        .with("context", Json::strings(&context))
+        .with("next", Json::Array(next))
+}
+
+fn ngram_route(m: &mut NGram, req: &Request) -> Result<Json, String> {
+    let b = &req.body;
+    match (req.method.as_str(), &req.path[5..]) {
+        ("GET", "ngram") => Ok(ngram_info(m)),
+        ("POST", "ngram/new") => {
+            *m = NGram::new(
+                b.num("order", 3.0) as usize,
+                b.str_or("unit", "word"),
+                b.bool_or("lower", true),
+                b.num("stimulation", 1.0),
+            )?;
+            Ok(ngram_info(m))
+        }
+        ("POST", "ngram/train") => {
+            let paths = paths_of(b);
+            let (n, test) = m.train_paths(&paths, b.num("held_out", 10.0) as usize)?;
+            let ev = m.evaluate(&test, 1000);
+            m.history.push(
+                eval_json(&ev)
+                    .with("round", m.history.len().into())
+                    .with("source", paths.join(",").as_str().into()),
+            );
+            Ok(Json::object()
+                .with("trained", n.into())
+                .with("held_out", eval_json(&ev))
+                .with("model", ngram_info(m)))
+        }
+        ("POST", "ngram/text") => {
+            let lines: Vec<String> = crate::ngram::split_text_lines(b.str_or("text", ""));
+            let n = m.train_lines(&lines, Some("pasted text"));
+            Ok(Json::object().with("trained", n.into()).with("model", ngram_info(m)))
+        }
+        ("POST", "ngram/predict") => Ok(ngram_predict(m, b)),
+        ("POST", "ngram/generate") => {
+            let text = b.str_or("text", "");
+            let mut rng = Rng::new(b.num("seed", 1.0) as u64);
+            let toks = m.generate(
+                text,
+                (b.num("max_tokens", 30.0) as usize).min(5000),
+                b.num("temperature", 0.0),
+                &mut rng,
+            );
+            let completion = if m.unit == "base64" {
+                let mut all = m.prompt_tokens(text);
+                all.extend(toks.iter().cloned());
+                crate::ngram::detokenize(&all, &m.unit)
+            } else {
+                crate::ngram::detokenize(&toks, &m.unit)
+            };
+            Ok(Json::object()
+                .with("text", text.into())
+                .with("tokens", Json::strings(&toks))
+                .with("completion", completion.into())
+                .with("unit", m.unit.as_str().into()))
+        }
+        ("POST", "ngram/credit") => {
+            let n = m.credit_text(b.str_or("text", ""), b.num("amount", 1.0));
+            Ok(Json::object().with("credited", n.into()).with("model", ngram_info(m)))
+        }
+        ("GET", "ngram/ollama") => {
+            let client = Ollama::new(req.param("url"), req.param("model"));
+            Ok(match client.models() {
+                Ok(models) => Json::object()
+                    .with("available", true.into())
+                    .with("url", client.url.as_str().into())
+                    .with("model", client.model.as_str().into())
+                    .with("models", Json::strings(&models)),
+                Err(e) => Json::object()
+                    .with("available", false.into())
+                    .with("url", client.url.as_str().into())
+                    .with("model", client.model.as_str().into())
+                    .with("error", e.into()),
+            })
+        }
+        ("POST", "ngram/autotrain") => {
+            let client = b.bool_or("ollama", false).then(|| {
+                Ollama::new(
+                    b.get("url").and_then(Json::as_str),
+                    b.get("model").and_then(Json::as_str),
+                )
+            });
+            let topics: Vec<String> = b
+                .str_or("topics", "")
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect();
+            let o = crate::autotrain::Options {
+                data: paths_of(b),
+                held_out: b.num("held_out", 10.0) as usize,
+                topics,
+                rounds: (b.num("rounds", 3.0) as usize).min(50),
+                lines: b.num("lines", 20.0) as usize,
+                continuations: b.num("continuations", 20.0) as usize,
+                judge: b.num("judge", 10.0) as usize,
+                patience: b.num("patience", 2.0) as usize,
+                keep: b.get("keep").and_then(Json::as_str).map(String::from),
+                ..Default::default()
+            };
+            if b.bool_or("fresh", true) {
+                // the corpus is trained again: start from an empty model of the same shape, not on top of the old one
+                let (order, unit, lower, stim) = (m.order, m.unit.clone(), m.lower, m.stimulation);
+                *m = NGram::new(order, &unit, lower, stim)?;
+            }
+            let mut log = Vec::new();
+            let records = crate::autotrain::autotrain(m, &o, client.as_ref(), &mut |l| log.push(l.to_string()))?;
+            Ok(Json::object()
+                .with("rounds", Json::Array(records))
+                .with("log", Json::strings(&log))
+                .with("model", ngram_info(m)))
+        }
+        ("POST", "ngram/save") => {
+            let path = b.str_or("path", "ngram.json.gz").to_string();
+            m.save(&path)
+                .map(|_| Json::object().with("saved", path.as_str().into()))
+        }
+        ("POST", "ngram/load") => {
+            *m = load_ngram(b.str_or("path", "ngram.json.gz"))?;
+            Ok(ngram_info(m))
+        }
+        ("GET", _) | ("POST", _) => Err("no such route".to_string()),
+        _ => Err("method not allowed".to_string()),
+    }
 }

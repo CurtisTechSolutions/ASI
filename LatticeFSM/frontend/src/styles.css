@@ -2291,3 +2291,55 @@ pre.code.wrap {
   min-height: 1.4em;
   font-size: 12px;
 }
+
+/* Predict: the likeliest next tokens, each a bar as long as its probability, a click to take it */
+.next-tokens {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px;
+  margin: 0.6rem 0;
+}
+
+.next-token {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.next-token:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.next-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent);
+  opacity: 0.16;
+}
+
+.next-label,
+.next-p {
+  position: relative;
+}
+
+.next-p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.run-log {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+}

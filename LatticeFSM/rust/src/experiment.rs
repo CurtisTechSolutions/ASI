@@ -22,7 +22,7 @@ use crate::languages::{examples, language, random_string, Language, ALPHABET, LA
 use crate::machine::{Machine, Settings, BASELINE, DISCOUNT, LIFE};
 use crate::rng::Rng;
 
-pub const EXPERIMENTS: [&str; 7] = [
+pub const EXPERIMENTS: [&str; 8] = [
     "learning",
     "stimulation",
     "adaptation",
@@ -30,6 +30,7 @@ pub const EXPERIMENTS: [&str; 7] = [
     "walk",
     "network",
     "media",
+    "ngram",
 ];
 
 /// The media experiment's networks: the kind of data set (`media::make_dataset`) and the architecture taught it.
@@ -1012,6 +1013,132 @@ fn media_table(r: &Json) -> String {
     lines.join("\n")
 }
 
+/// The N-gram models the ngram experiment measures: a unit and an order.
+pub const NGRAMS: [(&str, usize); 12] = [
+    ("word", 1),
+    ("word", 2),
+    ("word", 3),
+    ("word", 4),
+    ("char", 3),
+    ("char", 5),
+    ("char", 7),
+    ("sound", 3),
+    ("sound", 5),
+    ("base64", 4),
+    ("base64", 8),
+    ("base64", 12),
+];
+
+/// Every model of [`NGRAMS`] trained on the corpus under `data`, every `held_out`-th line (or base64 sequence) held
+/// out and measured: perplexity, bits a token, next-token accuracy, and bits a byte of the held-out text.  Draws
+/// nothing: the Python port gives the same numbers.
+pub fn ngram(data: &[String], held_out: usize, max_ranked: usize) -> Result<Json, String> {
+    use crate::b64::{decode, file_sequences};
+    use crate::ngram::{corpus_lines, split_lines, tokenize, NGram};
+    let mut rows = Vec::new();
+    for (unit, order) in NGRAMS {
+        let mut m = NGram::new(order, unit, true, 1.0)?;
+        let mut test: Vec<Vec<String>> = Vec::new();
+        let mut nbytes = 0usize;
+        if unit == "base64" {
+            for (path, seqs) in file_sequences(data, 76)? {
+                let (tr, te) = split_lines(&seqs, held_out);
+                let tr: Vec<Vec<String>> = tr.iter().map(|q| q.chars().map(String::from).collect()).collect();
+                m.train_sequences(&tr, Some(&path));
+                for q in te {
+                    nbytes += decode(&q).len();
+                    test.push(q.chars().map(String::from).collect());
+                }
+            }
+        } else {
+            for (path, lines) in corpus_lines(data)? {
+                let (tr, te) = split_lines(&lines, held_out);
+                m.train_lines(&tr, Some(&path));
+                for line in te {
+                    let toks = tokenize(&line, unit, true);
+                    if !toks.is_empty() {
+                        test.push(toks);
+                        nbytes += line.len() + 1;
+                    }
+                }
+            }
+        }
+        let ev = m.evaluate(&test, max_ranked);
+        let bits = ev.bits.unwrap_or(0.0);
+        rows.push(
+            Json::object()
+                .with("unit", unit.into())
+                .with("order", order.into())
+                .with("vocab", (m.vocab.len() - 3).into())
+                .with("ngrams", m.n_grams().into())
+                .with("tokens", (m.clock as f64).into())
+                .with("held_out_tokens", ev.tokens.into())
+                .with("held_out_bytes", nbytes.into())
+                .with("perplexity", ev.perplexity.map(Json::from).unwrap_or(Json::Null))
+                .with("bits", ev.bits.map(Json::from).unwrap_or(Json::Null))
+                .with(
+                    "bits_per_byte",
+                    if nbytes > 0 {
+                        Json::from(bits * ev.tokens as f64 / nbytes as f64)
+                    } else {
+                        Json::Null
+                    },
+                )
+                .with("accuracy", ev.accuracy.map(Json::from).unwrap_or(Json::Null))
+                .with("top5", ev.top5.map(Json::from).unwrap_or(Json::Null)),
+        );
+    }
+    let models: Vec<Json> = NGRAMS
+        .iter()
+        .map(|(u, o)| Json::Array(vec![(*u).into(), (*o).into()]))
+        .collect();
+    Ok(Json::object()
+        .with("experiment", "ngram".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("data", Json::strings(data))
+                .with("held_out", held_out.into())
+                .with("models", Json::Array(models))
+                .with("max_ranked", max_ranked.into()),
+        )
+        .with("rows", Json::Array(rows)))
+}
+
+fn ngram_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let data: Vec<&str> = arr(&s, "data").iter().filter_map(Json::as_str).collect();
+    let k = s.num("held_out", 0.0);
+    let mut lines = vec![
+        format!(
+            "ngram: interpolated Kneser-Ney on {}, every {k}th line (base64: every {k}th 76-letter sequence of the \
+             files) held out; accuracy over the first {} held-out positions; bits a byte to compare the units",
+            data.join(", "),
+            s.num("max_ranked", 0.0)
+        ),
+        String::new(),
+        "| unit | N | vocabulary | n-grams | held-out perplexity | bits a token | **bits a byte** | next-token accuracy \
+         | top 5 |"
+            .to_string(),
+        "|---|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {:.2} | {:.3} | **{:.3}** | {:.3} | {:.3} |",
+            row.str_or("unit", ""),
+            row.num("order", 0.0),
+            row.num("vocab", 0.0),
+            row.num("ngrams", 0.0),
+            row.num("perplexity", 0.0),
+            row.num("bits", 0.0),
+            row.num("bits_per_byte", 0.0),
+            row.num("accuracy", 0.0),
+            row.num("top5", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
 fn network_table(r: &Json) -> String {
     let s = r.get("settings").cloned().unwrap_or(Json::object());
     let seeds = arr(&s, "seeds").len();
@@ -1089,6 +1216,7 @@ pub fn tables(record: &Json) -> String {
     match record.str_or("experiment", "") {
         "network" => network_table(record),
         "media" => media_table(record),
+        "ngram" => ngram_table(record),
         "learning" => learning_table(record),
         "stimulation" => stimulation_table(record),
         "compression" => compression_table(record),
@@ -1261,6 +1389,7 @@ pub fn run(which: &[String], out: Option<&str>, episodes: usize, life: f64) -> R
             "walk" => walk(episodes, &[1, 2, 3], life, 300)?,
             "network" => network(episodes, &[1, 2, 3, 4, 5], life, 300, 20)?,
             "media" => media(60, 30, 1, 0.95, life)?,
+            "ngram" => ngram(&["data/corpus".to_string()], 10, 2000)?,
             other => {
                 return Err(format!(
                     "no experiment named {other:?}; choose from {EXPERIMENTS:?} or all"

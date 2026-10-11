@@ -24,6 +24,8 @@ The five requirements, in the author's words, and where each is realised:
 | a module like TensorFlow, to connect several of these together | §13.1–13.3: `Network`, `Layer`, `Sequential`, `Parallel`, the architecture string, compile / fit / evaluate / predict |
 | encoder and decoder layers: text to its phonetic representation with the repository's tokenizer, English in and out | §13.4: `PhoneticEncoder`, `PhoneticDecoder`, `translate`, `fit_pairs` |
 | train on text, audio, images and video (images / differences and audio) | §14: the text, audio, image, diff and video encoders |
+| predict the next thing with N-grams, trained automatically from a corpus and with Ollama | §15: `NGram`, Kneser-Ney over adaptive edges; `autotrain` |
+| a base64 encoder and decoder for text, images, video..., and N-gram learning over it | §16: `b64`, the `base64` unit |
 
 ## 1. The matrix
 
@@ -709,4 +711,115 @@ hold out one class of the alternating synthetic sets). The synthetic sets
   a network file classifies it the same way in either.
 * **The repository's own acoustic units for audio,** the tokenizer the
   network already uses for English, rather than a second front end.
+
+## 15. Predicting the next thing: N-grams
+
+`ngram.py` and `ngram.rs`, the same model number for number.
+
+### 15.1 The machine and its edges
+
+The machine's state is the last `N - 1` token ids, the start padded with
+`<s>` (id 0); `</s>` (id 1) ends every sequence and `<unk>` (id 2) stands for
+a token never trained on. Ids are given in the order tokens are first seen.
+`grams[context][token]` counts how often `token` followed `context` (the
+highest order only; nothing else is stored). An edge that has been credited
+also has a record `[width, rewarded, punished, last]`; `last` is the clock
+(tokens trained on) when it was last taken.
+
+### 15.2 Kneser-Ney
+
+For order `k = N` the table is `grams`; for each `k < N` it is the
+continuation counts of the order above: `cont_k[h'][w]` is the number of
+distinct `x` with `count_{k+1}[x h'][w] > 0`. Per table: `total[h]`,
+`distinct[h]` (tokens with a count), and the discount
+`D_k = n1 / (n1 + 2 n2)` from its count-of-counts (0.75 when undefined or
+outside (0, 1)). Then, with `p_0(w) = 1 / (V - 1)` (0 for `<s>`) and for `k`
+from 1 to `N`, `h` the last `k - 1` ids of the context:
+
+    p_k(w) = max(c_k(h, w) - D_k, 0) / total_k(h) + (D_k · distinct_k(h) / total_k(h)) · p_{k-1}(w)
+
+when `h` has a row in table `k`, else `p_k = p_{k-1}`. `P_KN = p_N`. With
+credited edges out of the context `h`:
+`P(w | h) = P_KN(w | h) · width(h, w)^s / Z`, `Z = 1 + Σ P_KN(v | h)(width(h, v)^s - 1)`
+over the credited `v` in id order (`s` the stimulation). The full distribution
+is computed order by order with exactly these operations, so it equals the
+token-by-token value bit for bit (a test checks it in each port).
+
+### 15.3 Tokens
+
+`word`: lower-cased; runs of alphanumerics and `_` (an apostrophe between a
+word character and a letter stays inside), every other non-space character
+alone. `char`: every character of the stripped line, whitespace as `_`.
+`sound`: the phonetic tokenizer's phonemes without stress, through one
+tokenizer with its word memory off, after numerals other than `0-9` are
+removed. `base64`: §16. Detokenizing joins words with a space except before
+`. , ! ? ; : ) ] } % ' "` and after `( [ { $ "`.
+
+### 15.4 Measuring, generating, credit
+
+`evaluate` sums `ln P` over every token and `</s>` of held-out sequences:
+perplexity `exp(-Σ / n)`, bits `-Σ / n / ln 2`; over the first `max_ranked`
+positions, accuracy is the share where the target is the top token (ties to
+the lower id), top 5 where it is among the first five. Greedy generation
+takes the top token each step (never `<s>` or `<unk>`) until `</s>`; sampling
+draws from `P^(1/T)`. `credit_text(text, r)` credits every edge the text
+takes, `</s>` included: `r > 0` multiplies the width by `1 + 0.2 r` (at most
+20) and adds `r` to rewarded; `r < 0` divides it by `1 + 0.2 |r|` (at least
+0.05) and adds `|r|` to punished.
+
+### 15.5 Automatic training
+
+`autotrain` trains on `corpus_sequences(data)` (every `held_out`-th sequence
+of every file kept back), records round 0, and for each round `r` with Ollama:
+for `topics_per_round` topics `topics[((r-1)·t + j) mod |topics|]` (given, or
+the eight most frequent tokens of five or more letters that are not stop
+words) asks `CORPUS_PROMPT` at temperature 0.8, seed `1000·seed + 10r + j`,
+and trains on the parsed lines (numbering, bullets, quotes and preambles
+stripped); takes `continuations` prefixes - the first `prefix_words` tokens
+(base64: `4 ·` that many letters) of training sequences at a stride of
+`⌊n / count⌋` from offset `7919 r` - asks `CONTINUE_PROMPT` (temperature
+0.7, 32 tokens) and trains on prefix + the first line of the reply; writes
+`judge` greedy texts from two-token prefixes (offset `104729 r`), asks
+`JUDGE_PROMPT` (temperature 0) and credits each judged text `+1` or `-1`;
+then records the round and stops after `patience` rounds without a lower
+held-out perplexity.
+
+### 15.6 Decisions
+
+* **Sparse, not dense.** The lattice's dense matrix holds a trigram over 13
+  tokens and no more; an N-gram over a real vocabulary has to keep only the
+  edges it has seen.
+* **Kneser-Ney, because it is the right baseline:** continuation counts are
+  what make a low order useful, and the lattice's own credit sits on top of
+  it rather than replacing it, so a model nobody has judged is a standard one.
+* **A held-out set that never changes during autotrain,** so each round's
+  number means the same thing, and an early stop, so a teacher whose text
+  hurts the corpus's likelihood is noticed instead of trusted.
+* **An LLM as teacher three ways** - more text, the next words where the
+  model asks, and a verdict on the model's own writing - each of which the
+  model can use without the LLM's probabilities, which Ollama does not
+  reliably expose.
+
+## 16. Base64
+
+`b64.py` and `b64.rs`: the RFC 4648 alphabet `A-Z a-z 0-9 + /` with `=`
+padding. `decode` ignores every character outside the alphabet, reads a last
+group of two or three letters as one or two bytes and drops a lone last
+letter. `encode_prefix(data)` is the first `⌊8 · len / 6⌋` letters of
+`encode(data)`: only letters whose six bits are all known, a prefix of the
+encoding of every continuation of `data`.
+
+The `base64` unit tokenizes a text as the letters of its UTF-8 (no
+lower-casing), a prompt as `encode_prefix` of its UTF-8, and a file - any
+file, every one under a directory but hidden files and `README.md` - as
+consecutive 57-byte pieces, each encoded to 76 letters, one sequence each
+(57 bytes is 19 groups of three: no group is split). Text is written back by
+decoding the prompt's letters and the generated ones together;
+`generate_bytes` continues a file's first bytes and starts a fresh sequence
+whenever one ends, until `max_tokens` letters or a padded end.
+
+* **One alphabet for everything:** the model and its machinery do not change
+  for a picture or a video; what changes is only which letters follow which.
+* **Cut at whole groups** so a letter always means the same six bits of the
+  same byte position in its group, the structure an N-gram can learn.
 
