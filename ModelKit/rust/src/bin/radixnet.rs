@@ -33,12 +33,13 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use modelkit::cli::{
-    dispatch, negative_stats, parse_args, path_json, read_named, read_texts, verdict_json, Ctx, COMMANDS,
+    decode_to, dispatch, negative_stats, parse_args, path_json, prefix_doc, prefix_of, read_named_as, read_texts,
+    read_texts_as, verdict_json, Ctx, COMMANDS,
 };
 use modelkit::duo::{guard_report, Filter, FilterConfig};
 use modelkit::service::Service;
 use modelkit::voice::{decoder_name, say, speak_texts, speak_walks, SayOptions, SpeakOptions, Utterance};
-use radixnet::encoding::{parse_encoding, Unit};
+use radixnet::encoding::{decoded_prediction, parse_encoding, Unit};
 use radixnet::file::read_document;
 use radixnet::json::Json;
 use radixnet::kinds::TrainSettings;
@@ -59,14 +60,17 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      serve version\n\
      --kind radix | count | negative | resonant: the algorithm of a NEW model (count is this port's default); a \
      loaded file's own kind always wins.\n\
-     --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word | phone | syllable | acoustic), how \
-     many \
+     --encoding unit[:n[:stride]] of a NEW model - what one unit is (char | word | phone | syllable | acoustic | \
+     base64), how many \
      units a gram holds and how far apart\n\
      consecutive grams start (1 = the sliding window, n = non-overlapping groups).  char:3:1 is the default, \
      char:5:5 groups of five\n\
      letters, word:2:1 the word bigram, word:3:1 the word trigram; the names trigram | bigram | word-bigram | \
      word-trigram work too.  phone:3:1 is a model of sounds (the phonetic tokenizer's), syllable:2:1 of \
-     syllables.\n\
+     syllables;\n\
+     base64:3:1 reads anything - a text, an image, a video - as its bytes, in base64 symbols: every --data file \
+     (repeatable) is\n\
+     a text per line when it is UTF-8 text, else one text of every byte (and always one with --whole-file).\n\
      --units / --ngram / --stride set the three dials separately.  A loaded file's own encoding always wins, and \
      is fixed for its life.\n\
      --log SPEC (or $RADIXNET_LOG) sets what is written to stderr: a level (error | warn | info | debug | trace | \
@@ -76,7 +80,11 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      written to stdout, which is where --json puts its document.  Targets: http, model, train.\n\
      predict / generate: --top-k K, --top-p P, --min-p P narrow what a sampled step draws from (off at 0 / 1 / 0); \
      --diversity X spreads\n\
-     the beam's K continuations apart (0 = off).  train: --order corpus | shortest-first | longest-first | \
+     the beam's K continuations apart (0 = off); --prefix-file FILE continues a file's bytes instead of --prefix \
+     TEXT, and\n\
+     --decode-to FILE writes the answer as the bytes it holds (a model of base64 symbols decodes them; several \
+     samples are\n\
+     numbered before the extension).  train: --order corpus | shortest-first | longest-first | \
      shuffle, --curriculum C (the\n\
      first epoch walks the first C of the ordered texts, the last all of them; 1 = off), --replay R (every epoch \
      rehearses R times as\n\
@@ -183,7 +191,7 @@ fn run() -> Result<(), String> {
     let mut encoding = parse_encoding(&args.str("encoding", ""))?;
     if let Some(name) = args.get("units") {
         encoding.unit = Unit::parse(name)
-            .ok_or_else(|| format!("--units must be char, word, phone, syllable or acoustic, got {name:?}"))?;
+            .ok_or_else(|| format!("--units must be char, word, phone, syllable, acoustic or base64, got {name:?}"))?;
     }
     if args.get("ngram").is_some() {
         encoding.n = args.usize("ngram", encoding.n)?;
@@ -224,7 +232,8 @@ fn run() -> Result<(), String> {
                 Some(model) => model,
                 None => open(false)?,
             };
-            let texts = read_texts(&args)?;
+            // read once the model is open: a model of base64 symbols reads the bytes
+            let texts = read_texts_as(&args, model.encoding(), "training")?;
             // every kind's settings; each kind reads what applies to it
             let settings = TrainSettings {
                 config: train_config(&args, args.usize("epochs", 5)?)?,
@@ -265,7 +274,9 @@ fn run() -> Result<(), String> {
         }
         "predict" => {
             let mut model = open(true)?;
-            let prefix = args.str("prefix", "");
+            // --prefix TEXT or --prefix-file FILE: what the model is asked, and the bytes it stands for
+            let enc = model.encoding();
+            let (prefix, content) = prefix_of(&args, enc, true)?;
             let max_length = args.int("max-length", -1)?;
             // Python's default is dijkstra; the count model's dijkstra is its beam
             let default_mode = if model.kind() == "count" { "beam" } else { "dijkstra" };
@@ -306,8 +317,8 @@ fn run() -> Result<(), String> {
                 );
                 found = ranked;
             }
-            // a model of sounds: the words each answer spells, and the part of them the continuation wrote
-            let enc = model.encoding();
+            // a model of sounds: the words each answer spells, and the part of them the continuation
+            // wrote; a model of base64 symbols: what each answer holds
             let ranked = |paths: &[radixnet::search::PathResult]| -> Json {
                 Json::Arr(
                     paths
@@ -315,6 +326,7 @@ fn run() -> Result<(), String> {
                         .map(|r| match path_json(r) {
                             Json::Obj(mut pairs) => {
                                 pairs.extend(spelled_prediction(enc, &r.full_text, &r.text));
+                                pairs.extend(decoded_prediction(enc, &r.full_text, &content));
                                 Json::Obj(pairs)
                             }
                             other => other,
@@ -322,8 +334,10 @@ fn run() -> Result<(), String> {
                         .collect(),
                 )
             };
+            // the prefix as given; the file's text, or the symbols its bytes fix, when it was a file
+            let given = args.get("prefix").map_or_else(|| prefix.clone(), str::to_string);
             let mut doc = vec![
-                ("prefix".to_string(), Json::str(prefix)),
+                ("prefix".to_string(), Json::str(given)),
                 ("kind".to_string(), Json::str(model.kind())),
                 ("continuation".to_string(), Json::str(found.best.text.clone())),
                 ("full_text".to_string(), Json::str(found.best.full_text.clone())),
@@ -344,6 +358,8 @@ fn run() -> Result<(), String> {
                 ("bottom".to_string(), ranked(&found.bottom)),
             ];
             doc.extend(spelled_prediction(enc, &found.best.full_text, &found.best.text));
+            doc.extend(prefix_doc(&args, enc, &prefix));
+            doc.extend(decoded_prediction(enc, &found.best.full_text, &content));
             doc.push(("traversal".to_string(), Json::str(found.traversal.clone())));
             doc.push(("guard".to_string(), guard));
             if let Some(path) = args.get("speak") {
@@ -353,19 +369,29 @@ fn run() -> Result<(), String> {
                     speak_outputs(&model, &[found.best.full_text.clone()], path)?,
                 ));
             }
+            if let Some(path) = args.get("decode-to").filter(|p| !p.is_empty()) {
+                // --decode-to FILE: the answer, as the bytes it holds
+                doc.push((
+                    "decoded_to".to_string(),
+                    decode_to(path, enc, &[found.best.full_text.clone()])?,
+                ));
+            }
             emit(Json::Obj(doc));
         }
         "generate" => {
             let mut model = open(true)?;
             let seeded = args.on("seeded");
             let tuning = search_tuning(&args)?;
+            // --prefix TEXT or --prefix-file FILE, or neither: every text starts from START
+            let enc = model.encoding();
+            let (prefix, content) = prefix_of(&args, enc, false)?;
             let opts = GenerateOptions {
                 max_length: args.usize("max-length", 60)?,
                 mode: args.str("mode", "sample"),
                 temperature: args.float("temperature", 1.0)?,
                 count: args.usize("count", 1)?,
                 seed: seeded.then_some(seed),
-                prefix: args.str("prefix", ""),
+                prefix: prefix.clone(),
                 step_penalty: args.float("step-penalty", 0.0)?,
                 beam: args.usize("beam", 0)?,
                 traversal: resolve_traversal(&args.str("traversal", DEFAULT_TRAVERSAL))?.to_string(),
@@ -396,22 +422,29 @@ fn run() -> Result<(), String> {
                 }
                 None => (model.generate(&opts)?, Json::Null),
             };
-            // a model of sounds: the words each text spells
-            let enc = model.encoding();
+            // a model of sounds: the words each text spells; a model of base64 symbols: what each holds
             let sample = |r: &radixnet::search::PathResult| -> Json {
                 match path_json(r) {
-                    Json::Obj(mut pairs) if enc.unit.phonetic() => {
-                        pairs.push(("spelled".to_string(), Json::str(enc.spell(&r.text))));
+                    Json::Obj(mut pairs) => {
+                        if enc.unit.phonetic() {
+                            pairs.push(("spelled".to_string(), Json::str(enc.spell(&r.text))));
+                        }
+                        pairs.extend(decoded_prediction(enc, &r.full_text, &content));
                         Json::Obj(pairs)
                     }
                     other => other,
                 }
             };
+            // the prefix as given, or what a file's bytes were asked as
+            let given = match args.get("prefix-file").filter(|p| !p.is_empty()) {
+                Some(_) => prefix.clone(),
+                None => args.str("prefix", ""),
+            };
             let mut doc = Json::obj([
                 ("samples", Json::Arr(samples.iter().map(sample).collect())),
                 ("count", Json::Int(samples.len() as i64)),
                 ("mode", Json::str(opts.mode.clone())),
-                ("prefix", Json::str(opts.prefix.clone())),
+                ("prefix", Json::str(given)),
                 ("max_length", Json::Int(opts.max_length as i64)),
                 ("temperature", Json::Num(opts.temperature)),
                 ("traversal", Json::str(opts.traversal.clone())),
@@ -422,6 +455,14 @@ fn run() -> Result<(), String> {
                 let texts: Vec<String> = samples.iter().map(|r| r.text.clone()).collect();
                 if let Json::Obj(pairs) = &mut doc {
                     pairs.push(("speech".to_string(), speak_outputs(&model, &texts, path)?));
+                }
+            }
+            if let Json::Obj(pairs) = &mut doc {
+                pairs.extend(prefix_doc(&args, enc, &prefix));
+                if let Some(path) = args.get("decode-to").filter(|p| !p.is_empty()) {
+                    // --decode-to FILE: every sample, as the bytes it holds
+                    let texts: Vec<String> = samples.iter().map(|r| r.full_text.clone()).collect();
+                    pairs.push(("decoded_to".to_string(), decode_to(path, enc, &texts)?));
                 }
             }
             emit(doc);
@@ -638,9 +679,11 @@ fn run() -> Result<(), String> {
         }
         "score" => {
             let mut model = open(true)?;
+            // a model of base64 symbols scores the bytes: of the text, or of the file
+            let enc = model.encoding();
             let texts = match args.get("text") {
-                Some(text) => vec![text.to_string()],
-                None => read_texts(&args)?,
+                Some(text) => vec![enc.text_input(text)],
+                None => read_texts_as(&args, enc, "scorable")?,
             };
             let results: Vec<Json> = texts
                 .iter()
@@ -669,10 +712,28 @@ fn run() -> Result<(), String> {
             // 2NRL when both kinds are given, reward on good alone, punish on
             // bad alone - and the same epoch defaults Python and Go use
             let mut model = open(true)?;
-            let good = read_named(&args, "good")?;
-            let bad = read_named(&args, "bad")?;
+            // the texts given inline (--good-text / --bad-text, repeatable) and the files, blank ones
+            // dropped; a model of base64 symbols learns the bytes of every one of them
+            let enc = model.encoding();
+            let blank = |t: &String| t.trim_matches(modelkit::multipart::base64::is_python_space).is_empty();
+            let rated = |inline: &str, file: &str| -> Result<Vec<String>, String> {
+                let mut texts: Vec<String> = args
+                    .all(inline)
+                    .iter()
+                    .filter(|t| !blank(t))
+                    .map(|t| enc.text_input(t))
+                    .collect();
+                texts.extend(read_named_as(&args, file, enc, file)?.into_iter().filter(|t| !blank(t)));
+                Ok(texts)
+            };
+            let good = rated("good-text", "good")?;
+            let bad = rated("bad-text", "bad")?;
             if good.is_empty() && bad.is_empty() {
-                return Err("nothing to learn from: give --good (thumbs up) and / or --bad (thumbs down)".to_string());
+                return Err(
+                    "nothing to learn from: give --good / --good-text (thumbs up) and/or --bad / --bad-text (thumbs \
+                     down)"
+                        .to_string(),
+                );
             }
             // rated sets are small: the feedback defaults, and a mark out of 10 per text
             let mut o = feedback_options(&args, Feedback::rated())?;
@@ -705,8 +766,9 @@ fn run() -> Result<(), String> {
         }
         "2nrl" => {
             let mut model = open(true)?;
-            let bad = read_named(&args, "bad")?;
-            let good = read_named(&args, "good")?;
+            // read once the model is open: a model of base64 symbols reads the bytes
+            let bad = read_named_as(&args, "bad", model.encoding(), "bad")?;
+            let good = read_named_as(&args, "good", model.encoding(), "good")?;
             // the standalone command's defaults are 3 and 3; `feedback` uses 2 and 3
             let o = feedback_options(&args, Feedback::two_nrl())?;
             let (negative, positive) = radixnet::kinds::two_nrl(&mut model, &bad, &good, &o, &mut |_| true)?;
@@ -1135,9 +1197,9 @@ fn run() -> Result<(), String> {
             ]));
         }
         "check" => {
-            // the structural invariants, over a corpus when one is given
+            // the structural invariants, over a corpus when one is given (read as the model reads it)
             let model = open(true)?;
-            let texts = read_named(&args, "data")?;
+            let texts = read_named_as(&args, "data", model.encoding(), "corpus")?;
             model.g.check_invariants(&texts, false)?;
             emit(Json::obj([
                 ("checked", Json::Int(texts.len() as i64)),

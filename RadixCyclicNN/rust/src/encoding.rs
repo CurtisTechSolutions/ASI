@@ -8,7 +8,11 @@
 //! * `n = 5` is a sliding window of five characters, and any n works;
 //! * `n = 4, stride = 4` is *tokenisation*: non-overlapping groups of four
 //!   letters;
-//! * `unit = Words, n = 2` is the word bigram, `n = 3` the word trigram.
+//! * `unit = Words, n = 2` is the word bigram, `n = 3` the word trigram;
+//! * `unit = Base64` is the trigram of *base64 symbols*: anything - a text,
+//!   an image, a video, a recording - is read as its bytes and written in
+//!   base64 ([`base64_text`]), the graph learns n-grams of those symbols, and
+//!   what the model says is decoded back into bytes ([`base64_bytes`]).
 //!
 //! Two consecutive grams share [`Encoding::overlap`] units, which is what lets
 //! the graph chain them: node A ends with the units node B starts with.  With
@@ -26,6 +30,8 @@
 //! that costs is measured rather than guessed: `bench/RESULTS.md`.
 
 use std::fmt;
+
+use crate::json::Json;
 
 /// The sliding-window length of the default encoding.
 pub const WINDOW: usize = 3;
@@ -63,6 +69,17 @@ pub enum Unit {
     /// graph is built over; as text the units are tokens taken as they come,
     /// like words, and what the model says is spoken through the vocoder.
     Acoustic,
+    /// One *base64 symbol*: six bits of the bytes of anything - a text, an
+    /// image, a video, a recording.  Content becomes base64 where it enters
+    /// ([`base64_text`]): a text as its UTF-8 bytes, a file as the bytes it
+    /// holds, written in the 64 symbols `A-Z a-z 0-9 + /` with no padding.
+    /// The graph is built over those symbols exactly as over characters, so
+    /// the n-gram dials mean what they always do (`base64:4:4` is one gram per
+    /// three bytes), and what the model says is decoded back into bytes
+    /// ([`base64_bytes`]).  A text of the graph is already base64: the
+    /// conversion happens once, where the content comes in, never inside the
+    /// model.
+    Base64,
 }
 
 impl Unit {
@@ -74,6 +91,7 @@ impl Unit {
             Unit::Phones => "phone",
             Unit::Syllables => "syllable",
             Unit::Acoustic => "acoustic",
+            Unit::Base64 => "base64",
         }
     }
 
@@ -88,6 +106,17 @@ impl Unit {
         matches!(self, Unit::Words | Unit::Acoustic)
     }
 
+    /// Whether a text slices into these units code point by code point:
+    /// characters, and base64 symbols (Python's `CHARACTER_UNITS`).
+    ///
+    /// Every place that cuts, measures, joins or reverses a text letter by
+    /// letter - or that has no words to list because a unit is a letter - asks
+    /// this rather than naming the character unit, so the symbols take the
+    /// path the characters take, wherever that is.
+    pub fn characters(self) -> bool {
+        matches!(self, Unit::Chars | Unit::Base64)
+    }
+
     /// What a model under this unit counts in.
     ///
     /// Every length, count and score is in these, so the CLI, the API and the
@@ -100,6 +129,7 @@ impl Unit {
             Unit::Phones => "phones",
             Unit::Syllables => "syllables",
             Unit::Acoustic => "units",
+            Unit::Base64 => "symbols",
         }
     }
 
@@ -111,6 +141,7 @@ impl Unit {
             "phone" | "phones" | "phoneme" | "phonemes" | "sound" | "sounds" => Some(Unit::Phones),
             "syllable" | "syllables" | "syl" => Some(Unit::Syllables),
             "acoustic" | "acoustics" | "audio" | "unit" | "units" => Some(Unit::Acoustic),
+            "base64" | "b64" => Some(Unit::Base64),
             _ => None,
         }
     }
@@ -205,6 +236,7 @@ impl Encoding {
             Unit::Phones => "phone",
             Unit::Syllables => "syllable",
             Unit::Acoustic => "unit",
+            Unit::Base64 => "symbol",
         };
         let kind = if self.sliding() { "sliding" } else { "groups" };
         format!("{}-{unit} grams, stride {} ({kind})", self.n, self.stride)
@@ -215,7 +247,8 @@ impl Encoding {
     /// The text cut into units, indexed so that slicing by unit is O(1).
     pub fn units(&self, text: &str) -> Units {
         match self.unit {
-            Unit::Chars => Units::chars(text),
+            // a base64 symbol is one code point, as a character is
+            Unit::Chars | Unit::Base64 => Units::chars(text),
             Unit::Words | Unit::Acoustic => Units::words(text),
             // the text read through the tokenizer: a word becomes its sounds, punctuation a
             // pause, the gap between two words a #.  Text that is already sounds passes
@@ -227,7 +260,7 @@ impl Encoding {
     /// How many units a text holds.
     pub fn len(&self, text: &str) -> usize {
         match self.unit {
-            Unit::Chars => text.chars().count(),
+            Unit::Chars | Unit::Base64 => text.chars().count(),
             Unit::Words | Unit::Acoustic => text.split_whitespace().count(),
             Unit::Phones | Unit::Syllables => crate::phonetic::text(self.unit, text).split_whitespace().count(),
         }
@@ -252,7 +285,7 @@ impl Encoding {
     /// words.  Empty pieces are dropped, so a label contributing no unit adds
     /// no separator.
     pub fn join(&self, parts: &[&str]) -> String {
-        if self.unit == Unit::Chars {
+        if self.unit.characters() {
             return parts.concat();
         }
         let mut out = String::new();
@@ -284,7 +317,7 @@ impl Encoding {
         if prefix.is_empty() {
             return true;
         }
-        if self.unit == Unit::Chars {
+        if self.unit.characters() {
             return text.starts_with(prefix);
         }
         let sounds;
@@ -355,7 +388,8 @@ impl Encoding {
     /// for character.
     pub fn reverse(&self, text: &str) -> String {
         match self.unit {
-            Unit::Chars => text.chars().rev().collect(),
+            // base64 symbols too: the symbols backwards, not the bytes
+            Unit::Chars | Unit::Base64 => text.chars().rev().collect(),
             // words, sounds or acoustic units: the units in reverse order (a piece given as
             // text is first turned into its sounds, as `join` does)
             _ => self
@@ -365,6 +399,63 @@ impl Encoding {
                 .collect::<Vec<_>>()
                 .join(" "),
         }
+    }
+
+    // -- content: what comes in, and what goes out ----------------------------
+
+    /// Whether the units are base64 symbols - six bits of the bytes of any
+    /// content ([`Unit::Base64`]).
+    pub fn is_base64(&self) -> bool {
+        self.unit == Unit::Base64
+    }
+
+    /// Content - the bytes of a file - as the text this encoding reads.
+    ///
+    /// Base64 writes the bytes in its symbols, whatever they hold
+    /// ([`base64_text`]); every other unit reads them as UTF-8 text, and bytes
+    /// that are not UTF-8 are no text it can read.  Python's
+    /// `Encoding.content_text`.
+    pub fn content_text(&self, data: &[u8]) -> Result<String, String> {
+        if self.is_base64() {
+            return Ok(base64_text(data));
+        }
+        std::str::from_utf8(data)
+            .map(str::to_string)
+            .map_err(|err| err.to_string())
+    }
+
+    /// A text given in plain words - a sentence to train on, to score or to
+    /// blame - as this encoding reads it.
+    ///
+    /// Base64 writes its UTF-8 bytes in symbols; every other unit takes it as
+    /// it is.  Python's `Encoding.text_input`.
+    pub fn text_input(&self, text: &str) -> String {
+        if self.is_base64() {
+            return base64_text(text.as_bytes());
+        }
+        text.to_string()
+    }
+
+    /// A prefix given in plain words, as this encoding asks it.
+    ///
+    /// Base64 asks the symbols its UTF-8 bytes fix ([`base64_prefix`]), so the
+    /// walk writes on from the last whole symbol; every other unit takes it as
+    /// it is.  Python's `Encoding.prefix_input`.
+    pub fn prefix_input(&self, text: &str) -> String {
+        if self.is_base64() {
+            return base64_prefix(text.as_bytes());
+        }
+        text.to_string()
+    }
+
+    /// What a text of this encoding holds, as bytes: base64 symbols decoded
+    /// ([`base64_bytes`]), any other text as its UTF-8.  Python's
+    /// `Encoding.content_bytes`.
+    pub fn content_bytes(&self, text: &str) -> Vec<u8> {
+        if self.is_base64() {
+            return base64_bytes(text);
+        }
+        text.as_bytes().to_vec()
     }
 
     // -- encoder -------------------------------------------------------------
@@ -464,11 +555,12 @@ impl fmt::Display for Encoding {
 
 /// Reads a spec: `unit[:n[:stride]]`.
 ///
-/// `unit` is char / chars / character / word / words, `n` defaults to
-/// [`WINDOW`] and `stride` to 1 (a sliding window); `unit:n:n` and the
-/// shorthand `unit:n:groups` are the non-overlapping form.  A few names for the
-/// common ones are accepted too: `trigram`, `bigram`, `word-bigram`,
-/// `word-trigram`.
+/// `unit` is char / chars / character / word / words, a sound (phone,
+/// syllable, acoustic) or base64 / b64; `n` defaults to [`WINDOW`] and
+/// `stride` to 1 (a sliding window); `unit:n:n` and the shorthand
+/// `unit:n:groups` are the non-overlapping form, so `base64:4:4` is one gram
+/// per three bytes of any content.  A few names for the common ones are
+/// accepted too: `trigram`, `bigram`, `word-bigram`, `word-trigram`.
 pub fn parse_encoding(spec: &str) -> Result<Encoding, String> {
     let s = spec.trim().to_ascii_lowercase();
     if s.is_empty() {
@@ -488,7 +580,7 @@ pub fn parse_encoding(spec: &str) -> Result<Encoding, String> {
     }
     let unit = Unit::parse(parts[0]).ok_or_else(|| {
         format!(
-            "encoding {spec:?}: unit must be char, word, phone, syllable or acoustic, got {:?}",
+            "encoding {spec:?}: unit must be char, word, phone, syllable, acoustic or base64, got {:?}",
             parts[0]
         )
     })?;
@@ -622,6 +714,161 @@ pub fn vocabulary<'a>(encoding: &Encoding, grams: impl IntoIterator<Item = &'a s
     rows
 }
 
+// -- the base64 unit: content in, content out -----------------------------------
+
+/// The 64 symbols of the base64 unit: RFC 4648's standard alphabet, in its
+/// order.
+pub const BASE64_ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Bytes as base64 symbols: the standard alphabet, no padding (3 bytes -> 4
+/// symbols, 1 -> 2, 2 -> 3).
+///
+/// This is the encoder of the base64 unit: a text is its UTF-8 bytes, a file
+/// the bytes it holds, and either becomes the text a model over base64
+/// symbols is built from.  Written out here rather than borrowed from the kit,
+/// whose own base64 pads (the model never depends on the kit).  Python's
+/// `base64_text`.
+pub fn base64_text(data: &[u8]) -> String {
+    let alphabet = BASE64_ALPHABET.as_bytes();
+    let mut out = String::with_capacity((data.len() * 8).div_ceil(6));
+    for group in data.chunks(3) {
+        // the group's bytes as 24 bits, a missing byte as zeros; one symbol
+        // per six bits the bytes reach into - two for one byte, three for two
+        let bits = group
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, &b)| acc | (u32::from(b) << (16 - 8 * i)));
+        for i in 0..=group.len() {
+            out.push(char::from(alphabet[((bits >> (18 - 6 * i)) & 63) as usize]));
+        }
+    }
+    out
+}
+
+/// The symbols every continuation of `data` shares: the first
+/// `floor(8 * len / 6)` of its base64.
+///
+/// The last symbol of a text's base64 also holds bits of the bytes that would
+/// follow it, so a prefix given as content is asked as the symbols it fixes:
+/// `b"the c"` -> `"dGhlIG"`, and the walk writes on from there - the bits of
+/// `c` that the next symbol carries included.  Python's `base64_prefix`.
+pub fn base64_prefix(data: &[u8]) -> String {
+    let mut symbols = base64_text(data);
+    symbols.truncate(data.len() * 8 / 6); // every symbol is one byte of ASCII
+    symbols
+}
+
+/// The six bits a base64 symbol stands for, or `None` for anything outside
+/// the 64.
+fn symbol_value(byte: u8) -> Option<u32> {
+    match byte {
+        b'A'..=b'Z' => Some(u32::from(byte - b'A')),
+        b'a'..=b'z' => Some(u32::from(byte - b'a') + 26),
+        b'0'..=b'9' => Some(u32::from(byte - b'0') + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+/// Base64 symbols back to bytes, whatever was written: the decoder of the
+/// base64 unit, which never fails.
+///
+/// Anything outside the 64 symbols is skipped (padding, whitespace, a stray
+/// character, the URL-safe `-` and `_`), a last symbol that cannot complete a
+/// byte is dropped, and the bits a final partial group has over are ignored -
+/// so a predicted or generated text always decodes, into `floor(6 * symbols /
+/// 8)` bytes (`"YR"` is `b"a"`).  Python's `base64_bytes`.
+pub fn base64_bytes(text: &str) -> Vec<u8> {
+    // a character outside ASCII is no symbol, and none of its bytes is one either
+    let mut values: Vec<u32> = text.bytes().filter_map(symbol_value).collect();
+    if values.len() % 4 == 1 {
+        values.pop();
+    }
+    let mut out = Vec::with_capacity(values.len() * 3 / 4);
+    for group in values.chunks(4) {
+        let bits = group
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (i, &v)| acc | (v << (18 - 6 * i)));
+        // four symbols make three bytes, three make two, two make one
+        for i in 0..group.len() * 6 / 8 {
+            out.push((bits >> (16 - 8 * i)) as u8);
+        }
+    }
+    out
+}
+
+/// Whether bytes read as UTF-8 text - strictly, as Python's decoder reads
+/// them: a surrogate or an overlong form is no text.  What decides whether a
+/// file is cut into lines or taken whole.  Python's `is_utf8`.
+pub fn is_utf8(data: &[u8]) -> bool {
+    std::str::from_utf8(data).is_ok()
+}
+
+/// The bytes a blank line of a text file is made of: ASCII whitespace.
+const ASCII_SPACE: &[u8] = b" \t\n\r\x0b\x0c";
+
+/// The texts a file gives a model of base64 symbols, each in its symbols
+/// ([`base64_text`]).
+///
+/// A file that reads as UTF-8 text gives one text per line - split on `\n`,
+/// each line's bytes as they are (a `\r` stays, a byte-order mark stays), a
+/// line of nothing but ASCII whitespace skipped - unless `whole_file`.
+/// Anything else (an image, a video, a recording, an archive), and any file
+/// taken whole, is one text: every byte it holds, so the decoded text is the
+/// file again.  An empty file gives nothing.  Python's `base64_file_texts`.
+pub fn base64_file_texts(data: &[u8], whole_file: bool) -> Vec<String> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    if !whole_file && is_utf8(data) {
+        return data
+            .split(|&b| b == b'\n')
+            .filter(|line| line.iter().any(|b| !ASCII_SPACE.contains(b)))
+            .map(base64_text)
+            .collect();
+    }
+    vec![base64_text(data)]
+}
+
+/// What a text of a model of base64 symbols holds: `decoded`,
+/// `decoded_continuation` and `decoded_bytes`.
+///
+/// `decoded` is the whole text - the prefix and what the walk wrote after it -
+/// decoded ([`base64_bytes`]) and read as UTF-8, a byte sequence that is not
+/// text showing as U+FFFD: one per maximal invalid subpart, the Unicode
+/// Standard's practice, which is what `String::from_utf8_lossy` writes and
+/// what Python's `decode("utf-8", "replace")` writes.  `decoded_bytes` is how
+/// many bytes that is.  `decoded_continuation` is what the model wrote that
+/// `prefix` - the content the walk was asked to continue, as bytes - did not
+/// already hold: everything after the bytes the two have in common.  A prefix
+/// that ends inside a symbol leaves its last byte to the walk, which may write
+/// it differently (asked `the d` it may say `the log`), so the continuation
+/// starts where the model's bytes and the prefix's part.
+///
+/// Every other encoding gets no pairs, as a model that is not sounds gets no
+/// `spelled` ([`crate::phonetic::spelled_prediction`]): the fields are there
+/// only when they say something.  Python's `decoded_prediction`.
+pub fn decoded_prediction(enc: Encoding, full_text: &str, prefix: &[u8]) -> Vec<(String, Json)> {
+    if !enc.is_base64() {
+        return Vec::new();
+    }
+    let whole = base64_bytes(full_text);
+    let same = whole.iter().zip(prefix).take_while(|(a, b)| a == b).count();
+    vec![
+        (
+            "decoded".to_string(),
+            Json::str(String::from_utf8_lossy(&whole).into_owned()),
+        ),
+        (
+            "decoded_continuation".to_string(),
+            Json::str(String::from_utf8_lossy(&whole[same..]).into_owned()),
+        ),
+        ("decoded_bytes".to_string(), Json::Int(whole.len() as i64)),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -736,5 +983,260 @@ mod tests {
                 ("the".to_string(), 1),
             ]
         );
+    }
+
+    // -- the base64 unit (Python's tests/test_base64_unit.py) ------------------------
+
+    /// A tiny binary blob that is not UTF-8: the head of a PNG and some bytes
+    /// that are no text - what an image or a recording looks like to the unit.
+    const BLOB: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF, 0xFE, 0x80, 0x10, 0x20, 0x30, 0xC0, 0xC1,
+    ];
+
+    fn b64() -> Encoding {
+        Encoding::new(Unit::Base64, 3, 1).unwrap()
+    }
+
+    /// Bytes nobody chose: a small linear congruential generator, so the
+    /// round trips run over every value a byte takes without a dependency.
+    fn noise(seed: u32, len: usize) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                (state >> 16) as u8
+            })
+            .collect()
+    }
+
+    fn decoded(pairs: &[(String, Json)], key: &str) -> Json {
+        pairs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Json::Null)
+    }
+
+    #[test]
+    fn the_base64_dial_is_parsed_named_and_written() {
+        for spec in ["base64", "b64", "BASE64:3:1", " base64 ", "b64:3:sliding"] {
+            assert_eq!(parse_encoding(spec).unwrap(), b64(), "{spec}");
+        }
+        let groups = parse_encoding("base64:4:4").unwrap();
+        assert_eq!((groups.unit, groups.n, groups.stride), (Unit::Base64, 4, 4));
+        assert_eq!(groups.to_string(), "base64:4:4");
+        assert_eq!(parse_encoding(&groups.to_string()).unwrap(), groups);
+        assert_eq!(groups.describe(), "4-symbol grams, stride 4 (groups)");
+        assert_eq!(b64().describe(), "3-symbol grams, stride 1 (sliding)");
+        assert_eq!(groups.units_name(), "symbols");
+        assert_eq!(Unit::Base64.name(), "base64");
+        assert!(groups.is_base64() && !groups.is_default());
+        assert!(!Encoding::default().is_base64());
+        assert!(Unit::Base64.characters() && Unit::Chars.characters());
+        assert!(!Unit::Words.characters() && !Unit::Phones.characters() && !Unit::Acoustic.characters());
+        assert!(!Unit::Base64.phonetic() && !Unit::Base64.tokens());
+        let refused = parse_encoding("base65").unwrap_err();
+        assert!(refused.contains("base64"), "{refused}");
+    }
+
+    /// The symbols slice like characters: one code point, one unit.
+    #[test]
+    fn a_symbol_is_one_unit() {
+        let e = b64();
+        let text = "dGhlIGNhdA";
+        assert_eq!(e.units(text).len(), 10);
+        assert_eq!(e.units(text).text(), text);
+        assert_eq!(e.len(text), 10);
+        assert_eq!(e.slice(text, 2, 5), "hlI");
+        assert_eq!(e.join(&["dGh", "", "lIG"]), "dGhlIG");
+        assert!(e.has_unit_prefix("dGhlIG", "dGh"));
+        assert!(!e.has_unit_prefix("dGhlIG", "dGx"));
+        assert_eq!(e.reverse("abc+/"), "/+cba");
+        assert_eq!(e.encode("dGhlIA"), vec!["dGh", "Ghl", "hlI", "lIA"]);
+        let groups = parse_encoding("base64:4:4").unwrap();
+        assert_eq!(groups.encode("dGhlIGNhdA"), vec!["dGhl", "IGNh"]);
+        assert_eq!(groups.normalize("dGhlIGNhdA"), "dGhlIGNh");
+        assert_eq!(e.spell("dGhl"), "dGhl", "symbols are their own spelling");
+    }
+
+    #[test]
+    fn bytes_become_symbols_without_padding() {
+        assert_eq!(base64_text(b""), "");
+        assert_eq!(base64_text(b"a"), "YQ");
+        assert_eq!(base64_text(b"ab"), "YWI");
+        assert_eq!(base64_text(b"abc"), "YWJj");
+        assert_eq!(base64_text(b"the cat"), "dGhlIGNhdA");
+        assert_eq!(base64_text(&[0xff, 0xfe, 0xfd]), "//79");
+        assert_eq!(base64_text(&[0xfb, 0xff]), "+/8");
+        // every byte value, against the standard alphabet with the padding taken off
+        let every: Vec<u8> = (0..=255).collect();
+        assert!(base64_text(&every).starts_with("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"));
+        assert!(base64_text(&every).ends_with("8PHy8/T19vf4+fr7/P3+/w"));
+        assert!(base64_text(BLOB).chars().all(|c| BASE64_ALPHABET.contains(c)));
+        assert_eq!(BASE64_ALPHABET.len(), 64);
+    }
+
+    #[test]
+    fn any_bytes_come_back_from_their_symbols() {
+        for size in (0..40).chain([255, 1000, 4097]) {
+            let data = noise(7 + size as u32, size);
+            let symbols = base64_text(&data);
+            assert_eq!(symbols.len(), (size * 8).div_ceil(6), "{size} bytes");
+            assert_eq!(base64_bytes(&symbols), data, "{size} bytes");
+        }
+    }
+
+    /// A predicted text always decodes: padding, whitespace and stray
+    /// characters are skipped, a dangling symbol is dropped, and the bits a
+    /// last partial group has over are ignored.
+    #[test]
+    fn the_decoder_takes_whatever_was_written() {
+        assert_eq!(base64_bytes(""), b"");
+        assert_eq!(base64_bytes("YQ=="), b"a");
+        assert_eq!(base64_bytes("YW\nJj \t"), b"abc");
+        assert_eq!(
+            base64_bytes("Y-W_J.j"),
+            b"abc",
+            "the URL-safe symbols are not this alphabet's"
+        );
+        assert_eq!(base64_bytes("YWJjZ"), b"abc", "one symbol cannot make a byte");
+        assert_eq!(base64_bytes("Y"), b"");
+        assert_eq!(base64_bytes("YR"), b"a", "R's low four bits are left over");
+        assert_eq!(base64_bytes("YWJ"), b"ab");
+        assert_eq!(
+            base64_bytes("Y\u{e9}W\u{1f600}Jj"),
+            b"abc",
+            "a character outside ASCII is no symbol"
+        );
+        assert_eq!(base64_bytes("//79"), [0xff, 0xfe, 0xfd]);
+    }
+
+    #[test]
+    fn a_prefix_is_the_symbols_its_bytes_fix() {
+        assert_eq!(base64_prefix(b""), "");
+        assert_eq!(base64_prefix(b"t"), "d");
+        assert_eq!(base64_prefix(b"th"), "dG");
+        assert_eq!(base64_prefix(b"the"), "dGhl");
+        assert_eq!(base64_prefix(b"the d"), "dGhlIG");
+        assert_eq!(base64_prefix(b"the cat"), "dGhlIGNhd");
+        for size in 0..30 {
+            let data = noise(3 + size as u32, size);
+            let prefix = base64_prefix(&data);
+            assert_eq!(prefix.len(), size * 8 / 6, "{size} bytes");
+            // every continuation of the bytes shares it
+            for tail in [&b""[..], b"\x00", b"\xff", b"xyz"] {
+                let longer = [&data[..], tail].concat();
+                assert!(base64_text(&longer).starts_with(&prefix), "{size} bytes + {tail:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn utf8_is_read_strictly() {
+        assert!(is_utf8("the cat \u{20ac}".as_bytes()));
+        assert!(is_utf8(b""));
+        assert!(!is_utf8(BLOB));
+        assert!(!is_utf8(b"\xed\xa0\x80"), "a surrogate is not UTF-8");
+        assert!(!is_utf8(b"\xc0\xaf"), "nor is an overlong form");
+        assert!(!is_utf8(b"\xf0\x90\x80"), "nor a sequence cut short");
+    }
+
+    #[test]
+    fn a_text_file_is_one_text_per_line() {
+        let data = b"one\r\n  \ntwo\n\n\tthree \n";
+        let texts = base64_file_texts(data, false);
+        assert_eq!(
+            texts,
+            vec![base64_text(b"one\r"), base64_text(b"two"), base64_text(b"\tthree ")]
+        );
+        let back: Vec<Vec<u8>> = texts.iter().map(|t| base64_bytes(t)).collect();
+        assert_eq!(back, vec![b"one\r".to_vec(), b"two".to_vec(), b"\tthree ".to_vec()]);
+        // a byte-order mark is a byte of the first line like any other
+        assert_eq!(
+            base64_file_texts(b"\xef\xbb\xbfhi\n", false),
+            vec![base64_text(b"\xef\xbb\xbfhi")]
+        );
+    }
+
+    #[test]
+    fn anything_else_is_one_text_of_every_byte() {
+        assert_eq!(base64_file_texts(BLOB, false), vec![base64_text(BLOB)]);
+        assert_eq!(base64_bytes(&base64_file_texts(BLOB, false)[0]), BLOB);
+        let data = b"one\ntwo\n\n";
+        assert_eq!(base64_file_texts(data, true), vec![base64_text(data)]);
+        assert_eq!(base64_bytes(&base64_file_texts(data, true)[0]), data);
+        // nothing comes from nothing; a blank file taken whole is its bytes
+        assert!(base64_file_texts(b"", false).is_empty());
+        assert!(base64_file_texts(b"", true).is_empty());
+        assert!(base64_file_texts(b" \n\t\n", false).is_empty());
+        assert_eq!(base64_file_texts(b" \n\t\n", true), vec![base64_text(b" \n\t\n")]);
+    }
+
+    #[test]
+    fn content_comes_in_and_goes_out() {
+        let e = b64();
+        assert_eq!(e.text_input("the cat"), "dGhlIGNhdA");
+        assert_eq!(e.prefix_input("the cat"), "dGhlIGNhd");
+        assert_eq!(e.content_text(BLOB).unwrap(), base64_text(BLOB));
+        assert_eq!(e.content_bytes(&base64_text(BLOB)), BLOB);
+        // every other unit takes text as it is, and gives its UTF-8 back
+        let plain = Encoding::default();
+        assert_eq!(plain.text_input("the cat"), "the cat");
+        assert_eq!(plain.prefix_input("the cat"), "the cat");
+        assert_eq!(plain.content_text("caf\u{e9}".as_bytes()).unwrap(), "caf\u{e9}");
+        assert!(plain.content_text(BLOB).is_err(), "bytes that are no text");
+        assert_eq!(plain.content_bytes("caf\u{e9}"), "caf\u{e9}".as_bytes());
+    }
+
+    #[test]
+    fn a_prediction_decodes() {
+        let e = b64();
+        assert_eq!(
+            Json::Obj(decoded_prediction(e, "dGhlIGNhdCBzYXQ", b"the cat")),
+            Json::obj([
+                ("decoded", Json::str("the cat sat")),
+                ("decoded_continuation", Json::str(" sat")),
+                ("decoded_bytes", Json::Int(11)),
+            ])
+        );
+        // no prefix: all of it was written
+        let all = decoded_prediction(e, "dGhlIGNhdA", b"");
+        assert_eq!(decoded(&all, "decoded_continuation").as_str(), Some("the cat"));
+        // every other encoding adds nothing
+        assert!(decoded_prediction(Encoding::default(), "the cat sat", b"the cat").is_empty());
+    }
+
+    /// Asked `the d`, the symbols fix 4 bytes and half of the fifth; a walk
+    /// that finishes it as `l` said `the log`, and the continuation is
+    /// everything after the bytes the two share.
+    #[test]
+    fn the_last_byte_of_a_prefix_is_the_walks_to_finish() {
+        let e = b64();
+        let prefix = base64_prefix(b"the d");
+        assert_eq!(prefix, "dGhlIG");
+        let out = decoded_prediction(e, &format!("{prefix}xvZw"), b"the d");
+        assert_eq!(decoded(&out, "decoded").as_str(), Some("the log"));
+        assert_eq!(decoded(&out, "decoded_continuation").as_str(), Some("log"));
+        let out = decoded_prediction(e, &base64_text(b"the dog"), b"the d");
+        assert_eq!(decoded(&out, "decoded").as_str(), Some("the dog"));
+        assert_eq!(decoded(&out, "decoded_continuation").as_str(), Some("og"));
+    }
+
+    /// One U+FFFD per maximal invalid subpart - the Unicode Standard's
+    /// practice, Python's `errors="replace"`, and what the Go port writes too.
+    #[test]
+    fn bytes_that_are_not_text_read_as_replacement_characters() {
+        for (data, text) in [
+            (&b"ok\xe2\x82A\xff"[..], "ok\u{fffd}A\u{fffd}"), // a truncated sequence is one subpart
+            (b"\xed\xa0\x80", "\u{fffd}\u{fffd}\u{fffd}"),    // a surrogate: three
+            (b"\xf0\x90\x80", "\u{fffd}"),                    // a four-byte sequence cut short at the end
+            (b"\xc0\xaf", "\u{fffd}\u{fffd}"),                // an overlong form: two
+            (b"\xf4\x90\x80\x80", "\u{fffd}\u{fffd}\u{fffd}\u{fffd}"), // past U+10FFFF: four
+            (b"\xe2\x82\xac", "\u{20ac}"),
+        ] {
+            let out = decoded_prediction(b64(), &base64_text(data), b"");
+            assert_eq!(decoded(&out, "decoded").as_str(), Some(text), "{data:?}");
+            assert_eq!(decoded(&out, "decoded_bytes").as_i64(), Some(data.len() as i64));
+        }
     }
 }

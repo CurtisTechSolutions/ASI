@@ -28,6 +28,13 @@
 //! is validated from there, entry by entry (D-035, as the Go server does it).
 //! Only the JSON forms, which carry the file inline, are read whole.
 //!
+//! What is kept is decided by the bytes: a ZIP archive stays an archive, bytes
+//! that are UTF-8 text are kept as that text (the byte-order mark dropped),
+//! and anything else - an image, a video, a recording - is kept byte for
+//! byte, so a model of base64 symbols learns exactly what was sent; a text
+//! model reads such a file as text, the bytes that are not replaced, when it
+//! reads it.
+//!
 //! No dependencies, like everything else: the multipart parser (held and
 //! streamed) and base64 ([`base64`]) are written out.
 
@@ -1093,16 +1100,40 @@ pub fn store_text(svc: &Service, name: &str, content: &str) -> Result<Json, ApiE
 }
 
 /// Stores a binary upload (`ModelService.upload_bytes`): a ZIP archive is
-/// kept whole as one upload (D-034), anything else is stored as UTF-8 text
-/// with the byte-order mark dropped and undecodable bytes replaced.  Answers
-/// `{"uploads": [record]}`, plus `"archives": [summary]` for an archive.
+/// kept whole as one upload (D-034), a UTF-8 text file as its text with the
+/// byte-order mark dropped, and anything else as it is, byte for byte
+/// ([`store_raw`]).  Answers `{"uploads": [record]}`, plus `"archives":
+/// [summary]` for an archive.
 pub fn store_bytes(svc: &Service, name: &str, data: &[u8]) -> Result<Json, ApiError> {
     if radixnet::zip::is_zip(data) {
         return store_archive(svc, name, data);
     }
-    let data = data.strip_prefix(b"\xef\xbb\xbf".as_slice()).unwrap_or(data);
-    let text = String::from_utf8_lossy(data);
-    Ok(Json::obj([("uploads", Json::Arr(vec![store_text(svc, name, &text)?]))]))
+    let Ok(text) = std::str::from_utf8(data) else {
+        return Ok(Json::obj([("uploads", Json::Arr(vec![store_raw(svc, name, data)?]))]));
+    };
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    Ok(Json::obj([("uploads", Json::Arr(vec![store_text(svc, name, text)?]))]))
+}
+
+/// Stores bytes that are no UTF-8 text - an image, a video, a recording - as
+/// the upload `name`, byte for byte, so a model of base64 symbols learns
+/// exactly what was sent (the second half of `ModelService.upload_bytes`).
+/// The record is a text upload's, counted over the bytes read as text.
+pub fn store_raw(svc: &Service, name: &str, data: &[u8]) -> Result<Json, ApiError> {
+    let dir = upload_dir(svc)?;
+    let path = std::path::Path::new(&dir).join(sanitize_upload_name(name)?);
+    let replaced = path.is_file();
+    // written beside and moved into place, so a reader never sees half a file
+    let part = staged(&path);
+    std::fs::write(&part, data)
+        .and_then(|_| std::fs::rename(&part, &path))
+        .map_err(|err| ApiError::with_status(500, format!("cannot store {}: {err}", path.display())))?;
+    let mut doc = record(&path)?;
+    if let Json::Obj(pairs) = &mut doc {
+        pairs.push(("replaced".to_string(), Json::Bool(replaced)));
+    }
+    radixnet::log_info!(LOG, "upload {} ({} bytes, binary)", path.display(), data.len());
+    Ok(doc)
 }
 
 /// Keeps a ZIP archive held in memory (the JSON forms carry it inline) as a
@@ -1232,17 +1263,21 @@ fn store_from(svc: &Service, dir: &str, name: &str, data: &mut dyn Read) -> Resu
 }
 
 /// Keeps an upload whose bytes are in `part`, a file in the upload directory,
-/// under the name `safe` (already made safe).  The first four bytes decide:
-/// a ZIP archive is validated by reading its entries from the file - a batch
-/// at a time, never whole - and kept whole under a `.zip` name (D-034);
-/// anything else is a text file, stored as UTF-8 with the byte-order mark
-/// dropped and undecodable bytes replaced, converted a chunk at a time.
-/// `part` is gone afterwards, kept or refused.
+/// under the name `safe` (already made safe).  The first four bytes decide
+/// whether it is a ZIP archive, which is validated by reading its entries from
+/// the file - a batch at a time, never whole - and kept whole under a `.zip`
+/// name (D-034); otherwise the bytes decide, read a chunk at a time: UTF-8
+/// text is stored as that text with the byte-order mark dropped, and anything
+/// else is kept byte for byte.  `part` is gone afterwards, kept or refused.
 fn store_part(svc: &Service, dir: &str, safe: &str, part: &Path) -> Result<Json, ApiError> {
     let outcome = if radixnet::zip::is_zip_file(part) {
         keep_archive(svc, dir, safe, part)
     } else {
-        keep_text(dir, safe, part)
+        match utf8_file(part) {
+            Ok(true) => keep_text(dir, safe, part),
+            Ok(false) => keep_raw(dir, safe, part),
+            Err(err) => Err(ApiError::with_status(500, format!("cannot store {safe}: {err}"))),
+        }
     };
     // nothing to do when it was moved into place; a refused one goes
     let _ = std::fs::remove_file(part);
@@ -1340,10 +1375,57 @@ fn keep_text(dir: &str, safe: &str, part: &Path) -> Result<Json, ApiError> {
     Ok(Json::obj([("uploads", Json::Arr(vec![doc]))]))
 }
 
-/// Copies bytes as text - UTF-8 with the byte-order mark dropped and anything
-/// that is not UTF-8 replaced, what [`store_bytes`] makes of a small upload -
-/// a chunk at a time, so a file of any size is converted without being held.
-/// Returns how many bytes were written.
+/// The bytes in `part`, which are no UTF-8 text, moved into place as they are.
+fn keep_raw(dir: &str, safe: &str, part: &Path) -> Result<Json, ApiError> {
+    let path = Path::new(dir).join(safe);
+    let replaced = path.is_file();
+    std::fs::rename(part, &path)
+        .map_err(|err| ApiError::with_status(500, format!("cannot store {}: {err}", path.display())))?;
+    let mut doc = record(&path)?;
+    if let Json::Obj(pairs) = &mut doc {
+        pairs.push(("replaced".to_string(), Json::Bool(replaced)));
+    }
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    radixnet::log_info!(LOG, "upload {} ({bytes} bytes, binary)", path.display());
+    Ok(Json::obj([("uploads", Json::Arr(vec![doc]))]))
+}
+
+/// Whether a file's bytes are UTF-8 text, strictly - read a chunk at a time,
+/// so a file of any size is judged without being held.  A sequence cut by
+/// the end of a chunk waits for the rest of it; one cut by the end of the
+/// file is no text.
+fn utf8_file(path: &Path) -> std::io::Result<bool> {
+    let mut src = BufReader::with_capacity(CHUNK, std::fs::File::open(path)?);
+    let mut chunk = vec![0u8; CHUNK];
+    // what the last chunk left: a multi-byte sequence cut short, waiting for its rest
+    let mut held: Vec<u8> = Vec::new();
+    loop {
+        let n = match src.read(&mut chunk) {
+            Ok(n) => n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if n == 0 {
+            return Ok(held.is_empty());
+        }
+        held.extend_from_slice(&chunk[..n]);
+        match std::str::from_utf8(&held) {
+            Ok(_) => held.clear(),
+            // the input ended inside a sequence: its rest may be in the next chunk
+            Err(err) if err.error_len().is_none() => {
+                let valid = err.valid_up_to();
+                held.drain(..valid);
+            }
+            Err(_) => return Ok(false),
+        }
+    }
+}
+
+/// Copies bytes as text - UTF-8 with the byte-order mark dropped, what
+/// [`store_bytes`] makes of a small text upload - a chunk at a time, so a file
+/// of any size is converted without being held.  Anything that is not UTF-8
+/// would be replaced, though only text reaches it: [`store_part`] keeps the
+/// rest byte for byte.  Returns how many bytes were written.
 fn copy_as_text(mut src: impl Read, mut dst: impl Write) -> std::io::Result<u64> {
     let mut chunk = vec![0u8; CHUNK];
     // what the last chunk left: a multi-byte sequence cut short, waiting for its rest
@@ -1835,6 +1917,38 @@ mod tests {
         assert_eq!(cut_short(b"\xf0\x9f\x98\x80"), 0, "complete");
         assert_eq!(cut_short(b"a\xff"), 0, "not a lead byte");
         assert_eq!(cut_short(b"\x80\x80\x80"), 0, "continuation bytes alone");
+    }
+
+    /// What decides between keeping an upload as text and keeping it byte for
+    /// byte, judged a chunk at a time as it would be whole - a sequence cut by
+    /// the end of a chunk included.
+    #[test]
+    fn a_file_is_text_only_when_every_byte_of_it_is() {
+        let dir = std::env::temp_dir().join(format!("radixnet-utf8-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("judged.bin");
+        // sequences of three bytes and of four astride the end of the first chunk, and one cut by it that is wrong
+        let mut euro = vec![b'a'; CHUNK - 2];
+        euro.extend("\u{20ac}\u{1f600} the end".as_bytes());
+        let mut astride = vec![b'b'; CHUNK - 1];
+        astride.extend("\u{1f600}".as_bytes());
+        let mut broken = vec![b'c'; CHUNK - 1];
+        broken.extend(b"\xe2\x82A");
+        for (bytes, text) in [
+            (&b""[..], true),
+            (b"\xef\xbb\xbfplain text\n", true),
+            (&euro[..], true),
+            (&astride[..], true),
+            (&broken[..], false),
+            (b"\x89PNG\r\n\x1a\n\x00\xff", false),
+            (b"ends inside \xe2\x82", false),
+            (b"\xed\xa0\x80", false),
+        ] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(utf8_file(&path).unwrap(), text, "{} bytes", bytes.len());
+            assert_eq!(text, std::str::from_utf8(bytes).is_ok());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

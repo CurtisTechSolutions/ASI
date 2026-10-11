@@ -532,8 +532,10 @@ class TestRustWordParity(unittest.TestCase):
         self.assertEqual(again.stats()["epochs_total"], 3)
 
     def test_the_other_dials_agree_too(self):
-        """Any n, any stride: the two sides build the same graph from the same grams."""
-        for spec in ("char:5:1", "char:4:4", "word:2:1", "phone:3:1", "phone:2:2", "syllable:2:1"):
+        """Any n, any stride: the two sides build the same graph from the same grams - and from the same bytes,
+        when the unit is base64 symbols (the corpus read as its bytes, a line at a time)."""
+        for spec in ("char:5:1", "char:4:4", "word:2:1", "phone:3:1", "phone:2:2", "syllable:2:1", "base64:3:1",
+                     "base64:4:4"):
             with self.subTest(encoding=spec):
                 pym = os.path.join(TMP.name, f"py.{spec.replace(':', '-')}.json")
                 rsm = os.path.join(TMP.name, f"rs.{spec.replace(':', '-')}.json")

@@ -506,11 +506,12 @@ impl Model {
     /// The alphabet of a word encoding: every word the graph's grams are made
     /// of, most read first, ties alphabetically.  `limit` 0 is all of them.
     ///
-    /// A model that does not count in words has none.  The order is the Python
-    /// and Go one, word for word, so three implementations list one alphabet.
+    /// A model that does not count in words has none - characters, or base64
+    /// symbols, are letters and no words.  The order is the Python and Go one,
+    /// word for word, so three implementations list one alphabet.
     pub fn top_words(&mut self, limit: usize) -> Vec<crate::words::WordRow> {
         self.g.prepare();
-        if self.g.enc.unit == crate::encoding::Unit::Chars {
+        if self.g.enc.unit.characters() {
             return Vec::new();
         }
         let grams = self.g.gram_index();
@@ -1770,7 +1771,8 @@ pub fn stats(model: &Model) -> Vec<(String, String)> {
     put("unit", g.enc.unit.name().to_string());
     put("ngram", g.enc.n.to_string());
     put("stride", g.enc.stride.to_string());
-    if g.enc.unit != crate::encoding::Unit::Chars {
+    if !g.enc.unit.characters() {
+        // characters and base64 symbols have no words to count
         put(
             "vocabulary",
             crate::encoding::vocabulary(&g.enc, g.gram_index()).len().to_string(),

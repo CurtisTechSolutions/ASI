@@ -1099,6 +1099,269 @@ fn an_upload_of_any_size_streams_to_disk() {
     );
 }
 
+// -- a model of base64 symbols: any content as its bytes ----------------------------------------
+
+/// The head of a PNG and some bytes that are no text: what an image, a video
+/// or a recording is to the base64 unit.
+const BLOB: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF, 0xFE, 0x80, 0x10, 0x20, 0x30, 0xC0, 0xC1,
+];
+
+const SENTENCES: [&str; 4] = [
+    "the cat sat on the mat",
+    "the cat sat on the floor",
+    "the dog sat on the log",
+    "a quick brown fox jumps over the lazy dog",
+];
+
+/// A text model's lossy reading of bytes, as the answers write it.
+fn lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// The API over a model of base64 symbols (Python's `tests/test_base64.py`,
+/// `TestTheApi`): a text is learned as its bytes, a prefix asked as the
+/// symbols its bytes fix, every answer says what it holds, the model's own
+/// words come back as they are when a request says `symbols`, and an upload
+/// that is no text is kept - and learned - byte for byte.
+#[test]
+fn a_model_of_base64_symbols_learns_bytes_and_answers_in_them() {
+    use radixnet::encoding::{base64_bytes, base64_prefix, base64_text, BASE64_ALPHABET};
+    let dir = temp_dir("base64");
+    let enc = Encoding::new(Unit::Base64, 3, 1).expect("a base64 encoding");
+    let model = Model::new(
+        1,
+        GraphOptions {
+            encoding: enc,
+            ..Default::default()
+        },
+    )
+    .expect("a model");
+    let port = serve(model, &format!("{dir}/model.count.json"));
+    let uploads = std::path::Path::new(&dir).join("uploads");
+    let body = |pairs: Vec<(&str, Json)>| Json::obj(pairs).render(0);
+    let texts = || Json::strs(SENTENCES.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let train = |pairs: Vec<(&str, Json)>| {
+        let (status, doc) = post(port, "/api/train", &body(pairs));
+        assert_eq!(status, 202, "{doc:?}");
+        assert!(job_done(port), "{:?}", get(port, "/api/job").1);
+    };
+
+    let (_, info) = get(port, "/api/encoding");
+    assert_eq!(
+        (info.at("encoding").as_str(), info.at("unit").as_str()),
+        (Some("base64:3:1"), Some("base64"))
+    );
+    assert_eq!(get(port, "/api/model").1.at("units").as_str(), Some("symbols"));
+
+    // texts are learned as their bytes: every label is made of the symbols
+    train(vec![("texts", texts()), ("epochs", Json::Int(2))]);
+    let (_, graph) = get(port, "/api/graph?limit=1000");
+    for node in graph.at("nodes").as_array() {
+        let label = node.at("label").as_str().unwrap_or("");
+        assert!(
+            label.starts_with('<') || label.chars().all(|c| BASE64_ALPHABET.contains(c)),
+            "{label:?} is not base64 symbols"
+        );
+    }
+
+    // a prefix is asked in symbols and answered in bytes
+    let (status, doc) = post(
+        port,
+        "/api/predict",
+        &body(vec![
+            ("prefix", Json::str("the cat sat on the")),
+            ("length", Json::Int(8)),
+            ("to_end", Json::Bool(true)),
+            ("k", Json::Int(2)),
+            ("guard", Json::Bool(false)),
+        ]),
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("prefix").as_str(), Some("the cat sat on the"));
+    assert_eq!(
+        doc.at("prefix_symbols").as_str(),
+        Some(base64_prefix(b"the cat sat on the").as_str())
+    );
+    let said = doc.at("decoded").as_str().unwrap_or("").to_string();
+    assert!(
+        ["the cat sat on the mat", "the cat sat on the floor"].contains(&said.as_str()),
+        "{said:?}"
+    );
+    assert!(said.ends_with(doc.at("decoded_continuation").as_str().unwrap_or("?")));
+    assert_eq!(doc.at("decoded_bytes").as_i64(), Some(said.len() as i64));
+    let rows = [doc.at("top").as_array(), doc.at("bottom").as_array()].concat();
+    assert!(!rows.is_empty());
+    for row in rows {
+        let full = row.at("full_text").as_str().unwrap_or("");
+        assert_eq!(row.at("decoded").as_str(), Some(lossy(&base64_bytes(full)).as_str()));
+    }
+    let (status, doc) = post(
+        port,
+        "/api/generate",
+        &body(vec![
+            ("count", Json::Int(2)),
+            ("mode", Json::str("beam")),
+            ("prefix", Json::str("the")),
+            ("guard", Json::Bool(false)),
+        ]),
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("prefix_symbols").as_str(), Some("dGhl"));
+    for sample in doc.at("samples").as_array() {
+        let full = sample.at("full_text").as_str().unwrap_or("");
+        assert!(
+            sample.at("decoded").as_str().unwrap_or("").starts_with("the"),
+            "{sample:?}"
+        );
+        assert_eq!(
+            sample.at("decoded_bytes").as_i64(),
+            Some(base64_bytes(full).len() as i64)
+        );
+    }
+
+    // the model's own words come back as they are when the request says so
+    let own = base64_text(b"the dog sat on the log");
+    let score = |pairs: Vec<(&str, Json)>| post(port, "/api/score", &body(pairs)).1;
+    let known = score(vec![("text", Json::str(own.clone())), ("symbols", Json::Bool(true))]);
+    assert_eq!(known.at("unknown_transitions").as_i64(), Some(0), "{known:?}");
+    assert_eq!(known.at("text").as_str(), Some(own.as_str()));
+    let bytes_of_symbols = score(vec![("text", Json::str(own))]);
+    assert!(bytes_of_symbols.at("unknown_transitions").as_i64().unwrap_or(0) > 0);
+    let sentence = score(vec![("text", Json::str(SENTENCES[2]))]);
+    assert_eq!(sentence.at("unknown_transitions").as_i64(), Some(0), "{sentence:?}");
+    let (status, doc) = post(
+        port,
+        "/api/feedback",
+        &body(vec![
+            ("good", Json::strs(vec![base64_text(b"the cat ate the rat")])),
+            ("symbols", Json::Bool(true)),
+        ]),
+    );
+    assert_eq!(status, 202, "{doc:?}");
+    assert!(job_done(port));
+    let (_, doc) = post(
+        port,
+        "/api/predict",
+        &body(vec![
+            ("prefix", Json::str(base64_prefix(b"the cat ate"))),
+            ("symbols", Json::Bool(true)),
+            ("length", Json::Int(6)),
+            ("to_end", Json::Bool(true)),
+            ("guard", Json::Bool(false)),
+        ]),
+    );
+    assert_eq!(
+        doc.at("prefix_symbols").as_str(),
+        Some(base64_prefix(b"the cat ate").as_str())
+    );
+    assert_eq!(doc.at("decoded").as_str(), Some("the cat ate the rat"));
+    // fourteen symbols fix ten bytes and half the eleventh: the walk finished the "e"
+    assert_eq!(doc.at("decoded_continuation").as_str(), Some("e the rat"));
+
+    // the preview shows the symbols everything was computed on
+    let (_, doc) = post(port, "/api/encoding/preview", r#"{"text":"the cat"}"#);
+    assert_eq!(
+        (doc.at("text").as_str(), doc.at("symbols").as_str()),
+        (Some("the cat"), Some("dGhlIGNhdA"))
+    );
+    assert_eq!(
+        &doc.at("windows").as_array()[..2],
+        &[Json::str("dGh"), Json::str("Ghl")]
+    );
+    assert_eq!(doc.at("chars").as_i64(), Some(10));
+    assert_eq!(doc.at("round_trip").as_bool(), Some(true));
+    let (_, doc) = post(port, "/api/encoding/preview", r#"{"text":"dGhl","symbols":true}"#);
+    assert_eq!(doc.at("symbols").as_str(), Some("dGhl"));
+    assert_eq!(
+        doc.at("windows"),
+        &Json::strs(vec!["dGh".to_string(), "Ghl".to_string()])
+    );
+    assert_eq!(get(port, "/api/words").0, 400, "symbols are no words");
+
+    // an upload that is no text is kept byte for byte, however it arrives
+    let inline = format!(
+        r#"{{"name":"image.png","content_base64":"{}"}}"#,
+        modelkit::multipart::base64::encode(BLOB)
+    );
+    let (status, doc) = post(port, "/api/uploads", &inline);
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(
+        doc.at("uploads").as_array()[0].at("bytes").as_i64(),
+        Some(BLOB.len() as i64)
+    );
+    assert_eq!(std::fs::read(uploads.join("image.png")).unwrap(), BLOB);
+    let (status, _) = send(port, "POST", "/api/uploads?name=raw.png", "image/png", BLOB);
+    assert_eq!(status, 200);
+    assert_eq!(std::fs::read(uploads.join("raw.png")).unwrap(), BLOB);
+    let (status, _) = send(
+        port,
+        "POST",
+        "/api/uploads",
+        "multipart/form-data; boundary=q",
+        &multipart_body("q", "part.png", BLOB),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(std::fs::read(uploads.join("part.png")).unwrap(), BLOB);
+    // a text upload is still text, the byte-order mark dropped as it always was
+    let corpus = format!("\u{feff}{}\n", SENTENCES.join("\n"));
+    let (status, _) = post(
+        port,
+        "/api/uploads",
+        &format!(
+            r#"{{"name":"corpus.txt","content_base64":"{}"}}"#,
+            modelkit::multipart::base64::encode(corpus.as_bytes())
+        ),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        std::fs::read(uploads.join("corpus.txt")).unwrap(),
+        &corpus.as_bytes()[3..]
+    );
+
+    // a fresh model of one file walks that file from START: the decoded walk is the file again
+    let (status, doc) = post(
+        port,
+        "/api/reset",
+        r#"{"kind":"count","encoding":"base64:3:1","seed":1}"#,
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    train(vec![
+        ("files", Json::strs(vec!["image.png".to_string()])),
+        ("epochs", Json::Int(2)),
+    ]);
+    let (_, doc) = post(
+        port,
+        "/api/predict",
+        r#"{"prefix":"","length":1,"to_end":true,"guard":false}"#,
+    );
+    let full = doc.at("full_text").as_str().unwrap_or("");
+    assert_eq!(base64_bytes(full), BLOB);
+    assert_eq!(doc.at("decoded_bytes").as_i64(), Some(BLOB.len() as i64));
+    // and the text file is learned line by line, as its bytes
+    train(vec![
+        ("files", Json::strs(vec!["corpus.txt".to_string()])),
+        ("epochs", Json::Int(2)),
+    ]);
+    let (_, doc) = post(port, "/api/score", &body(vec![("text", Json::str(SENTENCES[2]))]));
+    assert_eq!(doc.at("unknown_transitions").as_i64(), Some(0), "{doc:?}");
+
+    // a text model adds nothing, and reads a binary upload as text with the bytes that are not replaced
+    let (status, _) = post(port, "/api/reset", r#"{"kind":"count","encoding":"char:3:1","seed":1}"#);
+    assert_eq!(status, 200);
+    train(vec![
+        ("texts", texts()),
+        ("files", Json::strs(vec!["image.png".to_string()])),
+    ]);
+    let (_, doc) = post(port, "/api/predict", r#"{"prefix":"the cat","length":4,"guard":false}"#);
+    for key in ["prefix_symbols", "decoded", "decoded_continuation", "decoded_bytes"] {
+        assert!(doc.get(key).is_none(), "{key} on a text model");
+    }
+    let (_, doc) = post(port, "/api/encoding/preview", r#"{"text":"the cat"}"#);
+    assert!(doc.get("symbols").is_none());
+    assert_eq!(doc.at("text").as_str(), Some("the cat"));
+}
+
 // -- talking with the model by voice (D-089) --------------------------------------------------
 
 /// A 440 Hz tone as a WAV, `seconds` long: a recording with nothing to hear in it.

@@ -21,7 +21,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::http::{accepted, Answer, ApiError, Request, Server};
 use radixnet::clock::utc_now;
-use radixnet::encoding::{parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL, START_LABEL, THINK_LABEL};
+use radixnet::encoding::{
+    base64_bytes, base64_file_texts, decoded_prediction, parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL,
+    START_LABEL, THINK_LABEL,
+};
 use radixnet::graph::{END, START};
 use radixnet::json::Json;
 use radixnet::kinds;
@@ -85,6 +88,14 @@ impl Job {
 /// The service: one model behind one lock, plus where its files live.
 pub struct Service {
     model: Mutex<Model>,
+    /// The running model's encoding, as the last hold of its lock left it.
+    ///
+    /// An encoding is fixed for a model's life, so this is what a route reads
+    /// while a job holds the model: the texts a request carries are turned
+    /// into the model's units (a model of base64 symbols learns their bytes)
+    /// without waiting for a training run to let go - Python reads
+    /// `svc.model.encoding` without the lock for the same reason.
+    running_encoding: Mutex<Encoding>,
     /// The encodings that were running earlier, kept as they were left.
     ///
     /// Changing encoding parks the model that was running rather than dropping
@@ -137,6 +148,7 @@ impl Service {
         let born_kind = model.kind();
         let negative_active = AtomicBool::new(model.is_negative());
         Service {
+            running_encoding: Mutex::new(model.encoding()),
             model: Mutex::new(model),
             parked: Mutex::new(Vec::new()),
             born_with,
@@ -265,7 +277,16 @@ impl Service {
     /// so the frontend's reads get in between.
     pub(crate) fn with_model<T>(&self, f: impl FnOnce(&mut Model) -> T) -> T {
         let mut model = self.model.lock().unwrap_or_else(|e| e.into_inner());
-        f(&mut model)
+        let out = f(&mut model);
+        // whatever `f` did - a switch to another model included - leaves the encoding to read
+        *self.running_encoding.lock().unwrap_or_else(|e| e.into_inner()) = model.encoding();
+        out
+    }
+
+    /// The running model's encoding without waiting for its lock: the one the
+    /// last hold of the lock left, which a job that holds it cannot change.
+    pub(crate) fn known_encoding(&self) -> Encoding {
+        *self.running_encoding.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Opens a job of `kind` and hands back its id; the caller finishes it.
@@ -688,17 +709,32 @@ impl Service {
     ///
     /// `train` names its three `texts` / `text` / `files`, which is the one
     /// place the pattern is spelt differently; `one` and `files` say so.
+    ///
+    /// A model of base64 symbols learns the bytes of what it is given: a text
+    /// given inline as its UTF-8 bytes - or as it is, when the request says
+    /// `symbols` ([`inline_texts`]) - and an upload as the bytes it holds
+    /// ([`Service::upload_symbols`]), each written in its symbols.  Python's
+    /// `_texts_and_files`; the encoding is read without waiting for a job.
     pub(crate) fn texts_of(&self, r: &Request, list: &str, one: &str, files: &str) -> Result<Vec<String>, ApiError> {
+        let enc = self.known_encoding();
         let mut texts = r.texts(list);
         texts.extend(r.texts(one));
+        let mut texts = inline_texts(enc, texts, r.flag("symbols", false));
+        let whole = r.flag("whole_file", false);
         for name in r.texts(files) {
-            texts.extend(self.upload_texts(&name, r.flag("whole_file", false))?);
+            texts.extend(if enc.is_base64() {
+                self.upload_symbols(&name, whole)?
+            } else {
+                self.upload_texts(&name, whole)?
+            });
         }
         Ok(texts)
     }
 
     /// One upload as training texts: the whole file as a single text, or a text
-    /// per non-empty line.
+    /// per non-empty line.  A file kept byte for byte because it is no UTF-8
+    /// text is read as text all the same, the bytes that are not replaced
+    /// (Python's `_decode_text`).
     pub(crate) fn upload_texts(&self, name: &str, whole: bool) -> Result<Vec<String>, ApiError> {
         let dir = self
             .upload_dir
@@ -711,13 +747,71 @@ impl Service {
         {
             return Ok(texts);
         }
-        let content = std::fs::read_to_string(&path)
-            .map_err(|err| ApiError::bad_request(format!("cannot read upload {name:?}: {err}")))?;
+        let bytes =
+            std::fs::read(&path).map_err(|err| ApiError::bad_request(format!("cannot read upload {name:?}: {err}")))?;
+        let content = radixnet::source::decode_text(&bytes);
         if whole {
             return Ok(vec![content]);
         }
         Ok(split_texts(&content, "lines", 0))
     }
+
+    /// One upload as a model of base64 symbols reads it: the bytes it holds,
+    /// written in its symbols ([`radixnet::encoding::base64_file_texts`]) - a
+    /// UTF-8 text file one text per line, anything else (an image, a video, an
+    /// archive, which is not unpacked) one text of every byte, and every file
+    /// one text with `whole`.  Python's `upload_texts(..., encoding)`.
+    pub(crate) fn upload_symbols(&self, name: &str, whole: bool) -> Result<Vec<String>, ApiError> {
+        let dir = self
+            .upload_dir
+            .as_ref()
+            .ok_or_else(|| ApiError::bad_request("no upload directory is configured"))?;
+        let path = safe_upload(dir, name)?;
+        let bytes =
+            std::fs::read(&path).map_err(|err| ApiError::bad_request(format!("cannot read upload {name:?}: {err}")))?;
+        Ok(base64_file_texts(&bytes, whole))
+    }
+}
+
+/// Texts given in a request, as the model reads them (Python's
+/// `_inline_texts`).
+///
+/// A model of base64 symbols learns the bytes of a text: its UTF-8 bytes
+/// written in the symbols ([`Encoding::text_input`]) - unless the request
+/// says the texts are symbols already (`symbols`: the model's own words given
+/// back, a liked continuation or a rated sample), which are taken as they
+/// are.  Any other model takes every text as it is.
+pub(crate) fn inline_texts(enc: Encoding, texts: Vec<String>, symbols: bool) -> Vec<String> {
+    if symbols || !enc.is_base64() {
+        return texts;
+    }
+    texts.iter().map(|t| enc.text_input(t)).collect()
+}
+
+/// A prefix as the model is asked it, and the content it stands for, as bytes
+/// (Python's `_prefix_asked`).
+///
+/// A model of base64 symbols is asked the symbols the prefix's UTF-8 bytes fix
+/// ([`Encoding::prefix_input`]); with `symbols` the prefix is written in them
+/// already, asked as it is and standing for the bytes it decodes into.  Any
+/// other model is asked the prefix as it is.
+pub(crate) fn prefix_asked(enc: Encoding, prefix: &str, symbols: bool) -> (String, Vec<u8>) {
+    if !enc.is_base64() {
+        return (prefix.to_string(), prefix.as_bytes().to_vec());
+    }
+    if symbols {
+        return (prefix.to_string(), base64_bytes(prefix));
+    }
+    (enc.prefix_input(prefix), prefix.as_bytes().to_vec())
+}
+
+/// `[(key, symbols)]` for a model of base64 symbols - what it was asked, in its
+/// symbols - and nothing for any other (Python's `_base64_doc`).
+fn base64_doc(enc: Encoding, symbols: &str, key: &str) -> Vec<(String, Json)> {
+    if !enc.is_base64() {
+        return Vec::new();
+    }
+    vec![(key.to_string(), Json::str(symbols))]
 }
 
 /// An upload's path, with a name that tries to leave the directory refused -
@@ -1093,6 +1187,10 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     };
     let prefix = r.text("prefix", "");
     let (kind, ..) = svc.active_kind();
+    // a model of base64 symbols is asked the symbols the prefix's bytes fix, or the
+    // prefix as it is when the request says it is written in them (`symbols`)
+    let enc = svc.active_encoding();
+    let (asked, content) = prefix_asked(enc, &prefix, r.flag("symbols", false));
     // the negative network guards the answer: the best continuation it does
     // not veto is the one that comes back, and when it vetoes every one the
     // continuation is empty and `guard` says why (`guard: false` turns it off;
@@ -1102,8 +1200,8 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
         svc.guard(
             provenance,
             |pair| -> Result<(radixnet::beam::Prediction, Json), String> {
-                let found = pair.positive.predict(&prefix, &opts)?;
-                let (ranked, verdicts) = pair.rank(&prefix, &found);
+                let found = pair.positive.predict(&asked, &opts)?;
+                let (ranked, verdicts) = pair.rank(&asked, &found);
                 let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
                 let report = crate::duo::guard_report(
                     pair,
@@ -1124,15 +1222,19 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
             let (found, report) = outcome?;
             (found, report)
         }
-        None => (svc.with_model(|m| m.predict(&prefix, &opts))?, Json::Null),
+        None => (svc.with_model(|m| m.predict(&asked, &opts))?, Json::Null),
     };
-    // a model of sounds: the words each answer spells, and the part of them the continuation wrote
-    let enc = svc.active_encoding();
+    // a model of sounds: the words each answer spells, and the part of them the continuation
+    // wrote; a model of base64 symbols: what each answer holds
     let ranked = |paths: &[PathResult]| -> Json {
         Json::Arr(
             paths
                 .iter()
-                .map(|r| path_json(r, spelled_prediction(enc, &r.full_text, &r.text)))
+                .map(|r| {
+                    let mut extra = spelled_prediction(enc, &r.full_text, &r.text);
+                    extra.extend(decoded_prediction(enc, &r.full_text, &content));
+                    path_json(r, extra)
+                })
                 .collect(),
         )
     };
@@ -1160,6 +1262,9 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     .map(|(k, v)| (k.to_string(), v))
     .collect::<Vec<_>>();
     doc.extend(spelled_prediction(enc, &found.best.full_text, &found.best.text));
+    // a model of base64 symbols: the symbols it was asked, and what its answer holds
+    doc.extend(base64_doc(enc, &asked, "prefix_symbols"));
+    doc.extend(decoded_prediction(enc, &found.best.full_text, &content));
     Ok(Json::Obj(doc))
 }
 
@@ -1167,13 +1272,17 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     let (traversal, penalty_scale, merit_scale) = traversal_of(r)?;
     let tuning = search_fields(r)?;
     let seeded = r.body.get("seed").and_then(|v| v.as_i64());
+    // a model of base64 symbols starts from the symbols the prefix's bytes fix (or the prefix
+    // as it is, with `symbols`), as predict does
+    let enc = svc.active_encoding();
+    let (asked, content) = prefix_asked(enc, &r.text("prefix", ""), r.flag("symbols", false));
     let opts = GenerateOptions {
         max_length: r.usize("max_length", 60)?,
         mode: r.text("mode", "sample"),
         temperature: r.number("temperature", 1.0)?,
         count: r.usize("count", 1)?,
         seed: seeded,
-        prefix: r.text("prefix", ""),
+        prefix: asked.clone(),
         step_penalty: r.number("step_penalty", 0.0)?,
         beam: r.usize("beam", 0)?,
         traversal,
@@ -1214,22 +1323,22 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
         Some(outcome) => outcome?,
         None => (svc.with_model(|m| m.generate(&opts))?, Json::Null),
     };
-    // a model of sounds: the words each text spells
-    let enc = svc.active_encoding();
-    let spelled = |r: &PathResult| -> Vec<(String, Json)> {
+    // a model of sounds: the words each text spells; a model of base64 symbols: what each holds
+    let extra = |r: &PathResult| -> Vec<(String, Json)> {
+        let mut pairs = Vec::new();
         if enc.unit.phonetic() {
-            vec![("spelled".to_string(), Json::str(enc.spell(&r.text)))]
-        } else {
-            Vec::new()
+            pairs.push(("spelled".to_string(), Json::str(enc.spell(&r.text))));
         }
+        pairs.extend(decoded_prediction(enc, &r.full_text, &content));
+        pairs
     };
-    Ok(Json::obj([
-        (
-            "samples",
-            Json::Arr(samples.iter().map(|r| path_json(r, spelled(r))).collect()),
-        ),
-        ("guard", guard),
-    ]))
+    let mut doc = vec![(
+        "samples".to_string(),
+        Json::Arr(samples.iter().map(|r| path_json(r, extra(r))).collect()),
+    )];
+    doc.extend(base64_doc(enc, &asked, "prefix_symbols"));
+    doc.push(("guard".to_string(), guard));
+    Ok(Json::Obj(doc))
 }
 
 fn score(svc: &Arc<Service>, r: &Request) -> Answer {
@@ -1242,8 +1351,10 @@ fn score(svc: &Arc<Service>, r: &Request) -> Answer {
     if texts.is_empty() {
         return Err(ApiError::bad_request("give 'text' or 'texts' to score"));
     }
+    let symbols = r.flag("symbols", false);
     let results: Vec<Json> = svc.with_model(|m| {
-        texts
+        // a model of base64 symbols scores the bytes of the text (the symbols as they are, with `symbols`)
+        inline_texts(m.encoding(), texts, symbols)
             .iter()
             .map(|text| {
                 let s = m.score(text);
@@ -1711,7 +1822,8 @@ fn words(svc: &Arc<Service>, r: &Request) -> Answer {
     let limit = r.query_usize("limit", 50)?;
     let out = svc.with_model(|m| -> Result<Json, ApiError> {
         let enc = m.encoding();
-        if enc.unit == Unit::Chars {
+        if enc.unit.characters() {
+            // characters, or base64 symbols: no words to list
             return Err(ApiError::bad_request(format!(
                 "this model counts in {}, so it has no words to list; a word alphabet needs a word encoding \
                  (--encoding word:{}:{})",
@@ -1830,11 +1942,20 @@ fn encoding(svc: &Arc<Service>, _r: &Request) -> Answer {
     ]))
 }
 
+/// `POST /api/encoding/preview`: one text through the encoder and back
+/// through both decoders, and through the graph's own labels.
+///
+/// A model of base64 symbols previews the symbols of the text's bytes - or the
+/// text as it is, when the request says `symbols` - so everything below is
+/// computed on the symbols, and the answer keeps the text as given with the
+/// symbols beside it (Python's `encoding_preview`).
 fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
-    let text = r.text("text", "");
+    let given = r.text("text", "");
+    let symbols = r.flag("symbols", false);
     let (kind, _, units) = svc.active_kind();
     Ok(svc.with_model(|m| {
         let enc = m.encoding();
+        let text = inline_texts(enc, vec![given.clone()], symbols).remove(0);
         let grams = enc.encode(&text);
         let decoded = enc.decode_grams(grams.iter().map(|g| g.as_str()));
         let unknown: Vec<String> = grams.iter().filter(|g| m.g.lookup(g).is_none()).cloned().collect();
@@ -1880,16 +2001,20 @@ fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
                 ])
             }
         };
-        Json::obj([
-            ("encoding", Json::str(enc.to_string())),
-            ("window", Json::Int(enc.n as i64)),
-            ("ngram", Json::Int(enc.n as i64)),
-            ("stride", Json::Int(enc.stride as i64)),
-            ("overlap", Json::Int(enc.overlap() as i64)),
-            ("configurable", Json::Bool(true)),
-            ("units", Json::str(units)),
-            ("kind", Json::str(kind)),
-            ("text", Json::str(text.clone())),
+        let mut doc = vec![
+            ("encoding".to_string(), Json::str(enc.to_string())),
+            ("window".to_string(), Json::Int(enc.n as i64)),
+            ("ngram".to_string(), Json::Int(enc.n as i64)),
+            ("stride".to_string(), Json::Int(enc.stride as i64)),
+            ("overlap".to_string(), Json::Int(enc.overlap() as i64)),
+            ("configurable".to_string(), Json::Bool(true)),
+            ("units".to_string(), Json::str(units)),
+            ("kind".to_string(), Json::str(kind)),
+            ("text".to_string(), Json::str(given.clone())),
+        ];
+        // a model of base64 symbols: the symbols everything below is computed on
+        doc.extend(base64_doc(enc, &text, "symbols"));
+        let rest = Json::obj([
             ("chars", Json::Int(enc.len(&text) as i64)),
             ("windows", Json::strs(grams.clone())),
             ("grams", Json::strs(grams.clone())),
@@ -1899,7 +2024,11 @@ fn encoding_preview(svc: &Arc<Service>, r: &Request) -> Answer {
             ("unknown_windows", Json::strs(unknown.clone())),
             ("unknown_grams", Json::strs(unknown)),
             ("path", path),
-        ])
+        ]);
+        if let Json::Obj(pairs) = rest {
+            doc.extend(pairs);
+        }
+        Json::Obj(doc)
     }))
 }
 
@@ -1945,7 +2074,7 @@ fn reset(svc: &Arc<Service>, r: &Request) -> Answer {
     if let Some(name) = r.body.get("unit").and_then(|v| v.as_str()) {
         encoding.unit = Unit::parse(name).ok_or_else(|| {
             ApiError::bad_request(format!(
-                "unit must be char, word, phone, syllable or acoustic, got {name:?}"
+                "unit must be char, word, phone, syllable, acoustic or base64, got {name:?}"
             ))
         })?;
     }

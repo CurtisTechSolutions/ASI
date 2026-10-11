@@ -755,10 +755,6 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         .get("data")
         .ok_or("evolve needs --data FILE: the real corpus the critic learns from")?
         .to_string();
-    let corpus = crate::cli::read_named(&ctx.args, "data")?;
-    if corpus.is_empty() {
-        return Err(format!("no corpus texts found in {data}"));
-    }
     let schedule = Schedule::from_args(&ctx.args)?;
     let origin = if Path::new(&ctx.model_path).exists() {
         Json::obj([
@@ -769,6 +765,11 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         Json::obj([("kind", Json::str("new")), ("path", Json::Null)])
     };
     let mut generator = ctx.open(false)?;
+    // read once the generator is open: a model of base64 symbols reads the corpus as its bytes
+    let corpus = crate::cli::read_named_as(&ctx.args, "data", generator.encoding(), "corpus")?;
+    if corpus.is_empty() {
+        return Err(format!("no corpus texts found in {data}"));
+    }
     let disc_path = ctx.args.get("discriminator").map(str::to_string);
     let discriminator = match &disc_path {
         Some(path) if Path::new(path).exists() => {

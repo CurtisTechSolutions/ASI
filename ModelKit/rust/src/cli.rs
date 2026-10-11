@@ -13,7 +13,7 @@ pub mod attention;
 pub mod correct;
 pub mod window;
 
-use radixnet::encoding::Encoding;
+use radixnet::encoding::{base64_file_texts, base64_prefix, Encoding};
 use radixnet::file::read_file_text;
 use radixnet::json::Json;
 use radixnet::model::Model;
@@ -491,6 +491,164 @@ pub fn read_named(args: &Args, flag: &str) -> Result<Vec<String>, String> {
     Ok(split_texts(&content, &unit, page_lines))
 }
 
+// -- a model of base64 symbols: content in, content out --------------------------------------------
+
+/// Whether every file is to be read as one text: `--whole-file`, or this
+/// port's own way of saying it, `--split file`.
+pub fn whole_file(args: &Args) -> bool {
+    args.on("whole-file")
+        || matches!(
+            args.str("split", "lines").trim().to_ascii_lowercase().as_str(),
+            "file" | "whole" | "whole-file"
+        )
+}
+
+/// A file's bytes as they are; a missing one is `data file not found: PATH`
+/// (Python's `read_file_bytes`).
+pub fn read_file_bytes(path: &str) -> Result<Vec<u8>, String> {
+    if !std::path::Path::new(path).is_file() {
+        return Err(format!("data file not found: {path}"));
+    }
+    std::fs::read(path).map_err(|err| format!("{path}: {err}"))
+}
+
+/// The texts a model of base64 symbols reads from every file a flag names
+/// (`--data notes.txt --data photo.png`), each file as the bytes it holds,
+/// written in its symbols ([`radixnet::encoding::base64_file_texts`]): a
+/// UTF-8 text file one text per line, anything else - an image, a video, a
+/// recording, an archive - one text of every byte, and every file one text
+/// with `whole_file`.  Nothing is unpacked or heard first: a ZIP or a WAV is
+/// just bytes.
+///
+/// An absent flag reads as nothing; files that give no text at all are
+/// refused, `no {what} texts found in ...` - Python's `read_texts(paths,
+/// whole_file, what, encoding)`.
+pub fn read_symbols(args: &Args, flag: &str, whole_file: bool, what: &str) -> Result<Vec<String>, String> {
+    let paths = args.all(flag);
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut texts = Vec::new();
+    for path in &paths {
+        texts.extend(base64_file_texts(&read_file_bytes(path)?, whole_file));
+    }
+    if texts.is_empty() {
+        return Err(format!("no {what} texts found in {}", paths.join(", ")));
+    }
+    Ok(texts)
+}
+
+/// The texts of one named file flag as a model of `enc` reads them: a model
+/// of base64 symbols reads every file's bytes ([`read_symbols`]), each file
+/// one text when `--whole-file` (or `--split file`) says so; any other reads
+/// the file as text, split as `--split` asks ([`read_named`]).
+pub fn read_named_as(args: &Args, flag: &str, enc: Encoding, what: &str) -> Result<Vec<String>, String> {
+    if enc.is_base64() {
+        return read_symbols(args, flag, whole_file(args), what);
+    }
+    read_named(args, flag)
+}
+
+/// The texts of every `--text` and of `--data` as a model of `enc` reads
+/// them: a model of base64 symbols learns the UTF-8 bytes of every `--text`
+/// and the bytes of every `--data` file - each file one text with
+/// `--whole-file` - all written in its symbols; any other model reads them as
+/// [`read_texts`] does.
+pub fn read_texts_as(args: &Args, enc: Encoding, what: &str) -> Result<Vec<String>, String> {
+    if !enc.is_base64() {
+        return read_texts(args);
+    }
+    let mut texts: Vec<String> = args.all("text").iter().map(|t| enc.text_input(t)).collect();
+    texts.extend(read_symbols(args, "data", whole_file(args), what)?);
+    Ok(texts)
+}
+
+/// The prefix a model is asked, and the content it stands for, as bytes
+/// (Python's `_prefix_of`).
+///
+/// `--prefix-file` gives a prefix as the bytes of a file, `--prefix` as text
+/// (its UTF-8 bytes): one or the other, and `required` says whether the
+/// command needs one at all (`predict` does; `generate` starts from START).
+/// A model of base64 symbols is asked the symbols those bytes fix
+/// ([`radixnet::encoding::base64_prefix`]), so its walk writes on from the
+/// last whole symbol; any other model reads the file as UTF-8 text and takes
+/// `--prefix` as it is.
+pub fn prefix_of(args: &Args, enc: Encoding, required: bool) -> Result<(String, Vec<u8>), String> {
+    let (text, file) = (args.get("prefix"), args.get("prefix-file"));
+    if text.is_some() && file.is_some() {
+        return Err("argument --prefix-file: not allowed with argument --prefix".to_string());
+    }
+    if let Some(path) = file.filter(|p| !p.is_empty()) {
+        let data = read_file_bytes(path)?;
+        if enc.is_base64() {
+            return Ok((base64_prefix(&data), data));
+        }
+        let asked = enc
+            .content_text(&data)
+            .map_err(|err| format!("{path} is not valid UTF-8 text: {err}"))?;
+        return Ok((asked, data));
+    }
+    if required && text.is_none() && file.is_none() {
+        return Err("one of the arguments --prefix --prefix-file is required".to_string());
+    }
+    let text = text.unwrap_or("");
+    Ok((enc.prefix_input(text), text.as_bytes().to_vec()))
+}
+
+/// What a document adds about the prefix it was asked (Python's
+/// `_prefix_doc`): the file it came from, and the symbols a model of base64
+/// symbols was asked.
+pub fn prefix_doc(args: &Args, enc: Encoding, asked: &str) -> Vec<(String, Json)> {
+    let mut doc = Vec::new();
+    if let Some(path) = args.get("prefix-file").filter(|p| !p.is_empty()) {
+        doc.push(("prefix_file".to_string(), Json::str(path)));
+    }
+    if enc.is_base64() {
+        doc.push(("prefix_symbols".to_string(), Json::str(asked)));
+    }
+    doc
+}
+
+/// `os.path.splitext`: `("out", ".png")` for `out.png`.  Only the last part
+/// of a path has an extension, and a name's leading dots are not one
+/// (`.hidden` has none).
+pub fn split_ext(path: &str) -> (&str, &str) {
+    let name = path.rfind('/').map_or(0, |at| at + 1);
+    match path.rfind('.') {
+        Some(dot) if dot > name && path[name..dot].bytes().any(|b| b != b'.') => (&path[..dot], &path[dot..]),
+        _ => (path, ""),
+    }
+}
+
+/// `--decode-to PATH` on predict and generate: what each text holds, written
+/// as bytes - the output decoder of a model of base64 symbols (Python's
+/// `_decode_to`).
+///
+/// One text is written to `PATH`; several to `PATH` numbered before its
+/// extension (`out-1.png`, `out-2.png`, ...).  A model of base64 symbols
+/// writes the decoded bytes - an image, a video, a text again - and any other
+/// model its text as UTF-8.  Answers `[{"path", "bytes"}]`, a row per file;
+/// each write is said on the log, never on stdout, which is the document's.
+pub fn decode_to(path: &str, enc: Encoding, texts: &[String]) -> Result<Json, String> {
+    let (root, ext) = split_ext(path);
+    let mut written = Vec::with_capacity(texts.len());
+    for (i, text) in texts.iter().enumerate() {
+        let target = if texts.len() == 1 {
+            path.to_string()
+        } else {
+            format!("{root}-{}{ext}", i + 1)
+        };
+        let data = enc.content_bytes(text);
+        std::fs::write(&target, &data).map_err(|err| format!("{target}: {err}"))?;
+        radixnet::log_info!("model", "wrote {target} ({} bytes)", data.len());
+        written.push(Json::obj([
+            ("path", Json::str(target)),
+            ("bytes", Json::Int(data.len() as i64)),
+        ]));
+    }
+    Ok(Json::Arr(written))
+}
+
 /// The negative model beside a model file: `model.count.json` ->
 /// `model.count.negative.json`, with `.gz` kept on the end.
 pub fn negative_path(model: &str) -> String {
@@ -688,5 +846,141 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(before, names.len(), "a command is listed twice");
+    }
+
+    // -- a model of base64 symbols (Python's tests/test_base64.py) --------------------------
+
+    /// The head of a PNG and some bytes that are no text.
+    const BLOB: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF, 0xFE, 0x80, 0x10, 0x20, 0x30, 0xC0, 0xC1,
+    ];
+
+    /// A directory of the test's own, made fresh.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("radixnet-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn base64() -> Encoding {
+        radixnet::encoding::parse_encoding("base64").unwrap()
+    }
+
+    #[test]
+    fn an_extension_is_split_off_as_python_splits_it() {
+        for (path, root, ext) in [
+            ("out.png", "out", ".png"),
+            ("out", "out", ""),
+            ("dir/out.tar.gz", "dir/out.tar", ".gz"),
+            (".hidden", ".hidden", ""),
+            ("dir.d/out", "dir.d/out", ""),
+            ("a/.b.c", "a/.b", ".c"),
+            ("..x", "..x", ""),
+            ("a..b", "a.", ".b"),
+            ("dir/", "dir/", ""),
+        ] {
+            assert_eq!(split_ext(path), (root, ext), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_model_of_base64_symbols_reads_files_as_their_bytes() {
+        let dir = scratch("symbols");
+        let text = dir.join("corpus.txt");
+        std::fs::write(&text, "the cat\n\n  \nthe dog\r\n").unwrap();
+        let blob = dir.join("image.png");
+        std::fs::write(&blob, BLOB).unwrap();
+        let (text, blob) = (text.to_string_lossy().into_owned(), blob.to_string_lossy().into_owned());
+        let (_, args) = parse_args(&argv(&["train", "--data", &text, "--data", &blob, "--text", "hi"])).unwrap();
+        let read = read_texts_as(&args, base64(), "training").unwrap();
+        let b64 = radixnet::encoding::base64_text;
+        assert_eq!(read, vec![b64(b"hi"), b64(b"the cat"), b64(b"the dog\r"), b64(BLOB)]);
+        // each file one text, every byte of it
+        let (_, args) = parse_args(&argv(&["train", "--data", &text, "--whole-file"])).unwrap();
+        assert_eq!(
+            read_texts_as(&args, base64(), "training").unwrap(),
+            vec![b64(b"the cat\n\n  \nthe dog\r\n")]
+        );
+        // a text model reads the text as it always did
+        let (_, args) = parse_args(&argv(&["score", "--data", &text])).unwrap();
+        assert_eq!(
+            read_named_as(&args, "data", Encoding::default(), "scorable").unwrap(),
+            vec!["the cat", "the dog"]
+        );
+        // a missing file, and files with no text in them, say so
+        let (_, args) = parse_args(&argv(&["score", "--data", "/no/such/file"])).unwrap();
+        assert_eq!(
+            read_named_as(&args, "data", base64(), "scorable").unwrap_err(),
+            "data file not found: /no/such/file"
+        );
+        let blank = dir.join("blank.txt").to_string_lossy().into_owned();
+        std::fs::write(&blank, " \n\n").unwrap();
+        let (_, args) = parse_args(&argv(&["2nrl", "--bad", &blank])).unwrap();
+        assert_eq!(
+            read_named_as(&args, "bad", base64(), "bad").unwrap_err(),
+            format!("no bad texts found in {blank}")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_prefix_is_text_or_a_file_and_never_both() {
+        let dir = scratch("prefix");
+        let head = dir.join("head.bin").to_string_lossy().into_owned();
+        std::fs::write(&head, &BLOB[..8]).unwrap();
+        let ask = |items: &[&str], enc: Encoding, required: bool| {
+            let (_, args) = parse_args(&argv(items)).unwrap();
+            prefix_of(&args, enc, required)
+        };
+        // the symbols the bytes fix, and the bytes themselves
+        let (asked, content) = ask(&["predict", "--prefix-file", &head], base64(), true).unwrap();
+        assert_eq!(asked, radixnet::encoding::base64_prefix(&BLOB[..8]));
+        assert_eq!(content, &BLOB[..8]);
+        let (asked, content) = ask(&["predict", "--prefix", "the d"], base64(), true).unwrap();
+        assert_eq!((asked.as_str(), content.as_slice()), ("dGhlIG", &b"the d"[..]));
+        // a text model takes text as it is, and a file only when it is text
+        let (asked, _) = ask(&["predict", "--prefix", "the d"], Encoding::default(), true).unwrap();
+        assert_eq!(asked, "the d");
+        let refused = ask(&["predict", "--prefix-file", &head], Encoding::default(), true).unwrap_err();
+        assert!(refused.contains("is not valid UTF-8 text"), "{refused}");
+        // one or the other; predict needs one, generate starts from nothing
+        assert!(ask(&["predict", "--prefix", "a", "--prefix-file", &head], base64(), false).is_err());
+        assert!(ask(&["predict"], base64(), true).is_err());
+        assert_eq!(
+            ask(&["generate"], base64(), false).unwrap(),
+            (String::new(), Vec::new())
+        );
+        let (_, args) = parse_args(&argv(&["predict", "--prefix-file", &head])).unwrap();
+        let keys: Vec<String> = prefix_doc(&args, base64(), "iVBORw0KGg")
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(keys, ["prefix_file", "prefix_symbols"]);
+        assert_eq!(
+            prefix_doc(&args, Encoding::default(), "x").len(),
+            1,
+            "no symbols but the base64 model's"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decode_to_writes_what_each_text_holds() {
+        let dir = scratch("decode-to");
+        let out = dir.join("out.png").to_string_lossy().into_owned();
+        let symbols = radixnet::encoding::base64_text(BLOB);
+        let one = decode_to(&out, base64(), std::slice::from_ref(&symbols)).unwrap();
+        assert_eq!(one.as_array()[0].at("path").as_str(), Some(out.as_str()));
+        assert_eq!(one.as_array()[0].at("bytes").as_i64(), Some(BLOB.len() as i64));
+        assert_eq!(std::fs::read(&out).unwrap(), BLOB);
+        // several are numbered before the extension; a text model writes its text
+        let two = decode_to(&out, Encoding::default(), &["a".to_string(), "caf\u{e9}".to_string()]).unwrap();
+        let paths: Vec<&str> = two.as_array().iter().filter_map(|w| w.at("path").as_str()).collect();
+        let numbered = |i: usize| dir.join(format!("out-{i}.png")).to_string_lossy().into_owned();
+        assert_eq!(paths, [numbered(1), numbered(2)]);
+        assert_eq!(std::fs::read(numbered(2)).unwrap(), "caf\u{e9}".as_bytes());
+        assert_eq!(two.as_array()[1].at("bytes").as_i64(), Some(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,8 +2,9 @@
 //!
 //! Three dials compose here, and the point of these tests is that they do:
 //!
-//! * `Encoding::unit` says what one **unit** of text is - a character, or a
-//!   whitespace word (`SPEC-WordNGrams.md`);
+//! * `Encoding::unit` says what one **unit** of text is - a character, a
+//!   whitespace word (`SPEC-WordNGrams.md`), or a base64 symbol: six bits of
+//!   the bytes of any content;
 //! * `n` says how many units a **gram** holds;
 //! * `stride` says how far apart consecutive grams start.
 //!
@@ -11,8 +12,11 @@
 //! `unit: Chars, n: 5, stride: 5`, and the graph below them never has to know
 //! which it is holding.
 
+use radixnet::encoding::{base64_bytes, base64_file_texts, base64_text, decoded_prediction, BASE64_ALPHABET};
+use radixnet::kinds::TrainSettings;
 use radixnet::model::PredictOptions;
-use radixnet::{parse_encoding, Encoding, GraphOptions, Model, TrainOptions, Unit};
+use radixnet::radix::TrainConfig;
+use radixnet::{parse_encoding, Encoding, GraphOptions, Json, Model, TrainOptions, Unit, FIRST};
 
 /// Every combination the tests drive end to end.
 fn every_encoding() -> Vec<Encoding> {
@@ -23,6 +27,11 @@ fn every_encoding() -> Vec<Encoding> {
     };
     let words = |n: usize, stride: usize| Encoding {
         unit: Unit::Words,
+        n,
+        stride,
+    };
+    let base64 = |n: usize, stride: usize| Encoding {
+        unit: Unit::Base64,
         n,
         stride,
     };
@@ -38,6 +47,8 @@ fn every_encoding() -> Vec<Encoding> {
         words(2, 1),
         words(3, 1),
         words(2, 2), // word groups
+        base64(3, 1),
+        base64(4, 4), // base64 symbols: sliced as characters are
     ]
 }
 
@@ -339,9 +350,14 @@ fn the_structure_is_the_one_the_other_two_build() {
         ("word:2:1", 113, 199, 261),
         ("word:3:1", 72, 131, 239),
         ("word:2:2", 78, 141, 155),
+        // the corpus file read as its bytes, a line at a time, in base64 symbols
+        ("base64:3:1", 665, 1131, 1049),
+        ("base64:4:4", 236, 427, 348),
     ];
+    let symbols = base64_file_texts(data.as_bytes(), false);
     for (spec, nodes, edges, grams) in expected {
         let enc = parse_encoding(spec).unwrap();
+        let corpus = if enc.is_base64() { &symbols } else { &corpus };
         let mut model = Model::new(
             1,
             GraphOptions {
@@ -354,7 +370,7 @@ fn the_structure_is_the_one_the_other_two_build() {
         model.g.workers = 1;
         model
             .train(
-                &corpus,
+                corpus,
                 &TrainOptions {
                     epochs: 2,
                     ..Default::default()
@@ -367,4 +383,153 @@ fn the_structure_is_the_one_the_other_two_build() {
             "{spec}: this port disagrees with Python and Go about the structure"
         );
     }
+}
+
+// -- the base64 unit: any content as the n-grams of its symbols ---------------------------------
+
+/// The head of a PNG and some bytes that are no text: what an image, a video
+/// or a recording is to the base64 unit.
+const BLOB: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF, 0xFE, 0x80, 0x10, 0x20, 0x30, 0xC0, 0xC1,
+];
+
+/// The corpus as its bytes in base64 symbols, and the blob after it - what a
+/// model of base64 symbols is given to learn.
+fn symbols() -> Vec<String> {
+    let mut texts: Vec<String> = CORPUS.iter().map(|t| base64_text(t.as_bytes())).collect();
+    texts.push(base64_text(BLOB));
+    texts
+}
+
+/// A model of `kind` over base64 symbols, trained the way its kind trains.
+fn learned(kind: &str, texts: &[String], epochs: usize) -> Model {
+    let mut model = radixnet::kinds::new_model(kind, 1, parse_encoding("base64").unwrap(), &[]).unwrap();
+    model.workers = 1;
+    model.g.workers = 1;
+    let settings = TrainSettings {
+        config: TrainConfig {
+            epochs,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    radixnet::kinds::train(&mut model, texts, &settings, &mut |_| true).unwrap();
+    model
+}
+
+fn decoded(pairs: &[(String, Json)], key: &str) -> Json {
+    pairs
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.clone())
+        .unwrap_or(Json::Null)
+}
+
+/// Every kind learns the symbols of real bytes, writes the base64 encoding
+/// into its file, and reads it back as the model it was (Python's
+/// `test_train_predict_decode_save_and_load`).
+#[test]
+fn every_kind_learns_base64_symbols_saves_and_loads() {
+    let enc = parse_encoding("base64").unwrap();
+    let dir = std::env::temp_dir().join(format!("radixnet-base64-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for kind in ["count", "radix", "resonant", "negative"] {
+        let mut model = learned(kind, &symbols(), 2);
+        let stats = radixnet::kinds::stats(&model);
+        assert_eq!(stats.at("encoding").as_str(), Some("base64:3:1"), "{kind}");
+        assert_eq!(stats.at("units").as_str(), Some("symbols"), "{kind}");
+        assert!(
+            stats.get("vocabulary").is_none(),
+            "{kind}: symbols are letters, not words"
+        );
+        assert!(model.top_words(0).is_empty(), "{kind}: no words to list");
+        for node in FIRST..model.g.num_node_ids() {
+            let label = model.g.label(node);
+            assert!(
+                !model.g.is_alive(node) || label.chars().all(|c| BASE64_ALPHABET.contains(c)),
+                "{kind}: {label:?} is not base64 symbols"
+            );
+        }
+        let path = dir.join(format!("{kind}.json")).to_string_lossy().into_owned();
+        model.save(&path).unwrap();
+        let doc = radixnet::file::read_document(&path).unwrap();
+        assert_eq!(
+            doc.at("graph").at("encoding").render(0),
+            r#"{"unit":"base64","n":3,"stride":1}"#,
+            "{kind}"
+        );
+        let mut loaded = Model::load(&path).unwrap();
+        assert_eq!((loaded.kind(), loaded.encoding()), (kind, enc));
+        let grams = |m: &mut Model| -> std::collections::BTreeSet<String> {
+            m.g.prepare();
+            m.g.gram_index().iter().map(|g| g.to_string()).collect()
+        };
+        assert_eq!(grams(&mut loaded), grams(&mut model), "{kind}");
+        if kind == "negative" {
+            continue; // it judges; it does not walk
+        }
+        let found = loaded
+            .predict(
+                &enc.prefix_input("the cat"),
+                &PredictOptions {
+                    length: 12,
+                    mode: "dijkstra".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let out = decoded_prediction(enc, &found.best.full_text, b"the cat");
+        let said = decoded(&out, "decoded");
+        assert!(said.as_str().unwrap_or("").starts_with("the ca"), "{kind}: {said:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_model_of_base64_symbols_says_the_sentence_back() {
+    let enc = parse_encoding("base64").unwrap();
+    let mut model = learned("count", &symbols(), 3);
+    let found = model
+        .predict(
+            &enc.prefix_input("the cat sat on the"),
+            &PredictOptions {
+                length: 8,
+                to_end: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(found.best.reached_end);
+    let out = decoded_prediction(enc, &found.best.full_text, b"the cat sat on the");
+    let said = decoded(&out, "decoded");
+    assert!(
+        ["the cat sat on the mat", "the cat sat on the floor"].contains(&said.as_str().unwrap_or("")),
+        "{said:?}"
+    );
+    // the scores read the bytes too: a text it learned is all known transitions, noise is not
+    assert_eq!(model.score(&enc.text_input(CORPUS[0])).unknown_transitions, 0);
+    assert!(
+        model
+            .score(&enc.text_input("qzx wqzj vbn qzx wqzj vbn"))
+            .unknown_transitions
+            > 0
+    );
+}
+
+/// From START a model of one file walks that file: the decoded walk is the
+/// file again, byte for byte.
+#[test]
+fn a_binary_file_comes_back_byte_for_byte() {
+    let mut model = learned("count", &[base64_text(BLOB)], 2);
+    let found = model
+        .predict(
+            "",
+            &PredictOptions {
+                length: 1,
+                to_end: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(base64_bytes(&found.best.full_text), BLOB);
 }
