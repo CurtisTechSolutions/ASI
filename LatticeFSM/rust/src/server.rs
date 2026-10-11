@@ -54,7 +54,7 @@
 //! | `POST /api/{chain,ngram}/generate` | `{text, max_tokens?, temperature?, seed?, count?}`: `count` samples (the chain's walk depths with them) |
 //! | `POST /api/{chain,ngram}/credit`, `/feedback` | `{text, amount}`, `{good, bad, amount?}`: reward or punish |
 //! | `POST /api/{chain,ngram}/score` | `{text}`: every token's probability (and walk depth), perplexity, bits |
-//! | `POST /api/{chain,ngram}/teach` | `{text, reply, max_rounds?}`: teach `reply` after `text` until every token of it is right; the new continuation |
+//! | `POST /api/{chain,ngram}/teach` | `{text, reply, max_rounds?, threshold?}`: teach `reply` after `text` until every token of it is right; the new continuation |
 //! | `POST /api/chain/confidence`, `/sweep` | `{confidence}`, `{data?, uploads?, held_out?, thresholds?}`: set the threshold; accuracy and depth at each threshold on held-out lines |
 //! | `GET /api/chain/graph` | `?limit=`: the most-seen node contexts: guess, confidence |
 //! | `POST /api/{chain,ngram}/save`, `/load` | `{path}`: write or read the model |
@@ -1070,6 +1070,7 @@ fn network_teach(net: &mut Network, body: &Json) -> Result<Json, String> {
     } else {
         1
     };
+    let threshold = crate::routes::threshold_of(body);
     let translator = net.decoder().is_some();
     let label = if translator {
         None
@@ -1095,7 +1096,8 @@ fn network_teach(net: &mut Network, body: &Json) -> Result<Json, String> {
             None => net.sounds(&text)? == net.target_sounds(&reply),
             Some(l) => net.predict(std::slice::from_ref(&text))?[0] == l,
         };
-        if right == of && answers {
+        // the goal: `threshold` of a round right - and, at all of it, the answer it gives is the one taught
+        if right >= crate::ngram::goal_of(threshold, of) && (threshold < 1.0 || answers) {
             reached = true;
             break;
         }
@@ -1104,6 +1106,7 @@ fn network_teach(net: &mut Network, body: &Json) -> Result<Json, String> {
     Ok(Json::object()
         .with("right", right.into())
         .with("of", of.into())
+        .with("need", crate::ngram::goal_of(threshold, of).into())
         .with("rounds", rounds.into())
         .with("reached", reached.into())
         .with("history", Json::numbers(&history))
@@ -1121,13 +1124,17 @@ fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
         let mut h = net.fit_pairs(&train, body.num("epochs", 20.0) as usize, Some(&test))?;
         // until: epochs on and on until every taught pair is exactly right
         let max_epochs = (body.num("max_epochs", 200.0) as usize).clamp(1, 100_000);
-        while body.bool_or("until", false) && h.exact.last().is_some_and(|&e| e < 1.0) && h.exact.len() < max_epochs {
+        let threshold = crate::routes::threshold_of(body);
+        while body.bool_or("until", false)
+            && h.exact.last().is_some_and(|&e| e < threshold)
+            && h.exact.len() < max_epochs
+        {
             let more = net.fit_pairs(&train, 1, Some(&test))?;
             h.sounds.extend(more.sounds);
             h.exact.extend(more.exact);
             h.val_exact.extend(more.val_exact);
         }
-        let reached = h.exact.last().is_some_and(|&e| e >= 1.0);
+        let reached = h.exact.last().is_some_and(|&e| e >= threshold);
         let mut shown = Vec::new();
         for (x, y) in train.iter().take(3).chain(test.iter().take(3)) {
             shown.push(Json::strings(&[x.clone(), net.translate(x)?, y.clone()]));
@@ -1165,6 +1172,7 @@ fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
     };
     let epochs = (body.num("epochs", 1.0) as usize).max(1);
     let until = body.bool_or("until", false);
+    let threshold = crate::routes::threshold_of(body);
     let max_epochs = (body.num("max_epochs", 200.0) as usize).clamp(epochs, 100_000);
     let mut held = Vec::new();
     let mut taught = Vec::new();
@@ -1173,13 +1181,17 @@ fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
         taught.push(net.fit(&train, 1)?[0]);
         held.push(net.evaluate(&test)?);
         // until: every taught example right while taught, and by the quiet pass after
-        if until && taught.len() >= epochs && taught[taught.len() - 1] >= 1.0 && net.evaluate(&train)? >= 1.0 {
+        if until
+            && taught.len() >= epochs
+            && taught[taught.len() - 1] >= threshold
+            && net.evaluate(&train)? >= threshold
+        {
             reached = true;
             break;
         }
     }
     if !until {
-        reached = taught.last().is_some_and(|&t| t >= 1.0);
+        reached = taught.last().is_some_and(|&t| t >= threshold);
     }
     Ok(Json::object()
         .with("taught", Json::numbers(&taught))

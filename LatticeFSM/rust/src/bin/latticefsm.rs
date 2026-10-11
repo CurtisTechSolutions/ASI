@@ -158,6 +158,7 @@ commands
               generate TEXT... [--max-tokens 40]   the continuation and how deep every walk went
               evaluate | sweep [--thresholds 0,0.5,0.9,1]   accuracy and depth on held-out lines
               stats | credit TEXT --amount R   (without --load the data is learned first; --set-confidence T)
+              teach TEXT REPLY [--max-rounds 100] [--threshold 0.95]; train --until [--max-rounds 20] [--threshold]
   corpus PATH... [--unit text|base64] [--show N]   what a corpus is read as: every document (zip, tar, tar.gz,
               gz, html, xml, docx, odt, epub, jsonl opened) and its lines, or its base64 sequences
   base64 encode|decode INPUT... [--out FILE]   anything (a file, or a text) as base64, or base64 back to bytes;
@@ -1127,26 +1128,43 @@ fn network_cmd(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// `--until`: after the first pass (round 1), the model drilled on what it learned until every token is right (or as
-/// many as can be: a context the data continues in more than one way can only be guessed one way), as
+fn pct(threshold: f64) -> String {
+    format!("{:.0}%", threshold * 100.0)
+}
+
+/// `--until`: after the first pass (round 1), the model drilled on what it learned until `threshold` of every token
+/// that can be right is (a context the data continues in more than one way can only be guessed one way), as
 /// `cli._train_until` does.
-fn report_until(first: (u64, u64), best_possible: usize, d: &latticefsm::ngram::Drill) {
+fn report_until(first: (u64, u64), best_possible: usize, threshold: f64, d: &latticefsm::ngram::Drill) {
     let (right, of) = first;
-    println!("round 1: {right} of {of} predicted right before learning (the most possible: {best_possible})");
+    println!(
+        "round 1: {right} of {of} predicted right before learning (the most possible: {best_possible}; the goal: {}, {})",
+        d.need,
+        pct(threshold)
+    );
     for (k, r) in d.rounds.iter().enumerate() {
         println!("round {}: {r} of {} right", k + 2, d.of);
     }
     let (rnd, right, of) = (d.rounds.len() + 1, d.right, d.of);
     if right == of {
         println!("{of} of {of} reached in {rnd} rounds");
-    } else if d.reached {
+    } else if right >= best_possible {
         println!(
             "{right} of {of} reached in {rnd} rounds: the most possible - the rest ({}) come after contexts the data \
              continues in more than one way",
             of - right
         );
+    } else if d.reached {
+        println!(
+            "{right} of {of} reached in {rnd} rounds: the goal of {} ({} of the {best_possible} possible)",
+            d.need,
+            pct(threshold)
+        );
     } else {
-        println!("stopped after {rnd} rounds at {right} of {of} (the most possible: {best_possible})");
+        println!(
+            "stopped after {rnd} rounds at {right} of {of} (the goal: {} of the {best_possible} possible)",
+            d.need
+        );
     }
 }
 
@@ -1167,16 +1185,25 @@ fn training_sequences(data: &[String], unit: &str, lower: bool, held_out: usize)
     Ok(seqs)
 }
 
-fn print_teaching(text: &str, reply: &str, t: &latticefsm::ngram::Teaching, now: String) {
+fn print_teaching(text: &str, reply: &str, t: &latticefsm::ngram::Teaching, threshold: f64, now: String) {
     let h: Vec<String> = t.history.iter().map(|x| x.to_string()).collect();
+    let goal = if t.need < t.of {
+        format!("; the goal {} ({})", t.need, pct(threshold))
+    } else {
+        String::new()
+    };
     println!(
-        "taught {} after {}: {} of {} right after {} rounds{}; right before each round: {}",
+        "taught {} after {}: {} of {} right after {} rounds{}{goal}; right before each round: {}",
         py_repr(reply),
         py_repr(text),
         t.right,
         t.of,
         t.rounds,
-        if t.reached { "" } else { " (not all: --max-rounds)" },
+        if t.reached {
+            ""
+        } else {
+            " (short of the goal: --max-rounds)"
+        },
         h.join(" ")
     );
     println!("now: {now}");
@@ -1256,8 +1283,9 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
                 let seqs = training_sequences(&data, &m.unit.clone(), m.lower, held_out)?;
                 let (best_possible, _) = m.ceiling(&seqs);
                 let rounds = (a.num("max-rounds", 20.0) as usize).max(2) - 1;
-                let d = m.drill(&seqs, rounds, rounds);
-                report_until(first, best_possible, &d);
+                let threshold = a.num("threshold", 0.95);
+                let d = m.drill(&seqs, rounds, rounds, threshold);
+                report_until(first, best_possible, threshold, &d);
             }
             if !test.is_empty() {
                 let ev = m.evaluate(&test, 2000);
@@ -1402,9 +1430,15 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
                 return Err("teach TEXT REPLY: the text and the reply that should follow it".to_string());
             }
             let (text, reply) = (&texts[0], &texts[1]);
-            let t = m.teach(&m.tokens(text), &m.tokens(reply), a.num("max-rounds", 100.0) as usize);
+            let threshold = a.num("threshold", 0.95);
+            let t = m.teach(
+                &m.tokens(text),
+                &m.tokens(reply),
+                a.num("max-rounds", 100.0) as usize,
+                threshold,
+            );
             let now = m.complete(text, 2 * t.of + 10, 0.0, &mut Rng::new(1));
-            print_teaching(text, reply, &t, now);
+            print_teaching(text, reply, &t, threshold, now);
         }
         other => {
             return Err(format!(
@@ -1535,8 +1569,9 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
                 let seqs = training_sequences(&data, &m.unit.clone(), m.lower, held_out)?;
                 let (best_possible, _) = m.ceiling(&seqs);
                 let rounds = (a.num("max-rounds", 20.0) as usize).max(2) - 1;
-                let d = m.drill(&seqs, rounds, rounds);
-                report_until(first, best_possible, &d);
+                let threshold = a.num("threshold", 0.95);
+                let d = m.drill(&seqs, rounds, rounds, threshold);
+                report_until(first, best_possible, threshold, &d);
             }
             if !test.is_empty() {
                 let ev = m.evaluate(&test, None);
@@ -1717,9 +1752,15 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
                 return Err("teach TEXT REPLY: the text and the reply that should follow it".to_string());
             }
             let (text, reply) = (&texts[0], &texts[1]);
-            let t = m.teach(&m.tokens(text), &m.tokens(reply), a.num("max-rounds", 100.0) as usize);
+            let threshold = a.num("threshold", 0.95);
+            let t = m.teach(
+                &m.tokens(text),
+                &m.tokens(reply),
+                a.num("max-rounds", 100.0) as usize,
+                threshold,
+            );
             let now = m.complete(text, 2 * t.of + 10, 0.0, &mut Rng::new(1));
-            print_teaching(text, reply, &t, now);
+            print_teaching(text, reply, &t, threshold, now);
         }
         other => return Err(format!("unknown chain action {other:?}")),
     }

@@ -118,13 +118,13 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/ngram/save`, `/api/ngram/load` | `{path}` | write or read the model |
 | `GET /api/chain` | | the chain the server holds (8 nodes of letters, confidence 0.9, trained on `data/corpus` at start): stats per depth, sources, history |
 | `POST /api/chain/new` | `{nodes?, unit?, confidence?, lower?}` | a fresh chain |
-| `POST /api/{chain,ngram}/train` | `{data?, uploads?, held_out?, predict?, self_credit?, until?, max_rounds?}` | train on server paths and uploads, every token predicted first; with `until`, drilled to N of N (or the most possible); the held-out measure |
+| `POST /api/{chain,ngram}/train` | `{data?, uploads?, held_out?, predict?, self_credit?, until?, max_rounds?, threshold?}` | train on server paths and uploads, every token predicted first; with `until`, drilled until `threshold` (default 0.95) of the most possible is right; the held-out measure |
 | `POST /api/{chain,ngram}/text` | `{text, predict?, self_credit?, until?, max_rounds?}` | train on pasted text, a line a sequence |
 | `POST /api/{chain,ngram}/predict` | `{text, k?}` | the next tokens; the chain's input nodes and walk too |
 | `POST /api/{chain,ngram}/generate` | `{text, max_tokens?, temperature?, seed?, count?}` | `count` samples (the chain's walk depths with them) |
 | `POST /api/{chain,ngram}/credit`, `/feedback` | `{text, amount}`, `{good, bad, amount?}` | reward or punish |
 | `POST /api/{chain,ngram}/score` | `{text}` | every token's probability (and walk depth), perplexity, bits |
-| `POST /api/{chain,ngram}/teach` | `{text, reply, max_rounds?}` | teach `reply` after `text` until every token of it is right; the new continuation |
+| `POST /api/{chain,ngram}/teach` | `{text, reply, max_rounds?, threshold?}` | teach `reply` after `text` until `threshold` (default 0.95) of its tokens are right; the new continuation |
 | `POST /api/chain/confidence`, `/sweep` | `{confidence}`, `{data?, uploads?, held_out?, thresholds?}` | set the threshold; accuracy and depth at each threshold on held-out lines |
 | `GET /api/chain/graph` | `?limit=` | the most-seen node contexts: guess, confidence |
 | `POST /api/{chain,ngram}/save`, `/load` | `{path}` | write or read the model |

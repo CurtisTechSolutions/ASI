@@ -264,17 +264,29 @@ export function untilNote(r) {
   if (!r) return "";
   if (r.rounds === undefined || r.rounds === null) return `${r.right} of ${r.of} right`;
   const rounds = `${r.rounds} round${r.rounds === 1 ? "" : "s"}`;
-  return r.reached ? `taught in ${rounds}: ${r.right} of ${r.of} right` : `stopped after ${rounds} at ${r.right} of ${r.of}`;
+  // a goal short of all of them (the threshold) is said, so 41 of 43 does not read as a failure
+  const goal = typeof r.need === "number" && r.need < r.of ? ` (the goal ${r.need})` : "";
+  return r.reached
+    ? `taught in ${rounds}: ${r.right} of ${r.of} right${goal}`
+    : `stopped after ${rounds} at ${r.right} of ${r.of}${goal}`;
 }
 
 /**
  * Training until N of N (`until` on `/api/{m}/train` and `/text`): its rounds `[{round, right, of}]` and
  * `reached` as one line - "33 of 33 reached in 4 rounds" or "stopped after 20 rounds at 30 of 33".
  */
-export function roundsNote(rounds, reached) {
+export function roundsNote(rounds, reached, need, best) {
   const list = Array.isArray(rounds) ? rounds : [];
   if (!list.length) return "";
   const last = list[list.length - 1];
   const n = `${list.length} round${list.length === 1 ? "" : "s"}`;
-  return reached ? `${last.of} of ${last.of} reached in ${n}` : `stopped after ${n} at ${last.right} of ${last.of}`;
+  const goal = typeof need === "number" ? ` (the goal: ${need}${typeof best === "number" ? ` of the ${best} possible` : ""})` : "";
+  return reached ? `${last.right} of ${last.of} reached in ${n}${goal}` : `stopped after ${n} at ${last.right} of ${last.of}${goal}`;
+}
+
+/** A goal given as a percentage ("95") as the share the server takes (0.95), within 0..1. */
+export function goalShare(percent, fallback = 95) {
+  const v = Number.parseFloat(percent);
+  const p = Number.isFinite(v) ? v : fallback;
+  return Math.min(1, Math.max(0, p / 100));
 }

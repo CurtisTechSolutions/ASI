@@ -650,6 +650,13 @@ Teaching a reply, and training, go on until every token is right:
 * The network's "teach this reply" (`until`) repeats until a whole round is
   right and its answer is the reply; its fit (`until`) until every taught
   pair is exactly right.
+* **A threshold** makes the goal a share instead of all of it: `--threshold`
+  (`"threshold"` on the routes, "Goal %" in the frontend), **0.95 by
+  default**, so teaching stops at 95% of a reply's tokens and training at
+  95% of the most possible; 1 is exact. The same reply at 0.95: 41 of 43
+  right after 8 rounds instead of 43 of 43 after 11. Right means right with
+  the true text before it: a reply taught short of all of it may still be
+  continued differently once one early token goes another way.
 
 ```bash
 latticefsm chain teach "what is the brain" "a lattice of adaptive edges."

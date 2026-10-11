@@ -433,31 +433,42 @@ def _ngram(args):
     return NGram(args.order, args.unit, lower=not args.keep_case, stimulation=args.stimulation)
 
 
+def _pct(threshold: float) -> str:
+    return f"{threshold * 100:.0f}%"
+
+
 def _train_until(m, data, args, right: int, of: int) -> None:
     """``--until``: after the first pass (round 1: every token predicted before it was learned), drill the model on
-    what it learned (:meth:`drill`) until every token is right - or as many as can be: a context the data continues
-    in more than one way can only ever be guessed one way - or ``--max-rounds``."""
-    from .ngram import train_corpus
+    what it learned (:meth:`drill`) until ``--threshold`` of every token that can be right is - a context the data
+    continues in more than one way can only ever be guessed one way - or ``--max-rounds``."""
+    from .ngram import goal_of, train_corpus
     seqs: list = []
     train_corpus(data, m.unit, m.lower, args.held_out, lambda t: seqs.append(t) or 0, [])
     best_possible, _ = m.ceiling(seqs)
-    print(f"round 1: {right} of {of} predicted right before learning (the most possible: {best_possible})")
-    d = m.drill(seqs, max(2, args.max_rounds) - 1, max(2, args.max_rounds) - 1)
+    need = goal_of(args.threshold, best_possible)
+    print(f"round 1: {right} of {of} predicted right before learning (the most possible: {best_possible}; the goal: "
+          f"{need}, {_pct(args.threshold)})")
+    rounds = max(2, args.max_rounds) - 1
+    d = m.drill(seqs, rounds, rounds, args.threshold)
     for k, r in enumerate(d["rounds"]):
         print(f"round {k + 2}: {r} of {d['of']} right")
     rnd, right, of = len(d["rounds"]) + 1, d["right"], d["of"]
     if right == of:
         print(f"{of} of {of} reached in {rnd} rounds")
-    elif d["reached"]:
+    elif right >= best_possible:
         print(f"{right} of {of} reached in {rnd} rounds: the most possible - the rest ({of - right}) come after "
               f"contexts the data continues in more than one way")
+    elif d["reached"]:
+        print(f"{right} of {of} reached in {rnd} rounds: the goal of {need} ({_pct(args.threshold)} of the "
+              f"{best_possible} possible)")
     else:
-        print(f"stopped after {rnd} rounds at {right} of {of} (the most possible: {best_possible})")
+        print(f"stopped after {rnd} rounds at {right} of {of} (the goal: {need} of the {best_possible} possible)")
 
 
-def _print_teaching(m, text, reply, r) -> None:
+def _print_teaching(m, text, reply, r, threshold) -> None:
+    goal = f"; the goal {r['need']} ({_pct(threshold)})" if r["need"] < r["of"] else ""
     print(f"taught {reply!r} after {text!r}: {r['right']} of {r['of']} right after {r['rounds']} rounds"
-          + ("" if r["reached"] else " (not all: --max-rounds)") + "; right before each round: "
+          + ("" if r["reached"] else " (short of the goal: --max-rounds)") + goal + "; right before each round: "
           + " ".join(map(str, r["history"])))
     print(f"now: {m.complete(text, 2 * r['of'] + 10)}")
 
@@ -556,7 +567,8 @@ def cmd_ngram(args) -> int:
     elif args.action == "teach":
         if len(args.text) != 2:
             raise SystemExit("teach TEXT REPLY: the text and the reply that should follow it")
-        _print_teaching(m, args.text[0], args.text[1], m.teach(args.text[0], args.text[1], args.max_rounds))
+        _print_teaching(m, args.text[0], args.text[1],
+                        m.teach(args.text[0], args.text[1], args.max_rounds, args.threshold), args.threshold)
     if args.save and args.action in ("train", "credit", "teach"):
         m.save(args.save)
         print(f"saved {args.save}", file=sys.stderr)
@@ -665,7 +677,8 @@ def cmd_chain(args) -> int:
     elif args.action == "teach":
         if len(args.text) != 2:
             raise SystemExit("teach TEXT REPLY: the text and the reply that should follow it")
-        _print_teaching(m, args.text[0], args.text[1], m.teach(args.text[0], args.text[1], args.max_rounds))
+        _print_teaching(m, args.text[0], args.text[1],
+                        m.teach(args.text[0], args.text[1], args.max_rounds, args.threshold), args.threshold)
     if args.save and args.action in ("train", "credit", "teach"):
         m.save(args.save)
         print(f"saved {args.save}", file=sys.stderr)
@@ -905,10 +918,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="train / autotrain: only count (by default every token is predicted first, then learned)")
     q.add_argument("--self-credit", type=float, default=0.0,
                    help="while predicting: reward a right first guess, punish a wrong one by this much (default 0)")
-    q.add_argument("--until", action="store_true", help="train: drill the model on what it learned until every token is "
-                   "predicted right (N of N; or every one that can be) or --max-rounds")
+    q.add_argument("--until", action="store_true", help="train: drill the model on what it learned until --threshold of every "
+                   "token that can be right is (N of N at 1), or --max-rounds")
     q.add_argument("--max-rounds", type=int, default=None, help="--until: at most this many passes (default 20); teach: "
                    "at most this many rounds (default 100)")
+    q.add_argument("--threshold", type=float, default=0.95, help="teach / --until: stop once this share of the goal "
+                   "is right (default 0.95; 1: every one)")
     q.add_argument("-k", type=int, default=10, help="predict: how many next tokens")
     q.add_argument("--max-tokens", type=int, default=30)
     q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")
@@ -948,10 +963,12 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--self-credit", type=float, default=0.0,
                    help="train: reward the nodes behind a right first guess, punish those behind a wrong one")
     q.add_argument("--thresholds", default="0,0.3,0.5,0.7,0.8,0.9,0.95,1", help="sweep: the confidences")
-    q.add_argument("--until", action="store_true", help="train: drill the model on what it learned until every token is "
-                   "predicted right (N of N; or every one that can be) or --max-rounds")
+    q.add_argument("--until", action="store_true", help="train: drill the model on what it learned until --threshold of every "
+                   "token that can be right is (N of N at 1), or --max-rounds")
     q.add_argument("--max-rounds", type=int, default=None, help="--until: at most this many passes (default 20); teach: "
                    "at most this many rounds (default 100)")
+    q.add_argument("--threshold", type=float, default=0.95, help="teach / --until: stop once this share of the goal "
+                   "is right (default 0.95; 1: every one)")
     q.add_argument("-k", type=int, default=10, help="predict: how many next inputs")
     q.add_argument("--max-tokens", type=int, default=40)
     q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")

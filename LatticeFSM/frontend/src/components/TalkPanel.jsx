@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { useLmInfo } from "../hooks/useLmInfo.js";
-import { lmLabel, mean, untilNote } from "../lm.js";
+import { goalShare, lmLabel, mean, untilNote } from "../lm.js";
 import { askModel, turnText } from "../talk.js";
 import { fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
@@ -150,10 +150,10 @@ export function useTalk(lm, onMoved) {
   }
 
   /** Teach that `reply` follows the turn's message (POST /api/{m}/teach), round after round until N of N. */
-  async function teach(turn, reply, maxRounds = 100) {
+  async function teach(turn, reply, maxRounds = 100, threshold = 0.95) {
     setBusy(true);
     try {
-      const r = await api.lmTeach(turn.lm, { text: turn.text, reply, max_rounds: maxRounds });
+      const r = await api.lmTeach(turn.lm, { text: turn.text, reply, max_rounds: maxRounds, threshold });
       const taught = { reply, note: `taught "${reply}": ${untilNote(r)}`, reached: Boolean(r.reached), completion: r.completion };
       setTurns((t) => t.map((x) => (x.id === turn.id ? { ...x, taught } : x)));
       setError(null);
@@ -184,6 +184,7 @@ export default function TalkPanel({ lm, tick, onMoved }) {
   const [learn, setLearn] = useStoredState("lmtalk.learn", false);
   const [subscripts, setSubscripts] = useStoredState("lmtalk.subscripts", false);
   const [maxRounds, setMaxRounds] = useStoredState("lmtalk.maxRounds", "100");
+  const [goal, setGoal] = useStoredState("lmtalk.goal", "95");
   const talk = useTalk(lm, onMoved);
 
   const send = async () => {
@@ -218,6 +219,7 @@ export default function TalkPanel({ lm, tick, onMoved }) {
           <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min="1" step="1" />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" hint="0: the likeliest" />
           <NumberField label="Teach rounds" value={maxRounds} onChange={setMaxRounds} min="1" step="1" hint="at most, teaching a reply until it is all right" />
+          <NumberField label="Goal %" value={goal} onChange={setGoal} min="1" max="100" step="1" hint="of the reply's tokens right; 100: every one" />
           <CheckField label="Learn what I say" checked={learn} onChange={setLearn} hint="train on every message first" />
           {chain ? <CheckField label="Depth subscripts" checked={subscripts} onChange={setSubscripts} hint="each token's depth beside it" /> : null}
         </div>
@@ -225,7 +227,7 @@ export default function TalkPanel({ lm, tick, onMoved }) {
           turns={talk.turns}
           busy={talk.busy}
           onRate={talk.rate}
-          onTeach={(turn, reply) => talk.teach(turn, reply, Math.max(1, parseInteger(maxRounds, 100)))}
+          onTeach={(turn, reply) => talk.teach(turn, reply, Math.max(1, parseInteger(maxRounds, 100)), goalShare(goal))}
           maxDepth={chain ? maxDepth : null}
           subscripts={chain && subscripts}
           empty="Say something - a few words it might know how to go on with - and it carries on from there."

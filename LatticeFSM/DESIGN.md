@@ -940,7 +940,12 @@ that context length can get right. **`drill(seqs, max_rounds, patience)`**:
 the target of a context is its most frequent next token (ties to the lower
 id). A round counts the right first guesses over `seqs` (teacher-forced);
 stop at the ceiling, `max_rounds`, or `patience` rounds without a gain (the
-CLI and the server pass `patience = max_rounds`). Else, contexts in sorted
+CLI and the server pass `patience = max_rounds`). Both take a `threshold`
+(the command line and the server default to `THRESHOLD = 0.95`): the goal is
+`goal_of(threshold, n) = ceil(threshold * n - 1e-9)` of the reply's `n`
+tokens or of the ceiling (`n` itself at 1), and they stop once that many are
+right; the network's teach stops at that share of a round (and, only at 1,
+with its answer the reply), its fit at that share of the pairs. Else, contexts in sorted
 order, every one whose guess is not its target, `a = 2^k` (`k`: the rounds
 it was corrected before): the N-gram narrows the guess's edge by `a` and
 widens the target's by `a`; the chain punishes by `a` every node on its walk

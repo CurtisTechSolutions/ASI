@@ -2,7 +2,7 @@ import { useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { infoLine, useLmInfo } from "../hooks/useLmInfo.js";
-import { UNITS, bestSweepRow, historyPoints, lmLabel, pct, roundsNote, sweepSeries } from "../lm.js";
+import { UNITS, bestSweepRow, goalShare, historyPoints, lmLabel, pct, roundsNote, sweepSeries } from "../lm.js";
 import { fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
@@ -60,7 +60,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
   const [untilData, setUntilData] = useStoredState("lmtrain.until", false);
   const [untilText, setUntilText] = useStoredState("lmtrain.untilText", true);
   const [maxRounds, setMaxRounds] = useStoredState("lmtrain.maxRounds", "20");
-  const [patience, setPatience] = useStoredState("lmtrain.patience", "3");
+  const [goal, setGoal] = useStoredState("lmtrain.goal", "95");
   const [thresholds, setThresholds] = useStoredState("lmtrain.thresholds", THRESHOLDS);
   const [uploads, setUploads] = useState([]);
   const [sweep, setSweep] = useState(null);
@@ -87,14 +87,14 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
 
   const learning = () => ({ predict: predictFirst, self_credit: predictFirst ? parseNumber(selfCredit, 0) : 0 });
 
-  // keep re-training until every token is predicted right (N of N), the rounds run out, or it stops gaining
+  // keep drilling until the goal - a share of every token that can be right (100: all of them) - or the rounds run out
   const untilBody = (on) =>
-    on ? { until: true, max_rounds: Math.max(1, parseInteger(maxRounds, 20)), patience: Math.max(1, parseInteger(patience, 3)) } : {};
+    on ? { until: true, max_rounds: Math.max(1, parseInteger(maxRounds, 20)), threshold: goalShare(goal) } : {};
 
   const untilResult = (r) => {
     const list = r && Array.isArray(r.rounds) ? r.rounds : null;
-    setRounds(list && list.length ? { rounds: list, reached: Boolean(r.reached) } : null);
-    return list && list.length ? `; ${roundsNote(list, r.reached)}` : "";
+    setRounds(list && list.length ? { rounds: list, reached: Boolean(r.reached), need: r.need, best: r.best } : null);
+    return list && list.length ? `; ${roundsNote(list, r.reached, r.need, r.best)}` : "";
   };
 
   // what to train on: the server paths (when ticked) and the selected uploads; neither means the server's default
@@ -218,7 +218,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
         <div className="row">
           <CheckField label="Until N of N" checked={untilData} onChange={setUntilData} hint="re-train until every token is predicted right - on a corpus this can take long" />
           <NumberField label="Max rounds" value={maxRounds} onChange={setMaxRounds} min="1" step="1" hint="shared with the text card" />
-          <NumberField label="Patience" value={patience} onChange={setPatience} min="1" step="1" hint="rounds without a gain before it stops" />
+          <NumberField label="Goal %" value={goal} onChange={setGoal} min="1" max="100" step="1" hint="of every token that can be right; 100: N of N" />
         </div>
         <div className="actions">
           <button type="button" className="primary" disabled={busy !== null} onClick={train}>
@@ -247,7 +247,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
             {busy === "text" ? "Training…" : "Train on this text"}
           </button>
         </div>
-        <p className="muted">Predict while learning, self-credit, max rounds and patience (in the card beside) apply here too.</p>
+        <p className="muted">Predict while learning, self-credit, max rounds and the goal (in the card beside) apply here too.</p>
       </div>
 
       <div className="card wide">
@@ -257,7 +257,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
         {rounds ? (
           <>
             <h3>
-              Until N of N: <span className={rounds.reached ? "ok-text" : "error-text"}>{roundsNote(rounds.rounds, rounds.reached)}</span>
+              Until the goal: <span className={rounds.reached ? "ok-text" : "error-text"}>{roundsNote(rounds.rounds, rounds.reached, rounds.need, rounds.best)}</span>
             </h3>
             <div className="table-wrap">
               <table className="data">

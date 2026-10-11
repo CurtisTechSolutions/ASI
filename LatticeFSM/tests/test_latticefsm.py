@@ -1244,6 +1244,21 @@ class TestTeaching(unittest.TestCase):
         tiny.train_lines(["abcd", "abce"])
         self.assertEqual(tiny.ceiling([list("abcd"), list("abce")]), (9, 10))  # after abc: d or e, one of them
 
+    def test_a_threshold_stops_short_of_all(self):
+        from latticefsm.chain import Chain
+        from latticefsm.ngram import goal_of
+        self.assertEqual([goal_of(t, 43) for t in (1.0, 0.95, 0.9, 0.5, 0.0)], [43, 41, 39, 22, 0])
+        self.assertEqual(goal_of(0.95, 20), 19)  # 0.95 x 20 is 19, not 19.000000000000004 rounded up
+        exact, near = Chain(), Chain()
+        for m in (exact, near):
+            m.train_paths(["data/corpus"], held_out=10, predict=False)
+        a = exact.teach("what is the brain", "a lattice of adaptive edges that predicts.", threshold=1.0)
+        b = near.teach("what is the brain", "a lattice of adaptive edges that predicts.", threshold=0.9)
+        self.assertEqual((a["need"], b["need"]), (43, 39))
+        self.assertTrue(a["reached"] and b["reached"])
+        self.assertLess(b["rounds"], a["rounds"])
+        self.assertGreaterEqual(b["right"], 39)
+
     def test_scores_are_the_probabilities(self):
         from latticefsm.chain import Chain
         from latticefsm.ngram import NGram

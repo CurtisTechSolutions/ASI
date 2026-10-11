@@ -44,8 +44,8 @@ pub trait Lm {
     fn credit_text(&mut self, text: &str, amount: f64) -> usize;
     /// Every token of a text (and `</s>`) with the probability given it, and (for the chain) the depth of its walk.
     fn score(&mut self, text: &str) -> Vec<(String, f64, Option<usize>)>;
-    fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize) -> Teaching;
-    fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize) -> Drill;
+    fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize, threshold: f64) -> Teaching;
+    fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize, threshold: f64) -> Drill;
     fn ceiling(&self, seqs: &[Sequence]) -> (usize, usize);
     fn save(&self, path: &str) -> Result<(), String>;
     fn history(&mut self) -> &mut Vec<Json>;
@@ -142,11 +142,11 @@ impl Lm for NGram {
             .map(|(t, p)| (t, p, None))
             .collect()
     }
-    fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize) -> Teaching {
-        NGram::teach(self, text, reply, max_rounds)
+    fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize, threshold: f64) -> Teaching {
+        NGram::teach(self, text, reply, max_rounds, threshold)
     }
-    fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize) -> Drill {
-        NGram::drill(self, seqs, max_rounds, patience)
+    fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize, threshold: f64) -> Drill {
+        NGram::drill(self, seqs, max_rounds, patience, threshold)
     }
     fn ceiling(&self, seqs: &[Sequence]) -> (usize, usize) {
         NGram::ceiling(self, seqs)
@@ -242,11 +242,11 @@ impl Lm for Chain {
             .map(|(t, p, d)| (t, p, Some(d)))
             .collect()
     }
-    fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize) -> Teaching {
-        Chain::teach(self, text, reply, max_rounds)
+    fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize, threshold: f64) -> Teaching {
+        Chain::teach(self, text, reply, max_rounds, threshold)
     }
-    fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize) -> Drill {
-        Chain::drill(self, seqs, max_rounds, patience)
+    fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize, threshold: f64) -> Drill {
+        Chain::drill(self, seqs, max_rounds, patience, threshold)
     }
     fn ceiling(&self, seqs: &[Sequence]) -> (usize, usize) {
         Chain::ceiling(self, seqs)
@@ -279,6 +279,11 @@ pub fn default_chain() -> Chain {
 }
 
 // ---- the routes both models answer ---------------------------------------------------------------------------------
+
+/// The share of the goal a body's `threshold` asks for (0 to 1; default `THRESHOLD`, 95%).
+pub fn threshold_of(b: &Json) -> f64 {
+    b.num("threshold", crate::ngram::THRESHOLD).clamp(0.0, 1.0)
+}
 
 /// The server paths a training body names: `data` (comma-separated, or a list) and `uploads` (names in the upload
 /// directory); neither: the corpus.
@@ -398,12 +403,13 @@ fn lm_train(m: &mut dyn Lm, b: &Json) -> Result<Json, String> {
             &mut Vec::new(),
         )?;
         let max = (b.num("max_rounds", 20.0) as usize).clamp(2, 1000);
-        let d = m.drill(&seqs, max - 1, b.num("patience", max as f64) as usize);
+        let d = m.drill(&seqs, max - 1, b.num("patience", max as f64) as usize, threshold_of(b));
         let (rows, reached) = drill_json(first, &d);
         j = j
             .with("rounds", rows)
             .with("reached", reached.into())
-            .with("best", d.best.into());
+            .with("best", d.best.into())
+            .with("need", d.need.into());
     }
     let ev = m.evaluate(&test);
     let mut rec = ev
@@ -441,12 +447,13 @@ fn lm_text(m: &mut dyn Lm, b: &Json) -> Result<Json, String> {
     if b.bool_or("until", false) {
         let seqs: Vec<Sequence> = lines.iter().map(|l| m.tokens(l)).filter(|t| !t.is_empty()).collect();
         let max = (b.num("max_rounds", 20.0) as usize).clamp(2, 1000);
-        let d = m.drill(&seqs, max - 1, b.num("patience", max as f64) as usize);
+        let d = m.drill(&seqs, max - 1, b.num("patience", max as f64) as usize, threshold_of(b));
         let (rows, reached) = drill_json(first, &d);
         j = j
             .with("rounds", rows)
             .with("reached", reached.into())
-            .with("best", d.best.into());
+            .with("best", d.best.into())
+            .with("need", d.need.into());
     }
     Ok(j.with("model", m.info()))
 }
@@ -519,7 +526,12 @@ pub fn lm_route(m: &mut dyn Lm, method: &str, action: &str, req: &Request) -> Op
         ("POST", "teach") => {
             let (text, reply) = (b.str_or("text", ""), b.str_or("reply", ""));
             let (tt, rt) = (m.tokens(text), m.tokens(reply));
-            let t = m.teach(&tt, &rt, (b.num("max_rounds", 100.0) as usize).min(100_000));
+            let t = m.teach(
+                &tt,
+                &rt,
+                (b.num("max_rounds", 100.0) as usize).min(100_000),
+                threshold_of(b),
+            );
             let mut rng = Rng::new(1);
             let (out, _) = m.continue_tokens(&m.prompt_tokens(text), 2 * t.of + 10, 0.0, &mut rng);
             let completion = completion_text(m, text, &out);

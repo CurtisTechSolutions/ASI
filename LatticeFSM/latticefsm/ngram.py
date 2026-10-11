@@ -42,7 +42,7 @@ import random
 from collections.abc import Iterable, Iterator, Sequence
 
 __all__ = ["BOS", "EOS", "UNITS", "UNK", "NGram", "corpus_lines", "corpus_sequences", "corpus_stream", "detokenize",
-           "load_ngram", "train_corpus",
+           "load_ngram", "train_corpus", "goal_of", "THRESHOLD",
            "split_lines", "tokenize"]
 
 BOS, EOS, UNK = "<s>", "</s>", "<unk>"
@@ -173,6 +173,18 @@ def corpus_sequences(paths: Iterable[str], unit: str = "word", lower: bool = Tru
             out.append((label, []))
         out[-1][1].append(toks)
     return out
+
+
+THRESHOLD = 0.95
+"""How much of the goal teaching until N of N stops at, by default: 95% of the tokens (of the most possible, when
+training), so it need not be exact."""
+
+
+def goal_of(threshold: float, n: int) -> int:
+    """The right guesses that meet a goal of ``n`` at ``threshold`` (a share, ``1``: all of them)."""
+    if threshold >= 1.0:
+        return n
+    return max(0, math.ceil(threshold * n - 1e-9))
 
 
 MAX_HELD_OUT = 10000
@@ -395,16 +407,18 @@ class NGram:
         counts, n = self._targets(seqs)
         return sum(max(r.values()) for r in counts.values()), n
 
-    def drill(self, seqs: Sequence[Sequence[str]], max_rounds: int = 20, patience: int = 3) -> dict:
+    def drill(self, seqs: Sequence[Sequence[str]], max_rounds: int = 20, patience: int = 3,
+              threshold: float = 1.0) -> dict:
         """Correct the model on ``seqs`` (already learned) round after round until its first guess in every context is
         the token that follows it most often - every token right that can be (:meth:`ceiling`) - or ``max_rounds``, or
         ``patience`` rounds without a gain.  A round counts the first guesses that are right, then in every context
         whose guess is not its most frequent token narrows the guess's edge and widens the token's by ``2 ^ k`` (``k``:
-        the rounds that context has already been corrected).  Returns ``{rounds: [right, ...], right, of, best,
-        reached}``."""
+        the rounds that context has already been corrected).  With ``threshold`` below 1 it stops once that share of
+        the most possible is right.  Returns ``{rounds: [right, ...], right, of, best, need, reached}``."""
         counts, n = self._targets(seqs)
         target = {c: min(r, key=lambda w: (-r[w], w)) for c, r in counts.items()}
         best_possible = sum(max(r.values()) for r in counts.values())
+        need = goal_of(threshold, best_possible)
         streak: dict[tuple[int, ...], int] = {}
         rounds: list[int] = []
         best, stale = -1, 0
@@ -419,7 +433,7 @@ class NGram:
                 best, stale = right, 0
             else:
                 stale += 1
-            if right >= best_possible or len(rounds) >= max_rounds or stale >= patience:
+            if right >= need or len(rounds) >= max_rounds or stale >= patience:
                 break
             for c in sorted(target):
                 t = target[c]
@@ -430,7 +444,7 @@ class NGram:
                         self.credit(c, g, -a)
                     self.credit(c, t, a)
                     streak[c] = streak.get(c, 0) + 1
-        return {"rounds": rounds, "right": right, "of": n, "best": best_possible, "reached": right >= best_possible}
+        return {"rounds": rounds, "right": right, "of": n, "best": best_possible, "need": need, "reached": right >= need}
 
     def train_lines(self, lines: Iterable[str | Sequence[str]], source: str | None = None, predict: bool = False,
                     credit: float = 0.0, reward: bool = True) -> int:
@@ -701,16 +715,18 @@ class NGram:
             out.append((EOS if j == len(toks) else toks[j], self.prob(self.context(toks[:j]), w)))
         return out
 
-    def teach(self, text: str | Sequence[str], reply: str | Sequence[str], max_rounds: int = 100) -> dict:
+    def teach(self, text: str | Sequence[str], reply: str | Sequence[str], max_rounds: int = 100,
+              threshold: float = 1.0) -> dict:
         """Teach the model that ``reply`` follows ``text``, round after round, until its first guess is right on every
         token of the reply and on the ``</s>`` after it (``of`` of them) - its greedy continuation of ``text`` is then
         ``reply`` - or ``max_rounds`` rounds have passed.  A round narrows every wrong guess's edge (credit -1 the first
         round a position is wrong, doubling every round it stays wrong) and then learns ``text + reply`` as one
-        sequence.  Returns ``{right, of, rounds, reached, history}`` (``history``: the
-        right guesses before each round, and after the last)."""
+        sequence.  With ``threshold`` below 1 it stops once that share of them is right.  Returns ``{right, of, need,
+        rounds, reached, history}`` (``history``: the right guesses before each round, and after the last)."""
         ctx = self._sequence(text)
         rep = self._sequence(reply)
         of = len(rep) + 1
+        need = goal_of(threshold, of)
         history: list[int] = []
         streak = [0] * of
         rounds = 0
@@ -722,7 +738,7 @@ class NGram:
                 guesses.append((c, w, self.top(c)))
             right = sum(g == w for _, w, g in guesses)
             history.append(right)
-            if right == of or rounds >= max_rounds:
+            if right >= need or rounds >= max_rounds:
                 break
             for i, (c, w, g) in enumerate(guesses):
                 if g == w:
@@ -733,7 +749,7 @@ class NGram:
                 streak[i] += 1
             self.train_tokens(ctx + rep)
             rounds += 1
-        return {"right": right, "of": of, "rounds": rounds, "reached": right == of, "history": history}
+        return {"right": right, "of": of, "need": need, "rounds": rounds, "reached": right >= need, "history": history}
 
     # ---- describing --------------------------------------------------------------------------------------------
 

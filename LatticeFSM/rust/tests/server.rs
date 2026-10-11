@@ -493,13 +493,22 @@ fn the_language_models_uploads_and_checkpoints() {
     assert_eq!(s.get("tokens").unwrap().as_array().unwrap().len(), 8);
     assert!(s.num("perplexity", 0.0) > 1.0);
     // teaching a reply until every token of it is right
-    let (_, t) = post(&addr, "/api/chain/teach", r#"{"text":"hello","reply":"hi there."}"#);
+    let (_, t) = post(
+        &addr,
+        "/api/chain/teach",
+        r#"{"text":"hello","reply":"hi there.","threshold":1}"#,
+    );
     assert!(t.bool_or("reached", false));
     assert_eq!(t.num("right", 0.0), t.num("of", -1.0));
     assert_eq!(t.str_or("completion", "").trim(), "hi there.");
-    let (_, t) = post(&addr, "/api/ngram/teach", r#"{"text":"hello","reply":"hi there ."}"#);
+    let (_, t) = post(
+        &addr,
+        "/api/ngram/teach",
+        r#"{"text":"hello","reply":"hi there .","threshold":0.5}"#,
+    );
     assert!(t.bool_or("reached", false));
-    // uploads, in chunks, and training on them until N of N
+    assert_eq!(t.num("need", 0.0), 2.0); // half of "hi there ." (three tokens) and its end
+                                         // uploads, in chunks, and training on them until N of N
     let (_, u) = post(
         &addr,
         "/api/uploads",

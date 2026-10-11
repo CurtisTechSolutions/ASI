@@ -21,6 +21,7 @@ import {
   sweepSeries,
   tokenPieces,
   untilNote,
+  goalShare,
 } from "../src/lm.js";
 import { recognitionText, speakable, speechSupport, spokenText } from "../src/speech.js";
 import { cleanName, fmtAgo, fmtTime } from "../src/util.js";
@@ -157,6 +158,14 @@ test("untilNote and roundsNote say how teaching until N of N ended", () => {
   assert.equal(untilNote({ right: 1, of: 1, rounds: 1, reached: true }), "taught in 1 round: 1 of 1 right");
   assert.equal(untilNote({ right: 12, of: 33 }), "12 of 33 right");
   assert.equal(roundsNote([{ round: 1, right: 20, of: 33 }, { round: 2, right: 33, of: 33 }], true), "33 of 33 reached in 2 rounds");
+  assert.equal(
+    roundsNote([{ round: 1, right: 20, of: 33 }, { round: 2, right: 30, of: 33 }], true, 29, 31),
+    "30 of 33 reached in 2 rounds (the goal: 29 of the 31 possible)",
+  );
+  assert.equal(untilNote({ right: 41, of: 43, need: 41, rounds: 8, reached: true }), "taught in 8 rounds: 41 of 43 right (the goal 41)");
+  assert.equal(goalShare("95"), 0.95);
+  assert.equal(goalShare("150"), 1);
+  assert.equal(goalShare("x"), 0.95);
   assert.equal(roundsNote([{ round: 1, right: 20, of: 33 }], false), "stopped after 1 round at 20 of 33");
   assert.equal(roundsNote([], true), "");
 });

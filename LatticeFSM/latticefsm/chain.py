@@ -52,7 +52,7 @@ import math
 import random
 from collections.abc import Iterable, Sequence
 
-from .ngram import BOS, EOS, UNITS, UNK, detokenize, tokenize, train_corpus
+from .ngram import BOS, EOS, UNITS, UNK, detokenize, goal_of, tokenize, train_corpus
 
 __all__ = ["Chain", "PRIOR", "load_chain"]
 
@@ -308,7 +308,8 @@ class Chain:
         counts, n = self._targets(seqs)
         return sum(max(r.values()) for r in counts.values()), n
 
-    def drill(self, seqs: Sequence[Sequence[str]], max_rounds: int = 20, patience: int = 3) -> dict:
+    def drill(self, seqs: Sequence[Sequence[str]], max_rounds: int = 20, patience: int = 3,
+              threshold: float = 1.0) -> dict:
         """Correct the chain on ``seqs`` (already learned) round after round until its first guess after every full
         context is the input that follows it most often - every input right that can be (:meth:`ceiling`) - or
         ``max_rounds``, or ``patience`` rounds without a gain.  A round counts the first guesses that are right, then
@@ -316,10 +317,13 @@ class Chain:
         guessed it by ``2 ^ k`` (``k``: the rounds that context has already been corrected), so the walk goes deeper,
         to the nodes that know; and when the deepest node the context reaches does not know - other text it learned
         continues the context otherwise - or knows but is outvoted by the nodes nearer the output, that node is given
-        enough more of the input to make it its guess, and ``2 ^ k - 1`` more.  Returns ``{rounds: [right, ...], right, of, best, reached}``."""
+        enough more of the input to make it its guess, and ``2 ^ k - 1`` more.  With ``threshold`` below 1 it stops
+        once that share of the most possible is right.  Returns ``{rounds: [right, ...], right, of, best, need,
+        reached}``."""
         counts, n = self._targets(seqs)
         target = {c: min(r, key=lambda w: (-r[w], w)) for c, r in counts.items()}
         best_possible = sum(max(r.values()) for r in counts.values())
+        need = goal_of(threshold, best_possible)
         streak: dict[tuple[int, ...], int] = {}
         rounds: list[int] = []
         best, stale = -1, 0
@@ -334,7 +338,7 @@ class Chain:
                 best, stale = right, 0
             else:
                 stale += 1
-            if right >= best_possible or len(rounds) >= max_rounds or stale >= patience:
+            if right >= need or len(rounds) >= max_rounds or stale >= patience:
                 break
             for c in sorted(target):
                 t = target[c]
@@ -347,11 +351,11 @@ class Chain:
                             node.punished += 2.0 ** k
                     deep = self.tables[len(c)].get(c)
                     if deep is not None and (deep.best != t or len(path) == len(c) + 1):
-                        need = 0 if deep.best == t else deep.counts[deep.best] - deep.counts.get(t, 0) + (t > deep.best)
-                        if need + 2 ** k - 1 > 0:
-                            deep.add(t, need + 2 ** k - 1)
+                        extra = 0 if deep.best == t else deep.counts[deep.best] - deep.counts.get(t, 0) + (t > deep.best)
+                        if extra + 2 ** k - 1 > 0:
+                            deep.add(t, extra + 2 ** k - 1)
                     streak[c] = k + 1
-        return {"rounds": rounds, "right": right, "of": n, "best": best_possible, "reached": right >= best_possible}
+        return {"rounds": rounds, "right": right, "of": n, "best": best_possible, "need": need, "reached": right >= need}
 
     def train_paths(self, paths: Iterable[str], held_out: int = 0, predict: bool = True,
                     credit: float = 0.0, reward: bool = True) -> tuple[int, list[list[str]]]:
@@ -496,16 +500,19 @@ class Chain:
             out.append((EOS if i == len(ids) - 1 else toks[i - 1], p, max(0, len(path) - 1)))
         return out
 
-    def teach(self, text: str | Sequence[str], reply: str | Sequence[str], max_rounds: int = 100) -> dict:
+    def teach(self, text: str | Sequence[str], reply: str | Sequence[str], max_rounds: int = 100,
+              threshold: float = 1.0) -> dict:
         """Teach the chain that ``reply`` follows ``text``, round after round, until its first guess is right on every
         input of the reply and on the ``</s>`` after it (``of`` of them) - its greedy continuation of ``text`` is then
         ``reply`` - or ``max_rounds`` rounds have passed.  A round punishes, at every wrong guess, the nodes on the walk
         that guessed it (so the next walk goes deeper, past them) - by 1 the first round a position is wrong, doubling
         every round it stays wrong, so even a node right a thousand times elsewhere gives way - and then learns
-        ``text + reply`` as one sequence.  Returns ``{right, of, rounds, reached, history}``."""
+        ``text + reply`` as one sequence.  With ``threshold`` below 1 it stops once that share of them is
+        right.  Returns ``{right, of, need, rounds, reached, history}``."""
         ctx = self._sequence(text)
         rep = self._sequence(reply)
         of = len(rep) + 1
+        need = goal_of(threshold, of)
         history: list[int] = []
         streak = [0] * of
         rounds = 0
@@ -525,13 +532,13 @@ class Chain:
                     streak[i] += 1
                 ids.append(w)
             history.append(right)
-            if right == of or rounds >= max_rounds:
+            if right >= need or rounds >= max_rounds:
                 break
             for hist, g, amount in wrong:
                 self._credit_path(self.walk(hist), g, -amount)
             self.train_tokens(ctx + rep, predict=False)
             rounds += 1
-        return {"right": right, "of": of, "rounds": rounds, "reached": right == of, "history": history}
+        return {"right": right, "of": of, "need": need, "rounds": rounds, "reached": right >= need, "history": history}
 
     # ---- describing --------------------------------------------------------------------------------------------
 

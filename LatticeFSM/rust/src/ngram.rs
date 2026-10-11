@@ -240,6 +240,18 @@ pub fn corpus_sequences(paths: &[String], unit: &str, lower: bool) -> Result<Vec
     Ok(out)
 }
 
+/// How much of the goal teaching until N of N stops at, by default: 95% of the tokens (of the most possible, when
+/// training), so it need not be exact.
+pub const THRESHOLD: f64 = 0.95;
+
+/// The right guesses that meet a goal of `n` at `threshold` (a share; `1`: all of them).
+pub fn goal_of(threshold: f64, n: usize) -> usize {
+    if threshold >= 1.0 {
+        return n;
+    }
+    (threshold * n as f64 - 1e-9).ceil().max(0.0) as usize
+}
+
 /// Held-out sequences kept at most while training on a corpus; past it, every sequence is trained on.
 pub const MAX_HELD_OUT: usize = 10000;
 
@@ -393,6 +405,7 @@ fn add_to(tables: &mut [Order], ranks: &mut Option<BTreeMap<u64, BTreeSet<u32>>>
 pub struct Teaching {
     pub right: usize,
     pub of: usize,
+    pub need: usize,
     pub rounds: usize,
     pub reached: bool,
     pub history: Vec<usize>,
@@ -403,6 +416,7 @@ impl Teaching {
         crate::json::Json::object()
             .with("right", self.right.into())
             .with("of", self.of.into())
+            .with("need", self.need.into())
             .with("rounds", self.rounds.into())
             .with("reached", self.reached.into())
             .with(
@@ -420,6 +434,7 @@ pub struct Drill {
     pub right: usize,
     pub of: usize,
     pub best: usize,
+    pub need: usize,
     pub reached: bool,
 }
 
@@ -669,7 +684,7 @@ impl NGram {
 
     /// Correct the model on `seqs` (already learned) round after round until its first guess in every context is the
     /// token that follows it most often, or `max_rounds`, or `patience` rounds without a gain - as `NGram.drill`.
-    pub fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize) -> Drill {
+    pub fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize, threshold: f64) -> Drill {
         let (counts, n) = self.targets(seqs);
         let mut targets: Vec<(Vec<u32>, u32)> = counts
             .iter()
@@ -684,6 +699,7 @@ impl NGram {
             .collect();
         targets.sort();
         let best_possible: usize = counts.values().map(|r| r.values().copied().max().unwrap_or(0)).sum();
+        let need = goal_of(threshold, best_possible);
         let mut streak: HashMap<Vec<u32>, i32> = HashMap::new();
         let mut rounds = Vec::new();
         let (mut best, mut stale) = (None, 0);
@@ -703,12 +719,13 @@ impl NGram {
             } else {
                 stale += 1;
             }
-            if right >= best_possible || rounds.len() >= max_rounds || stale >= patience {
+            if right >= need || rounds.len() >= max_rounds || stale >= patience {
                 return Drill {
                     right,
                     of: n,
                     best: best_possible,
-                    reached: right >= best_possible,
+                    need,
+                    reached: right >= need,
                     rounds,
                 };
             }
@@ -1121,8 +1138,9 @@ impl NGram {
     /// `max_rounds` rounds have passed.  A round narrows every wrong guess's edge (credit -1 the first round a position
     /// is wrong, doubling every round it stays wrong) and then learns `text + reply` as one sequence, as
     /// `NGram.teach` does.
-    pub fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize) -> Teaching {
+    pub fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize, threshold: f64) -> Teaching {
         let of = reply.len() + 1;
+        let need = goal_of(threshold, of);
         let mut history = Vec::new();
         let mut streak = vec![0i32; of];
         let mut rounds = 0;
@@ -1138,12 +1156,13 @@ impl NGram {
             }
             let right = guesses.iter().filter(|(_, w, g)| w == g).count();
             history.push(right);
-            if right == of || rounds >= max_rounds {
+            if right >= need || rounds >= max_rounds {
                 return Teaching {
                     right,
                     of,
+                    need,
                     rounds,
-                    reached: right == of,
+                    reached: right >= need,
                     history,
                 };
             }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { untilNote } from "../lm.js";
+import { goalShare, untilNote } from "../lm.js";
 import { fmtNum, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -96,6 +96,7 @@ export default function NetworkPanel({ onMoved }) {
   const [maxRounds, setMaxRounds] = useStoredState("talk.maxRounds", "200");
   const [until, setUntil] = useStoredState("talk.until", true);
   const [maxEpochs, setMaxEpochs] = useStoredState("talk.maxEpochs", "200");
+  const [goal, setGoal] = useStoredState("talk.goal", "95");
   const [turns, setTurns] = useState([]);
   const [fit, setFit] = useState(null);
   const [error, setError] = useState(null);
@@ -139,6 +140,7 @@ export default function NetworkPanel({ onMoved }) {
         times: Math.max(1, parseNumber(times, 3)),
         until: true,
         max_rounds: Math.max(1, parseNumber(maxRounds, 200)),
+        threshold: goalShare(goal),
       });
       const note = `taught "${reply}": ${untilNote(r)} - now: ${
         r.after.translator ? r.after.reply || "(silence)" : r.after.reply
@@ -162,7 +164,9 @@ export default function NetworkPanel({ onMoved }) {
         : data
           ? { data, epochs: parseNumber(epochs, 20) }
           : { language, episodes: 2000, epochs: parseNumber(epochs, 1) };
-      const body = until ? { ...base, until: true, max_epochs: Math.max(1, parseNumber(maxEpochs, 200)) } : base;
+      const body = until
+        ? { ...base, until: true, max_epochs: Math.max(1, parseNumber(maxEpochs, 200)), threshold: goalShare(goal) }
+        : base;
       const r = await api.networkFit(body);
       setFit(r);
       setInfo(r.network);
@@ -213,6 +217,7 @@ export default function NetworkPanel({ onMoved }) {
           <NumberField label="Epochs" value={epochs} onChange={setEpochs} min="1" step="1" />
           <NumberField label="Teach a reply" value={times} onChange={setTimes} min="1" step="1" hint="times a round, when you correct it" />
           <NumberField label="Rounds" value={maxRounds} onChange={setMaxRounds} min="1" step="1" hint="at most, teaching a reply until it is all right" />
+          <NumberField label="Goal %" value={goal} onChange={setGoal} min="1" max="100" step="1" hint="of a round right (and of the pairs, fitting); 100: every one" />
         </div>
         <div className="row">
           <CheckField label="Until all are right" checked={until} onChange={setUntil} hint="keep fitting until every taught pair is exactly right" />

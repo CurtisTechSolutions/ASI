@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 
 use crate::gzip;
 use crate::json::{parse, Json};
-use crate::ngram::{detokenize, tokenize, train_corpus, Drill, Sequence, Teaching, BOS, EOS, UNITS, UNK};
+use crate::ngram::{detokenize, goal_of, tokenize, train_corpus, Drill, Sequence, Teaching, BOS, EOS, UNITS, UNK};
 use crate::rng::Rng;
 
 const FORMAT: &str = "latticefsm-chain";
@@ -425,7 +425,7 @@ impl Chain {
     /// is the input that follows it most often, or `max_rounds`, or `patience` rounds without a gain: after every
     /// context guessed wrong the nodes on the walk that do not guess its input are punished by `2 ^ k`, and the deepest
     /// node it reaches, when it does not know, is given enough of the input to - as `Chain.drill`.
-    pub fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize) -> Drill {
+    pub fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize, threshold: f64) -> Drill {
         let (counts, n) = self.targets(seqs);
         let mut targets: Vec<(Vec<u32>, u32)> = counts
             .iter()
@@ -440,6 +440,7 @@ impl Chain {
             .collect();
         targets.sort();
         let best_possible: usize = counts.values().map(|r| r.values().copied().max().unwrap_or(0)).sum();
+        let need = goal_of(threshold, best_possible);
         let mut streak: HashMap<Vec<u32>, i32> = HashMap::new();
         let mut rounds = Vec::new();
         let (mut best, mut stale) = (None, 0);
@@ -460,12 +461,13 @@ impl Chain {
             } else {
                 stale += 1;
             }
-            if right >= best_possible || rounds.len() >= max_rounds || stale >= patience {
+            if right >= need || rounds.len() >= max_rounds || stale >= patience {
                 return Drill {
                     right,
                     of: n,
                     best: best_possible,
-                    reached: right >= best_possible,
+                    need,
+                    reached: right >= need,
                     rounds,
                 };
             }
@@ -491,14 +493,14 @@ impl Chain {
                     let full = d == Some(c.len());
                     if let Some(deep) = self.tables[c.len()].get_mut(c.as_slice()) {
                         if deep.best != Some(*t) || full {
-                            let need = match deep.best.filter(|b| b != t) {
+                            let extra = match deep.best.filter(|b| b != t) {
                                 Some(b) => {
                                     deep.counts[&b] - deep.counts.get(t).copied().unwrap_or(0) + u64::from(*t > b)
                                 }
                                 None => 0,
                             };
-                            if need + more > 0 {
-                                deep.add(*t, need + more);
+                            if extra + more > 0 {
+                                deep.add(*t, extra + more);
                             }
                         }
                     }
@@ -774,8 +776,9 @@ impl Chain {
     /// input of the reply and on the `</s>` after it, or `max_rounds` rounds have passed: a round punishes, at every
     /// wrong guess, the nodes on the walk that guessed it (by 1 the first round a position is wrong, doubling every
     /// round it stays wrong) and then learns `text + reply` as one sequence, as `Chain.teach` does.
-    pub fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize) -> Teaching {
+    pub fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize, threshold: f64) -> Teaching {
         let of = reply.len() + 1;
+        let need = goal_of(threshold, of);
         let mut history = Vec::new();
         let mut streak = vec![0i32; of];
         let mut rounds = 0;
@@ -805,12 +808,13 @@ impl Chain {
                 ids.push(w);
             }
             history.push(right);
-            if right == of || rounds >= max_rounds {
+            if right >= need || rounds >= max_rounds {
                 return Teaching {
                     right,
                     of,
+                    need,
                     rounds,
-                    reached: right == of,
+                    reached: right >= need,
                     history,
                 };
             }
