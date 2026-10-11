@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // A TextSource streams the texts of a corpus in order.  Training re-reads it
@@ -73,6 +74,89 @@ func (a AudioSource) Each(fn func(string) error) error {
 		return fmt.Errorf("%s: %w", a.Path, err)
 	}
 	return fn(text)
+}
+
+// Base64Source is a file as a model of base64 symbols reads it: the bytes it
+// holds, written in the symbols (Base64FileTexts).  A UTF-8 text file is one
+// text per line; anything else - an image, a video, a recording, an archive,
+// none of it unpacked or heard first - and any file taken whole is one text of
+// every byte.  A text file streams line by line, as FileSource does, after one
+// pass that settles it is text; a file that is one text is read whole, which
+// that one text needs anyway.
+type Base64Source struct {
+	Path      string
+	WholeFile bool
+}
+
+// Each yields the file's texts: Base64FileTexts of its bytes, streamed.
+func (s Base64Source) Each(fn func(string) error) error {
+	fh, err := os.Open(s.Path)
+	if err != nil {
+		return err
+	}
+	defer fh.Close()
+	if !s.WholeFile {
+		text, err := readsAsUTF8(fh)
+		if err != nil {
+			return err
+		}
+		if _, err := fh.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if text {
+			return base64Lines(fh, fn)
+		}
+	}
+	data, err := io.ReadAll(fh)
+	if err != nil || len(data) == 0 {
+		return err
+	}
+	return fn(Base64Text(data))
+}
+
+// readsAsUTF8 reads r to its end - or to the first byte that cannot be UTF-8 -
+// and reports whether all of it is UTF-8 text.
+func readsAsUTF8(r io.Reader) (bool, error) {
+	var check UTF8Check
+	buf := make([]byte, 64<<10)
+	for {
+		n, err := r.Read(buf)
+		check.Write(buf[:n])
+		if check.Failed() {
+			return false, nil
+		}
+		if err == io.EOF {
+			return check.Valid(), nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+}
+
+// base64Lines streams a UTF-8 text the way Base64FileTexts cuts one: split on
+// \n alone, each line's bytes as they are, the ASCII-blank lines left out,
+// every other line written in base64 symbols.
+func base64Lines(r io.Reader, fn func(string) error) error {
+	br := getReader(r)
+	defer putReader(br)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			line = bytes.TrimSuffix(line, []byte{'\n'})
+			if !asciiBlank(line) {
+				if ferr := fn(Base64Text(line)); ferr != nil {
+					return ferr
+				}
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // CollectTexts drains a source into a slice (for small corpora and the callers that need a list).
@@ -212,6 +296,9 @@ func (s *splitter) finish() error {
 
 // streamLines reads r line by line (any line length, CRLF tolerated, BOM and
 // invalid UTF-8 repaired) and feeds the splitter; memory stays O(one line).
+// A repair writes one U+FFFD per maximal invalid subpart (LossyUTF8), so a
+// file that is not text - an image kept as it was uploaded - reads here as it
+// reads in Python.
 func streamLines(r io.Reader, unit string, pageLines int, emit func(string) error) error {
 	sp := newSplitter(unit, pageLines, emit)
 	br := getReader(r)
@@ -225,8 +312,8 @@ func streamLines(r io.Reader, unit string, pageLines int, emit func(string) erro
 				first = false
 			}
 			line = strings.TrimRight(line, "\r\n")
-			if !isValidUTF8(line) {
-				line = strings.ToValidUTF8(line, "�")
+			if !utf8.ValidString(line) {
+				line = LossyUTF8([]byte(line))
 			}
 			if lerr := sp.line(line); lerr != nil {
 				return lerr
@@ -255,17 +342,6 @@ func getReader(r io.Reader) *bufio.Reader {
 func putReader(br *bufio.Reader) {
 	br.Reset(nil)
 	readers.Put(br)
-}
-
-func isValidUTF8(s string) bool {
-	for i := 0; i < len(s); {
-		if s[i] < 0x80 {
-			i++
-			continue
-		}
-		return strings.ToValidUTF8(s, "�") == s
-	}
-	return true
 }
 
 // StreamSplit splits the content of r into texts (streaming version of SplitTexts).

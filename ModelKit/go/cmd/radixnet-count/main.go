@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -69,8 +70,8 @@ func addGlobalFlags(fs *flag.FlagSet) {
 	fs.StringVar(&memProfile, "memprofile", memProfile, "write a heap profile to this file when the command finishes")
 	fs.StringVar(&memLimit, "memlimit", memLimit, "soft memory limit, e.g. 2GiB (default: 80% of the container / machine memory; \"off\" to let the heap grow freely)")
 	fs.StringVar(&outPath, "out", outPath, "where to save the model (default: --model)")
-	fs.StringVar(&encSpec, "encoding", encSpec, "encoding of a NEW model, unit[:n[:stride]] (default char:3:1); also trigram | bigram | word-bigram | word-trigram")
-	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word | phone | syllable | acoustic (default char)")
+	fs.StringVar(&encSpec, "encoding", encSpec, "encoding of a NEW model, unit[:n[:stride]] (default char:3:1; base64:4:4 groups of four base64 symbols, three bytes of any file each); also trigram | bigram | word-bigram | word-trigram")
+	fs.StringVar(&unitsFlag, "units", unitsFlag, "what one unit of a NEW model is: char | word | phone | syllable | acoustic | base64 (default char; base64: a symbol of the bytes of any file, decoded back into bytes)")
 	fs.IntVar(&ngramFlag, "ngram", ngramFlag, "units per gram of a NEW model: the n of the n-gram (default 3)")
 	fs.IntVar(&strideFlag, "stride", strideFlag, "units between consecutive grams of a NEW model: 1 = sliding window, n = groups of n (default 1)")
 }
@@ -199,6 +200,173 @@ func readTexts(paths []string, unit string, pageLines int) []string {
 	return texts
 }
 
+// -- a model of base64 symbols: content as bytes, in and out --------------------------
+
+// base64Sources is files as a model of base64 symbols reads them: the bytes
+// each one holds (radixnet.Base64Source) - a UTF-8 text file one text per
+// line, anything else one text of every byte, an archive or a recording too,
+// nothing unpacked or heard first - and every file one text with --split file
+// (Python's --whole-file).  No other split cuts them.
+func base64Sources(paths []string, unit string) radixnet.TextSource {
+	var sources radixnet.MultiSource
+	for _, p := range paths {
+		if st, err := os.Stat(p); err != nil || st.IsDir() {
+			fail("data file not found: %s", p)
+		}
+		sources = append(sources, radixnet.Base64Source{Path: p, WholeFile: wholeFileSplit(unit)})
+	}
+	return sources
+}
+
+// wholeFileSplit reports whether a --split takes every file as one text.
+func wholeFileSplit(unit string) bool {
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "file", "whole", "whole-file":
+		return true
+	}
+	return false
+}
+
+// modelSources is the streaming source of files as a model of encoding enc
+// reads them: a model of base64 symbols the bytes (base64Sources), any other
+// model the texts sourcesFor cuts them into.
+func modelSources(enc radixnet.Encoding, paths []string, unit string, pageLines int) radixnet.TextSource {
+	if enc.IsBase64() {
+		return base64Sources(paths, unit)
+	}
+	return sourcesFor(paths, unit, pageLines)
+}
+
+// modelTexts is readTexts for a model of encoding enc: a model of base64
+// symbols collects the texts of base64Sources, and what names them in the
+// error when there are none, as the Python CLI does ("no training texts found
+// in ..."); any other model reads what readTexts reads.
+func modelTexts(enc radixnet.Encoding, paths []string, unit string, pageLines int, what string) []string {
+	if !enc.IsBase64() {
+		return readTexts(paths, unit, pageLines)
+	}
+	texts, err := radixnet.CollectTexts(base64Sources(paths, unit))
+	if err != nil {
+		fail("%v", err)
+	}
+	if len(texts) == 0 {
+		fail("no %s texts found in %s", what, strings.Join(paths, ", "))
+	}
+	return texts
+}
+
+// errFound ends a walk over a source at its first text (anyText).
+var errFound = errors.New("found")
+
+// anyText reports whether a source holds a text at all, reading no further than its first.
+func anyText(src radixnet.TextSource) bool {
+	found := false
+	err := src.Each(func(string) error { found = true; return errFound })
+	if err != nil && !errors.Is(err, errFound) {
+		fail("%v", err)
+	}
+	return found
+}
+
+// readFileBytes is a file's bytes; a path that is not a file is an error.
+func readFileBytes(path string) []byte {
+	if st, err := os.Stat(path); err != nil || st.IsDir() {
+		fail("data file not found: %s", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fail("%v", err)
+	}
+	return data
+}
+
+// promptOf is the prefix the model is asked, and the content it stands for, as
+// bytes (Python's _prefix_of).  --prefix-file gives a prefix as the bytes of a
+// file and --prefix as text, its UTF-8 bytes.  A model of base64 symbols is
+// asked the symbols those bytes fix (radixnet.Base64Prefix), so the walk
+// writes on from the last whole symbol; any other model reads the file as
+// UTF-8 text - bytes that are not text are an error - and takes --prefix as it
+// is.
+func promptOf(enc radixnet.Encoding, prefix, prefixFile string) (string, []byte) {
+	if prefixFile == "" {
+		return enc.PrefixInput(prefix), []byte(prefix)
+	}
+	data := readFileBytes(prefixFile)
+	if enc.IsBase64() {
+		return radixnet.Base64Prefix(data), data
+	}
+	text, err := enc.ContentText(data)
+	if err != nil {
+		fail("%s is not valid UTF-8 text: %v", prefixFile, err)
+	}
+	return text, data
+}
+
+// promptDoc is what the JSON adds about a prefix: the file it came from, and
+// the symbols a model of base64 symbols was asked.
+func promptDoc(enc radixnet.Encoding, prefixFile, asked string) map[string]any {
+	doc := map[string]any{}
+	if prefixFile != "" {
+		doc["prefix_file"] = prefixFile
+	}
+	if enc.IsBase64() {
+		doc["prefix_symbols"] = asked
+	}
+	return doc
+}
+
+// givenFlags is the names of the flags the command line set, so a flag given
+// as "" can be told from one left out.
+func givenFlags(fs *flag.FlagSet) map[string]bool {
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	return given
+}
+
+// decodeTo is --decode-to PATH: what each text holds, written as bytes - the
+// output decoder of a model of base64 symbols, which writes the decoded bytes
+// (an image, a video, a text again: Encoding.ContentBytes), while any other
+// model writes its text as UTF-8.  One text is written to PATH, several to PATH
+// numbered before its extension (out-1.png, out-2.png, ...).  Nil when no path
+// was given.
+func decodeTo(path string, enc radixnet.Encoding, texts []string) []map[string]any {
+	if path == "" {
+		return nil
+	}
+	root, ext := splitExt(path)
+	written := []map[string]any{}
+	for i, text := range texts {
+		target := path
+		if len(texts) != 1 {
+			target = fmt.Sprintf("%s-%d%s", root, i+1, ext)
+		}
+		data := enc.ContentBytes(text)
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			fail("cannot write %s: %v", target, err)
+		}
+		written = append(written, map[string]any{"path": target, "bytes": len(data)})
+		say("wrote %s (%d bytes)", target, len(data))
+	}
+	return written
+}
+
+// splitExt is Python's os.path.splitext: a path and its extension, which is
+// the base name from its last dot on - the dots it starts with aside, so
+// .profile has none - and "" when there is no such dot (out.png -> out + .png,
+// out -> out + "").
+func splitExt(path string) (string, string) {
+	sep := strings.LastIndexAny(path, "/"+string(filepath.Separator))
+	dot := strings.LastIndexByte(path, '.')
+	if dot > sep {
+		for i := sep + 1; i < dot; i++ {
+			if path[i] != '.' {
+				return path[:dot], path[dot:]
+			}
+		}
+	}
+	return path, ""
+}
+
 func configure(m *radixnet.Model) *radixnet.Model {
 	m.Workers = workers
 	m.G.Workers = workers
@@ -309,13 +477,15 @@ commands:
 
 global options (before or after the command): --model PATH --kind count|word --json --seed N --workers N --exact --out PATH
                                              --memlimit SIZE (soft heap limit, default 80%% of the machine / container) --memprofile PATH
-                                             --encoding SPEC / --units char|word / --ngram N / --stride N (a NEW model only)
+                                             --encoding SPEC / --units char|word|base64 / --ngram N / --stride N (a NEW model only)
 
-the encoding of a NEW model: --units says what one unit is (a character or a word), --ngram how many
-units a gram holds, --stride how far apart consecutive grams start (1 = the sliding window, n = groups
-of n).  --encoding SPEC sets all three: char:3:1 (the default), char:5:5 (groups of five letters),
-word:2:1 (word bigrams), word:3:1 (word trigrams).  It is fixed when the model is created and travels
-with the file; the Python implementation reads every one of them too.
+the encoding of a NEW model: --units says what one unit is (a character, a word, or a base64 symbol),
+--ngram how many units a gram holds, --stride how far apart consecutive grams start (1 = the sliding
+window, n = groups of n).  --encoding SPEC sets all three: char:3:1 (the default), char:5:5 (groups of
+five letters), word:2:1 (word bigrams), word:3:1 (word trigrams), base64:4:4 (one gram per three bytes
+of any file - text, image, video - read as its bytes; predict / generate --decode-to FILE write the
+answer back out as bytes).  It is fixed when the model is created and travels with the file; the Python
+implementation reads every one of them too.
 `, version)
 }
 
@@ -456,8 +626,9 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 func cmdTrain(args []string) {
 	fs := subFlagSet("train")
 	var data multiFlag
-	fs.Var(&data, "data", "text file (repeatable)")
-	unit := fs.String("split", "lines", "how a file is cut into texts, each handled by its own goroutine: lines | paragraphs | pages | file")
+	fs.Var(&data, "data", "text file (repeatable); a model of base64 symbols reads any file - an image, a video - as its bytes")
+	unit := fs.String("split", "lines", "how a file is cut into texts, each handled by its own goroutine: lines | paragraphs | pages | file "+
+		"(a model of base64 symbols: a UTF-8 text file is one text per line and anything else one text of every byte, unless file)")
 	pageLines := fs.Int("page-lines", 50, "lines per page when a file has no form feeds (--split pages)")
 	epochs := fs.Int("epochs", 5, "passes over the texts")
 	chunk := fs.Int("chunk", radixnet.DefaultChunkSize, "texts streamed from the files per chunk (memory: the chunks in flight + the graph, whatever the corpus size)")
@@ -475,7 +646,6 @@ func cmdTrain(args []string) {
 		fail("train needs --data FILE")
 	}
 	trainPlan := plan()
-	source := sourcesFor(data, *unit, *pageLines)
 	radixnet.Workers = workers
 	var m *radixnet.Model
 	if _, err := os.Stat(modelFile()); err == nil {
@@ -504,12 +674,25 @@ func cmdTrain(args []string) {
 		}
 		configure(m)
 	}
+	// the model first: its encoding decides how the files are read, and a model of base64 symbols reads them as
+	// the bytes they hold
+	enc := m.Encoding()
+	source := modelSources(enc, data, *unit, *pageLines)
+	if enc.IsBase64() && !anyText(source) {
+		fail("no training texts found in %s", strings.Join(data, ", "))
+	}
 	pool := "one goroutine per text"
 	if workers > 0 {
 		pool = fmt.Sprintf("%d goroutines", workers)
 	}
 	before := m.MetaInt("trained_texts")
 	split := *unit
+	if enc.IsBase64() {
+		split = "bytes in base64 symbols, a text file line by line"
+		if wholeFileSplit(*unit) {
+			split = "bytes in base64 symbols, every file whole"
+		}
+	}
 	if trainPlan.Reverse {
 		split += ", every text read backwards"
 	}
@@ -542,15 +725,22 @@ func cmdTrain(args []string) {
 	}
 }
 
-func predictDoc(prefix string, p *radixnet.Prediction, enc radixnet.Encoding) map[string]any {
+// predictDoc is the JSON of a prediction.  content is what the prefix stood
+// for, as bytes: a model of base64 symbols says what its answer, and every top
+// / bottom row, holds against it (radixnet.DecodedPrediction).
+func predictDoc(prefix string, p *radixnet.Prediction, enc radixnet.Encoding, content []byte) map[string]any {
 	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
 		"probability": p.Probability(), "step_costs": p.StepCosts, "path": p.Labels, "node_ids": p.NodeIDs,
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "traversal": p.Traversal, "k": p.K, "beam": p.Beam,
-		"top": pathDicts(p.Top, enc), "bottom": pathDicts(p.Bottom, enc),
+		"top": pathDicts(p.Top, enc, content), "bottom": pathDicts(p.Bottom, enc, content),
 	}
-	// a model of sounds: the words its answer spells, and the part of them the continuation wrote
+	// a model of sounds: the words its answer spells, and the part of them the continuation wrote; a model of
+	// base64 symbols: what its answer holds
 	for k, v := range radixnet.SpelledPrediction(enc, p.FullText, p.Text) {
+		doc[k] = v
+	}
+	for k, v := range radixnet.DecodedPrediction(enc, p.FullText, content) {
 		doc[k] = v
 	}
 	// what the walk was punished for, and which search wrote it: reported only
@@ -564,7 +754,7 @@ func predictDoc(prefix string, p *radixnet.Prediction, enc radixnet.Encoding) ma
 	return doc
 }
 
-func pathDicts(paths []*radixnet.PathResult, enc radixnet.Encoding) []map[string]any {
+func pathDicts(paths []*radixnet.PathResult, enc radixnet.Encoding, content []byte) []map[string]any {
 	out := make([]map[string]any, 0, len(paths))
 	for _, r := range paths {
 		row := map[string]any{"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
@@ -573,6 +763,9 @@ func pathDicts(paths []*radixnet.PathResult, enc radixnet.Encoding) []map[string
 			row["punish"] = r.Punish
 		}
 		for k, v := range radixnet.SpelledPrediction(enc, r.FullText, r.Text) {
+			row[k] = v
+		}
+		for k, v := range radixnet.DecodedPrediction(enc, r.FullText, content) {
 			row[k] = v
 		}
 		out = append(out, row)
@@ -650,6 +843,8 @@ func planFlags(fs *flag.FlagSet) func() radixnet.Plan {
 func cmdPredict(args []string) {
 	fs := subFlagSet("predict")
 	prefix := fs.String("prefix", "", "text to continue")
+	prefixFile := fs.String("prefix-file", "", "continue a file instead: its bytes are the prefix (a model of base64 symbols "+
+		"is asked the symbols they fix; any other model reads the file as text)")
 	length := fs.Int("length", 20, "minimum characters to emit")
 	maxLength := fs.Int("max-length", -1, "cap on the continuation (-1 = none)")
 	mode := fs.String("mode", "beam", "beam | sample (dijkstra = beam)")
@@ -662,13 +857,26 @@ func cmdPredict(args []string) {
 	topK, topP, minP, diversity := searchFlags(fs)
 	addGuardFlags(fs)
 	speak := fs.String("speak", "", "also hear the answer: the full text spoken through the model's voice, written as a WAV (the output decoder; say has the voice's dials)")
+	decodeFile := fs.String("decode-to", "", "write the answer as the bytes it holds: a model of base64 symbols decodes its full text "+
+		"(an image, a video, a text again); any other model writes its text")
 	_ = fs.Parse(args)
+	given := givenFlags(fs)
+	switch {
+	case given["prefix"] && given["prefix-file"]:
+		fail("--prefix and --prefix-file cannot be given together: continue a text or a file")
+	case !given["prefix"] && !given["prefix-file"]:
+		fail("predict needs --prefix TEXT or --prefix-file FILE")
+	}
 	filter := checkedFilter(*topK, *topP, *minP)
 	m := openModel(true)
+	enc := m.Encoding()
+	// what the model is asked, and the content it stands for: a model of base64 symbols is asked the symbols the
+	// prefix's bytes fix
+	asked, content := promptOf(enc, *prefix, *prefixFile)
 	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength,
 		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale,
 		TopK: filter.TopK, TopP: filter.TopP, MinP: filter.MinP, Diversity: *diversity}
-	p, err := m.Predict(*prefix, opts)
+	p, err := m.Predict(asked, opts)
 	if err != nil {
 		fail("%v", err)
 	}
@@ -677,7 +885,7 @@ func cmdPredict(args []string) {
 	if pair := openGuard(m); pair != nil {
 		// the guard re-ranks what the search already offered: the best continuation it does not veto
 		kept := 0
-		p, verdicts = pair.Rank(*prefix, p)
+		p, verdicts = pair.Rank(asked, p)
 		for _, verdict := range verdicts {
 			if verdict.Decision != "reject" {
 				kept++
@@ -685,19 +893,43 @@ func cmdPredict(args []string) {
 		}
 		guard = guardDoc(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
 	}
-	enc := m.Encoding()
 	if jsonMode {
-		doc := predictDoc(*prefix, p, enc)
+		shown := asked // a prefix given as a file is shown as what was asked: its text, or its symbols
+		if given["prefix"] {
+			shown = *prefix
+		}
+		doc := predictDoc(shown, p, enc, content)
+		for k, v := range promptDoc(enc, *prefixFile, asked) {
+			doc[k] = v
+		}
 		doc["guard"] = guard
 		if *speak != "" {
 			doc["speech"] = speakOutputs(m, []string{p.FullText}, *speak)
 		}
+		if written := decodeTo(*decodeFile, enc, []string{p.FullText}); written != nil {
+			doc["decoded_to"] = written
+		}
 		emit(doc)
 		return
 	}
-	fmt.Printf("prefix       %s\ncontinuation %s\nfull text    %s\n", quote(*prefix), quote(p.Text), quote(p.FullText))
+	if given["prefix"] {
+		fmt.Printf("prefix       %s\n", quote(*prefix))
+	} else {
+		fmt.Printf("prefix file  %s\n", *prefixFile)
+	}
+	if enc.IsBase64() { // what the model was asked: the symbols the prefix fixes
+		fmt.Printf("prefix symbols %s\n", quote(clip(asked, 200)))
+	} else if !given["prefix"] {
+		fmt.Printf("prefix       %s\n", quote(clip(asked, 200)))
+	}
+	fmt.Printf("continuation %s\nfull text    %s\n", quote(p.Text), quote(p.FullText))
 	if enc.Unit.Phonetic() { // a model that thinks in sounds: say what its answer spells
 		fmt.Printf("spelled      %s\n", quote(enc.Spell(p.FullText)))
+	}
+	if decoded := radixnet.DecodedPrediction(enc, p.FullText, content); len(decoded) > 0 { // what its answer holds
+		fmt.Printf("decoded      %s\n", quote(clip(decoded["decoded"].(string), 200)))
+		fmt.Printf("decoded continuation %s\n", quote(clip(decoded["decoded_continuation"].(string), 200)))
+		fmt.Printf("decoded bytes %d\n", decoded["decoded_bytes"])
 	}
 	fmt.Printf("cost %.4f  p %.4g  path %s\n", p.Cost, p.Probability(), strings.Join(p.Labels, " -> "))
 	if *speak != "" {
@@ -716,12 +948,16 @@ func cmdPredict(args []string) {
 			if enc.Unit.Phonetic() {
 				fmt.Printf("  spelled %s", quote(enc.Spell(r.FullText)))
 			}
+			if decoded := radixnet.DecodedPrediction(enc, r.FullText, content); len(decoded) > 0 {
+				fmt.Printf("  decoded %s", quote(clip(decoded["decoded"].(string), 100)))
+			}
 			fmt.Println()
 		}
 	}
 	if guard != nil {
 		printVetoes(verdicts, "continuations")
 	}
+	decodeTo(*decodeFile, enc, []string{p.FullText}) // --decode-to FILE: the answer, as the bytes it holds
 }
 
 // cmdSpeak samples walks and speaks them as they go: every step's units reach
@@ -816,6 +1052,7 @@ func cmdGenerate(args []string) {
 	maxLength := fs.Int("max-length", 60, "maximum characters per text")
 	mode := fs.String("mode", "sample", "beam | sample | dijkstra")
 	prefix := fs.String("prefix", "", "start every text with this")
+	prefixFile := fs.String("prefix-file", "", "start every text with a file's bytes (a model of base64 symbols: the symbols they fix)")
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature")
 	stepPenalty := fs.Float64("step-penalty", 0, "beam / dijkstra: extra cost per edge")
 	beam := fs.Int("beam", 0, "beam width (0 = default)")
@@ -824,10 +1061,20 @@ func cmdGenerate(args []string) {
 	topK, topP, minP, diversity := searchFlags(fs)
 	addGuardFlags(fs)
 	speak := fs.String("speak", "", "also hear the texts: every sample spoken through the model's voice, one utterance each, written as a WAV (the output decoder; say has the voice's dials)")
+	decodeFile := fs.String("decode-to", "", "write every sample as the bytes it holds (FILE for one, FILE numbered before its "+
+		"extension for several): a model of base64 symbols decodes them; any other model writes its text")
 	_ = fs.Parse(args)
+	given := givenFlags(fs)
+	if given["prefix"] && given["prefix-file"] {
+		fail("--prefix and --prefix-file cannot be given together: start from a text or a file")
+	}
 	filter := checkedFilter(*topK, *topP, *minP)
 	m := openModel(true)
-	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: *prefix, StepPenalty: *stepPenalty, Beam: *beam,
+	enc := m.Encoding()
+	// every text starts from the prefix as the model is asked it: a model of base64 symbols from the symbols its
+	// bytes fix
+	asked, content := promptOf(enc, *prefix, *prefixFile)
+	opts := radixnet.GenerateOptions{MaxLength: *maxLength, Mode: *mode, Temperature: *temperature, Count: *count, Prefix: asked, StepPenalty: *stepPenalty, Beam: *beam,
 		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale,
 		TopK: filter.TopK, TopP: filter.TopP, MinP: filter.MinP, Diversity: *diversity}
 	if *seeded {
@@ -852,7 +1099,6 @@ func cmdGenerate(args []string) {
 		guard = guardDoc(pair, verdicts, map[string]any{"candidates": outcome.Candidates, "asked": outcome.Asked,
 			"kept": len(outcome.Kept), "rate": outcome.Rate})
 	}
-	enc := m.Encoding()
 	if jsonMode {
 		samples := make([]map[string]any, 0, len(results))
 		for _, r := range results {
@@ -861,12 +1107,25 @@ func cmdGenerate(args []string) {
 			if enc.Unit.Phonetic() { // what the sounds spell, sample by sample
 				sample["spelled"] = enc.Spell(r.Text)
 			}
+			for k, v := range radixnet.DecodedPrediction(enc, r.FullText, content) { // what the symbols hold
+				sample[k] = v
+			}
 			samples = append(samples, sample)
 		}
-		doc := map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": *prefix, "max_length": *maxLength,
+		shown := *prefix // a prefix given as a file is shown as what was asked: its text, or its symbols
+		if given["prefix-file"] {
+			shown = asked
+		}
+		doc := map[string]any{"samples": samples, "count": len(results), "mode": *mode, "prefix": shown, "max_length": *maxLength,
 			"temperature": *temperature, "guard": guard}
+		for k, v := range promptDoc(enc, *prefixFile, asked) {
+			doc[k] = v
+		}
 		if *speak != "" {
 			doc["speech"] = speakOutputs(m, sampleTexts(results), *speak)
+		}
+		if written := decodeTo(*decodeFile, enc, fullTexts(results)); written != nil {
+			doc["decoded_to"] = written
 		}
 		emit(doc)
 		return
@@ -882,18 +1141,35 @@ func cmdGenerate(args []string) {
 			fmt.Printf("%29s  spelled %s\n", "", quote(enc.Spell(r.Text)))
 		}
 	}
+	if enc.IsBase64() { // what the symbols hold, sample by sample
+		fmt.Printf("\n%3s %8s  %s\n", "#", "bytes", "decoded")
+		for i, r := range results {
+			decoded := radixnet.DecodedPrediction(enc, r.FullText, content)
+			fmt.Printf("%3d %8d  %s\n", i+1, decoded["decoded_bytes"], quote(clip(decoded["decoded"].(string), 100)))
+		}
+	}
 	if guard != nil {
 		printVetoes(verdicts, "candidates")
 	}
 	if *speak != "" {
 		speakOutputs(m, sampleTexts(results), *speak)
 	}
+	decodeTo(*decodeFile, enc, fullTexts(results)) // --decode-to FILE: every sample, as the bytes it holds
 }
 
 func sampleTexts(results []*radixnet.PathResult) []string {
 	texts := make([]string, 0, len(results))
 	for _, r := range results {
 		texts = append(texts, r.Text)
+	}
+	return texts
+}
+
+// fullTexts is every result's whole text, the prefix included: what --decode-to decodes.
+func fullTexts(results []*radixnet.PathResult) []string {
+	texts := make([]string, 0, len(results))
+	for _, r := range results {
+		texts = append(texts, r.FullText)
 	}
 	return texts
 }
@@ -1040,15 +1316,18 @@ func cmdScore(args []string) {
 	unit := fs.String("split", "lines", "lines | paragraphs | pages | file")
 	pageLines := fs.Int("page-lines", 50, "lines per page for --split pages")
 	_ = fs.Parse(args)
-	var texts []string
-	if *text != "" {
-		texts = []string{*text}
-	} else if len(data) > 0 {
-		texts = readTexts(data, *unit, *pageLines)
-	} else {
+	if *text == "" && len(data) == 0 {
 		fail("score needs --text or --data")
 	}
 	m := openModel(true)
+	// a model of base64 symbols scores the bytes of a text, and of a file; each result's text is what was scored
+	enc := m.Encoding()
+	var texts []string
+	if *text != "" {
+		texts = []string{enc.TextInput(*text)}
+	} else {
+		texts = modelTexts(enc, data, *unit, *pageLines, "scorable")
+	}
 	scores := m.ScoreAll(texts)
 	results := make([]map[string]any, len(scores))
 	meanLog, meanPer := 0.0, 0.0
@@ -1075,7 +1354,13 @@ func cmdScore(args []string) {
 	}
 }
 
-func ratedTexts(fs *flag.FlagSet, args []string) (good, bad []string, epochsNeg, epochsPos *int, strength *float64) {
+// ratedTexts adds the flags of the rated texts - thumbs up (--good FILE,
+// --good-text TEXT) and thumbs down (--bad, --bad-text) - and parses them.
+// The texts are read by the function it returns, once the model is open: a
+// model of base64 symbols learns the bytes of what it is given, a text as its
+// UTF-8 bytes and a file as the bytes it holds, written in its symbols.  A
+// blank text is dropped, as Python drops it.
+func ratedTexts(fs *flag.FlagSet, args []string) (texts func(enc radixnet.Encoding) (good, bad []string), epochsNeg, epochsPos *int, strength *float64) {
 	var goodFiles, badFiles multiFlag
 	fs.Var(&goodFiles, "good", "file of thumbs-up texts (repeatable)")
 	fs.Var(&badFiles, "bad", "file of thumbs-down texts (repeatable)")
@@ -1086,28 +1371,34 @@ func ratedTexts(fs *flag.FlagSet, args []string) (good, bad []string, epochsNeg,
 	epochsPos = fs.Int("pos-epochs", 3, "positive passes (traversal + reward)")
 	strength = fs.Float64("strength", 1.0, "reward / penalty per rated path")
 	_ = fs.Parse(args)
-	if len(goodFiles) > 0 {
-		good = append(good, readTexts(goodFiles, *unit, 50)...)
+	read := func(enc radixnet.Encoding, files []string, text, what string) []string {
+		var out []string
+		if len(files) > 0 {
+			for _, t := range modelTexts(enc, files, *unit, 50, what) {
+				if strings.TrimSpace(t) != "" {
+					out = append(out, t)
+				}
+			}
+		}
+		if strings.TrimSpace(text) != "" {
+			out = append(out, enc.TextInput(text))
+		}
+		return out
 	}
-	if *goodText != "" {
-		good = append(good, *goodText)
+	texts = func(enc radixnet.Encoding) (good, bad []string) {
+		return read(enc, goodFiles, *goodText, "good"), read(enc, badFiles, *badText, "bad")
 	}
-	if len(badFiles) > 0 {
-		bad = append(bad, readTexts(badFiles, *unit, 50)...)
-	}
-	if *badText != "" {
-		bad = append(bad, *badText)
-	}
-	return good, bad, epochsNeg, epochsPos, strength
+	return texts, epochsNeg, epochsPos, strength
 }
 
 func cmdFeedback(args []string) {
 	fs := subFlagSet("feedback")
-	good, bad, negEpochs, posEpochs, strength := ratedTexts(fs, args)
+	rated, negEpochs, posEpochs, strength := ratedTexts(fs, args)
+	m := openModel(true)
+	good, bad := rated(m.Encoding()) // the model first: a model of base64 symbols learns the bytes of what it is given
 	if len(good) == 0 && len(bad) == 0 {
 		fail("feedback needs --good / --good-text and/or --bad / --bad-text")
 	}
-	m := openModel(true)
 	action := "reward"
 	var negative, positive []map[string]any
 	var err error
@@ -1137,11 +1428,12 @@ func cmdFeedback(args []string) {
 
 func cmdTwoNRL(args []string) {
 	fs := subFlagSet("2nrl")
-	good, bad, negEpochs, posEpochs, strength := ratedTexts(fs, args)
+	rated, negEpochs, posEpochs, strength := ratedTexts(fs, args)
+	m := openModel(true)
+	good, bad := rated(m.Encoding()) // the model first: a model of base64 symbols learns the bytes of its files
 	if len(good) == 0 || len(bad) == 0 {
 		fail("2nrl needs --bad FILE and --good FILE")
 	}
-	m := openModel(true)
 	res, err := m.TwoNRL(bad, good, *negEpochs, *posEpochs, *strength)
 	if err != nil {
 		fail("%v", err)
@@ -1244,7 +1536,7 @@ func cmdWords(args []string) {
 	_ = fs.Parse(args)
 	m := openModel(true)
 	enc := m.Encoding()
-	if enc.Unit == radixnet.Chars {
+	if enc.Unit.Characters() { // characters, or base64 symbols: no words to list
 		fail("%s counts in %s, so it has no words to list; a word alphabet needs a word encoding "+
 			"(train a new model with --encoding word:%d:%d)", modelPath, enc.UnitsName(), enc.N, enc.Stride)
 	}

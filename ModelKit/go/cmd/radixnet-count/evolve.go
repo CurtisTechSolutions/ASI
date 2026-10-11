@@ -45,8 +45,9 @@ func cmdEvolve(args []string) {
 	cfg.NegEpochs, cfg.PosEpochs, cfg.DiscNegEpochs, cfg.DiscPosEpochs = *negEpochs, *posEpochs, *discNeg, *discPos
 	cfg.Strength, cfg.BlatantMode, cfg.BlatantMargin, cfg.BlatantBoost = *strength, *mode, *margin, *boost
 	cfg.Seed = seedFlag
-	corpus := readTexts(data, "lines", 0)
 	generator := openModel(false)
+	// the generator first: a model of base64 symbols reads its corpus as the bytes the files hold
+	corpus := modelTexts(generator.Encoding(), data, "lines", 0, "corpus")
 	if err := cfg.Validate(generator.Encoding()); err != nil {
 		fail("%v", err)
 	}

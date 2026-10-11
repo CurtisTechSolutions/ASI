@@ -74,11 +74,20 @@ const (
 	// the graph is built over; as text the units are tokens taken as they come,
 	// like words, and what the model says is spoken through the vocoder.
 	Acoustic UnitKind = "acoustic"
+	// Base64: one unit is one *base64 symbol* - six bits of the bytes of
+	// anything: a text, an image, a video, a recording.  Content becomes base64
+	// where it enters (Base64Text: a text as its UTF-8 bytes, a file as the
+	// bytes it holds, in the 64 symbols A-Z a-z 0-9 + / with no padding), the
+	// graph is built over the symbols exactly as over characters, and what the
+	// model says is decoded back into bytes (Base64Bytes).  A text of the graph
+	// is already base64: the conversion happens once, where the content comes
+	// in, never inside the model (base64.go).
+	Base64 UnitKind = "base64"
 )
 
 // Valid reports whether k is a unit kind this package knows.
 func (k UnitKind) Valid() bool {
-	return k == Chars || k == Words || k == Phones || k == Syllables || k == Acoustic
+	return k == Chars || k == Words || k == Phones || k == Syllables || k == Acoustic || k == Base64
 }
 
 // Phonetic reports whether the units are sounds rather than letters or words.
@@ -88,7 +97,14 @@ func (k UnitKind) Phonetic() bool { return k == Phones || k == Syllables }
 // they come (words, acoustic units).
 func (k UnitKind) Tokens() bool { return k == Words || k == Acoustic }
 
-// Word is the unit as an English word: "character", "word", "phone", "syllable".
+// Characters reports whether a text slices into these units code point by
+// code point: characters, and base64 symbols.  Everywhere a unit is handled
+// as a character - slicing, joining, reversing, the diff, the alphabet a model
+// has no words for - a symbol is handled the same way.  Python's
+// CHARACTER_UNITS.
+func (k UnitKind) Characters() bool { return k == Chars || k == Base64 }
+
+// Word is the unit as an English word: "character", "word", "phone", "syllable", "unit", "symbol".
 func (k UnitKind) Word() string {
 	switch k {
 	case Words:
@@ -99,6 +115,8 @@ func (k UnitKind) Word() string {
 		return "syllable"
 	case Acoustic:
 		return "unit"
+	case Base64:
+		return "symbol"
 	}
 	return "character"
 }
@@ -108,7 +126,8 @@ func (k UnitKind) Word() string {
 // Encoding is how a text becomes the grams the graph is built from, and how
 // the labels of a walk become text again.  Three dials:
 //
-//   - Unit  - what one position is: a character (Chars) or a word (Words).
+//   - Unit  - what one position is: a character (Chars), a word (Words), a
+//     sound (Phones, Syllables, Acoustic) or a base64 symbol (Base64).
 //   - N     - how many units one gram holds: the n of the n-gram.  Any n >= 1.
 //   - Stride - how many units apart consecutive grams start.  1 is the sliding
 //     window the model was born with ("hello" -> hel, ell, llo); N is
@@ -152,7 +171,7 @@ func (e Encoding) WithDefaults() Encoding {
 // Validate reports what is wrong with an encoding, if anything.
 func (e Encoding) Validate() error {
 	if !e.Unit.Valid() {
-		return fmt.Errorf("unit must be %q, %q, %q, %q or %q, got %q", Chars, Words, Phones, Syllables, Acoustic, e.Unit)
+		return fmt.Errorf("unit must be %q, %q, %q, %q, %q or %q, got %q", Chars, Words, Phones, Syllables, Acoustic, Base64, e.Unit)
 	}
 	if e.Unit.Phonetic() {
 		if _, err := phoneticTokenizer(e.Unit); err != nil {
@@ -201,10 +220,12 @@ func (e Encoding) Describe() string {
 }
 
 // ParseEncoding reads a spec: "unit[:n[:stride]]", where unit is char / chars /
-// character / word / words, n defaults to Window and stride to 1 (a sliding
-// window); "unit:n:n" and the shorthand "unit:n:groups" are the
-// non-overlapping form.  A few names for the common ones are accepted too:
-// "trigram", "bigram", "word-bigram", "word-trigram".
+// character / word / words (a sound: phone / syllable / acoustic; base64 /
+// b64), n defaults to Window and stride to 1 (a sliding window); "unit:n:n"
+// and the shorthand "unit:n:groups" are the non-overlapping form, so
+// "base64:4:4" is one gram per three bytes of any content.  A few names for the
+// common ones are accepted too: "trigram", "bigram", "word-bigram",
+// "word-trigram".
 func ParseEncoding(spec string) (Encoding, error) {
 	s := strings.ToLower(strings.TrimSpace(spec))
 	if s == "" {
@@ -238,8 +259,10 @@ func ParseEncoding(spec string) (Encoding, error) {
 		e.Unit = Syllables
 	case "acoustic", "acoustics", "audio", "unit", "units":
 		e.Unit = Acoustic
+	case "base64", "b64":
+		e.Unit = Base64
 	default:
-		return Encoding{}, fmt.Errorf("encoding %q: unit must be char, word, phone, syllable or acoustic, got %q", spec, parts[0])
+		return Encoding{}, fmt.Errorf("encoding %q: unit must be char, word, phone, syllable, acoustic or base64, got %q", spec, parts[0])
 	}
 	if len(parts) > 1 && parts[1] != "" {
 		n, err := strconv.Atoi(parts[1])
@@ -312,7 +335,8 @@ func (u Units) At(i int) string { return u.Slice(i, i+1) }
 
 // Units cuts text into the units of this encoding, normalising it on the way:
 // a word encoding collapses every run of whitespace to a single space, a
-// character encoding leaves the text exactly as it is.
+// character encoding leaves the text exactly as it is (and so does base64: a
+// symbol is one code point).
 func (e Encoding) Units(text string) Units {
 	if e.Unit.Tokens() {
 		return wordUnits(text)
@@ -371,17 +395,17 @@ func (e Encoding) Len(text string) int {
 
 // Slice is units [from, to) of a text; to < 0 means "to the end".
 func (e Encoding) Slice(text string, from, to int) string {
-	if e.Unit == Chars {
+	if e.Unit.Characters() {
 		return runeSlice(text, from, to)
 	}
 	return e.Units(text).Slice(from, to)
 }
 
-// Join glues unit-aligned pieces back together: nothing between characters, a
-// single space between words.  Empty pieces are dropped, so a label that
-// contributes no unit adds no separator.
+// Join glues unit-aligned pieces back together: nothing between characters
+// (or base64 symbols), a single space between words.  Empty pieces are
+// dropped, so a label that contributes no unit adds no separator.
 func (e Encoding) Join(parts ...string) string {
-	if e.Unit == Chars {
+	if e.Unit.Characters() {
 		return strings.Join(parts, "")
 	}
 	kept := parts[:0:0]
@@ -401,20 +425,20 @@ func (e Encoding) Truncate(text string, n int) string {
 	if n < 0 {
 		return text
 	}
-	if e.Unit == Chars {
+	if e.Unit.Characters() {
 		return truncateRunes(text, n)
 	}
 	return e.Slice(text, 0, n)
 }
 
 // HasUnitPrefix reports whether text starts with prefix on a unit boundary:
-// plain string prefix for characters, whole words for words ("the ca" is not a
-// word prefix of "the cat sat", "the cat" is).
+// plain string prefix for characters (and base64 symbols), whole words for
+// words ("the ca" is not a word prefix of "the cat sat", "the cat" is).
 func (e Encoding) HasUnitPrefix(text, prefix string) bool {
 	if prefix == "" {
 		return true
 	}
-	if e.Unit == Chars {
+	if e.Unit.Characters() {
 		return strings.HasPrefix(text, prefix)
 	}
 	if e.Unit.Phonetic() { // a prefix given as text is looked for as the sounds it makes
@@ -432,9 +456,10 @@ func (e Encoding) HasUnitPrefix(text, prefix string) bool {
 // code point, cut exactly as Units cuts them, so reversing twice gives the
 // text back; a word encoding reverses the order of the words and writes them
 // with single spaces, the layout it keeps anyway, each word's letters in their
-// order.  Python's Encoding.reverse, character for character.
+// order.  Base64 symbols reverse as characters do: the symbols backwards, not
+// the bytes.  Python's Encoding.reverse, character for character.
 func (e Encoding) Reverse(text string) string {
-	if e.Unit != Chars {
+	if !e.Unit.Characters() {
 		// words, sounds or acoustic units: the units in reverse order (a phonetic unit reads
 		// the text as sounds first, which Join does)
 		words := strings.Fields(e.Join(text))
@@ -466,7 +491,7 @@ func (e Encoding) Reverse(text string) string {
 // what is left.
 func (e Encoding) Encode(text string) []string {
 	e = e.WithDefaults()
-	if e.Unit == Chars { // the hot path of a training pass: no unit index needed
+	if e.Unit.Characters() { // the hot path of a training pass: no unit index needed
 		runes := []rune(text)
 		n := len(runes)
 		if n < e.N {
@@ -536,7 +561,7 @@ func (e Encoding) DecodePath(labels []string, startOffset int, includeContext bo
 	if !includeContext {
 		firstCut += e.N
 	}
-	if e.Unit == Chars {
+	if e.Unit.Characters() {
 		out := make([]byte, 0, 64)
 		for i, label := range labels {
 			cut := e.Overlap()

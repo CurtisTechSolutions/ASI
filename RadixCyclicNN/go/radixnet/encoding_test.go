@@ -9,7 +9,8 @@ import (
 )
 
 // theEncodings are the ones the tests exercise end to end: the default, a
-// bigger n, groups of four and five letters, and word bigrams / trigrams.
+// bigger n, groups of four and five letters, word bigrams / trigrams, and
+// base64 symbols (sliced as characters are).
 var theEncodings = []Encoding{
 	{Chars, 3, 1},
 	{Chars, 1, 1},
@@ -22,6 +23,8 @@ var theEncodings = []Encoding{
 	{Words, 2, 1},
 	{Words, 3, 1},
 	{Words, 2, 2},
+	{Base64, 3, 1},
+	{Base64, 4, 4},
 }
 
 func TestEncodingDefaultsAndValidation(t *testing.T) {
@@ -55,6 +58,8 @@ func TestParseEncoding(t *testing.T) {
 		"word:2":        {Words, 2, 1},
 		"word-trigram":  {Words, 3, 1},
 		"WORD:2:2":      {Words, 2, 2},
+		"base64":        {Base64, 3, 1},
+		"b64:4:groups":  {Base64, 4, 4},
 	}
 	for spec, want := range cases {
 		got, err := ParseEncoding(spec)

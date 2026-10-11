@@ -145,10 +145,15 @@ func ExtractTexts(data []byte, archiveName string) ([]Extracted, []Skipped, erro
 	return extracted, skipped, nil
 }
 
-// decodeText turns uploaded bytes into text: UTF-8 with the BOM dropped, invalid bytes replaced.
+// utf8BOM is the byte order mark some editors put in front of a text file.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// decodeText turns uploaded bytes into text: UTF-8 with the BOM dropped, and
+// one U+FFFD per maximal invalid subpart of what is not text
+// (radixnet.LossyUTF8) - what Python's data.decode("utf-8-sig", "replace")
+// reads, so a text model reads an upload as the Python server does.
 func decodeText(data []byte) string {
-	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
-	return strings.ToValidUTF8(string(data), "�")
+	return radixnet.LossyUTF8(bytes.TrimPrefix(data, utf8BOM))
 }
 
 func countLines(text string) int {
@@ -355,6 +360,34 @@ func writeAtomic(path string, data []byte) error {
 	return os.Rename(part, path)
 }
 
+// prependFile puts head back in front of the file at path, by way of a copy
+// beside it that then takes its place.
+func prependFile(path string, head []byte) error {
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.CreateTemp(filepath.Dir(path), ".upload-*.part")
+	if err != nil {
+		return err
+	}
+	_, err = dst.Write(head)
+	if err == nil {
+		_, err = io.Copy(dst, src)
+	}
+	if cerr := dst.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(dst.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(dst.Name())
+	}
+	return err
+}
+
 // StoreText stores content as the upload name (replacing an existing one).
 func (u *Uploads) StoreText(name, content string) (map[string]any, error) {
 	path, err := u.path(name)
@@ -376,8 +409,9 @@ func (u *Uploads) StoreText(name, content string) (map[string]any, error) {
 	return rec, nil
 }
 
-// StoreBytes stores a binary upload held in memory (the JSON forms): a ZIP
-// archive is kept whole, anything else is stored as text.
+// StoreBytes stores a binary upload held in memory (the JSON forms) as
+// StoreStream does: a ZIP archive kept whole, a UTF-8 text file as its text,
+// anything else as it is.
 func (u *Uploads) StoreBytes(name string, data []byte) (map[string]any, error) {
 	return u.StoreStream(name, bytes.NewReader(data))
 }
@@ -386,7 +420,13 @@ func (u *Uploads) StoreBytes(name string, data []byte) (map[string]any, error) {
 // the bytes go straight to a .part file; the first four decide whether it is
 // a ZIP archive, which is then validated by streaming its entries (at least
 // one text entry, or 400) and kept whole under a .zip name.  Anything else is
-// a text file.  Returns {"uploads": [record], "archives": [summary]?}.
+// a file: a UTF-8 text is stored as its text, the byte order mark dropped as
+// Python's utf-8-sig drops it, and bytes that are not text - an image, a video,
+// a recording - are kept byte for byte, so a model of base64 symbols learns
+// exactly what was sent (a text model reads them as lossy text, as it always
+// did).  Whether a file is text is settled as its bytes go by
+// (radixnet.UTF8Check), so nothing is read twice.  Returns
+// {"uploads": [record], "archives": [summary]?}.
 func (u *Uploads) StoreStream(name string, r io.Reader) (map[string]any, error) {
 	root, err := u.ensureDir()
 	if err != nil {
@@ -411,13 +451,25 @@ func (u *Uploads) StoreStream(name string, r io.Reader) (map[string]any, error) 
 	}
 	head = head[:n]
 	size := int64(n)
-	if _, err := part.Write(head); err != nil {
+	zipped := IsZip(head)
+	// a file's byte order mark is held back from the start: a text file is stored without it, and a file that
+	// turns out not to be text gets it back below
+	var text radixnet.UTF8Check
+	body, sink := head, io.Writer(part)
+	if !zipped {
+		text.Write(head)
+		sink = io.MultiWriter(part, &text)
+		if bytes.HasPrefix(head, utf8BOM) {
+			body = head[len(utf8BOM):]
+		}
+	}
+	if _, err := part.Write(body); err != nil {
 		part.Close()
 		cleanup()
 		return nil, err
 	}
 	if herr == nil {
-		copied, err := io.Copy(part, r)
+		copied, err := io.Copy(sink, r)
 		if err != nil {
 			part.Close()
 			cleanup()
@@ -429,8 +481,15 @@ func (u *Uploads) StoreStream(name string, r io.Reader) (map[string]any, error) 
 		cleanup()
 		return nil, err
 	}
-	if !IsZip(head) {
-		// a text file: stored as it is (lines are repaired when read)
+	if !zipped {
+		if len(body) < len(head) && !text.Valid() {
+			// not text after all: bytes that are not UTF-8 are kept as they came, the first three included
+			if err := prependFile(partName, utf8BOM); err != nil {
+				cleanup()
+				return nil, err
+			}
+		}
+		// a file that is not text reads as lossy text when a text model reads its lines (radixnet.LossyUTF8)
 		path := filepath.Join(root, safe)
 		u.mu.Lock()
 		defer u.mu.Unlock()
@@ -529,6 +588,26 @@ func (u *Uploads) Source(names []string, unit string, pageLines int, wholeFile b
 			return nil, &apiError{404, fmt.Sprintf("no upload named %q", filepath.Base(path))}
 		}
 		sources = append(sources, radixnet.SourceForFile(path, unit, pageLines))
+	}
+	return sources, nil
+}
+
+// Base64Source streams uploads as a model of base64 symbols reads them: every
+// upload as the bytes it holds, written in the symbols (radixnet.Base64Source)
+// - a text file one text per line, anything else, an archive included, one
+// text of every byte, and any file one text with wholeFile.  Nothing is
+// unpacked, and no split cuts them.
+func (u *Uploads) Base64Source(names []string, wholeFile bool) (radixnet.TextSource, error) {
+	var sources radixnet.MultiSource
+	for _, name := range names {
+		path, err := u.path(name)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := os.Stat(path); err != nil {
+			return nil, &apiError{404, fmt.Sprintf("no upload named %q", filepath.Base(path))}
+		}
+		sources = append(sources, radixnet.Base64Source{Path: path, WholeFile: wholeFile})
 	}
 	return sources, nil
 }

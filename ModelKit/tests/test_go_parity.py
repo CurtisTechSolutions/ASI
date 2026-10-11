@@ -29,6 +29,7 @@ sys.path.insert(1, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 
 from radixnet.counter import COUNTER_LIMIT  # noqa: E402
 from radixnet.countnet import CountRewardNet  # noqa: E402
+from radixnet.encoding import base64_bytes, base64_file_texts, base64_prefix, base64_text  # noqa: E402
 from radixnet.model import load_model  # noqa: E402
 
 KIT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2393,7 +2394,8 @@ class TestGoEncodingParity(unittest.TestCase):
 
     ENCODINGS = ["char:3:1", "char:5:1", "char:4:4", "char:5:5", "char:6:3",
                  "word:1:1", "word:2:1", "word:3:1", "word:2:2",
-                 "phone:3:1", "phone:2:2", "syllable:2:1"]
+                 "phone:3:1", "phone:2:2", "syllable:2:1",
+                 "base64:3:1", "base64:4:4"]
 
     def test_the_same_graph_from_the_same_corpus(self):
         for spec in self.ENCODINGS:
@@ -2579,3 +2581,359 @@ class TestGoEncodingParity(unittest.TestCase):
             with self.subTest(spec=spec):
                 self.assertTrue(py("--encoding", spec, "info", model=model, expect=1)["error"])
                 self.assertTrue(go("--encoding", spec, "info", model=model, expect=1)["error"])
+
+
+# the head of a PNG and some bytes that are no text: what an image, a video or a recording is to the base64 unit
+_BLOB = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0xFF, 0xFE, 0x80, 0x10, 0x20, 0x30, 0xC0, 0xC1])
+_BASE64_TEXTS = ["the cat sat on the mat", "the cat sat on the floor", "the dog sat on the log",
+                 "a quick brown fox jumps over the lazy dog"]
+_DECODED = ("decoded", "decoded_continuation", "decoded_bytes")
+
+
+class TestGoBase64Parity(unittest.TestCase):
+    """The base64 unit on both sides: anything - the corpus, an image - read as its bytes, learned as the n-grams of
+    its base64 symbols and said back as bytes.  Both CLIs build the same graph from a text file and a binary one, ask
+    the same symbols for the same prefix (a text or a file), decode the same answers and write the same bytes; both
+    servers keep a binary upload byte for byte, learn the same graph from it and from inline texts, and read a
+    request's texts the same way with and without ``symbols``."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="radixnet-go-base64-")
+        cls.blob = cls.path("image.png")
+        with open(cls.blob, "wb") as fh:
+            fh.write(_BLOB)
+        cls.head = cls.path("head.bin")  # the head of the image: a prefix whose decoded text is not UTF-8
+        with open(cls.head, "wb") as fh:
+            fh.write(_BLOB[:10])
+        cls.py_model, cls.go_model = cls.path("b64-py.json"), cls.path("b64-go.json")
+        cls.py_train = py("--kind", "count", "--units", "base64", "--seed", 1, "train", "--data", CORPUS, cls.blob,
+                          "--epochs", 2, model=cls.py_model)
+        # the Go CLI's --data repeats where Python's takes a list
+        cls.go_train = go("--units", "base64", "--seed", 1, "train", "--data", CORPUS, "--data", cls.blob,
+                          "--epochs", 2, "--workers", 4, model=cls.go_model)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @classmethod
+    def path(cls, name):
+        return os.path.join(cls.tmp.name, name)
+
+    def copies(self, name):
+        """A copy of each side's model, to change without changing the class's."""
+        py_copy, go_copy = self.path(f"{name}-py.json"), self.path(f"{name}-go.json")
+        shutil.copy(self.py_model, py_copy)
+        shutil.copy(self.go_model, go_copy)
+        return py_copy, go_copy
+
+    def same_graph(self, p, g, rewards=True):
+        self.assertEqual(p.get("encoding"), g.get("encoding"), "the written encoding block")
+        self.assertEqual(p["nodes"]["labels"], g["nodes"]["labels"])
+        self.assertEqual(p["nodes"]["count"], g["nodes"]["count"])
+        self.assertEqual((p["edges"]["src"], p["edges"]["dst"]), (g["edges"]["src"], g["edges"]["dst"]))
+        self.assertEqual(p["edges"]["count"], g["edges"]["count"])
+        assert_close(self, p["edges"]["w"], g["edges"]["w"], 1e-9)
+        if rewards:
+            assert_close(self, p["edges"]["reward"], g["edges"]["reward"], 1e-9)
+
+    def same_prediction(self, a, b):
+        """The same answer, asked and said the same way and holding the same bytes, with the same top rows; the
+        bottom rows at the same costs (the worst walks loop, and two walks of one cost may come in either order),
+        and every row decoded as its own full text holds."""
+        for key in ("prefix", "prefix_file", "prefix_symbols", "continuation", "full_text") + _DECODED:
+            self.assertEqual(a.get(key), b.get(key), key)
+        self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+
+        def rows(doc):
+            return [[r["full_text"]] + [r.get(k) for k in _DECODED] for r in doc["top"]]
+
+        self.assertEqual(rows(a), rows(b))
+        self.assertTrue(rows(a), "no top rows to compare")
+        assert_close(self, sorted(r["cost"] for r in a["bottom"]), sorted(r["cost"] for r in b["bottom"]))
+        for doc in (a, b):
+            for row in doc["top"] + doc["bottom"]:
+                whole = base64_bytes(row["full_text"])
+                self.assertEqual((row["decoded"], row["decoded_bytes"]), (whole.decode("utf-8", "replace"), len(whole)))
+                self.assertTrue(row["decoded"].endswith(row["decoded_continuation"]), row)
+
+    def same_samples(self, a, b):
+        for key in ("prefix", "prefix_file", "prefix_symbols"):
+            self.assertEqual(a.get(key), b.get(key), key)
+
+        def samples(doc):
+            return [[s["text"], s["full_text"]] + [s.get(k) for k in _DECODED] for s in doc["samples"]]
+
+        self.assertEqual(samples(a), samples(b))
+        self.assertTrue(samples(a), "no samples to compare")
+
+    # -- the command line ------------------------------------------------------------------------------------------
+
+    def test_the_same_graph_from_text_and_bytes(self):
+        """The corpus line by line and the image whole: the same texts, the same graph, and each side reads the
+        other's file as the model of symbols it is."""
+        with open(CORPUS, "rb") as fh:
+            texts = len(base64_file_texts(fh.read())) + 1
+        self.assertEqual((self.py_train["texts"], self.go_train["texts"]), (texts, texts))
+        p, g = load_json(self.py_model)["graph"], load_json(self.go_model)["graph"]
+        self.assertEqual(g["encoding"], {"unit": "base64", "n": 3, "stride": 1})
+        self.same_graph(p, g)
+        self.assertEqual(p["rng_state"], g["rng_state"])
+        alphabet = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+        self.assertTrue(all(set(label) <= alphabet for label in g["nodes"]["labels"][4:] if label))
+        for reader, path in ((go, self.py_model), (py, self.go_model)):
+            stats = reader("info", model=path)["stats"]
+            self.assertEqual((stats["encoding"], stats["units"]), ("base64:3:1", "symbols"))
+
+    def test_the_same_answers_to_a_prefix(self):
+        """A text prefix is asked as the symbols its bytes fix - ending inside a symbol included - and a file's bytes
+        likewise, a binary head whose decoded text is not UTF-8 among them."""
+        for args in (["--prefix", "the cat sat", "--length", 8, "--k", 3],
+                     ["--prefix", "the d", "--length", 6, "--to-end", "--k", 2],
+                     ["--prefix", "", "--length", 4, "--k", 2],
+                     ["--prefix-file", self.blob, "--length", 4, "--to-end", "--k", 2],
+                     ["--prefix-file", self.head, "--length", 4, "--to-end", "--k", 2]):
+            with self.subTest(args=args):
+                a = py("predict", *args, model=self.py_model)
+                b = go("predict", *args, model=self.go_model)
+                self.same_prediction(a, b)
+        a = go("predict", "--prefix-file", self.head, "--length", 4, "--to-end", model=self.go_model)
+        self.assertEqual((a["prefix_file"], a["prefix_symbols"], a["prefix"]), (self.head, base64_prefix(_BLOB[:10]),
+                                                                               base64_prefix(_BLOB[:10])))
+        self.assertIn("\ufffd", a["decoded"])  # bytes that are not text read as replacement characters
+        a = go("predict", "--prefix", "the cat sat", "--length", 8, model=self.go_model)
+        self.assertEqual((a["prefix"], a["prefix_symbols"]), ("the cat sat", base64_prefix(b"the cat sat")))
+        self.assertNotIn("prefix_file", a)
+
+    def test_the_same_samples(self):
+        for args in (["--prefix", "the"], ["--prefix-file", self.head], []):
+            with self.subTest(args=args):
+                a = py("generate", "--mode", "beam", "--count", 3, "--max-length", 40, *args, model=self.py_model)
+                b = go("generate", "--mode", "beam", "--count", 3, "--max-length", 40, *args, model=self.go_model)
+                self.same_samples(a, b)
+        b = go("generate", "--mode", "beam", "--count", 2, "--prefix", "the", model=self.go_model)
+        self.assertEqual((b["prefix"], b["prefix_symbols"]), ("the", "dGhl"))
+        self.assertTrue(all(s["decoded"].startswith("the") for s in b["samples"]), b["samples"])
+
+    def test_the_same_bytes_written_back(self):
+        """--decode-to: the image again from its head, and every sample numbered before the extension."""
+        os.makedirs(self.path("decoded-py"), exist_ok=True)
+        os.makedirs(self.path("decoded-go"), exist_ok=True)
+        written = {}
+        for side, run, model in (("py", py, self.py_model), ("go", go, self.go_model)):
+            out = self.path(f"decoded-{side}")
+            doc = run("predict", "--prefix-file", self.head, "--length", 4, "--to-end", "--decode-to",
+                      os.path.join(out, "again.png"), model=model)
+            gen = run("generate", "--mode", "beam", "--count", 2, "--prefix", "the", "--decode-to",
+                      os.path.join(out, "sample.txt"), model=model)
+            written[side] = [(os.path.basename(w["path"]), w["bytes"], load_bytes(w["path"]))
+                             for w in doc["decoded_to"] + gen["decoded_to"]]
+        self.assertEqual(written["py"], written["go"])
+        self.assertEqual([name for name, _, _ in written["go"]], ["again.png", "sample-1.txt", "sample-2.txt"])
+        self.assertEqual(written["go"][0][2], _BLOB)  # the walk wrote the rest of the image
+
+    def test_the_same_scores(self):
+        for args in (["--text", "the cat sat on the mat"], ["--text", "qzx wqzj vbn"], ["--data", self.blob],
+                     ["--data", CORPUS]):
+            with self.subTest(args=args):
+                a = py("score", *args, model=self.py_model)["results"]
+                b = go("score", *args, model=self.go_model)["results"]
+                self.assertEqual([r["text"] for r in a], [r["text"] for r in b])
+                for x, y in zip(a, b):
+                    self.assertEqual((x["chars"], x["transitions"], x["unknown_transitions"]),
+                                     (y["chars"], y["transitions"], y["unknown_transitions"]))
+                    self.assertLessEqual(abs(x["log_prob"] - y["log_prob"]), 1e-9)
+        b = go("score", "--text", "the cat sat on the mat", model=self.go_model)["results"][0]
+        self.assertEqual((b["text"], b["unknown_transitions"]), (base64_text(b"the cat sat on the mat"), 0))
+        self.assertEqual([r["text"] for r in go("score", "--data", self.blob, model=self.go_model)["results"]],
+                         [base64_text(_BLOB)])
+
+    def test_the_same_feedback(self):
+        """A thumbs-up text is learned as its bytes: the same graph after it, and the same sentence said back."""
+        py_model, go_model = self.copies("liked")
+        py("feedback", "--good-text", "the cat ate the rat", "--good-text", "  ", model=py_model)
+        go("feedback", "--good-text", "the cat ate the rat", model=go_model)
+        self.same_graph(load_json(py_model)["graph"], load_json(go_model)["graph"])
+        a = py("predict", "--prefix", "the cat ate", "--length", 6, "--to-end", model=py_model)
+        b = go("predict", "--prefix", "the cat ate", "--length", 6, "--to-end", model=go_model)
+        self.same_prediction(a, b)
+        self.assertEqual(b["decoded"], "the cat ate the rat")
+
+    def test_the_same_refusals(self):
+        self.assertIn("no words to list", py("words", model=self.py_model, expect=1)["error"])
+        self.assertIn("no words to list", go("words", model=self.go_model, expect=1)["error"])
+        for run, model in ((py, self.py_model), (go, self.go_model)):
+            run("predict", "--prefix", "a", "--prefix-file", self.blob, model=model, expect=1)  # one or the other
+            run("predict", model=model, expect=1)
+            run("generate", "--prefix", "a", "--prefix-file", self.blob, model=model, expect=1)
+        missing = self.path("missing.png")
+        self.assertIn("data file not found", py("train", "--data", missing, model=self.path("x-py.json"), expect=1)["error"])
+        self.assertIn("data file not found", go("--units", "base64", "train", "--data", missing, model=self.path("x-go.json"),
+                                                expect=1)["error"])
+
+    def test_whole_file_keeps_every_byte(self):
+        """Python's --whole-file is the Go CLI's --split file: the corpus as one text, blank lines and all."""
+        py_model, go_model = self.path("whole-py.json"), self.path("whole-go.json")
+        a = py("--kind", "count", "--units", "base64", "--seed", 1, "train", "--data", CORPUS, "--whole-file",
+               "--epochs", 1, model=py_model)
+        b = go("--units", "base64", "--seed", 1, "train", "--data", CORPUS, "--split", "file", "--epochs", 1,
+               model=go_model)
+        self.assertEqual((a["texts"], b["texts"]), (1, 1))
+        self.same_graph(load_json(py_model)["graph"], load_json(go_model)["graph"])
+
+    def test_a_text_model_reads_a_prefix_file_as_text(self):
+        py_model, go_model = self.path("chars-py.json"), self.path("chars-go.json")
+        py("--kind", "count", "--seed", 1, "train", "--data", CORPUS, "--epochs", 1, model=py_model)
+        go("--seed", 1, "train", "--data", CORPUS, "--epochs", 1, model=go_model)
+        head = self.path("head.txt")
+        with open(head, "w", encoding="utf-8") as fh:
+            fh.write("the cat sat on")
+        written = []
+        for run, model, out in ((py, py_model, "chars-py.txt"), (go, go_model, "chars-go.txt")):
+            doc = run("predict", "--prefix-file", head, "--length", 4, "--k", 2, "--decode-to", self.path(out), model=model)
+            self.assertEqual(doc["prefix"], "the cat sat on")
+            for key in ("prefix_symbols",) + _DECODED:
+                self.assertNotIn(key, doc)
+            written.append((doc, load_bytes(self.path(out))))
+        (a, a_bytes), (b, b_bytes) = written
+        self.assertEqual((a["full_text"], a["prefix_file"]), (b["full_text"], b["prefix_file"]))
+        self.assertEqual([r["full_text"] for r in a["top"]], [r["full_text"] for r in b["top"]])
+        self.assertEqual(a_bytes, b_bytes)
+        self.assertEqual(b_bytes, b["full_text"].encode("utf-8"))
+        self.assertIn("not valid UTF-8", py("predict", "--prefix-file", self.blob, model=py_model, expect=1)["error"])
+        self.assertIn("not valid UTF-8", go("predict", "--prefix-file", self.blob, model=go_model, expect=1)["error"])
+
+    # -- the HTTP API ----------------------------------------------------------------------------------------------
+
+    def servers(self):
+        """A Go server and a Python one, each with an upload directory and a fresh model of base64 symbols."""
+        import socket
+        import time
+        from tests.test_api import Client, start_server
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        go_dir, py_dir = tempfile.mkdtemp(dir=self.tmp.name), tempfile.mkdtemp(dir=self.tmp.name)
+        proc = subprocess.Popen(
+            [BINARY, "--model", os.path.join(go_dir, "model.json"), "--seed", "1", "--exact", "serve", "--host",
+             "127.0.0.1", "--port", str(port), "--frontend-dir", "", "--upload-dir", os.path.join(go_dir, "uploads"),
+             "--quiet"],
+            cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+        def stop():
+            proc.kill()
+            proc.wait()
+
+        self.addCleanup(stop)
+        go_client = Client(f"http://127.0.0.1:{port}")
+        for _ in range(300):
+            try:
+                if go_client.get("/api/health")[0] == 200:
+                    break
+            except Exception:  # noqa: BLE001 - the server is still starting
+                pass
+            if proc.poll() is not None:
+                raise AssertionError("the Go server exited early")
+            time.sleep(0.05)
+        else:
+            raise AssertionError("the Go server did not start")
+        py_client, _, _ = start_server(self.addCleanup, upload_dir=os.path.join(py_dir, "uploads"))
+        sides = {"py": (py_client, py_dir), "go": (go_client, go_dir)}
+        for client, _ in sides.values():
+            status, doc, _ = client.post("/api/reset", {"kind": "count", "encoding": "base64:3:1", "seed": 1})
+            self.assertEqual(status, 200, doc)
+        return sides
+
+    def both(self, sides, method, path, body=None, expect=200):
+        out = {}
+        for side, (client, _) in sides.items():
+            status, doc, _ = client.request(method, path, body)
+            self.assertEqual(status, expect, (side, path, doc))
+            out[side] = doc
+        return out["py"], out["go"]
+
+    def learn(self, sides, path, body):
+        from tests.test_api import wait_for_job
+
+        self.both(sides, "POST", path, body, expect=202)
+        for side, (client, _) in sides.items():
+            self.assertEqual(wait_for_job(client)["state"], "done", side)
+
+    def saved_graphs(self, sides, name):
+        graphs = []
+        for side, (client, folder) in sides.items():
+            target = os.path.join(folder, name)
+            status, doc, _ = client.post("/api/save", {"path": target})
+            self.assertEqual(status, 200, (side, doc))
+            graphs.append(load_json(target)["graph"])
+        return graphs
+
+    def test_the_servers_keep_the_bytes_and_learn_the_same(self):
+        sides = self.servers()
+        bom_text = "\ufeff" + "\n".join(_BASE64_TEXTS) + "\n"
+        for name, data in (("image.png", _BLOB), ("corpus.txt", bom_text.encode("utf-8"))):
+            a, b = self.both(sides, "POST", "/api/uploads", {"name": name, "content_base64": base64.b64encode(data).decode()},
+                             expect=201)
+            self.assertEqual(a["uploads"][0]["bytes"], b["uploads"][0]["bytes"])
+        for side, (_, folder) in sides.items():
+            # a binary upload is kept byte for byte; a text one is its text, the byte order mark dropped
+            self.assertEqual(load_bytes(os.path.join(folder, "uploads", "image.png")), _BLOB, side)
+            self.assertEqual(load_bytes(os.path.join(folder, "uploads", "corpus.txt")), bom_text[1:].encode("utf-8"), side)
+        self.learn(sides, "/api/train", {"texts": _BASE64_TEXTS, "files": ["image.png", "corpus.txt"], "epochs": 2})
+        self.same_graph(*self.saved_graphs(sides, "trained.json"))
+        a, b = self.both(sides, "GET", "/api/encoding")
+        self.assertEqual((a["encoding"], a["unit"]), (b["encoding"], b["unit"]))
+        self.assertEqual(b["unit"], "base64")
+        a, b = self.both(sides, "GET", "/api/model")
+        self.assertEqual((a["units"], b["units"]), ("symbols", "symbols"))
+        self.both(sides, "GET", "/api/words", expect=400)
+
+    def test_the_servers_answer_and_decode_the_same(self):
+        sides = self.servers()
+        self.both(sides, "POST", "/api/uploads", {"name": "image.png", "content_base64": base64.b64encode(_BLOB).decode()},
+                  expect=201)
+        self.learn(sides, "/api/train", {"texts": _BASE64_TEXTS, "files": ["image.png"], "epochs": 2})
+        for body in ({"prefix": "the cat sat on the", "length": 8, "to_end": True, "k": 2},
+                     {"prefix": "the d", "length": 6, "k": 2},
+                     {"prefix": base64_prefix(b"the cat"), "symbols": True, "length": 6, "k": 2},
+                     {"prefix": "", "length": 1, "to_end": True, "k": 2}):
+            with self.subTest(body=body):
+                a, b = self.both(sides, "POST", "/api/predict", {**body, "mode": "beam", "guard": False})
+                self.same_prediction(a, b)
+        self.assertEqual(base64_bytes(b["full_text"]), _BLOB)  # from START, the image again
+        for body in ({"prefix": "the"}, {"prefix": "dGhlIGRvZy", "symbols": True}, {}):
+            with self.subTest(body=body):
+                a, b = self.both(sides, "POST", "/api/generate", {**body, "count": 2, "mode": "beam", "guard": False})
+                self.same_samples(a, b)
+        said = base64_text(b"the dog sat on the log")
+        for body in ({"text": said, "symbols": True}, {"text": said}, {"text": "the dog sat on the log"}):
+            with self.subTest(body=body):
+                a, b = self.both(sides, "POST", "/api/score", body)
+                self.assertEqual((a["chars"], a["transitions"], a["unknown_transitions"]),
+                                 (b["chars"], b["transitions"], b["unknown_transitions"]))
+                self.assertLessEqual(abs(a["log_prob"] - b["log_prob"]), 1e-9)
+        for body in ({"text": "the cat"}, {"text": "dGhlIGNhdA", "symbols": True}, {"text": "q\u00e9z"}):
+            with self.subTest(body=body):
+                a, b = self.both(sides, "POST", "/api/encoding/preview", body)
+                for key in ("text", "symbols", "windows", "count", "decoded", "round_trip", "chars", "unknown_windows"):
+                    self.assertEqual(a.get(key), b.get(key), key)
+                for key in ("known", "labels", "decoded", "nodes", "compressed", "reason"):
+                    self.assertEqual(a["path"][key], b["path"][key], key)
+
+    def test_the_servers_learn_feedback_the_same(self):
+        """Rated texts are learned as their bytes - or, with symbols, as the model's own words given back."""
+        sides = self.servers()
+        self.learn(sides, "/api/train", {"texts": _BASE64_TEXTS, "epochs": 2})
+        self.learn(sides, "/api/feedback", {"good": [base64_text(b"the cat ate the rat")], "symbols": True})
+        a, b = self.both(sides, "POST", "/api/predict", {"prefix": base64_prefix(b"the cat ate"), "symbols": True,
+                                                         "length": 6, "to_end": True, "mode": "beam", "guard": False})
+        self.same_prediction(a, b)
+        # fourteen symbols fix ten bytes and half the eleventh: the walk finished the "e"
+        self.assertEqual((b["decoded"], b["decoded_continuation"]), ("the cat ate the rat", "e the rat"))
+        self.learn(sides, "/api/feedback", {"good": ["the dog ate the bone"], "bad": ["the dog sat on the cat"]})
+        self.same_graph(*self.saved_graphs(sides, "liked.json"))
+        a, b = self.both(sides, "POST", "/api/score", {"text": "the dog ate the bone"})
+        self.assertEqual((a["unknown_transitions"], b["unknown_transitions"]), (0, 0))

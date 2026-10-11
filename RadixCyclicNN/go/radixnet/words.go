@@ -16,7 +16,8 @@ package radixnet
 
 import "sort"
 
-// UnitsName is what this encoding counts in: "chars" or "words".
+// UnitsName is what this encoding counts in: "chars", "words", "phones",
+// "syllables", "units" (acoustic) or "symbols" (base64).
 //
 // Every length, count and score of a model is in these, so the CLI, the API
 // and the frontend all carry it beside the number - a per-word number read as
@@ -31,6 +32,8 @@ func (e Encoding) UnitsName() string {
 		return "syllables"
 	case Acoustic:
 		return "units"
+	case Base64:
+		return "symbols"
 	}
 	return "chars"
 }
@@ -78,13 +81,14 @@ type WordRow struct {
 }
 
 // TopWords is the alphabet, most read first, ties alphabetically.
-// `limit <= 0` is all of them.  A model that does not count in words has none.
+// `limit <= 0` is all of them.  A model that does not count in words has none:
+// one of characters, or of base64 symbols.
 //
 // The order is the Python implementation's, word for word: two ports asked for
 // the same alphabet hand back the same rows in the same order.
 func (m *Model) TopWords(limit int) []WordRow {
 	enc := m.Encoding()
-	if enc.Unit == Chars {
+	if enc.Unit.Characters() {
 		return nil
 	}
 	counts := enc.Vocabulary(m.G.GramIndex())

@@ -701,6 +701,63 @@ func (s *Service) AttentionPreview(wrong, right string, blur *float64) (map[stri
 	return out.(map[string]any), nil
 }
 
+// modelEncoding is the active model's encoding, read without waiting for a
+// job that holds the model: an encoding is fixed for a model's life, so a
+// request reads its inline texts in it while a training run goes on, as
+// Python reads svc.model.encoding.
+func (s *Service) modelEncoding() radixnet.Encoding { return s.model.Encoding() }
+
+// inlineTexts is texts given in a request, as the model reads them (Python's
+// _inline_texts).  A model of base64 symbols learns the bytes of a text: its
+// UTF-8 bytes written in the symbols (Encoding.TextInput) - unless the request
+// says the texts are symbols already (symbols: the model's own words given
+// back, a liked continuation or a rated sample), which are taken as they are.
+// Any other model takes every text as it is.
+func inlineTexts(enc radixnet.Encoding, texts []string, symbols bool) []string {
+	if symbols || !enc.IsBase64() {
+		return texts
+	}
+	out := make([]string, len(texts))
+	for i, text := range texts {
+		out[i] = enc.TextInput(text)
+	}
+	return out
+}
+
+// prompt is a prefix as a model is asked it: asked is the text the walk
+// starts from, and content what it stands for, as bytes - what a model of
+// base64 symbols measures the continuation it decodes against
+// (radixnet.DecodedPrediction).  enc is the encoding it was read in.
+type prompt struct {
+	asked   string
+	content []byte
+	enc     radixnet.Encoding
+}
+
+// promptOf is a prefix as a model of this encoding is asked it (Python's
+// _prefix_asked).  A model of base64 symbols is asked the symbols the prefix's
+// UTF-8 bytes fix (Encoding.PrefixInput); with symbols the prefix is written
+// in them already, asked as it is and standing for the bytes it decodes into.
+// Any other model is asked the prefix as it is.
+func promptOf(enc radixnet.Encoding, prefix string, symbols bool) prompt {
+	switch {
+	case !enc.IsBase64():
+		return prompt{asked: prefix, content: []byte(prefix), enc: enc}
+	case symbols:
+		return prompt{asked: prefix, content: radixnet.Base64Bytes(prefix), enc: enc}
+	}
+	return prompt{asked: enc.PrefixInput(prefix), content: []byte(prefix), enc: enc}
+}
+
+// symbolsDoc is {key: symbols} for a model of base64 symbols - what it was
+// asked, in its symbols - and nothing for any other.
+func symbolsDoc(enc radixnet.Encoding, key, symbols string) map[string]any {
+	if !enc.IsBase64() {
+		return map[string]any{}
+	}
+	return map[string]any{key: symbols}
+}
+
 // Encoding is GET /api/encoding: how the active model reads text - the unit,
 // the n of the n-gram, the stride and the sentinels.
 //
@@ -724,16 +781,23 @@ func (s *Service) Encoding() map[string]any {
 }
 
 // EncodingPreview is POST /api/encoding/preview: one text through the encoder
-// and back through both decoders, and through the graph's own labels.
-func (s *Service) EncodingPreview(text string) (map[string]any, error) {
+// and back through both decoders, and through the graph's own labels.  A
+// model of base64 symbols previews the symbols of the text's bytes (or the
+// text as it is, with symbols: written in them already): everything below is
+// computed on them, and they come back as "symbols" beside the text as given.
+func (s *Service) EncodingPreview(given string, symbols bool) (map[string]any, error) {
 	enc := s.model.Encoding()
+	text := inlineTexts(enc, []string{given}, symbols)[0]
 	windows := enc.Encode(text)
 	if windows == nil {
 		windows = []string{}
 	}
 	decoded := enc.DecodeGrams(windows)
 	info := s.Encoding()
-	info["text"] = text
+	info["text"] = given
+	for k, v := range symbolsDoc(enc, "symbols", text) {
+		info[k] = v
+	}
 	info["chars"] = enc.Len(text)
 	info["windows"] = windows
 	info["count"] = len(windows)
@@ -1098,7 +1162,7 @@ func (s *Service) Words(limit int) (map[string]any, error) {
 	}
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		enc := m.Encoding()
-		if enc.Unit == radixnet.Chars {
+		if enc.Unit.Characters() { // characters, or base64 symbols: no words to list
 			return nil, badRequest(
 				"this model counts in %s, so it has no words to list; a word alphabet needs a word encoding "+
 					"(--encoding word:%d:%d)", enc.UnitsName(), enc.N, enc.Stride)
@@ -1320,16 +1384,22 @@ func guardReport(pair *kit.Filter, verdicts []*kit.FilterVerdict, extra map[stri
 
 // Predict continues a prefix; with guard the negative network vetoes the
 // continuations it recognises as failures, and provenance (nil: the server's
-// setting) says whether the report lists the vetoes or only counts them.
-func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool, provenance *bool) (*radixnet.Prediction, map[string]any, error) {
+// setting) says whether the report lists the vetoes or only counts them.  A
+// model of base64 symbols is asked the symbols the prefix's bytes fix
+// (promptOf; symbols: the prefix is written in them already), and the guard
+// ranks what it was asked; the prompt comes back with the answer, so the
+// answer can say what it holds.
+func (s *Service) Predict(prefix string, symbols bool, o radixnet.PredictOptions, guard bool, provenance *bool) (*radixnet.Prediction, map[string]any, prompt, error) {
 	var report map[string]any
+	var asked prompt
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
-		found, err := m.Predict(prefix, o)
+		asked = promptOf(m.Encoding(), prefix, symbols)
+		found, err := m.Predict(asked.asked, o)
 		if err != nil || !guard {
 			return found, err
 		}
 		if pair := s.guard(provenance); pair != nil {
-			ranked, verdicts := pair.Rank(prefix, found) // the survivors, best first
+			ranked, verdicts := pair.Rank(asked.asked, found) // the survivors, best first
 			kept := 0
 			for _, verdict := range verdicts {
 				if verdict.Decision != "reject" {
@@ -1342,17 +1412,22 @@ func (s *Service) Predict(prefix string, o radixnet.PredictOptions, guard bool, 
 		return found, nil
 	})
 	if err != nil {
-		return nil, nil, badRequest("%v", err)
+		return nil, nil, asked, badRequest("%v", err)
 	}
-	return out.(*radixnet.Prediction), report, nil
+	return out.(*radixnet.Prediction), report, asked, nil
 }
 
 // Generate writes whole texts; with guard the model over-samples and the
 // negative network vetoes what it recognises as failure (provenance as in
-// Predict).
-func (s *Service) Generate(o radixnet.GenerateOptions, guard bool, provenance *bool) ([]*radixnet.PathResult, map[string]any, error) {
+// Predict).  Every text starts from o.Prefix as the model is asked it - a
+// model of base64 symbols from the symbols its bytes fix, as in Predict - and
+// that prompt comes back with them.
+func (s *Service) Generate(o radixnet.GenerateOptions, symbols bool, guard bool, provenance *bool) ([]*radixnet.PathResult, map[string]any, prompt, error) {
 	var report map[string]any
+	var asked prompt
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
+		asked = promptOf(m.Encoding(), o.Prefix, symbols)
+		o.Prefix = asked.asked
 		pair := (*kit.Filter)(nil)
 		if guard {
 			pair = s.guard(provenance)
@@ -1371,13 +1446,18 @@ func (s *Service) Generate(o radixnet.GenerateOptions, guard bool, provenance *b
 		return outcome.Results, nil
 	})
 	if err != nil {
-		return nil, nil, badRequest("%v", err)
+		return nil, nil, asked, badRequest("%v", err)
 	}
-	return out.([]*radixnet.PathResult), report, nil
+	return out.([]*radixnet.PathResult), report, asked, nil
 }
 
-func (s *Service) Score(text string) radixnet.Score {
-	out, _ := s.read(func(m *radixnet.Model) (any, error) { return m.Score(text), nil })
+// Score is the log-probability of a text.  A model of base64 symbols scores
+// the text's bytes, written in its symbols - or, with symbols, the text as it
+// is (inlineTexts).
+func (s *Service) Score(text string, symbols bool) radixnet.Score {
+	out, _ := s.read(func(m *radixnet.Model) (any, error) {
+		return m.Score(inlineTexts(m.Encoding(), []string{text}, symbols)[0]), nil
+	})
 	return out.(radixnet.Score)
 }
 
@@ -1472,4 +1552,32 @@ func (s *Service) UploadSource(names []string, unit string, pageLines int, whole
 		return nil, badRequest("uploads are disabled: start the server with --upload-dir")
 	}
 	return s.uploads.Source(names, unit, pageLines, wholeFile)
+}
+
+// UploadSourceFor is UploadSource for a model of encoding enc to learn from: a
+// model of base64 symbols reads every upload as the bytes it holds
+// (Uploads.Base64Source - unit and pageLines do not cut them), any other model
+// reads the texts UploadSource does.
+func (s *Service) UploadSourceFor(enc radixnet.Encoding, names []string, unit string, pageLines int, wholeFile bool) (radixnet.TextSource, error) {
+	if !enc.IsBase64() {
+		return s.UploadSource(names, unit, pageLines, wholeFile)
+	}
+	if s.uploads == nil {
+		return nil, badRequest("uploads are disabled: start the server with --upload-dir")
+	}
+	return s.uploads.Base64Source(names, wholeFile)
+}
+
+// UploadTextsFor collects the texts of UploadSourceFor (for the small rated
+// sets of feedback / 2NRL and the evolve corpus).
+func (s *Service) UploadTextsFor(enc radixnet.Encoding, names []string, unit string, pageLines int, wholeFile bool) ([]string, error) {
+	src, err := s.UploadSourceFor(enc, names, unit, pageLines, wholeFile)
+	if err != nil {
+		return nil, err
+	}
+	texts, err := radixnet.CollectTexts(src)
+	if err != nil {
+		return nil, wrapSourceError(err)
+	}
+	return texts, nil
 }

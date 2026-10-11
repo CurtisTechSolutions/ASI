@@ -51,12 +51,13 @@ type Span struct{ Lo, Hi int }
 func Edits(wrong, right string) []Edit { return DefaultEncoding().Edits(wrong, right) }
 
 // Edits aligns wrong against right one unit of this encoding at a time: by
-// character for a character encoding, by word for a word one - so the spans it
-// reports index the same units the graph's labels and offsets are measured in,
-// and a correction blames the steps the mistake really ran through.
+// character for a character encoding (by symbol for base64, a symbol being one
+// code point), by word for a word one - so the spans it reports index the same
+// units the graph's labels and offsets are measured in, and a correction
+// blames the steps the mistake really ran through.
 func (e Encoding) Edits(wrong, right string) []Edit {
 	e = e.WithDefaults()
-	if e.Unit != Chars { // words, or sounds: whole units, never letters
+	if !e.Unit.Characters() { // words, or sounds: whole units, never letters
 		return alignAtoms(wordAtoms(e.Units(wrong).Text()), wordAtoms(e.Units(right).Text()), joinWords, e.N)
 	}
 	return alignAtoms([]rune(wrong), []rune(right), joinRunes, e.N)

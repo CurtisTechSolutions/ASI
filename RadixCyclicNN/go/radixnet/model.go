@@ -1545,7 +1545,7 @@ func (m *Model) Stats() map[string]any {
 	m.metaStats(stats, "epochs_total", "trained_chars", "trained_texts", "twonrl_runs", "feedback_passes")
 	// what every number above is counted in; a per-word number read as per-character is read wrong
 	stats["units"] = m.Encoding().UnitsName()
-	if m.Encoding().Unit != Chars {
+	if !m.Encoding().Unit.Characters() { // characters and base64 symbols have no words to count
 		stats["vocabulary"] = len(m.Encoding().Vocabulary(m.G.GramIndex()))
 	}
 	return stats

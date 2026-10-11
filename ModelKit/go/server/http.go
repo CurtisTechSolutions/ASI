@@ -270,17 +270,17 @@ func init() {
 	route("GET", "/api/encoding", rEncoding)
 	doc("GET", "/api/encoding", "the text encoding every kind shares: {window, stride, overlap, start_label, end_label, back_label, think_label, configurable: false (the window is part of the model format, not a setting), note}")
 	route("POST", "/api/encoding/preview", rEncodingPreview)
-	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}")
+	doc("POST", "/api/encoding/preview", "one text through the encoder and back: {text} -> the same document plus {chars, windows, count, decoded, round_trip, kind, unknown_windows, path: {known, reason, labels, node_ids, decoded, nodes, compressed}}; a model of base64 symbols previews the symbols of the text's bytes, returned as symbols (symbols: true - the text is written in them already)")
 	route("POST", "/api/train", rTrain)
-	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts, order: corpus | shortest-first | longest-first | shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay (the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the buffer's capacity from now on; 0 drops it), patience, min_delta (stop after patience full epochs without the loss improving by min_delta; 0 = off), reverse (read every text backwards, in the model's units - its last character or word first - so the model learns what comes before; off by default)}; uploads stream through in chunks, whatever their size - reversed or not - unless an order, a curriculum or a replay buffer needs the whole list first")
+	doc("POST", "/api/train", "start a training job: {texts | text | files, whole_file, split: lines | paragraphs | pages | file, page_lines, epochs, auto_compress, chunk_size, inflight, parallel_parts, order: corpus | shortest-first | longest-first | shuffle, curriculum (the share of the ordered texts the first epoch walks, growing to all; 1 = off), replay (the share of the run's texts each epoch rehearses from the model's replay buffer; 0 = off), replay_size (the buffer's capacity from now on; 0 drops it), patience, min_delta (stop after patience full epochs without the loss improving by min_delta; 0 = off), reverse (read every text backwards, in the model's units - its last character or word first - so the model learns what comes before; off by default), symbols (a model of base64 symbols: the texts are written in them already)}; a model of base64 symbols learns the bytes - a text (each piece split cuts) as its UTF-8 bytes, an upload as every byte it holds, a UTF-8 text file line by line and split aside - written in its symbols; uploads stream through in chunks, whatever their size - reversed or not - unless an order, a curriculum or a replay buffer needs the whole list first")
 	route("GET", "/api/job", rJob)
 	doc("GET", "/api/job", "status of the current / last job")
 	route("POST", "/api/job/stop", rJobStop)
 	doc("POST", "/api/job/stop", "ask the running job to stop")
 	route("POST", "/api/predict", rPredict)
-	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures), provenance (false: the guard's report counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each; default: the server's setting)}; a model of sounds adds spelled and spelled_continuation (the English, and the part of it the continuation wrote) to the answer and to every top / bottom row")
+	doc("POST", "/api/predict", "continue a prefix: {prefix, length, mode: beam | sample, to_end, step_penalty, temperature, max_length, k, beam, traversal: reward (default) | punishment (the rewards leave the score and the punishments price every step, so the cheapest path is the least punished one), penalty_scale, merit_scale (0 = nothing but the punishments decides), top_k, top_p, min_p (sample mode: keep the k cheapest steps, the nucleus holding p of the mass, the steps at least min_p as likely as the best; off at 0 / 1 / 0), diversity (beam mode: the K continuations picked by maximal marginal relevance, so they differ in more than their endings; off at 0), guard (default on: the negative network vetoes the continuations it recognises as failures), provenance (false: the guard's report counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each; default: the server's setting)}; a model of sounds adds spelled and spelled_continuation (the English, and the part of it the continuation wrote) to the answer and to every top / bottom row; a model of base64 symbols is asked the symbols the prefix's bytes fix (symbols: true - the prefix is written in them already) and adds prefix_symbols, and decoded, decoded_continuation and decoded_bytes (what the answer holds) to the answer and to every row")
 	route("POST", "/api/generate", rGenerate)
-	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure), provenance (default: the server's setting; false counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each)}; a model of sounds adds spelled (the English) to every sample")
+	doc("POST", "/api/generate", "whole texts: {count, max_length, mode: beam | sample | dijkstra, temperature, seed, prefix, step_penalty, beam, traversal: reward (default) | punishment, penalty_scale, merit_scale, top_k, top_p, min_p (sample mode), diversity (beam mode), guard (default on: the model over-samples and the negative network vetoes what it recognises as failure), provenance (default: the server's setting; false counts the vetoes instead of listing them with the rule, the reasons and the fragments behind each), symbols}; a model of sounds adds spelled (the English) to every sample, a model of base64 symbols prefix_symbols and, to every sample, decoded, decoded_continuation and decoded_bytes")
 	route("POST", "/api/converse", rConverse)
 	doc("POST", "/api/converse", "the model converses with itself: {opening, turns, mode, max_length, context, temperature, k, beam, step_penalty, seed, speakers, history, avoid_repeats (what the conversation has heard), avoid_word_repeats (a reply repeating its own words), explore (times a reply that caught itself repeating may back up and look for another way on; 0 = not at all), learn (default on: what a rethink finds out is taught to the graph, so the model itself learns where it goes round - a conversation with this on changes the model), guard (default on: a reply the negative network vetoes is left unsaid), provenance (false: how many were vetoed, not which nor why; default: the server's setting)} -> {..., turns, repeats: the duplicates spoken anyway, to punish}; a turn of a model of sounds adds spelled and spelled_reply (the English, and the part of it the reply wrote)")
 	route("POST", "/api/converse/stream", rConverseStream)
@@ -288,11 +288,11 @@ func init() {
 	route("POST", "/api/think", rThink)
 	doc("POST", "/api/think", "the model thinks - one thought from the THINK sentinel, in the language of the thoughts it was taught (POST /api/ollama/think), questioning itself where it has learned to: {about (think at the node where this text ends, and teach the model to stop and think there), mode: beam | sample, k, beam, max_length, temperature, step_penalty, seed, depth (how deep it may question itself; 0 = never), questions (per thought), learn (default on: it teaches the model where it stopped to think - a thought changes the model)} -> {kind, trigger, at, about, text, depth, stopped: end | length | nothing, then: end | back | think, taught, handed_over, cost, probability, expanded, questioned, questions, labels, node_ids, step_costs}; a thought of a model of sounds, and each of its questions, adds spelled (the English)")
 	route("POST", "/api/score", rScore)
-	doc("POST", "/api/score", "log-probability of a text: {text}")
+	doc("POST", "/api/score", "log-probability of a text: {text, symbols} (a model of base64 symbols scores the text's bytes, or the symbols as they are with symbols: true)")
 	route("POST", "/api/2nrl", rTwoNRL)
 	doc("POST", "/api/2nrl", "start a 2NRL job: {bad | bad_text | bad_files, good | good_text | good_files, neg_epochs, pos_epochs, strength, bad_weights | bad_ratings, good_weights | good_ratings (per text: how bad / how good)}")
 	route("POST", "/api/feedback", rFeedback)
-	doc("POST", "/api/feedback", "rated texts: {good | good_text | good_files, bad | bad_text | bad_files, good_ratings / bad_ratings (marks out of 10, or good_weights / bad_weights as 0..1 shares), neg_epochs, pos_epochs, strength} -> a 2nrl / reward / punish job; every text is learned in proportion to its rating")
+	doc("POST", "/api/feedback", "rated texts: {good | good_text | good_files, bad | bad_text | bad_files, good_ratings / bad_ratings (marks out of 10, or good_weights / bad_weights as 0..1 shares), neg_epochs, pos_epochs, strength} -> a 2nrl / reward / punish job; every text is learned in proportion to its rating; symbols: true - the texts are a model of base64 symbols' own words, given back")
 	route("POST", "/api/invert", rInvert)
 	doc("POST", "/api/invert", "flip the sign of every reward")
 	route("POST", "/api/compress", rCompress)
@@ -303,9 +303,9 @@ func init() {
 	doc("POST", "/api/load", "{path}: replace the model with a file")
 	route("POST", "/api/reset", rReset)
 	doc("POST", "/api/reset", "{seed, count_scale, global_scale, window_scale, reward_scale, window, encoding | unit + ngram + stride}: a fresh model. "+
-		"The encoding is how text becomes grams and is fixed for the model's life: unit char | word, ngram the n of the n-gram, "+
+		"The encoding is how text becomes grams and is fixed for the model's life: unit char | word | phone | syllable | acoustic | base64, ngram the n of the n-gram, "+
 		"stride the units between two grams (1 = sliding window, n = non-overlapping groups). \"encoding\" sets all three at once "+
-		"(char:3:1 the default, char:5:5 groups of five letters, word:2:1 word bigrams, word:3:1 word trigrams)")
+		"(char:3:1 the default, char:5:5 groups of five letters, word:2:1 word bigrams, word:3:1 word trigrams, base64:4:4 one gram per three bytes of any content)")
 	route("GET", "/api/checkpoints", rCheckpoints)
 	doc("GET", "/api/checkpoints", "checkpoint records and the latest one")
 	route("POST", "/api/checkpoints/save", rCheckpointSave)
@@ -325,7 +325,7 @@ func init() {
 	route("GET", "/api/uploads", rUploads)
 	doc("GET", "/api/uploads", "uploaded training files (a ZIP counts the lines of its text entries)")
 	route("POST", "/api/uploads", rUpload)
-	doc("POST", "/api/uploads", "upload text files or ZIP archives: JSON {name, content | content_base64} / {files: [...]}, multipart/form-data, or a raw body with ?name=")
+	doc("POST", "/api/uploads", "upload text files or ZIP archives: JSON {name, content | content_base64} / {files: [...]}, multipart/form-data, or a raw body with ?name=; a file that is not UTF-8 text (an image, a video, a recording) is kept byte for byte")
 	route("POST", "/api/uploads/delete", rUploadDelete)
 	doc("POST", "/api/uploads/delete", "{name}")
 	route("GET", "/api/schedule", rSchedule)
@@ -441,7 +441,11 @@ func rEncodingPreview(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	out, err := rq.svc.EncodingPreview(text)
+	symbols, err := rq.f.flag("symbols", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := rq.svc.EncodingPreview(text, symbols)
 	return 200, out, err
 }
 
@@ -542,11 +546,21 @@ func rModelWeights(rq *request) (int, any, error) {
 }
 
 // textsAndFiles: inline texts and / or uploaded files (split per the unit); at least one text is required.
+//
+// A model of base64 symbols learns the bytes of what it is given: an inline
+// text - each piece the split cuts - as its UTF-8 bytes (or as it is, with
+// symbols: inlineTexts), an upload as the bytes it holds
+// (Service.UploadTextsFor), each written in its symbols.
 func textsAndFiles(rq *request, listName, textName, filesName, unit string, pageLines int, wholeFile bool) ([]string, error) {
 	names, err := rq.f.names(filesName)
 	if err != nil {
 		return nil, err
 	}
+	symbols, err := rq.f.flag("symbols", false)
+	if err != nil {
+		return nil, err
+	}
+	enc := rq.svc.modelEncoding()
 	var texts []string
 	if v, ok := rq.f.lookup(textName); ok && unit != "" && unit != "lines" {
 		blob, isStr := v.(string)
@@ -565,8 +579,9 @@ func textsAndFiles(rq *request, listName, textName, filesName, unit string, page
 			return nil, err
 		}
 	}
+	texts = inlineTexts(enc, texts, symbols)
 	if len(names) > 0 {
-		more, err := rq.svc.UploadTexts(names, unit, pageLines, wholeFile)
+		more, err := rq.svc.UploadTextsFor(enc, names, unit, pageLines, wholeFile)
 		if err != nil {
 			return nil, err
 		}
@@ -612,11 +627,22 @@ func splitOptions(f fields) (string, int, error) {
 // trainSource is the streaming source of a training request: inline texts
 // (already in memory) followed by the selected uploads, which stream from
 // disk chunk by chunk however large they are.
+//
+// A model of base64 symbols learns bytes: the inline text is split as for any
+// model and every piece is converted to the symbols of its UTF-8 bytes (taken
+// as it is with symbols: inlineTexts), while an upload is read as the bytes it
+// holds - one text per line of a UTF-8 text file, one text of every byte for
+// anything else or with whole_file - and split does not cut it.
 func trainSource(rq *request, unit string, pageLines int, wholeFile bool) (radixnet.TextSource, error) {
 	names, err := rq.f.names("files")
 	if err != nil {
 		return nil, err
 	}
+	symbols, err := rq.f.flag("symbols", false)
+	if err != nil {
+		return nil, err
+	}
+	enc := rq.svc.modelEncoding()
 	var inline []string
 	if v, ok := rq.f.lookup("text"); ok && unit != "lines" {
 		blob, isStr := v.(string)
@@ -638,9 +664,9 @@ func trainSource(rq *request, unit string, pageLines int, wholeFile bool) (radix
 		}
 		return nil, badRequest("missing field 'texts' (list of strings), 'text' (string, one text per line) or 'files' (list of upload names)")
 	}
-	src := radixnet.MultiSource{radixnet.SliceSource(inline)}
+	src := radixnet.MultiSource{radixnet.SliceSource(inlineTexts(enc, inline, symbols))}
 	if len(names) > 0 {
-		files, err := rq.svc.UploadSource(names, unit, pageLines, wholeFile)
+		files, err := rq.svc.UploadSourceFor(enc, names, unit, pageLines, wholeFile)
 		if err != nil {
 			return nil, err
 		}
@@ -729,12 +755,18 @@ func rJobStop(rq *request) (int, any, error) {
 	return 200, out, err
 }
 
-func pathDict(r *radixnet.PathResult, enc radixnet.Encoding) map[string]any {
+// pathDict is one of the top / bottom continuations of a prediction: spelled
+// when it is sounds, and decoded when it is base64 symbols - measured against
+// content, the bytes the prompt stood for.
+func pathDict(r *radixnet.PathResult, enc radixnet.Encoding, content []byte) map[string]any {
 	doc := map[string]any{
 		"continuation": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(),
 		"step_costs": r.StepCosts, "path": r.Labels, "node_ids": r.NodeIDs, "reached_end": r.ReachedEnd,
 	}
 	for k, v := range radixnet.SpelledPrediction(enc, r.FullText, r.Text) { // a model of sounds: the words
+		doc[k] = v
+	}
+	for k, v := range radixnet.DecodedPrediction(enc, r.FullText, content) { // a model of base64 symbols: the bytes
 		doc[k] = v
 	}
 	return doc
@@ -878,18 +910,22 @@ func rPredict(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	p, report, err := rq.svc.Predict(prefix, o, guard, provenance)
+	symbols, err := f.flag("symbols", false)
 	if err != nil {
 		return 0, nil, err
 	}
-	enc := rq.svc.unitEncoding()
+	p, report, asked, err := rq.svc.Predict(prefix, symbols, o, guard, provenance)
+	if err != nil {
+		return 0, nil, err
+	}
+	enc := asked.enc
 	top := make([]map[string]any, 0, len(p.Top))
 	for _, r := range p.Top {
-		top = append(top, pathDict(r, enc))
+		top = append(top, pathDict(r, enc, asked.content))
 	}
 	bottom := make([]map[string]any, 0, len(p.Bottom))
 	for _, r := range p.Bottom {
-		bottom = append(bottom, pathDict(r, enc))
+		bottom = append(bottom, pathDict(r, enc, asked.content))
 	}
 	doc := map[string]any{
 		"prefix": prefix, "kind": "count", "continuation": p.Text, "full_text": p.FullText, "cost": p.Cost,
@@ -897,20 +933,34 @@ func rPredict(rq *request) (int, any, error) {
 		"expanded": p.Expanded, "reached_end": p.ReachedEnd, "mode": p.Mode, "traversal": p.Traversal,
 		"k": p.K, "beam": p.Beam, "top": top, "bottom": bottom, "guard": report,
 	}
-	// a model of sounds: the words its answer spells, and the part of them the continuation wrote
-	for k, v := range radixnet.SpelledPrediction(enc, p.FullText, p.Text) {
-		doc[k] = v
+	// a model of sounds: the words its answer spells, and the part of them the continuation wrote; a model of
+	// base64 symbols: the symbols it was asked, and what its answer holds
+	for _, more := range []map[string]any{
+		radixnet.SpelledPrediction(enc, p.FullText, p.Text),
+		symbolsDoc(enc, "prefix_symbols", asked.asked),
+		radixnet.DecodedPrediction(enc, p.FullText, asked.content),
+	} {
+		for k, v := range more {
+			doc[k] = v
+		}
 	}
 	return 200, doc, nil
 }
 
-func sampleDict(r *radixnet.PathResult, enc radixnet.Encoding) map[string]any {
+// sampleDict is one generated text: a model of sounds adds the words it spells
+// (spelled), a model of base64 symbols what it holds (decoded,
+// decoded_continuation, decoded_bytes), measured against content, the bytes
+// the prompt stood for.
+func sampleDict(r *radixnet.PathResult, enc radixnet.Encoding, content []byte) map[string]any {
 	doc := map[string]any{
 		"text": r.Text, "full_text": r.FullText, "cost": r.Cost, "probability": r.Probability(), "path": r.Labels,
 		"node_ids": r.NodeIDs, "step_costs": r.StepCosts, "reached_end": r.ReachedEnd,
 	}
 	if enc.Unit.Phonetic() { // a model of sounds: the words the text spells
 		doc["spelled"] = enc.Spell(r.Text)
+	}
+	for k, v := range radixnet.DecodedPrediction(enc, r.FullText, content) {
+		doc[k] = v
 	}
 	return doc
 }
@@ -964,16 +1014,23 @@ func rGenerate(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	results, report, err := rq.svc.Generate(o, guard, provenance)
+	symbols, err := f.flag("symbols", false)
 	if err != nil {
 		return 0, nil, err
 	}
-	enc := rq.svc.unitEncoding()
+	results, report, asked, err := rq.svc.Generate(o, symbols, guard, provenance)
+	if err != nil {
+		return 0, nil, err
+	}
 	samples := make([]map[string]any, 0, len(results))
 	for _, r := range results {
-		samples = append(samples, sampleDict(r, enc))
+		samples = append(samples, sampleDict(r, asked.enc, asked.content))
 	}
-	return 200, map[string]any{"samples": samples, "guard": report}, nil
+	doc := map[string]any{"samples": samples, "guard": report}
+	for k, v := range symbolsDoc(asked.enc, "prefix_symbols", asked.asked) { // what a model of base64 symbols started from
+		doc[k] = v
+	}
+	return 200, doc, nil
 }
 
 // converseRequest reads the one conversation POST /api/converse and POST
@@ -1182,7 +1239,11 @@ func rScore(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	return 200, rq.svc.Score(text), nil
+	symbols, err := rq.f.flag("symbols", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	return 200, rq.svc.Score(text, symbols), nil
 }
 
 func rTwoNRL(rq *request) (int, any, error) {
@@ -1241,6 +1302,13 @@ func rFeedback(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	// a model of base64 symbols learns the bytes of what it is given - unless the texts are its own words,
+	// given back (a like, a rating): symbols
+	symbols, err := f.flag("symbols", false)
+	if err != nil {
+		return 0, nil, err
+	}
+	enc := rq.svc.modelEncoding()
 	good, err := f.textsOptional("good", "good_text")
 	if err != nil {
 		return 0, nil, err
@@ -1249,6 +1317,7 @@ func rFeedback(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+	good, bad = inlineTexts(enc, good, symbols), inlineTexts(enc, bad, symbols)
 	for _, pair := range []struct {
 		field  string
 		target *[]string
@@ -1258,7 +1327,7 @@ func rFeedback(rq *request) (int, any, error) {
 			return 0, nil, err
 		}
 		if len(names) > 0 {
-			more, err := rq.svc.UploadTexts(names, "lines", 50, wholeFile)
+			more, err := rq.svc.UploadTextsFor(enc, names, "lines", 50, wholeFile)
 			if err != nil {
 				return 0, nil, err
 			}
