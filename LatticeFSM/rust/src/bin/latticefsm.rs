@@ -13,6 +13,7 @@
 //!     expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
 //!     core-run    walk a string straight from a code, decoding only the cells the walk reaches
 //!     network     machines connected into a network: new, fit, evaluate, predict, translate, summary
+//!     ngram       predict the next thing: an N-gram model trained on a corpus or with Ollama
 //!     experiment  the learning, stimulation, adaptation and compression experiments
 //!     serve       the HTTP API and the React frontend (frontend/dist) on --port
 //!
@@ -22,6 +23,8 @@
 use std::env;
 use std::process;
 
+use latticefsm::autotrain::{self, Ollama};
+use latticefsm::b64;
 use latticefsm::compress::{compress, expansion, fidelity, load_core, Core, Precision};
 use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
@@ -29,6 +32,7 @@ use latticefsm::languages::{all_strings, examples, language, LANGUAGES};
 use latticefsm::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
 use latticefsm::media;
 use latticefsm::network::{load_network, Credit, Merge, Network, Vote, LAYER_DISCOUNT};
+use latticefsm::ngram::{corpus_sequences, detokenize, load_ngram, split_lines, NGram};
 use latticefsm::phonetic;
 use latticefsm::rng::Rng;
 use latticefsm::server;
@@ -49,6 +53,10 @@ impl Args {
         let mut i = 0;
         while i < rest.len() {
             let a = &rest[i];
+            // a short flag (`-k 5`) is read as the long one of the same name
+            let short =
+                (a.len() == 2 && a.starts_with('-') && a.as_bytes()[1].is_ascii_alphabetic()).then(|| format!("-{a}"));
+            let a = short.as_ref().unwrap_or(a);
             if let Some(name) = a.strip_prefix("--") {
                 if let Some((k, v)) = name.split_once('=') {
                     flags.push((k.to_string(), v.to_string()));
@@ -130,6 +138,16 @@ commands
                          file, every 5th held out: with --arch text>13, audio>13, image>13, diff>13 or video>13
                          (text, a WAV, a PNG / PPM / BMP, a directory of frames or a video file through ffmpeg)
               make-data  --kind text|image|audio|video --out DIR [--count 40]: a small synthetic labelled set
+  ngram ACTION     predict the next thing (latticefsm/ngram.py is the same model, number for number):
+              train      --data FILES/DIRS (data/corpus) --order 3 --unit word|char|sound --held-out 10 --save F
+              autotrain  the corpus, then --ollama rounds: sentences on --topics (default: the corpus's own words),
+                         continuations of its contexts, a judge's credit on its texts; --rounds 3 --lines 20
+                         --continuations 20 --judge 10 --patience 2 --keep FILE --save F --model M --url U
+              predict TEXT... [-k 10]   the likeliest next tokens        generate TEXT... [--temperature 0]
+              evaluate --data ...       perplexity and next-token accuracy on held-out lines
+              stats | credit TEXT --amount R | ollama (is it there, which models)
+  base64 encode|decode INPUT... [--out FILE]   anything (a file, or a text) as base64, or base64 back to bytes;
+              ngram --unit base64 learns any file - text, image, audio, video - letter by letter
   experiment  --which learning|stimulation|adaptation|compression|walk|network|all, --out DIR
   serve       the HTTP API and the frontend on --port (default 8000); --frontend-dir DIR (default: frontend/dist
               under the working directory, or ../frontend/dist)
@@ -233,6 +251,8 @@ fn main() {
         "rearrange" => rearrange_cmd(&a),
         "teach" => teach(&a),
         "network" => network_cmd(&a),
+        "base64" => base64_cmd(&a),
+        "ngram" => ngram_cmd(&a),
         "accuracy" => accuracy(&a),
         "table" => table(&a),
         "stats" => machine(&a).map(|m| println!("{}", m.stats().pretty(1))),
@@ -1086,6 +1106,289 @@ fn network_cmd(a: &Args) -> Result<(), String> {
         if let Some(path) = a.get("save") {
             net.save(path)?;
             eprintln!("saved {path}");
+        }
+    }
+    Ok(())
+}
+
+fn fmt_opt(v: Option<f64>, digits: usize) -> String {
+    v.map(|x| format!("{x:.digits$}")).unwrap_or_else(|| "-".to_string())
+}
+
+fn ngram_cmd(a: &Args) -> Result<(), String> {
+    let action = a.positional.first().map(String::as_str).unwrap_or("stats");
+    let texts: Vec<String> = a.positional.iter().skip(1).cloned().collect();
+    if action == "ollama" {
+        let client = Ollama::new(a.get("url"), a.get("model"));
+        let names = client.models()?;
+        let mut line = format!("Ollama at {}: {} models", client.url, names.len());
+        for n in &names {
+            line.push_str(&format!("\n  {n}"));
+        }
+        println!("{line}");
+        let pulled = names
+            .iter()
+            .any(|n| n == &client.model || n.split(':').next() == Some(client.model.as_str()));
+        let note = if pulled {
+            String::new()
+        } else {
+            format!(" (not pulled: `ollama pull {}`)", client.model)
+        };
+        println!("autotrain would use {}{note}", client.model);
+        return Ok(());
+    }
+    let mut m = match a.get("load") {
+        Some(p) if std::path::Path::new(p).exists() => load_ngram(p)?,
+        Some(p) if !matches!(action, "train" | "autotrain") => return Err(format!("no model at {p}")),
+        _ => NGram::new(
+            a.num("order", 3.0) as usize,
+            &a.str("unit", "word"),
+            !a.has("keep-case"),
+            a.num("stimulation", 1.0),
+        )?,
+    };
+    let data: Vec<String> = match a.get("data") {
+        Some(d) => d.split(',').map(String::from).collect(),
+        None => vec!["data/corpus".to_string()],
+    };
+    let held_out = a.num("held-out", 10.0) as usize;
+    match action {
+        "train" => {
+            let (_, test) = m.train_paths(&data, held_out)?;
+            let st = m.stats();
+            let what = if m.unit == "base64" {
+                "base64 letters".to_string()
+            } else {
+                format!("{}s", m.unit)
+            };
+            println!(
+                "{}-grams of {what}: {} tokens, {} distinct, {} n-grams in {} contexts, from {} sources",
+                m.order,
+                m.clock,
+                m.vocab.len() - 3,
+                m.n_grams(),
+                m.grams.len(),
+                st.num("sources", 0.0)
+            );
+            if !test.is_empty() {
+                let ev = m.evaluate(&test, 2000);
+                println!(
+                    "held out ({} lines, {} tokens): perplexity {}, {} bits a token, next-token accuracy {}, top 5 {}",
+                    test.len(),
+                    ev.tokens,
+                    fmt_opt(ev.perplexity, 2),
+                    fmt_opt(ev.bits, 3),
+                    fmt_opt(ev.accuracy, 3),
+                    fmt_opt(ev.top5, 3)
+                );
+            }
+        }
+        "autotrain" => {
+            let client = a.has("ollama").then(|| Ollama::new(a.get("url"), a.get("model")));
+            let o = autotrain::Options {
+                data: data.clone(),
+                held_out,
+                topics: a
+                    .get("topics")
+                    .map(|t| {
+                        t.split(',')
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                rounds: a.num("rounds", 3.0) as usize,
+                lines: a.num("lines", 20.0) as usize,
+                continuations: a.num("continuations", 20.0) as usize,
+                judge: a.num("judge", 10.0) as usize,
+                patience: a.num("patience", 2.0) as usize,
+                keep: a.get("keep").map(String::from),
+                save: a.get("save").map(String::from),
+                seed: a.num("seed", 1.0) as u64,
+                ..autotrain::Options::default()
+            };
+            autotrain::autotrain(&mut m, &o, client.as_ref(), &mut |line| println!("{line}"))?;
+        }
+        "predict" => {
+            let texts = if texts.is_empty() { vec![String::new()] } else { texts };
+            for text in &texts {
+                if text.is_empty() {
+                    println!("at the start:");
+                } else {
+                    println!("after {}:", py_repr(text));
+                }
+                for (tok, p) in m.predict(text, a.num("k", 10.0) as usize) {
+                    println!("  {tok:<16} {p:.6}");
+                }
+            }
+        }
+        "generate" => {
+            let texts = if texts.is_empty() { vec![String::new()] } else { texts };
+            let mut rng = Rng::new(a.num("seed", 1.0) as u64);
+            if let Some(out) = a.get("out") {
+                if m.unit != "base64" {
+                    return Err("--out writes bytes: it needs a base64 model (--unit base64)".to_string());
+                }
+                let start: Vec<u8> = match a.get("prefix-from") {
+                    Some(f) => {
+                        let mut d = std::fs::read(f).map_err(|e| format!("{f}: {e}"))?;
+                        d.truncate(a.num("prefix-bytes", 64.0) as usize);
+                        d
+                    }
+                    None => texts[0].as_bytes().to_vec(),
+                };
+                let bytes = m.generate_bytes(
+                    &start,
+                    a.num("max-tokens", 30.0) as usize,
+                    a.num("temperature", 0.0),
+                    &mut rng,
+                )?;
+                std::fs::write(out, &bytes).map_err(|e| format!("{out}: {e}"))?;
+                println!("wrote {} bytes to {out}", bytes.len());
+                return Ok(());
+            }
+            for text in &texts {
+                if m.unit == "base64" {
+                    println!(
+                        "{}",
+                        m.complete(
+                            text,
+                            a.num("max-tokens", 30.0) as usize,
+                            a.num("temperature", 0.0),
+                            &mut rng
+                        )
+                    );
+                    continue;
+                }
+                let toks = m.generate(
+                    text,
+                    a.num("max-tokens", 30.0) as usize,
+                    a.num("temperature", 0.0),
+                    &mut rng,
+                );
+                let sep = if !text.is_empty() && !toks.is_empty() && m.unit == "word" {
+                    " "
+                } else {
+                    ""
+                };
+                println!("{text}{sep}{}", detokenize(&toks, &m.unit));
+            }
+        }
+        "evaluate" => {
+            let mut test = Vec::new();
+            for (_, lines) in corpus_sequences(&data, &m.unit.clone(), m.lower)? {
+                if held_out > 0 {
+                    test.extend(split_lines(&lines, held_out).1);
+                } else {
+                    test.extend(lines);
+                }
+            }
+            let ev = m.evaluate(&test, 2000);
+            println!(
+                "{} lines, {} tokens: perplexity {}, bits {}, accuracy {}, top 5 {}",
+                test.len(),
+                ev.tokens,
+                fmt_opt(ev.perplexity, 6),
+                fmt_opt(ev.bits, 6),
+                fmt_opt(ev.accuracy, 6),
+                fmt_opt(ev.top5, 6)
+            );
+        }
+        "stats" => println!("{}", m.stats().pretty(1)),
+        "credit" => {
+            let amount = a.num("amount", 1.0);
+            for text in &texts {
+                println!(
+                    "credited {} edges of {} with {}",
+                    m.credit_text(text, amount),
+                    py_repr(text),
+                    py_signed(amount)
+                );
+            }
+        }
+        other => {
+            return Err(format!(
+                "ngram {other:?}: train, autotrain, predict, generate, evaluate, stats, credit or ollama"
+            ))
+        }
+    }
+    if matches!(action, "train" | "credit") {
+        if let Some(path) = a.get("save") {
+            m.save(path)?;
+            eprintln!("saved {path}");
+        }
+    }
+    Ok(())
+}
+
+/// A string the way Python's `repr` writes a simple one.
+fn py_repr(s: &str) -> String {
+    if s.contains('\'') && !s.contains('"') {
+        format!("\"{s}\"")
+    } else {
+        format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+    }
+}
+
+/// A float the way Python's `{:+}` writes it.
+fn py_signed(x: f64) -> String {
+    let body = if x == x.trunc() && x.abs() < 1e16 {
+        format!("{:.1}", x.abs())
+    } else {
+        format!("{}", x.abs())
+    };
+    format!("{}{body}", if x < 0.0 { "-" } else { "+" })
+}
+
+fn base64_cmd(a: &Args) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+    let action = a.positional.first().map(String::as_str).unwrap_or("encode");
+    let inputs: Vec<String> = a.positional.iter().skip(1).cloned().collect();
+    let inputs = if inputs.is_empty() {
+        vec!["-".to_string()]
+    } else {
+        inputs
+    };
+    for item in &inputs {
+        let data = if item == "-" {
+            let mut d = Vec::new();
+            std::io::stdin().read_to_end(&mut d).map_err(|e| e.to_string())?;
+            d
+        } else if std::path::Path::new(item).is_file() {
+            std::fs::read(item).map_err(|e| format!("{item}: {e}"))?
+        } else {
+            item.as_bytes().to_vec()
+        };
+        match action {
+            "encode" => {
+                let text = b64::encode(&data);
+                match a.get("out") {
+                    Some(out) => {
+                        std::fs::write(out, format!("{text}\n")).map_err(|e| format!("{out}: {e}"))?;
+                        eprintln!("wrote {} letters ({} bytes encoded) to {out}", text.len(), data.len());
+                    }
+                    None => println!("{text}"),
+                }
+            }
+            "decode" => {
+                let raw = b64::decode(&String::from_utf8_lossy(&data));
+                match a.get("out") {
+                    Some(out) => {
+                        std::fs::write(out, &raw).map_err(|e| format!("{out}: {e}"))?;
+                        eprintln!("wrote {} bytes to {out}", raw.len());
+                    }
+                    None => {
+                        let mut text = String::from_utf8_lossy(&raw).into_owned();
+                        if !raw.ends_with(b"\n") {
+                            text.push('\n');
+                        }
+                        std::io::stdout()
+                            .write_all(text.as_bytes())
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+            other => return Err(format!("base64 {other:?}: encode or decode")),
         }
     }
     Ok(())

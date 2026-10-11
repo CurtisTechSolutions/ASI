@@ -15,6 +15,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+sys.path.insert(0, HERE)
 
 from latticefsm import (  # noqa: E402
     COEFFICIENT_LIMIT, DEFAULT_ALPHABET, DEFAULT_STATES, FEATURES, LANGUAGES, WIDTH_MAX, WIDTH_MIN, WIDTH_REST, Edge,
@@ -987,6 +988,194 @@ class TestMedia(unittest.TestCase):
             self.assertIn("64 symbols", cli("encode", os.path.join(d, "img000.ppm"), "--arch", "image>3"))
 
 
+class TestNGram(unittest.TestCase):
+    """Predicting the next thing: tokens, Kneser-Ney, the adaptive edges, the file."""
+
+    def model(self, order=3, unit="word"):
+        from latticefsm.ngram import NGram
+        m = NGram(order, unit)
+        m.train_lines(["the cat sat on the mat", "the cat ate the fish", "a dog sat on the log",
+                       "the dog ate the bone ."])
+        return m
+
+    def test_tokens(self):
+        from latticefsm.ngram import detokenize, tokenize
+        self.assertEqual(tokenize("Don't stop -- it's 3.5, OK?"), ["don't", "stop", "-", "-", "it's", "3", ".", "5",
+                                                                  ",", "ok", "?"])
+        self.assertEqual(tokenize("Hi you", "char"), list("hi_you"))
+        self.assertEqual(detokenize(["hello", ",", "world", "!"]), "hello, world!")
+        self.assertEqual(detokenize(list("hi_you"), "char"), "hi you")
+        self.assertEqual(tokenize("cats", "sound"), ["K", "AE", "T", "S"])
+        self.assertEqual(detokenize(["K", "AE", "T", "S"], "sound"), "cats")
+
+    def test_every_distribution_sums_to_one_and_is_kneser_ney(self):
+        m = self.model()
+        for text in ("", "the", "the cat", "sat on", "never seen words"):
+            ctx = m.context(m.tokens(text))
+            d = m.distribution(ctx)
+            self.assertAlmostEqual(sum(d), 1.0, places=12)
+            self.assertEqual(d[0], 0.0)
+            self.assertEqual(d, [m.prob(ctx, w) for w in range(len(d))])
+        self.assertEqual(m.predict("the cat", 1)[0][0], "sat")
+        self.assertEqual(m.predict("sat on the", 2)[0][0], "mat")
+        # an unknown context falls to the continuation counts: what follows the most different contexts
+        self.assertIn(m.predict(["zzz", "zzz"], 1)[0][0], ("the", "</s>"))
+        self.assertGreater(dict(m.predict(["zzz", "zzz"], 20))["the"], dict(m.predict(["zzz", "zzz"], 20))["cat"])
+
+    def test_more_order_more_context(self):
+        from latticefsm.ngram import corpus_lines, split_lines
+        lines = corpus_lines(["data/corpus/sentences.txt"])[0][1]
+        train, test = split_lines(lines, 5)
+        ppl = {}
+        for n in (1, 2, 3):
+            m = self.model(n)
+            m.train_lines(train)
+            ppl[n] = m.evaluate(test)["perplexity"]
+        self.assertLess(ppl[2], ppl[1])
+        self.assertLess(ppl[3], ppl[1])
+
+    def test_credit_widens_and_narrows_what_is_predicted(self):
+        m = self.model()
+        ctx = m.context(m.tokens("the cat"))
+        before = m.prob(ctx, m.index["ate"])
+        m.credit_text("the cat ate", 3)
+        self.assertGreater(m.prob(ctx, m.index["ate"]), before)
+        self.assertAlmostEqual(sum(m.distribution(ctx)), 1.0, places=12)
+        m.credit_text("the cat ate", -10)
+        self.assertLess(m.prob(ctx, m.index["ate"]), before)
+        m.stimulation = 0.0
+        self.assertEqual(m.prob(ctx, m.index["ate"]), before)
+
+    def test_generation_and_the_file(self):
+        from latticefsm.ngram import load_ngram
+        m = self.model()
+        self.assertEqual(m.complete("the dog", 10), "ate the fish")  # a tie goes to the token seen first
+        m.credit_text("a dog sat", 1)
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("m.json", "m.json.gz"):
+                path = os.path.join(d, name)
+                m.save(path)
+                back = load_ngram(path)
+                self.assertEqual(back.to_dict(), m.to_dict())
+                self.assertEqual(back.predict("the", 5), m.predict("the", 5))
+
+    def test_a_corpus_directory(self):
+        from latticefsm.ngram import NGram, corpus_lines
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "a.txt"), "w") as f:
+                f.write("one two three\n\nfour five\n")
+            with open(os.path.join(d, "b.jsonl"), "w") as f:
+                f.write(json.dumps({"text": "six seven"}) + "\n" + json.dumps("eight") + "\n")
+            with open(os.path.join(d, "README.md"), "w") as f:
+                f.write("not this\n")
+            got = corpus_lines([d])
+            self.assertEqual([lines for _, lines in got], [["one two three", "four five"], ["six seven", "eight"]])
+            m = NGram(2)
+            n, held = m.train_paths([d], held_out=2)
+            self.assertEqual(held, [["four", "five"], ["eight"]])
+
+
+class TestAutotrain(unittest.TestCase):
+    """The corpus, then Ollama: sentences, continuations and a judge's credit, measured every round."""
+
+    def test_with_a_stand_in_ollama(self):
+        from fake_ollama import FakeOllama
+        from latticefsm.autotrain import Ollama, autotrain, parse_judgements, parse_lines
+        from latticefsm.ngram import NGram, load_ngram
+        self.assertEqual(parse_lines("Here they are:\n1. One.\n- Two\n\n3) \"Three\""), ["One.", "Two", "Three"])
+        self.assertEqual(parse_judgements('ok: [{"id": 2, "ok": false}, {"id": 1, "ok": true}]', 3), [True, False, None])
+        self.assertEqual(parse_judgements("1: yes\n2. no", 2), [True, False])
+        fake = FakeOllama()
+        try:
+            client = Ollama(fake.url, "fake-model")
+            self.assertEqual(client.models(), ["fake-model:latest"])
+            with tempfile.TemporaryDirectory() as d:
+                keep, save = os.path.join(d, "ollama.txt"), os.path.join(d, "m.json")
+                m = NGram(3)
+                logged = []
+                rec = autotrain(m, ["data/corpus/sentences.txt"], held_out=5, ollama=client, rounds=2, lines=4,
+                                continuations=3, judge=4, topics=["gardens"], patience=5, keep=keep, save=save,
+                                log=logged.append)
+                self.assertEqual([r["round"] for r in rec], [0, 1, 2])
+                self.assertEqual(rec[1]["ollama_lines"], 8)
+                self.assertEqual(rec[1]["continuations"], 3)
+                self.assertTrue(0 < rec[1]["judged"] <= 4)
+                self.assertEqual(rec[1]["approved"], (rec[1]["judged"] + 1) // 2)
+                self.assertGreater(rec[2]["tokens"], rec[0]["tokens"])
+                self.assertGreater(rec[1]["credited_edges"], 0)
+                self.assertIn("gardens", m.vocab)
+                self.assertEqual(len(fake.prompts), 2 * (2 + 3 + 1))
+                self.assertIn("English sentences about gardens", fake.prompts[0])
+                with open(keep) as f:
+                    self.assertEqual(len(f.read().splitlines()), 2 * (8 + 3))
+                self.assertEqual(load_ngram(save).history, m.history)
+                self.assertEqual(len(logged), 3)
+        finally:
+            fake.close()
+        with self.assertRaises(Exception):
+            Ollama("http://127.0.0.1:9", timeout=2).models()
+
+
+class TestBase64(unittest.TestCase):
+    """Anything as base64 letters, and an N-gram model that learns them."""
+
+    def test_the_coding(self):
+        import base64 as std
+        from latticefsm import b64
+        rng = random.Random(5)
+        for n in range(0, 50):
+            data = bytes(rng.randrange(256) for _ in range(n))
+            self.assertEqual(b64.encode(data), std.b64encode(data).decode())
+            self.assertEqual(b64.decode(b64.encode(data)), data)
+            for k in range(n + 1):
+                self.assertTrue(b64.encode(data).startswith(b64.encode_prefix(data[:k])))
+        self.assertEqual(b64.encode_prefix(b"Hell"), "SGVsb")
+        self.assertEqual(b64.decode("SGV sbG8 !\n"), b"Hello")
+        self.assertEqual(b64.decode("SGVsbA"), b"Hell")
+
+    def test_files_are_cut_at_whole_groups(self):
+        from latticefsm import b64
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "x.bin"), "wb") as f:
+                f.write(bytes(range(256)) * 2)
+            with open(os.path.join(d, ".hidden"), "w") as f:
+                f.write("no")
+            (path, seqs), = b64.file_sequences([d])
+            self.assertEqual([len(q) for q in seqs[:-1]], [76] * (len(seqs) - 1))
+            self.assertEqual(b64.decode("".join(seqs)), bytes(range(256)) * 2)
+
+    def test_a_model_of_any_file(self):
+        from latticefsm.ngram import NGram, load_ngram
+        with tempfile.TemporaryDirectory() as d:
+            f = media_files(d)
+            m = NGram(6, "base64")
+            n, held = m.train_paths([f["clip"], f["rgb.png"], "data/corpus/sentences.txt"], held_out=10)
+            self.assertLessEqual(len(m.vocab) - 3, 65)
+            ev = m.evaluate(held)
+            self.assertLess(ev["perplexity"], 30)
+            out = m.generate_bytes(b"P5\n32 32\n255\n", max_tokens=200)
+            self.assertTrue(out.startswith(b"P5\n32 32\n25"))
+            self.assertGreater(len(out), 100)
+            self.assertTrue(m.complete("the cat", 40).startswith("the ca"))
+            path = os.path.join(d, "b.json.gz")
+            m.save(path)
+            self.assertEqual(load_ngram(path).predict("the", 3), m.predict("the", 3))
+
+    def test_the_command_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "a.bin")
+            with open(src, "wb") as f:
+                f.write(bytes(range(200)))
+            run = lambda *a: subprocess.run([sys.executable, "-m", "latticefsm", *a], cwd=ROOT, capture_output=True,
+                                            text=True, check=True)
+            run("base64", "encode", src, "--out", os.path.join(d, "a.b64"))
+            run("base64", "decode", os.path.join(d, "a.b64"), "--out", os.path.join(d, "b.bin"))
+            with open(os.path.join(d, "b.bin"), "rb") as f:
+                self.assertEqual(f.read(), bytes(range(200)))
+            self.assertEqual(run("base64", "encode", "Hi").stdout, "SGk=\n")
+            self.assertEqual(run("base64", "decode", "SGk=").stdout, "Hi\n")
+
+
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
 class TestRustParity(unittest.TestCase):
     """The two ports agree on everything that does not draw: the stimulation and adaptation records, number for
@@ -1075,6 +1264,65 @@ class TestRustMediaParity(unittest.TestCase):
                     cases.append(("video>3", mp4))
             for arch, x in cases:
                 self.assertEqual(self.encode(py, arch, x), self.encode(rust, arch, x), (arch, x))
+
+
+@unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+class TestRustNGramParity(unittest.TestCase):
+    """The N-gram model is the same in both ports: a model written by either predicts, writes and measures the same
+    in the other, for every unit; base64 encodes alike; autotrain asks Ollama the same questions and records the same
+    rounds."""
+
+    def cli(self, port, *args, env=None):
+        cmd = [sys.executable, "-m", "latticefsm"] if port == "py" else [RUST]
+        return subprocess.run([*cmd, *args], cwd=ROOT, check=True, capture_output=True, text=True, env=env).stdout
+
+    def test_models_cross_both_ways(self):
+        with tempfile.TemporaryDirectory() as d:
+            for unit, order in (("word", 3), ("char", 5), ("sound", 3), ("base64", 8)):
+                data = "data/corpus/sentences.txt" if unit != "word" else "data/corpus"
+                outs = {}
+                for writer in ("py", "rs"):
+                    path = os.path.join(d, f"{unit}-{writer}.json")
+                    self.cli(writer, "ngram", "train", "--unit", unit, "--order", str(order), "--data", data,
+                             "--save", path)
+                    for reader in ("py", "rs"):
+                        outs[(writer, reader)] = (
+                            self.cli(reader, "ngram", "predict", "the cat", "", "--load", path, "-k", "6"),
+                            self.cli(reader, "ngram", "generate", "the", "a dog", "--load", path, "--max-tokens", "40"),
+                            self.cli(reader, "ngram", "evaluate", "--load", path, "--data", data))
+                self.assertEqual(len(set(outs.values())), 1, unit)
+
+    def test_base64_and_bytes(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = media_files(d)
+            self.assertEqual(self.cli("py", "base64", "encode", f["rgb.png"]), self.cli("rs", "base64", "encode", f["rgb.png"]))
+            outs = set()
+            for writer in ("py", "rs"):
+                path = os.path.join(d, f"m-{writer}.json")
+                self.cli(writer, "ngram", "train", "--unit", "base64", "--order", "6", "--data", f["clip"], "--save", path)
+                for reader in ("py", "rs"):
+                    out = os.path.join(d, f"{writer}{reader}.bin")
+                    self.cli(reader, "ngram", "generate", "--load", path, "--out", out, "--prefix-from",
+                             os.path.join(f["clip"], "frame00.ppm"), "--prefix-bytes", "15", "--max-tokens", "300")
+                    with open(out, "rb") as fh:
+                        outs.add(fh.read())
+            self.assertEqual(len(outs), 1)
+
+    def test_autotrain_asks_and_records_the_same(self):
+        from fake_ollama import FakeOllama
+        results = {}
+        for port in ("py", "rs"):
+            fake = FakeOllama()
+            try:
+                env = dict(os.environ, OLLAMA_HOST=fake.url)
+                log = self.cli(port, "ngram", "autotrain", "--ollama", "--model", "fake-model", "--data",
+                               "data/corpus/sentences.txt", "--held-out", "5", "--rounds", "2", "--lines", "4",
+                               "--continuations", "3", "--judge", "4", "--patience", "9", env=env)
+                results[port] = (log, list(fake.prompts))
+            finally:
+                fake.close()
+        self.assertEqual(results["py"], results["rs"])
+        self.assertIn("round 2:", results["py"][0])
 
 
 class TestRustCompressionParity(unittest.TestCase):

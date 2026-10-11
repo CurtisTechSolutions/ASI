@@ -1,0 +1,800 @@
+The brain is a directed cyclic graph, and the loops are the point
+Mason Curtis — Curtis Tech Solutions
+Working paper · September 2026
+I originally proposed that the brain is a directed acyclic graph. I was wrong.
+The brain is a directed cyclic graph, and the cycles are not damage to be
+routed around — they are what makes the structure finite, what makes
+generalisation free, and what creates the need for a supervisory level at all.
+A cycle is repetition stored once. A graph with a loop in it represents an
+infinite family of sequences in a fixed amount of space; the acyclic version of
+the same data grows without bound. That is the benefit. The cost is that a
+cyclic system can fail to halt, has no layer order, cannot use negative costs,
+and — at the level of a mind — can ruminate.
+The resolution is the part of my original note that needs the most unpacking:
+when we encounter a cycle, we use metacognition or another part of the brain
+instead. This paper makes that precise. A system inside a loop has, by
+definition, no information inside the loop that tells it to leave — re-asking
+the same question from the same place only returns the same answer. The exit
+must come from outside, and there are exactly three places it can come from: a
+clock, a monitor, or an inversion. All three are implemented in RadixCyclicNN/
+and I walk through each one in the code, including the piece that notices a loop
+from the shape of its own output, backs up to the point the walk went round, and
+searches again from past it — which the implementation calls, without any
+prompting from this paper, "the metacognition of a turn".
+I originally proposed that the brain is a directed acyclic graph. However, I
+believe the brain is actually a directed cyclic graph. Where cycles are a
+feature, not a bug. When we encounter a cycle, we use metacognition or another
+part of the brain instead.
+Everything below is what I meant.
+The DAG was a convenience, and I should be honest that it was a convenience
+borrowed from engineering rather than a conclusion drawn from the brain.
+A directed acyclic graph is an extremely comfortable object. It has a
+topological order, so you can evaluate it in one pass. It terminates for free.
+It has clean layers. Back-propagation is defined on it without any special
+handling. Every mainstream network architecture is a DAG for exactly these
+reasons — not because anyone examined a brain and found one.
+Then look at what a brain actually is. Feedback projections in cortex are not a
+minor correction term; descending and lateral connectivity is abundant, in many
+areas outnumbering the ascending fibres. Cortex and thalamus are wired in closed
+loops. Cortex, basal ganglia and thalamus form closed loops. Local circuits are
+densely recurrent. There is no direction you can point in a brain and say
+"information goes this way and does not come back".
+A model that forbids cycles is not a simplification of that. It is a different
+object. And the specific things it cannot do are not edge cases:
+That last row is the one that changed my mind. A DAG cannot ruminate, and
+therefore a DAG has nothing for metacognition to supervise. If you build a mind
+that cannot possibly loop, you have also built a mind that has no use for
+self-monitoring. But self-monitoring is obviously there in a human, and it is
+obviously about something. It is about loops.
+So the cycles are not a defect I am tolerating. They are the thing the higher
+Here is the whole thesis in four characters.
+RadixCyclicNN encodes text as a sliding window of three characters. The string
+"aaaa" becomes the trigrams ["aaa", "aaa"] — the same trigram twice. Since a
+trigram lives in exactly one node, the second occurrence does not make a new
+node. It makes an edge from the node back to itself:
+From RadixCyclicNN/tests/test_graph.py:
+Read the last line carefully. The graph was shown "aaaa" and it represents
+"aaaaaaa". It was never shown seven a's. It does not contain seven a's
+anywhere. It contains one node and one loop, and the loop is the statement
+That is generalisation, and it did not come from a training procedure, a
+regulariser, or a prior. It came from the structure. The moment you allow an
+edge to point backwards, seeing a thing twice becomes a claim about seeing it
+"abcabc" gives the trigrams abc, bca, cab, abc. After path compression the
+Two nodes, one 2-cycle, and the structure covers "abcabc", "abcabcabc", and
+every longer repetition of the same motif.
+This is the part that makes it more than a nice trick.
+To represent n repeated a's in an acyclic graph of trigram nodes, you need
+n − 2 distinct nodes, because every node can be entered at most once on the
+path and each one emits one character. The structure grows linearly with how
+long the repetition happens to be.
+In a cyclic graph you need one node, regardless of n.
+The last row is the important one. A finite acyclic graph cannot represent an
+unbounded language. A finite cyclic graph can, and it is the loop that does it.
+This is the same reason a regular expression with a Kleene star describes
+infinitely many strings with a finite pattern, and the same reason a for loop
+is shorter than the code it replaces. A cycle is a loop in the literal
+programming sense: repetition expressed once.
+The metric is in the codebase as compression_ratio() — trigrams known divided
+by nodes alive. For "abcabc" it is 3 / 2 = 1.5: three distinct trigrams held
+in two nodes, and the ratio is above 1 precisely because of the cycle. Every
+loop pushes that number up, and the ratio is high exactly when the data is
+repetitive, which is to say, exactly when there is structure to find.
+I am not going to claim this is free either. Four things break.
+1. Termination is no longer free. A walk over a cyclic graph can go round
+forever. In a DAG, "keep going until there is nowhere to go" is a complete
+algorithm. In a cyclic graph it is an infinite loop.
+2. There is no layer order. No topological sort exists, so "evaluate layer
+1, then layer 2" is undefined. Back-propagation as normally written depends on
+that order, which is why recurrent networks have to be unrolled in time before
+they can be trained at all.
+3. Negative costs become ill-posed. In a DAG you can happily give an edge a
+negative cost — there is no way to exploit it. The instant a cycle exists, a
+negative cycle means the cheapest path is −∞: go round forever and keep
+collecting. Shortest-path search over a cyclic graph requires non-negative
+This is why the cost function in search.py is what it is:
+P is a probability, so −log P ≥ 0, and the step penalty only adds. It is not
+a coincidence that the cost is non-negative by construction, and it is not a
+stylistic preference for log-probabilities. The decision to allow cycles is
+what forces the cost function to be non-negative. The structure dictated the
+4. At the level of a mind, a cycle is rumination. The same thought, again,
+with no new information and no exit. This is not a metaphor for the engineering
+problem — it is the same problem, in the same graph, at a different scale.
+Here is the argument that organises everything else.
+A system traversing a cycle cannot detect the cycle from inside it.
+Consider a walker at node A in a loop A → B → C → A. At A, the walker sees
+A's state and A's outgoing edges. That is exactly what it saw the first
+time. Nothing about the local state says "you have been here before" — that is
+precisely what it means for the state to have returned. If the walker's
+behaviour is a function of the current node, its behaviour on the second visit
+is identical to its behaviour on the first, and therefore so is the third, and
+To get out, something must differ between visit one and visit two. That
+something is by definition not part of the cycle. There are exactly three
+kinds of thing it can be:
+That table is the expansion of "we use metacognition or another part of the
+brain instead". Each row is a different part of the brain, and each is
+The cleanest exit, and the one that runs on every prediction.
+In search.py, the search state is not a node. It is a pair:
+Moving over an edge p → c emits len(label_c) − 2 characters, and
+chars_emitted never decreases. So even though the graph is cyclic, the
+search space is acyclic — you can revisit node A, but never in the same
+state, because you have emitted more characters getting back there.
+This is worth stating as a principle:
+A cycle in the graph is not a cycle in the search, as long as every
+traversal consumes something that cannot be replenished.
+Which is the formal version of a fact about thinking: you can have the same
+thought twice, but not at the same moment. Time has passed, and the context is
+different, and that is what stops the second pass from being the first.
+There is a second clock behind the first: max_expansions = 200_000. Even with
+no character cap, the search gives up after a fixed budget and returns the best
+partial answer it found rather than raising. Two guards, and they are the two
+guards a brain has — time and energy. Neither one reasons about loops. They
+do not have to. They just run out, and running out is sufficient.
+Note what the fallback does: it returns something. The design never says "I
+detected a loop, I have no answer". It says "here is the furthest I got". A
+supervisory level that only ever reports failure is not much of a supervisor.
+dialogue.py is the piece of the system that most directly implements the
+original note, and it has grown into the most complete answer to it. The model
+talks to itself: two voices take turns, and every reply is the prediction search
+run from the tail of what was just said.
+The failure mode is obvious the moment you build it. The most likely
+continuation of what was just said is what was just said. Unsupervised, two
+copies of a model settle into a loop within a handful of turns, agreeing with
+each other forever. This is a cycle — not in the graph this time, but in the
+conversation, one level up. And it shows up at two scales at once, which is why
+Between turns, Heard decides what counts as a duplicate: an utterance was
+said before, or its reply adds what an earlier reply added (the same
+continuation reached from a different context), or it echoes a line already
+spoken. A longer utterance that happens to contain an earlier one is explicitly
+not a duplicate — it says more than was heard.
+Inside a single utterance, stutter() catches the loop directly:
+That docstring is the thesis of this paper stated from the other direction. A
+stutter is not a language defect the system happens to produce; it is what a
+cycle looks like from the outside. The walk went round, and the output says the
+same words twice because the graph said the same nodes twice.
+Note the discrimination, which is the hard part. Only an immediate repetition
+counts. "Where there is a will there is a way" repeats its words and means
+something by it; the monitor leaves it alone. A monitor that flagged all
+repetition would be useless, because repetition is also how language emphasises,
+balances and rhymes. The monitor has to distinguish going round from coming
+back, and it does that by adjacency.
+Each step is a different escape, ordered cheapest to most drastic, and each one
+is a different part of the system taking over from the one that failed.
+Step 1 is the monitor proper, and the separation is the whole idea. The
+generator's job is to produce the most likely continuation, and producing a
+repeat is not a bug in it — it is the generator working correctly on a graph
+with a loop in it. A separate thing, holding a record of what has been said,
+rejects the output. The generator cannot see its own loop, so something outside
+Step 2 is re-framing: same question, less context. A narrower prompt has one
+answer; a wider one has several.
+Step 3 is the other part of the brain. Give up on continuing and start
+somewhere else entirely — changing the subject, which in cognition is what you
+do after an hour of staring at a problem when you get up to make coffee.
+Step 4 is honest failure. It speaks, marks the turn repeat=True, and then
+ends the conversation rather than saying the same duplicate again — because
+saying it twice is the loop, one level higher again.
+Step 5 is treated in §5.3: the utterances it could not avoid are collected
+and punished, so the loop is removed from the model rather than merely dodged.
+The newest piece is the one I find most convincing, because it is the
+impossibility argument of §5 turned into an algorithm.
+Dropping a stuttering continuation throws away everything it got right. The
+words before the walk went round were said once and were the most likely thing
+to say; only the tail is the loop. So a voice that catches itself repeating does
+not just take the next answer down the list. It backs up:
+Notice. stutter_at(text) returns the character index where the
+utterance started saying itself again — "say morning morning" cuts after
+"say morning ". That index is where the walk went round.
+Back up to exactly there and keep it. Everything before the cut was said
+once and is worth keeping.
+Explore from the cut. Re-run the search with that longer prefix.
+Step 3 is the crucial one, and the docstring says why better than I can:
+a longer prefix than the turn started with, which forces the walk to leave
+the loop at exactly the point it went round — asking the same question again
+from the context would only rank the same answers.
+That is §5 exactly. Asking the same question again from the same context would
+only rank the same answers. You cannot escape a cycle from inside it, because
+inside it nothing has changed and the same query returns the same ranking
+forever. The escape works only because the state is different — the prefix now
+runs past the point where the loop closed, so the loop is no longer reachable
+from where the search starts.
+If that finds nothing, it backs up one more word and looks wider —
+k (step + 2) candidates, so the further back it goes the more it weighs —
+up to explore times (default 3). Cheap and narrow first, expensive and broad
+only when the cheap move failed.
+And it is scoped. keep is the context picked up from the other voice, and it
+a voice rethinks what it said, never what it heard.
+A repeat inside the other voice's words is recorded and left alone. The
+monitor's authority stops at its own output — which is both good manners and
+good engineering, since the other voice's text is not this one's to explain.
+The whole episode is recorded in an object whose docstring needs no gloss from
+noticed, cut, steps, explored, found. The system does not merely
+escape its loops — it keeps a record of having noticed, of how far it backed up,
+of how hard it looked, and of whether it got anywhere. A turn that never had to
+think twice has no record at all, which is exactly right: metacognition is not
+running all the time, it engages when the base level gets into trouble.
+Nothing in any of this inspects the graph for cycles. There is no loop detector,
+no visited set, no tortoise and hare. The monitor watches outputs and
+notices that they repeat — which is precisely what metacognition has access to.
+You do not perceive your own synapses. You notice that you have had this thought
+The third exit is the one I find most interesting, because it is not a search
+If a model keeps producing the same wrong output, no amount of searching within
+its current landscape helps — the output is the minimum, that is why it keeps
+coming back. So invert the landscape. 2NRL: train on the failures, invert
+the network so that everything likely becomes unlikely, then fine-tune on the
+correct data at a smaller learning rate. invert() negates every edge weight and
+every unit's activation (amplitude and offset together); what was an attractor
+procedure has its own paper (2NRL.md); what concerns this one is what the
+cyclic structure does to it.
+This works because of a property of the sine activation — the sign of the
+amplitude a is the sign of the unit, so negating a unit is a parameter change
+rather than a structural one. (That is treated properly in the companion paper,
+SineWaveActivationFunction.md.)
+The targeted version is where cycles bite back, and the mathematics here is
+An edge score is a product of two activations:
+To flip the sign of that score by touching nodes, you need exactly one of the
+two endpoints to flip. So to flip every edge along a path, you flip every
+Flipping everything achieves nothing, because each edge gets two sign changes
+and they cancel. The naive move is precisely the useless one. You have to
+And now the cycles. A path is always two-colourable. A graph with a cycle in
+it may not be. A graph is two-colourable if and only if it contains no cycle of
+odd length — and a walk through a cyclic graph can absolutely close an odd loop.
+When it does, the conflict is unresolvable:
+There is no assignment that flips all three. The obstruction is exact, not
+The smallest odd cycle is the self-loop, and it is the extreme case:
+f_p² is non-negative no matter what f_p is, so flipping the node changes a
+self-loop's score by exactly nothing. The sign of a self-loop is the sign of
+its weight alone. A self-loop is sign-locked against node inversion.
+This is why the implementation says "the parity that covers the most edges, a
+shared node takes the largest amount" rather than "the parity that covers every
+edge". It is not sloppiness. It is the only thing that can be said in a graph
+that has cycles in it, and it is a clean example of the general shape of this
+research: allowing cycles made an operation that is exact on a DAG into one
+that is best-effort, and the design absorbs that rather than banning the
+For a self-loop the fix is the other knob: change w. Which is the right
+answer anyway — a self-loop means "this repeats", and the thing you want to
+adjust about a repetition is how attractive repeating is, not which direction
+The inversion exit also runs on a much slower timescale, and this is step 5 of
+When every candidate is a duplicate, the voice says the best one anyway and
+flags the turn. repeats(turns) then collects those flagged utterances — the
+duplicates the search could not avoid — and they become the bad half of a 2NRL
+negative phase: the CLI prints the radixnet feedback --bad-text … that
+punishes them, and the Converse tab's "Punish duplicates" marks them 👎 so the
+next training run teaches the model out of them.
+That closes a loop between the timescales, and it is worth being explicit about
+The first three exits route around a loop. Only the last one removes it. A
+loop the search could not escape is evidence about the model, and the system
+treats it as evidence: the thing it could not stop saying becomes the thing it
+This is the difference between coping and learning, and a mind needs both. You
+can notice you are ruminating and change the subject — that is the monitor, and
+it works this afternoon. Or the fact that you kept ruminating can change what is
+attractive to you in the first place, which is slower and is the only one of the
+two that means you do not have to keep noticing.
+Now the claim I actually care about.
+A DAG mind needs no metacognition. Every computation terminates on its own;
+there is no state it can fail to leave; there is nothing for a supervisor to
+supervise. Add a monitoring level to a DAG and it has no job.
+A cyclic mind needs one. And here is the part that makes cycles a feature
+rather than a cost paid for compression: the same property that makes the
+monitor necessary also makes it powerful.
+Because the base level can loop, it can also sustain. A loop held deliberately
+is working memory. A loop traversed cheaply is a habit. A loop with a counter is
+iteration. A loop through your own output is self-reflection. Every one of those
+is the thing the DAG could not do, and every one of them is the same structural
+fact as rumination. The failure mode and the capability are the identical
+mechanism, and which one you get depends entirely on whether something is
+That is what I meant by cycles being a feature. Not "loops are tolerable if you
+The loop is the capability. The monitor is what turns it from a trap into a
+tool. Neither exists without the other, and a mind built from a DAG has
+Metacognition is not a luxury layer bolted onto a working system. It is the
+other half of the design. The instant you let the graph point backwards, you
+have committed to building the thing that watches it, and you have also unlocked
+everything the backward edges can do.
+Concretely, the things I want the architecture to be capable of, all of which
+Working memory. Holding something available is a loop sustaining itself.
+There is no "hold" operation in a feedforward pass — the activation goes through
+and is gone. Persistence is recurrence.
+Skills and habits. A well-learned action is a path that is cheap to
+traverse, and a repeated action is a path you re-enter. Learning a skill is
+partly making a loop cheap; over-learning it is making the loop so cheap you
+enter it when you did not mean to.
+Counting and iteration. "Do this until X" is a cycle plus a monotone
+resource — precisely the (node, chars_emitted) construction from §5.1. Counting
+is not a separate faculty bolted on; it is what a loop plus a clock is.
+Self-reference. Thinking about your own thinking means the graph contains a
+path from a node back to itself. There is no acyclic encoding of that. If you
+want a system that can model itself, you have already chosen a cyclic graph
+whether or not you admit it.
+Learning from your own output. converse feeds the model's output back in
+as its input; Evolver makes the model's own samples into its next training
+data, with the worst of them becoming the garbage half of a 2NRL pass. Both are
+cycles at the system level, and both are how the thing improves without new
+external data. A DAG-shaped system has to be fed. A cyclic one can feed itself —
+which is, incidentally, the only version of "self-improving" that means
+These are the invariants the codebase actually enforces, and each one exists
+1. Never merge a self-loop. Path compression merges p → c into one node
+when the chain is unary, but the code excludes c == p:
+and the test asserts g.compress() == 0 for "aaaa". Merging a self-loop would
+destroy the statement "this repeats", which is the one thing the node is there
+to say. Compression is allowed to shorten a chain; it is never allowed to
+2. Structural edits must preserve the network function, cycle edges included.
+When two nodes merge, the merged node keeps the activation of whichever endpoint
+has the larger |f|, and the edges on the other side are rescaled by the ratio
+of the two activations so every edge score w · f_p · f_c is unchanged. The
+docstring is explicit that the cycle edge c → p, which becomes the self-loop
+p → p, is covered by the same rescale. If you touch the structure, check what
+it does to the loops — they are the cases that do not follow the general
+3. Costs must be non-negative. §4. Non-negotiable once cycles exist.
+4. Every search state must carry the monotone resource. Keying on node
+alone is an infinite loop; keying on (node, chars_emitted) is a finite search.
+This is the single most important line of the design.
+5. Every generator needs a stop condition that is not "nowhere left to go".
+In a cyclic graph there is always somewhere left to go. Stop on the resource, on
+the budget, or on the monitor — never on exhaustion.
+6. Monitors watch outputs, not structure. Do not write a cycle detector over
+the graph. Watch what comes out and notice repetition, the way dialogue.py
+does. It is cheaper, it catches loops that span levels the graph does not
+represent, and it is what a real supervisory system has access to.
+Falsifiable, in order of how much each would cost me:
+Prediction 1. Compression ratio rises with corpus repetitiveness, and the
+cyclic representation stays bounded on inputs where the acyclic one grows
+linearly. This one is nearly definitional and I would be surprised to be wrong.
+Prediction 2. Disabling the dialogue.py monitors (avoid_repeats=False,
+avoid_word_repeats=False, explore=0) collapses self-conversation into a
+fixed point within a small number of turns, and the number is small — single
+digits. If conversations stay varied without the monitors, then the generator is
+escaping its own loops somehow and my impossibility argument in §5 has a hole in
+Prediction 2a. Of the three, explore should matter most per unit of cost.
+Rejecting a stuttering candidate only moves down a ranking that was produced
+from the same context, so the runner-up is drawn from the same loop; backing up
+past the cut changes the query itself. Concretely: at explore = 0 the
+Rethink.found rate should be zero by construction, and turns that stutter
+should mostly resolve by changing the subject (fresh=True) rather than by
+continuing; at explore = 3 most should resolve by continuing. If backing up
+and simply taking the next candidate perform the same, then the state really was
+not what mattered and §5 is wrong about where the escape comes from.
+Prediction 3. Targeted inversion is measurably less effective on paths
+containing odd cycles than on simple paths, because the parity cover is
+incomplete (§5.3). This is the sharpest test: it is a specific, quantitative
+consequence of the odd-cycle obstruction, and it is a direct prediction of the
+mathematics rather than of the philosophy.
+Prediction 4. Raising step_penalty shortens generated output by making
+loop traversal expensive, monotonically. A penalty is a per-traversal tax on
+loops, so this is the knob that trades compression against wandering.
+What would change my mind: if the monotone-resource unrolling turned out to
+be doing all the work — if a system with only the clock, and no monitor and no
+inversion, performed as well as the full thing — then cycles would be merely
+survivable rather than a feature, and the metacognition claim would be
+decoration on a termination guard. I do not believe that, because Prediction 2
+is the experiment that separates them, but it is the result that would cost me
+This is an architectural argument supported by a small implementation.
+The graph experiments are character-level and small. Nothing here establishes
+that the cyclic structure scales to where it would have to scale.
+The neuroscience is directional, not quantitative. I am claiming that
+cortex is richly recurrent and organised in closed loops, which is not in
+dispute. I am not claiming a mapping from any specific loop to any specific
+mechanism here, and I would not defend one.
+"Metacognition" is doing real work in §5.2 and looser work in §6. The
+implementation is a repeat-detector over utterances. That is a genuine
+instance of the pattern — a monitor outside the generator, watching outputs —
+but it is one narrow instance, and I should not let the word carry more than
+The three exits may not be exhaustive. I argued that the differing
+quantity must come from outside the cycle, and then listed three kinds. The
+argument that it is three is by construction, not by proof. Noise is
+arguably a fourth and I currently file it under "inversion done badly".
+Cost accounting is missing. Cyclic search is more expensive than a DAG
+pass, and I have not measured how much the unrolled state space costs against
+the compression it buys.
+The brain is a directed cyclic graph. I previously said acyclic; that was
+borrowed from engineering convenience, not observed in a brain.
+A cycle is repetition stored once. One node and one self-loop, learned from
+"aaaa", represents "aaaaaaa" and every longer repetition — generalisation
+straight out of the structure, with no training procedure involved.
+A finite acyclic graph cannot represent an unbounded language. A finite cyclic
+graph can. That is what the loop is for.
+The costs are real: no guaranteed termination, no layer order, no negative
+costs (which is why the cost function is −log P + penalty ≥ 0), and
+A system inside a cycle cannot detect it from inside, because inside it
+nothing has changed and the same query returns the same ranking forever. The
+exit comes from a clock, a monitor, or an inversion — the
+(node, chars_emitted) search state, the ladder in dialogue.py, and
+A stutter is what a cycle looks like from outside: a run of words said twice
+in a row because the walk said the same nodes twice. The monitor finds the
+loop by watching output, never by inspecting the graph — and it has to tell
+going round from coming back, which it does by adjacency.
+The escape works by changing the state, not by re-asking. backtrack cuts the
+utterance at the point the walk went round and searches again from a prefix
+that runs past it, which forces the walk out of the loop; taking the
+next-ranked answer from the same context would only re-rank the same loop.
+What cannot be escaped gets punished. Duplicates the search could not avoid
+become a 2NRL negative phase, so the loop is removed from the graph instead of
+dodged again next time. Routing around a loop is coping; this is learning, and
+Cycles change the mathematics, not just the engineering: flipping a path's
+edges requires flipping alternate nodes, an odd cycle makes that impossible
+(2 of 3 edges at best), and a self-loop is sign-locked entirely because
+w · f² cannot change sign by flipping f.
+Loops are what make a supervisory level necessary and what make it
+worthwhile. Working memory, habit, iteration and self-reference are the same
+structural fact as rumination. Which one you get depends on whether something
+Cycles are a feature. The monitor is the other half of the feature.
+Replacing the sigmoid with f(x) = a·sin(b(x − h)) + k, default −sin(x/3)
+I replace the sigmoid activation function with a sine wave. The argument is
+short: the brain is an analog machine, analog machines carry information in
+waves, and if you look carefully at a sigmoid you find that it already is a
+wave — one single step of one, with everything before and after it thrown away.
+So I stopped throwing the rest away.
+The function is f(x) = a·sin(b(x − h)) + k, initialised to a = −1, b = 1/3,
+h = 0, k = 0, which is exactly −sin(x/3). All four parameters are learnable,
+per unit. In a CartPole control task, swapping this in for sigmoid or ReLU and
+changing nothing else moved the final reward from 9 and 10 to between 28 and 48.
+This paper says where the idea came from, what the four parameters mean, proves
+the geometric claim that motivated it (a sigmoid is one step of a sine wave
+rotated 45 degrees — and 45 is exactly the right number), works through the
+numbers, gives the three properties that follow for free, and is honest about
+what the experiment does and does not establish.
+Instead of the traditional sigmoid function frequently used in ANNs, we use a
+sine wave rotated 45 degrees.
+This was drawn from the idea that a brain operates like an analog computer.
+Hence, we assume sine waves are the standard of information
+encoding/decoding. This led me to see the similarities between a sigmoid
+function and a sine wave.
+That was the whole thing. Everything below is what I meant by it — in
+particular, §3 proves that the last sentence is not a loose analogy.
+I did not start from a function. I started from the brain.
+A digital computer represents information by forcing a continuous voltage into
+one of two buckets and then refusing to look at anything in between. That is a
+design choice, and it is a choice made because transistors are cheap and
+noise is expensive. A brain makes the opposite choice. Neurons do not resolve
+to 0 or 1 and hold. They oscillate. Population activity has rhythms, those
+rhythms have frequencies, the frequencies have phase relationships, and the
+phase relationships carry information. Whatever the brain is computing with, it
+So: if the brain is analog, and analog machines encode with waves, then the
+primitive of a brain-like network should be a wave. Amplitude, frequency,
+phase, offset. Those are the four things you can do to a wave, and they should
+be the four things a unit can learn.
+Then I looked back at the sigmoid, expecting it to be the opposite of a wave,
+and found that it wasn't.
+This is the geometric observation the whole idea rests on, and it is exact.
+Take the plain sine curve y = sin(t) and rotate the curve by an angle θ.
+The point (t, sin t) goes to
+For the result to still be a usable activation function it has to be a function
+of x — one output per input. That requires x(t) to be non-decreasing:
+45 degrees is exactly the critical angle. Rotate less and you get a
+function; rotate more and the curve folds back over itself and stops being one.
+I did not pick 45 because it sounded round. It is the largest rotation a sine
+wave survives as an activation function, and at that limit the curve looks like
+this (drawn here at 40°, just inside the limit, so the risers stay finite):
+A staircase. Flat treads where dy/dt = 0 (at t = π + 2πk), steep risers
+where dx/dt = 0 (at t = 2πk). And now look at one step of it next to a
+They are the same shape. I fitted a logistic σ(c·x) to one step of the
+40°-rotated sine numerically: the best fit is c = 6.90 with a maximum error of
+0.044 — under 4.5% of the step's full height, across the entire step.
+So here is the actual relationship between the two functions:
+A sigmoid is one step of a sine wave rotated 45 degrees. The sigmoid is
+what you get when you keep one step and flatten every other step in both
+directions out to infinity.
+That reframes the design question completely. The sigmoid is not a different
+kind of object from a sine wave that I am proposing to swap out. It is a sine
+wave with 99% of itself deleted. The question is no longer "why a sine instead
+of a sigmoid" — it is "why did we delete the rest of it?"
+The answer, historically, is monotonicity. One step is monotone; the staircase
+is monotone too, but a sine — unrotated — is not. That is the real trade, and
+I take it head on in §7.
+Four parameters, one wave:
+With the defaults this is exactly f(x) = −sin(x/3):
+b sets the period: 2π/b = 6π ≈ 18.85. A quarter of that — the monotone arm
+running from the origin up to the first crest — is 3π/2 ≈ 4.712.
+That number is not decoration. In RadixCyclicNN/radixnet/graph.py every new
+node's state is drawn uniformly from [−4.5, 4.5]:
+4.5 < 4.712. Every unit in a fresh network starts somewhere on the monotone
+arm of its own wave, with 0.21 to spare. The initialisation range and the
+frequency are matched on purpose: at initialisation the network behaves exactly
+like a network of smooth sigmoid-ish units, and it only discovers the rest of
+the wave if training pushes it there. You get the conservative behaviour for
+free and the periodic behaviour when it earns its place.
+That is the practical rule: b must be small enough that the pre-activations
+you actually produce land inside one arm. Pick b too large and every unit is
+wrapped around the wave several times before it has learned anything, and the
+layer is a hash function. 1/3 is the number that makes a range of about ±4.5
+Two reasons, and the second one is the interesting one.
+First: f(x) = −sin(x/3) is decreasing through the origin, f'(0) = −1/3.
+The default unit is inhibitory. More input, less output. Brains are full of
+inhibition and inhibition is what makes a system settle instead of run away; I
+would rather make it the default than an exception.
+Second: with a sine, the sign of the amplitude is the sign of the unit, and
+that makes network inversion a parameter change:
+Exactly negated, at every input, to the last digit — because a·sin(u) is
+linear in a. Flip a and the unit says the precise opposite of what it said
+You cannot do this with a ReLU. relu(−x) ≠ −relu(x); there is no parameter of
+a ReLU whose sign you can flip to get the negation of the function. There isn't
+one for a logistic sigmoid either.
+I use this. It is the mechanism behind 2NRL (train on the failures → invert
+→ fine-tune on the correct data): invert() in RadixCyclicNN flips every edge
+weight and every unit's activation — amplitude a and offset k together, since
+f = a·sin(u) + k and negating a alone leaves −f + 2k — and what was likely
+That whole training algorithm is only available because the activation function
+has a sign parameter. The activation function choice bought me a training
+2NRL has its own paper — 2NRL.md — which treats the procedure, why inverting a
+failure is coherent rather than destructive, and the condition under which it
+carries information. What matters here is the dependency running the other way:
+it needs a unit whose negation is a parameter change, and that is what a sine
+gives you and a ReLU does not.
+h slides the unit along the wave, k lifts its resting level. There is a
+clean identity here that I come back to in §8: shifting the phase and shifting
+the input are the same operation, so h is doing the job that a bias term
+does in a conventional network — but inside the nonlinearity rather than in
+f(x) = −sin(x/3), f'(x) = −(1/3)·cos(x/3), against the logistic σ and
+Read the last two rows. At x = 20 the sigmoid is 0.999999998 with a
+derivative of two billionths — that unit is dead, it will never learn again, and
+nothing downstream can tell the difference between an input of 20 and an input
+of 200. At the same input the sine unit is at −0.374 with a derivative of
+−0.309, which is 93% of its maximum slope. It is fully awake.
+At x = 50 the sigmoid derivative is exactly zero in float64. Not small.
+Zero. The unit has been removed from the network and there is no gradient path
+Here is the same point measured over whole ranges — the fraction of inputs in
+[−R, R] where the derivative is smaller than 0.01, i.e. where the unit has
+effectively stopped responding:
+The shape of that table is the whole argument.
+ReLU is dead on exactly half of its input space, always. That half is
+fixed and it is the negative half, so a unit that drifts negative and stays
+there is gone permanently.
+Sigmoid is dead on a fraction that grows toward 100% as the network's
+pre-activations grow. Training makes weights bigger; bigger weights make
+pre-activations bigger; bigger pre-activations push units into saturation.
+Sigmoid networks kill themselves by learning.
+The sine is dead on a constant ~2% no matter how large the range gets,
+and — this is the part that matters — never permanently. The zero-derivative
+points are the crests, isolated points of measure zero. Move the input
+slightly and full slope comes back. A sine unit is never more than a quarter
+period away from its maximum sensitivity.
+Formally, |f'(x)| = |a·b·cos(b(x − h))| attains |a·b| every half period,
+forever. There is no x beyond which the unit stops responding. The vanishing
+gradient is not something this function mitigates; it is something it does not
+This is why the function fits the rest of my architecture. In RadixCyclicNN I do
+not back-propagate through depth at all — the learning rule is one hop, local,
+and it updates the activation parameters rather than pushing error down a
+chain. That design is only worth building if a single unit's own function is
+expressive enough to be worth learning. A ReLU has nothing to learn — it has no
+parameters. A sigmoid has nothing to learn. A wave has four knobs: gain, scale,
+operating point, resting level. There is enough function in one unit to make
+local learning meaningful, which is precisely what lets me delete
+back-propagation through depth and not miss it.
+I am not going to pretend this is free.
+−sin(x/3) is not injective. f(1.0) = −0.327 and f(17.85) = −0.327. Two
+very different inputs, one identical output. A downstream unit cannot tell them
+apart. This is aliasing, it is exactly what dropping the monotonicity
+requirement buys you, and it is the one real objection to the whole idea.
+Three things make it survivable.
+1. A layer is a population, not a unit. No single unit is asked to identify
+its input. A layer of units with different learned h and b gives a set of
+readings at different phases and different frequencies, and two inputs that
+alias on one unit will not alias on all of them. This is not a hopeful
+analogy — it is how any multi-scale periodic code resolves ambiguity: you cannot
+tell 1 o'clock from 13 o'clock from the hour hand alone, and you can the instant
+you add a second hand running at a different rate. Biology uses exactly this
+trick for position coding with multi-scale periodic responses. One periodic unit
+is ambiguous; a set of them at different scales is not.
+2. Initialisation keeps you on one arm. As shown in §4, Z_RANGE = 4.5
+against a quarter period of 4.712 means a fresh network is entirely inside the
+monotone region. Aliasing is not something the network is born with; it is
+something it can grow into if the data rewards it.
+3. b is learnable. If the wrapping hurts, the gradient on b shrinks it,
+stretching the period until the operating range fits in one arm again. The
+function can retreat to being a sigmoid. A sigmoid cannot advance to being a
+The honest summary of the trade: I gave up global monotonicity and bought
+permanent liveness, an exact sign flip, and four learnable parameters per
+unit. For an architecture with no deep gradient path, that is a good trade.
+For a very deep conventional network trained by back-propagation with no
+normalisation, I would expect the periodicity to cause trouble, and I would
+expect to have to fight the optimiser's many local minima. I have not done that
+If the activation has parameters, they should be learned. The partial
+derivatives, with u = b(x − h):
+Each one says something:
+df/da = sin(u) — the gain learns fastest for units sitting at the steep
+part of their own wave and not at all for units sitting at a zero crossing. A
+unit that is currently saying nothing does not get louder; it gets moved
+df/db = a(x − h)·cos(u) — the frequency gradient scales with x − h,
+the distance from the unit's operating point. Frequency is learned from the
+outliers. The units seeing inputs far from where they are tuned are the ones
+that pull the period; the ones sitting near their own centre leave it alone.
+That is the right behaviour: the period needs to change exactly when the data
+df/dh = −a·b·cos(u) = −df/dx — exact identity, verified to machine
+precision at every input I tested. Sliding the wave left is identical to
+sliding the input right. So the phase parameter is a per-unit input bias
+hiding inside the nonlinearity. This is worth knowing for two reasons: you get
+a bias term whether or not you wrote one, and if you do also have a bias in
+front of the activation, h and that bias are degenerate — they will fight
+over the same direction and waste gradient. Pick one.
+df/dk = 1 — pure output bias, always learnable, never saturates. This is
+the unit's resting level.
+In RadixCyclicNN every node owns its own (a, b, h, k) and all four are updated
+by the local rule, alongside the node state z and the outgoing weights.
+Experiments/SBNN_RNN_ActivationFunction/main.py is the same principle in a
+conventional RNN: the same (a, b, h, k), one wave per hidden unit, updated by their own
+gradients at a tenth of the weight learning rate. The tenth matters — the
+activation is the shape of the space the weights are searching in, and moving
+the space as fast as you move the search makes both diverge.
+Experiments/ActivationFunctionTest/ holds three scripts — sigmoid.py,
+relu.py, sinewave.py — that are byte-for-byte identical except for the activation
+function. Same environment (CartPole-v1), same architecture (Dense 24 → Dense
+n_actions), same optimiser (Adam), same loss (MSE), same γ = 0.95, same
+ε-greedy schedule, same 250 episodes, same greedy evaluation episode at the end.
+Reported total reward on the final greedy episode:
+A ~200% to ~400% improvement.
+I would rather state this precisely than oversell it.
+What it establishes: on this task, with this architecture and this budget,
+changing only the activation function produced a large and repeatable
+difference in the direction the theory predicts. That is a real result and it is
+What it does not establish: these are single runs scored by a single greedy
+episode, with no seed sweep and no error bars, and CartPole returns are very
+high-variance. The range "28–48" is itself evidence of that variance.
+And there is a confound I should name myself. In all three scripts the
+activation is applied to the output layer as well as the hidden layer. That is
+a serious handicap for sigmoid specifically: the output is squashed into (0,1)
+while the regression targets in Q-learning reach roughly 1/(1−γ) = 20, so the
+output units saturate almost immediately and the gradient dies at the head. Part
+of the measured gap is therefore "sine beats a sigmoid that was placed where a
+sigmoid cannot work". The sine head is bounded too — [−1, 1] — but bounded is
+survivable when the gradient never dies, and for control only the argmax over
+actions matters, not the magnitude. That is my mechanistic explanation for the
+gap, and it is also the reason the number should not be quoted without the
+The cleaner experiment is already in the directory.
+reinforcement_q_learning_relu.py and reinforcement_q_learning_sinewave.py
+are the proper DQN pair — replay buffer, target network, soft updates, fixed
+seed (seed = 1), and critically a linear output head:
+The activation is confined to the hidden layers, where it belongs. That pair
+measures the activation function and nothing else, and it is the one I would
+To turn this from an indication into a result:
+Run the DQN pair (linear head), not the Keras trio.
+20 seeds per activation, not 1.
+Score on the mean of 100 greedy evaluation episodes, not one.
+Report mean ± standard deviation, and the full distribution.
+Add tanh as a fourth arm — it is the strongest of the classical squashing
+functions and the fairest opponent for a bounded periodic one.
+Sweep b ∈ {1/6, 1/3, 1/2, 1} to show the frequency argument in §4 rather
+Report wall-clock too. sin is not free next to max(0, x).
+The edge signal in RadixCyclicNN is w · f_p(z_p) · f_c(z_c) — weight times the
+activation of the parent times the activation of the child. The consequence of a
+sign-flippable activation shows up there: since the score is a product of two
+activations, flipping both endpoints leaves the edge unchanged, and flipping
+every other node along a path flips every edge on it. That parity fact is what
+makes targeted inversion possible, and I treat it properly in the companion
+Aliasing. Covered in §7. Real, mitigated, not eliminated.
+Range discipline. The function is only sensible while b·(x − h) stays
+in a range you chose. Pre-activations that grow without bound turn the layer
+into noise. Either keep b learnable, or normalise, or both.
+A periodic landscape has periodic minima. Gradient descent on a function
+with infinitely many equivalent-looking basins is harder than on a monotone
+one. I have not characterised this.
+Standard initialisation schemes do not apply. Xavier/He are derived
+assuming monotone activations with particular variance behaviour. Z_RANGE
+matched to the quarter period is my substitute; it is a rule of thumb, not a
+Cost. sin is meaningfully more expensive than max(0, x). On this
+architecture the graph walk dominates and it does not show up, but for a
+large dense network it would.
+Not yet tested at depth. Everything here is 2–3 layers, or a graph with
+no depth at all. I do not know what 50 layers of this does, and the honest
+answer is that I built an architecture where I do not need 50 layers.
+A 20-seed DQN run where tanh matches or beats the sine on the cleanly
+controlled pair. That would mean the CartPole result was about the saturating
+output head, not about periodicity.
+Learned b values collapsing toward zero across tasks. That would mean the
+network is asking to be a sigmoid, and I should let it.
+Learned h and an explicit input bias reliably cancelling each other out.
+That would confirm the degeneracy in §8 is costing real capacity, and one of
+the two should be removed.
+A sigmoid is one step of a sine wave rotated 45 degrees, and 45° is exactly
+the largest rotation that keeps a sine wave a function. The fit of a logistic
+to one step is within 4.4%.
+So the sigmoid is not an alternative to a wave. It is a wave with one step
+kept and the rest flattened.
+f(x) = a·sin(b(x − h)) + k, default −sin(x/3): amplitude, frequency,
+phase, offset — the four things you can do to a wave — all learnable per unit.
+The unit never permanently dies: |f'| returns to its maximum every half
+period, while sigmoid's dead fraction grows toward 100% and ReLU's is a fixed
+Negating a unit is exact: a → −a together with k → −k gives −f(x) to
+machine precision. That is what makes 2NRL's invert() possible, and neither
+ReLU nor sigmoid has a sign parameter to do it with. The offset has to go with
+the amplitude — a → −a alone is −f + 2k, which is the negation only while
+k is still 0, and k is learned.
+df/dh = −df/dx exactly: the phase parameter is a per-unit input bias.
+The cost is global monotonicity, mitigated by population coding, by
+initialising inside one arm, and by b being learnable.
+CartPole: 9 (sigmoid), 10 (ReLU), 28–48 (sine). Real, directionally
+consistent with the theory, and in need of the seed sweep in §9 before it
+should be quoted as a headline.
+The wave was there the whole time. We were only ever looking at one step of it.
+Count the multiplications, and the decay stops being a loss and becomes a reading
+The vanishing gradient is treated as the central pathology of deep networks.
+It is not a pathology. It is an encoding.
+Back-propagation multiplies. A gradient that reaches a layer n products away
+from the loss has been through n of them, and each one scales it by roughly the
+same factor c, so it arrives at about cn of the size it started. Everyone
+knows this. What follows from it is the part nobody uses: cn is
+invertible. The magnitude was not destroyed, it was multiplied by a known
+number. The gradient is carrying a message about its own depth, written in an
+exponential code, and the key to that code is n — which is free, because n is
+just the depth, known from the architecture before any data is seen.
+We threw away the key and then complained the message was unreadable.
+This paper takes the count seriously: track how many times we did XX, and use
+that number to put the values back in range. I measure whether the premise
+actually holds (it does, and it gets stronger with depth: R² of 0.926 at depth
+2 rising to 0.997 at depth 12, with the fitted c converging on the value
+theory predicts). I then test whether dividing the decay back out actually helps,
+against two controls built to sink the claim: a count-free per-layer
+normalisation, and a constraint holding every arm's total step size identical so
+the comparison cannot be won by simply taking bigger steps. Counting beats plain
+SGD by 43% and beats the count-free control, in a window around depths 3–4. Past
+that the whole SGD family stalls together, and Adam beats every count-based arm
+at every depth by roughly 3× — which I state here rather than bury, because it
+is the most informative result and it is not in my favour.
+The experiment is experiments/depth_counted_normalisation.py, standard library
+only, runnable with nothing installed.
+The vanishing gradient is a feature of gradient descent. Keep track of the
+number of times we do XX — the underlying cause — and use that number to
+normalise the values back to 0–1.
+That is the whole idea. The rest is what it means and whether it survives
+contact with a measurement.
+This one I had already half-answered and not noticed.
+The RadixCyclicNN design table contains a line I wrote a long time before I
+understood what it implied:
+Accept the vanishing gradient, update the activation function instead;
+NN; activation(child) × activation(parent)
+The NN there is this paper's XX. The edge signal in that architecture is
+W[p,c] · f_p(z_p) · f_c(z_c) — a weight times the activation of the parent
+times the activation of the child. A product. Every edge is one
+multiplication of two activations, and a path of length n is n of them in a
+row. That is the vanishing gradient, in its smallest possible form.
+My answer there was to dodge it. The learning rule is one hop and local, so
+n = 1 always, there is no product chain, and vanishing gradients "never enter
+the picture". That works, and I still think it is right for that architecture.
+But dodging a thing is not understanding it. The question I did not ask then is
+the one here: if the problem is that n is large, what happens if you just
+Worth being precise, because the whole argument rests on the cause being this
+For a layer z_{l+1} = W_l a_l + b_l with a_l = f(z_l), back-propagation sends
+Every backward hop multiplies by two things: the weight matrix and the activation
+derivative. Scale the weights so the linear part is roughly norm-preserving —
+which is exactly what Xavier initialisation is for — and what is left is |f'|.
+For the logistic sigmoid, max |f'| = 0.25, at x = 0, and it is smaller
+everywhere else. So each hop multiplies the gradient by at most a quarter,
+and usually less. Twelve layers of that is 0.2512 ≈ 6e-8.
+That is the vanishing gradient in one line. It is not subtle, it is not an
+interaction effect, it is not an artefact of any particular optimiser. It is
+repeated multiplication by a number smaller than one, n times, and n is the
+Here is the step the field does not take.
+A gradient that has been through n hops looks like
+where c is the typical per-hop contraction and r_n is whatever the gradient
+would have been without the decay — the part you actually want.
+cn is a number. It is not noise, it is not a projection, it is not a
+lossy compression. It is multiplication by a positive scalar, and multiplication
+by a positive scalar is invertible for any c ≠ 0. Divide by cn and r_n
+The information was never destroyed. It was moved into the exponent, and the
+exponent is n, and n is the depth, which you already know.
+So the thing that makes the vanishing gradient a feature rather than a bug:
+The magnitude of a gradient is a measurement of how far it travelled. A network
+is reporting its own depth on every backward pass, in the one quantity we
+decided to interpret as damage.
+Read log||g|| / log(c) ≈ n and the gradient tells you where it came from. We
+have been reading "the number is small" and concluding "the signal is gone", when
+the correct reading is "the signal came from n layers down, and here is n".
+Recovering r_n is the obvious use, and it is what §6 tests. The subtler one is
+that once you know what the decay should be, you can see when it isn't.
+cn is the expected magnitude at depth n. A layer whose gradient departs
+from that prediction is doing something the geometry does not explain — and that
+is exactly the layer worth looking at. Without a model of the expected decay,
+every deep layer just looks small and they all look alike. The vanishing gradient
+is the baseline that makes per-layer anomalies visible at all.
+You cannot detect an anomaly without a norm to be anomalous against. The decay is
+The proposal is to track how many XX operations happened and use that number
+to bring the values back into range. There are two places to do it, and they are
+At every multiplication. After each product, rescale the value back into
+[-1, 1] and increment a counter. The number never gets small, because you never
+let it. What would have been magnitude is now sitting in the counter:
+Nothing can underflow, because nothing is ever allowed to get far from 1. The
+decay is not suffered and then repaired; it is never incurred.
+Once, at the end. Let the gradient decay as it normally does, then divide by
+cn when it arrives. Cheaper — one scalar per layer instead of a rescale per
+operation — but you have to know c, and §7 shows how badly that can bite.
+The per-step version has a punchline worth stating plainly:
+That is floating point. A mantissa kept near 1 and an exponent counting the
+scale is exactly what every float in the machine already is. We are already
+counting the multiplications — every float does — we just never let the
+learning rule see the count.

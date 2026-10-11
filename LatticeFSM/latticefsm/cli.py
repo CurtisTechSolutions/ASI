@@ -16,6 +16,8 @@
     expand      rebuild a machine from a code, from the central node outward (all shells, or --shells k)
     core-run    walk a string straight from a code, decoding only the cells the walk reaches
     network     machines connected into a network: new, fit, evaluate, predict, translate, encode, summary, make-data
+    ngram       predict the next thing: train an N-gram model on a corpus or with Ollama, predict, generate
+    base64      encode anything (text, an image, a video) as base64, or decode it back
     experiment  the learning, stimulation, adaptation and compression experiments
     test        run the test suite
 
@@ -26,6 +28,7 @@ two read and write the same machine files.
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 
@@ -419,6 +422,132 @@ def cmd_network(args) -> int:
     return 0
 
 
+def _ngram(args):
+    from .ngram import NGram, load_ngram
+    if getattr(args, "load", None) and os.path.exists(args.load):
+        return load_ngram(args.load)
+    if getattr(args, "load", None) and args.action not in ("train", "autotrain"):
+        raise SystemExit(f"no model at {args.load}")
+    return NGram(args.order, args.unit, lower=not args.keep_case, stimulation=args.stimulation)
+
+
+def _fmt(v, digits=3) -> str:
+    return "-" if v is None else f"{v:.{digits}f}"
+
+
+def cmd_ngram(args) -> int:
+    from .autotrain import Ollama, OllamaError, autotrain
+    from .ngram import corpus_sequences, detokenize, split_lines
+    if args.action == "ollama":
+        client = Ollama(args.url, args.model)
+        try:
+            names = client.models()
+        except OllamaError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(f"Ollama at {client.url}: {len(names)} models" + "".join(f"\n  {n}" for n in names))
+        print(f"autotrain would use {client.model}" + ("" if client.model in names or
+                                                       any(n.split(':')[0] == client.model for n in names)
+                                                       else " (not pulled: `ollama pull " + client.model + "`)"))
+        return 0
+    m = _ngram(args)
+    data = [p for d in (args.data or ["data/corpus"]) for p in d.split(",") if p]
+    if args.action == "train":
+        _, test = m.train_paths(data, held_out=args.held_out)
+        st = m.stats()
+        what = "base64 letters" if st["unit"] == "base64" else st["unit"] + "s"
+        print(f"{st['order']}-grams of {what}: {st['tokens']} tokens, {st['vocab']} distinct, {st['ngrams']} "
+              f"n-grams in {st['contexts']} contexts, from {st['sources']} sources")
+        if test:
+            ev = m.evaluate(test)
+            print(f"held out ({len(test)} lines, {ev['tokens']} tokens): perplexity {_fmt(ev['perplexity'], 2)}, "
+                  f"{_fmt(ev['bits'])} bits a token, next-token accuracy {_fmt(ev['accuracy'])}, top 5 {_fmt(ev['top5'])}")
+    elif args.action == "autotrain":
+        client = Ollama(args.url, args.model) if args.ollama else None
+        topics = [t.strip() for t in (args.topics or "").split(",") if t.strip()]
+        try:
+            autotrain(m, data, held_out=args.held_out, ollama=client, topics=topics, rounds=args.rounds,
+                      lines=args.lines, continuations=args.continuations, judge=args.judge, patience=args.patience,
+                      keep=args.keep, save=args.save, seed=args.seed, log=print)
+        except OllamaError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+    elif args.action == "predict":
+        for text in args.text or [""]:
+            print(f"after {text!r}:" if text else "at the start:")
+            for tok, p in m.predict(text, args.k):
+                print(f"  {tok:<16} {p:.6f}")
+    elif args.action == "generate":
+        import random as _random
+        rng = _random.Random(args.seed)
+        if args.out:
+            if m.unit != "base64":
+                raise SystemExit("--out writes bytes: it needs a base64 model (--unit base64)")
+            start = b""
+            if args.prefix_from:
+                with open(args.prefix_from, "rb") as f:
+                    start = f.read(args.prefix_bytes)
+            elif args.text:
+                start = args.text[0].encode("utf-8")
+            data_out = m.generate_bytes(start, args.max_tokens, args.temperature, rng)
+            with open(args.out, "wb") as f:
+                f.write(data_out)
+            print(f"wrote {len(data_out)} bytes to {args.out}")
+            return 0
+        for text in args.text or [""]:
+            if m.unit == "base64":
+                print(m.complete(text, args.max_tokens, args.temperature, rng))
+                continue
+            toks = m.generate(text, args.max_tokens, args.temperature, rng)
+            print(f"{text}{' ' if text and toks and m.unit == 'word' else ''}{detokenize(toks, m.unit)}")
+    elif args.action == "evaluate":
+        test = []
+        for _, seqs in corpus_sequences(data, m.unit, m.lower):
+            test += split_lines(seqs, args.held_out)[1] if args.held_out else seqs
+        ev = m.evaluate(test)
+        print(f"{len(test)} lines, {ev['tokens']} tokens: perplexity {_fmt(ev['perplexity'], 6)}, bits "
+              f"{_fmt(ev['bits'], 6)}, accuracy {_fmt(ev['accuracy'], 6)}, top 5 {_fmt(ev['top5'], 6)}")
+    elif args.action == "stats":
+        for k, v in m.stats().items():
+            print(f"{k}: {v}")
+    elif args.action == "credit":
+        for text in args.text:
+            print(f"credited {m.credit_text(text, args.amount)} edges of {text!r} with {args.amount:+}")
+    if args.save and args.action in ("train", "credit"):
+        m.save(args.save)
+        print(f"saved {args.save}", file=sys.stderr)
+    return 0
+
+
+def cmd_base64(args) -> int:
+    from . import b64
+    for item in args.input or ["-"]:
+        if item == "-":
+            data = sys.stdin.buffer.read()
+        elif os.path.isfile(item):
+            with open(item, "rb") as f:
+                data = f.read()
+        else:
+            data = item.encode("utf-8")
+        if args.action == "encode":
+            text = b64.encode(data)
+            if args.out:
+                with open(args.out, "w", encoding="ascii") as f:
+                    f.write(text + "\n")
+                print(f"wrote {len(text)} letters ({len(data)} bytes encoded) to {args.out}", file=sys.stderr)
+            else:
+                print(text)
+        else:
+            raw = b64.decode(data.decode("ascii", "ignore"))
+            if args.out:
+                with open(args.out, "wb") as f:
+                    f.write(raw)
+                print(f"wrote {len(raw)} bytes to {args.out}", file=sys.stderr)
+            else:
+                sys.stdout.write(raw.decode("utf-8", "replace") + ("" if raw.endswith(b"\n") else "\n"))
+    return 0
+
+
 def cmd_experiment(args) -> int:
     for rec in experiment.run(args.which, args.out, episodes=args.episodes, life=args.life):
         print(experiment.tables(rec))
@@ -585,6 +714,43 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--episodes", type=int, default=4000)
     q.add_argument("--epochs", type=int, default=None, help="default 1 for a language, 20 for pairs")
     q.add_argument("--max-length", type=int, default=6)
+    q = add("ngram", cmd_ngram, "predict the next thing: an N-gram model trained on a corpus or with Ollama",
+            machine=False, load=False)
+    q.add_argument("action", choices=("train", "autotrain", "predict", "generate", "evaluate", "stats", "credit",
+                                      "ollama"))
+    q.add_argument("text", nargs="*", help="predict / generate / credit: the texts")
+    q.add_argument("--data", nargs="+", default=None, help="text files or directories (default data/corpus)")
+    q.add_argument("--load", default=None, help="a saved model (train / autotrain continue it when it exists)")
+    q.add_argument("--save", default=None, help="write the model here (.json or .json.gz)")
+    q.add_argument("--order", type=int, default=3, help="N: the context is the last N-1 tokens (default 3)")
+    q.add_argument("--unit", choices=("word", "char", "sound", "base64"), default="word",
+                   help="base64: any file (text, image, audio, video) as base64 letters")
+    q.add_argument("--keep-case", action="store_true", help="do not lower-case")
+    q.add_argument("--stimulation", type=float, default=1.0, help="how much a credited edge's width counts")
+    q.add_argument("--held-out", type=int, default=10, help="hold out every N-th line to measure on (0: none)")
+    q.add_argument("-k", type=int, default=10, help="predict: how many next tokens")
+    q.add_argument("--max-tokens", type=int, default=30)
+    q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")
+    q.add_argument("--seed", type=int, default=1)
+    q.add_argument("--amount", type=float, default=1.0, help="credit: positive rewards, negative punishes")
+    q.add_argument("--ollama", action="store_true", help="autotrain: use Ollama (else the corpus only)")
+    q.add_argument("--url", default=None, help="Ollama's address (default $OLLAMA_HOST or http://127.0.0.1:11434)")
+    q.add_argument("--model", default=None, help="the Ollama model (default $LATTICEFSM_OLLAMA_MODEL or llama3.2)")
+    q.add_argument("--topics", default=None, help="autotrain: comma-separated topics (default: the corpus's own words)")
+    q.add_argument("--rounds", type=int, default=3)
+    q.add_argument("--lines", type=int, default=20, help="autotrain: sentences the LLM writes per topic")
+    q.add_argument("--continuations", type=int, default=20, help="autotrain: contexts the LLM continues per round")
+    q.add_argument("--judge", type=int, default=10, help="autotrain: own texts the LLM judges per round")
+    q.add_argument("--patience", type=int, default=2, help="autotrain: rounds without improvement before stopping")
+    q.add_argument("--keep", default=None, help="autotrain: append what the LLM wrote to this file")
+    q.add_argument("--out", default=None, help="generate: write a base64 model's output, decoded, to this file")
+    q.add_argument("--prefix-from", default=None, help="generate --out: start from the first bytes of this file")
+    q.add_argument("--prefix-bytes", type=int, default=64)
+    q = add("base64", cmd_base64, "encode anything (a file or a text) as base64, or decode it back", machine=False,
+            load=False)
+    q.add_argument("action", choices=("encode", "decode"))
+    q.add_argument("input", nargs="*", help="files, or texts (- or nothing: standard input)")
+    q.add_argument("--out", default=None, help="write the result here instead of printing it")
     add("test", cmd_test, "run the test suite", machine=False, load=False)
     return p
 

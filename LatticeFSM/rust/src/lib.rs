@@ -21,6 +21,8 @@
 //! if run.accepted { m.reward(1.0); } else { m.punish(1.0); }
 //! ```
 
+pub mod autotrain;
+pub mod b64;
 pub mod compress;
 pub mod edge;
 pub mod experiment;
@@ -34,6 +36,7 @@ pub mod lattice;
 pub mod machine;
 pub mod media;
 pub mod network;
+pub mod ngram;
 pub mod phonetic;
 pub mod rng;
 pub mod server;
