@@ -46,6 +46,24 @@
 //! | `GET /api/ngram/ollama` | `?url=&model=`: is Ollama there, which models |
 //! | `POST /api/ngram/autotrain` | `{data?, ollama?, model?, url?, topics?, rounds?, lines?, continuations?, judge?, patience?, fresh?, predict?, self_credit?}` |
 //! | `POST /api/ngram/save`, `/api/ngram/load` | `{path}`: write or read the model |
+//! | `GET /api/chain` | the chain the server holds (8 nodes of letters, confidence 0.9, trained on `data/corpus` at start): stats per depth, sources, history |
+//! | `POST /api/chain/new` | `{nodes?, unit?, confidence?, lower?}`: a fresh chain |
+//! | `POST /api/{chain,ngram}/train` | `{data?, uploads?, held_out?, predict?, self_credit?, until?, max_rounds?}`: train on server paths and uploads, every token predicted first; with `until`, drilled to N of N (or the most possible); the held-out measure |
+//! | `POST /api/{chain,ngram}/text` | `{text, predict?, self_credit?, until?, max_rounds?}`: train on pasted text, a line a sequence |
+//! | `POST /api/{chain,ngram}/predict` | `{text, k?}`: the next tokens; the chain's input nodes and walk too |
+//! | `POST /api/{chain,ngram}/generate` | `{text, max_tokens?, temperature?, seed?, count?}`: `count` samples (the chain's walk depths with them) |
+//! | `POST /api/{chain,ngram}/credit`, `/feedback` | `{text, amount}`, `{good, bad, amount?}`: reward or punish |
+//! | `POST /api/{chain,ngram}/score` | `{text}`: every token's probability (and walk depth), perplexity, bits |
+//! | `POST /api/{chain,ngram}/teach` | `{text, reply, max_rounds?}`: teach `reply` after `text` until every token of it is right; the new continuation |
+//! | `POST /api/chain/confidence`, `/sweep` | `{confidence}`, `{data?, uploads?, held_out?, thresholds?}`: set the threshold; accuracy and depth at each threshold on held-out lines |
+//! | `GET /api/chain/graph` | `?limit=`: the most-seen node contexts: guess, confidence |
+//! | `POST /api/{chain,ngram}/save`, `/load` | `{path}`: write or read the model |
+//! | `GET /api/uploads`, `POST /api/uploads`, `POST /api/uploads/delete` | `{name, content_base64 \| content, append?}`, `{name}`: the uploads (any file; big ones in pieces), written under `data/uploads` or `$LATTICEFSM_UPLOADS` |
+//! | `GET /api/checkpoints`, `POST /api/checkpoints/{save,restore,delete,upload}`, `GET /api/checkpoints/download?name=` | `{model, tag?}`, `{name}`, `{name, content_base64, append?}`: checkpoints of any model in `checkpoints/` or `$LATTICEFSM_CHECKPOINTS` |
+//! | `POST /api/converse` | `{model, opening, turns?, max_tokens?, temperature?}`: the model talking to itself |
+//! | `POST /api/chat/llm` | `{model, topic, turns?, pass_mark?, learn?, ollama_model?, url?}`: Ollama talks with the model and marks its replies; 502 without Ollama |
+//! | `POST /api/ollama/corpus` | `{prompt, lines?, ollama_model?, url?}`: sentences Ollama writes |
+//! | `GET /api/status` | every model in brief, uploads, checkpoints |
 //! | `GET /api/network` | the network the server also holds (`enc>dec` until another is made): its blocks and summary |
 //! | `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` |
 //! | `POST /api/network/talk` | `{text}`: the network's reply - English from a translator, yes / no from a classifier - and its trace |
@@ -57,6 +75,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::autotrain::Ollama;
+use crate::chain::{load_chain, Chain};
 use crate::compress::{compress, expansion, fidelity, load_core, Precision};
 use crate::experiment::teach_language;
 use crate::http::{self, Handler, Request, Response};
@@ -66,6 +85,10 @@ use crate::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DE
 use crate::network::{load_network, Credit, Merge, Network, Step, Vote, LAYER_DISCOUNT};
 use crate::ngram::{load_ngram, Evaluation, NGram};
 use crate::rng::Rng;
+use crate::routes::{
+    chain_route, chat_llm, checkpoint_model, checkpoint_name, checkpoint_path, checkpoint_upload, checkpoints_dir,
+    checkpoints_list, converse, default_chain, lm_route, ollama_corpus, uploads_route, Lm,
+};
 use crate::VERSION;
 
 /// The machine behind the server, the network beside it (made on first use), and where the prebuilt frontend lives.
@@ -73,6 +96,7 @@ pub struct Service {
     pub machine: Mutex<Machine>,
     pub network: Mutex<Option<Network>>,
     pub ngram: Mutex<Option<NGram>>,
+    pub chain: Mutex<Option<Chain>>,
     pub frontend: Option<PathBuf>,
 }
 
@@ -82,6 +106,7 @@ impl Service {
             machine: Mutex::new(machine),
             network: Mutex::new(None),
             ngram: Mutex::new(None),
+            chain: Mutex::new(None),
             frontend: None,
         })
     }
@@ -92,7 +117,167 @@ impl Service {
             machine: Mutex::new(machine),
             network: Mutex::new(None),
             ngram: Mutex::new(None),
+            chain: Mutex::new(None),
             frontend: dir,
+        })
+    }
+
+    /// Run `f` on the language model a body names (`model`: chain, the default, or ngram).
+    fn with_lm_result(&self, b: &Json, f: impl FnOnce(&mut dyn Lm) -> Result<Json, String>) -> Result<Json, String> {
+        if b.str_or("model", "chain") == "ngram" {
+            let mut g = self
+                .ngram
+                .lock()
+                .map_err(|_| "the N-gram model's lock is poisoned".to_string())?;
+            f(g.get_or_insert_with(default_ngram))
+        } else {
+            let mut g = self
+                .chain
+                .lock()
+                .map_err(|_| "the chain's lock is poisoned".to_string())?;
+            f(g.get_or_insert_with(default_chain))
+        }
+    }
+
+    fn with_lm(&self, b: &Json, f: impl FnOnce(&mut dyn Lm) -> Result<Json, String>) -> Response {
+        answer(self.with_lm_result(b, f))
+    }
+
+    /// Every model in brief, and how many uploads and checkpoints there are.
+    fn status(&self) -> Json {
+        let chain = self.chain.lock().ok().map(|mut g| {
+            let m = g.get_or_insert_with(default_chain);
+            Json::object()
+                .with("nodes", m.nodes.into())
+                .with("unit", m.unit.as_str().into())
+                .with("confidence", m.confidence.into())
+                .with("tokens", (m.clock as f64).into())
+                .with("contexts", m.tables.iter().map(|t| t.len()).sum::<usize>().into())
+                .with("vocab", (m.vocab.len() - 3).into())
+        });
+        let ngram = self.ngram.lock().ok().map(|mut g| {
+            let m = g.get_or_insert_with(default_ngram);
+            Json::object()
+                .with("order", m.order.into())
+                .with("unit", m.unit.as_str().into())
+                .with("tokens", (m.clock as f64).into())
+                .with("ngrams", m.n_grams().into())
+                .with("vocab", (m.vocab.len() - 3).into())
+        });
+        let machine = self.machine.lock().ok().map(|m| {
+            let st = m.stats();
+            Json::object()
+                .with("shape", st.get("shape").cloned().unwrap_or(Json::Null))
+                .with("clock", st.get("clock").cloned().unwrap_or(Json::Null))
+        });
+        let uploads = uploads_route("GET", "", &Json::Null)
+            .ok()
+            .and_then(|j| j.get("uploads").and_then(Json::as_array).map(Vec::len))
+            .unwrap_or(0);
+        let checkpoints = checkpoints_list()
+            .get("checkpoints")
+            .and_then(Json::as_array)
+            .map(Vec::len)
+            .unwrap_or(0);
+        Json::object()
+            .with("version", VERSION.into())
+            .with("chain", chain.unwrap_or(Json::Null))
+            .with("ngram", ngram.unwrap_or(Json::Null))
+            .with("machine", machine.unwrap_or(Json::Null))
+            .with("uploads", uploads.into())
+            .with("checkpoints", checkpoints.into())
+    }
+
+    /// Save a model to a file, or read one in place of the model of its kind.
+    fn save_model(&self, model: &str, path: &str) -> Result<(), String> {
+        match model {
+            "chain" => self
+                .chain
+                .lock()
+                .map_err(poisoned)?
+                .get_or_insert_with(default_chain)
+                .save(path),
+            "ngram" => self
+                .ngram
+                .lock()
+                .map_err(poisoned)?
+                .get_or_insert_with(default_ngram)
+                .save(path),
+            "machine" => self.machine.lock().map_err(poisoned)?.save(path),
+            "network" => match self.network.lock().map_err(poisoned)?.as_ref() {
+                Some(n) => n.save(path),
+                None => Err("there is no network yet: make one first".to_string()),
+            },
+            other => Err(format!("no model {other:?}")),
+        }
+    }
+
+    fn load_model(&self, model: &str, path: &str) -> Result<Json, String> {
+        Ok(match model {
+            "chain" => {
+                let mut g = self.chain.lock().map_err(poisoned)?;
+                Lm::info(g.insert(load_chain(path)?))
+            }
+            "ngram" => {
+                let mut g = self.ngram.lock().map_err(poisoned)?;
+                Lm::info(g.insert(load_ngram(path)?))
+            }
+            "machine" => {
+                let mut g = self.machine.lock().map_err(poisoned)?;
+                *g = load_machine(path)?;
+                g.stats()
+            }
+            "network" => {
+                let mut g = self.network.lock().map_err(poisoned)?;
+                network_info(g.insert(load_network(path)?))
+            }
+            other => return Err(format!("no model {other:?}")),
+        })
+    }
+
+    /// `/api/checkpoints`: list, save, restore, delete, download, upload.
+    fn checkpoints_route(&self, req: &Request) -> Response {
+        let action = req.path["/api/checkpoints".len()..].trim_start_matches('/');
+        let b = &req.body;
+        if (req.method.as_str(), action) == ("GET", "download") {
+            let name = req.param("name").unwrap_or("");
+            return match checkpoint_path(name).and_then(|p| std::fs::read(&p).map_err(|e| format!("{name}: {e}"))) {
+                Ok(bytes) => Response::file(
+                    if name.ends_with(".gz") {
+                        "application/gzip"
+                    } else {
+                        "application/json"
+                    },
+                    bytes,
+                    name,
+                ),
+                Err(e) => Response::error(404, &e),
+            };
+        }
+        answer(match (req.method.as_str(), action) {
+            ("GET", "") => Ok(checkpoints_list()),
+            ("POST", "save") => (|| {
+                let model = b.str_or("model", "chain");
+                let name = checkpoint_name(model, b.str_or("tag", "manual"))?;
+                let dir = checkpoints_dir();
+                std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                self.save_model(model, &dir.join(&name).to_string_lossy())?;
+                Ok(Json::object().with("name", name.as_str().into()))
+            })(),
+            ("POST", "restore") => (|| {
+                let name = b.str_or("name", "");
+                let model = checkpoint_model(name).ok_or_else(|| format!("which model {name:?} holds is not known"))?;
+                let info = self.load_model(model, &checkpoint_path(name)?.to_string_lossy())?;
+                Ok(Json::object().with("model", model.into()).with("info", info))
+            })(),
+            ("POST", "delete") => (|| {
+                let name = b.str_or("name", "");
+                std::fs::remove_file(checkpoint_path(name)?).map_err(|e| format!("{name}: {e}"))?;
+                Ok(Json::object().with("deleted", name.into()))
+            })(),
+            ("POST", "upload") => checkpoint_upload(b),
+            ("GET", _) | ("POST", _) => Err("no such route".to_string()),
+            _ => Err("method not allowed".to_string()),
         })
     }
 
@@ -115,12 +300,40 @@ impl Service {
                 Err(_) => return Response::error(500, "the N-gram model's lock is poisoned"),
             };
             let m = guard.get_or_insert_with(default_ngram);
-            return match ngram_route(m, req) {
-                Ok(v) => Response::ok(&v),
-                Err(msg) if msg == "no such route" => Response::error(404, &msg),
-                Err(msg) if msg == "method not allowed" => Response::error(405, &msg),
-                Err(msg) => Response::error(400, &msg),
+            return answer(ngram_route(m, req));
+        }
+        if req.path == "/api/chain" || req.path.starts_with("/api/chain/") {
+            let mut guard = match self.chain.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::error(500, "the chain's lock is poisoned"),
             };
+            let m = guard.get_or_insert_with(default_chain);
+            let action = req.path["/api/chain".len()..].trim_start_matches('/');
+            return answer(chain_route(m, &req.method, action, req));
+        }
+        if req.path == "/api/uploads" || req.path.starts_with("/api/uploads/") {
+            let action = req.path["/api/uploads".len()..].trim_start_matches('/');
+            return answer(uploads_route(&req.method, action, &req.body));
+        }
+        if req.path == "/api/checkpoints" || req.path.starts_with("/api/checkpoints/") {
+            return self.checkpoints_route(req);
+        }
+        match (req.method.as_str(), req.path.as_str()) {
+            ("GET", "/api/status") => return answer(Ok(self.status())),
+            ("POST", "/api/converse") => return self.with_lm(&req.body, |m| Ok(converse(m, &req.body))),
+            ("POST", "/api/chat/llm") => {
+                return match self.with_lm_result(&req.body, |m| chat_llm(m, &req.body)) {
+                    Ok(v) => Response::ok(&v),
+                    Err(e) => Response::error(502, &e),
+                }
+            }
+            ("POST", "/api/ollama/corpus") => {
+                return match ollama_corpus(&req.body) {
+                    Ok(v) => Response::ok(&v),
+                    Err(e) => Response::error(502, &e),
+                }
+            }
+            _ => {}
         }
         let mut m = match self.machine.lock() {
             Ok(m) => m,
@@ -301,6 +514,7 @@ impl Service {
                 status: 200,
                 content_type: content_type(&path),
                 body: bytes,
+                attachment: None,
             },
             // a single-page app: an unknown path is one of its routes, not a missing file
             None => match std::fs::read(root.join("index.html")) {
@@ -308,6 +522,7 @@ impl Service {
                     status: 200,
                     content_type: "text/html; charset=utf-8",
                     body: bytes,
+                    attachment: None,
                 },
                 Err(_) => Response::error(404, "not found"),
             },
@@ -842,30 +1057,56 @@ fn talk(net: &mut Network, text: &str) -> Result<Json, String> {
     Ok(j)
 }
 
-/// `{text, reply, times?}`: a translator taught the pair, a classifier the verdict (yes / no); then its new reply.
+/// `{text, reply, times?, until?, max_rounds?}`: a translator taught the pair, a classifier the verdict (yes / no);
+/// then its new reply.  With `until`, round after round (each `times` teachings) until a whole round is right - N of
+/// N - and the network's answer is the reply (or `max_rounds`); `right` / `of` are then the last round's.
 fn network_teach(net: &mut Network, body: &Json) -> Result<Json, String> {
     let text = body.str_or("text", "").to_string();
     let reply = body.str_or("reply", "").to_string();
     let times = (body.num("times", 1.0) as usize).clamp(1, 1000);
-    let mut right = 0;
-    let mut of = 0;
-    if net.decoder().is_some() {
+    let until = body.bool_or("until", false);
+    let max_rounds = if until {
+        (body.num("max_rounds", 200.0) as usize).clamp(1, 100_000)
+    } else {
+        1
+    };
+    let translator = net.decoder().is_some();
+    let label = if translator {
+        None
+    } else {
+        Some(crate::media::verdict(&reply)?)
+    };
+    let (mut right, mut of, mut rounds, mut reached) = (0, 0, 0, false);
+    let mut history = Vec::new();
+    while rounds < max_rounds {
+        (right, of) = (0, 0);
         for _ in 0..times {
-            let (r, n) = net.teach_pair(&text, &reply)?;
+            let (r, n) = match label {
+                None => net.teach_pair(&text, &reply)?,
+                Some(l) => (net.teach(&text, l)? as usize, 1),
+            };
             right += r;
             of += n;
         }
-    } else {
-        let label = crate::media::verdict(&reply)?;
-        for _ in 0..times {
-            right += net.teach(&text, label)? as usize;
-            of += 1;
+        rounds += 1;
+        history.push(right as f64);
+        // N of N, and the answer it now gives is the one taught
+        let answers = match label {
+            None => net.sounds(&text)? == net.target_sounds(&reply),
+            Some(l) => net.predict(std::slice::from_ref(&text))?[0] == l,
+        };
+        if right == of && answers {
+            reached = true;
+            break;
         }
     }
     let after = talk(net, &text)?;
     Ok(Json::object()
         .with("right", right.into())
         .with("of", of.into())
+        .with("rounds", rounds.into())
+        .with("reached", reached.into())
+        .with("history", Json::numbers(&history))
         .with("after", after))
 }
 
@@ -877,7 +1118,16 @@ fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
     if let Some(task) = body.get("task").and_then(Json::as_str) {
         let pairs = crate::phonetic::task(task)?;
         let (train, test) = crate::phonetic::split(&pairs, 4);
-        let h = net.fit_pairs(&train, body.num("epochs", 20.0) as usize, Some(&test))?;
+        let mut h = net.fit_pairs(&train, body.num("epochs", 20.0) as usize, Some(&test))?;
+        // until: epochs on and on until every taught pair is exactly right
+        let max_epochs = (body.num("max_epochs", 200.0) as usize).clamp(1, 100_000);
+        while body.bool_or("until", false) && h.exact.last().is_some_and(|&e| e < 1.0) && h.exact.len() < max_epochs {
+            let more = net.fit_pairs(&train, 1, Some(&test))?;
+            h.sounds.extend(more.sounds);
+            h.exact.extend(more.exact);
+            h.val_exact.extend(more.val_exact);
+        }
+        let reached = h.exact.last().is_some_and(|&e| e >= 1.0);
         let mut shown = Vec::new();
         for (x, y) in train.iter().take(3).chain(test.iter().take(3)) {
             shown.push(Json::strings(&[x.clone(), net.translate(x)?, y.clone()]));
@@ -887,6 +1137,7 @@ fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
             .with("exact", Json::numbers(&h.exact))
             .with("held_out", Json::numbers(&h.val_exact))
             .with("examples", Json::Array(shown))
+            .with("reached", reached.into())
             .with("network", network_info(net)));
     }
     let (train, test): Split = if let Some(path) = body.get("data").and_then(Json::as_str) {
@@ -912,16 +1163,28 @@ fn network_fit(net: &mut Network, body: &Json) -> Result<Json, String> {
         let te = examples(&lang, 200, &mut rng, 6);
         (tr, te)
     };
-    let epochs = body.num("epochs", 1.0) as usize;
+    let epochs = (body.num("epochs", 1.0) as usize).max(1);
+    let until = body.bool_or("until", false);
+    let max_epochs = (body.num("max_epochs", 200.0) as usize).clamp(epochs, 100_000);
     let mut held = Vec::new();
     let mut taught = Vec::new();
-    for _ in 0..epochs {
+    let mut reached = false;
+    while taught.len() < if until { max_epochs } else { epochs } {
         taught.push(net.fit(&train, 1)?[0]);
         held.push(net.evaluate(&test)?);
+        // until: every taught example right while taught, and by the quiet pass after
+        if until && taught.len() >= epochs && taught[taught.len() - 1] >= 1.0 && net.evaluate(&train)? >= 1.0 {
+            reached = true;
+            break;
+        }
+    }
+    if !until {
+        reached = taught.last().is_some_and(|&t| t >= 1.0);
     }
     Ok(Json::object()
         .with("taught", Json::numbers(&taught))
         .with("held_out", Json::numbers(&held))
+        .with("reached", reached.into())
         .with("network", network_info(net)))
 }
 
@@ -949,24 +1212,6 @@ fn eval_json(ev: &Evaluation) -> Json {
         .with("bits", ev.bits.map(Json::from).unwrap_or(Json::Null))
         .with("accuracy", ev.accuracy.map(Json::from).unwrap_or(Json::Null))
         .with("top5", ev.top5.map(Json::from).unwrap_or(Json::Null))
-}
-
-/// `{predict?, self_credit?}`: predict every token before learning it (the default), and credit the guess.
-fn learn_options(m: &mut NGram, b: &Json) {
-    m.predict = b.bool_or("predict", true);
-    m.self_credit = b.num("self_credit", 0.0);
-    m.reset_online();
-}
-
-/// How well the model predicted the tokens it was just trained on, each before it learned it.
-fn online_json(m: &mut NGram) -> Json {
-    let (n, acc, ppl, bits) = m.reset_online();
-    let opt = |v: Option<f64>| v.map(Json::from).unwrap_or(Json::Null);
-    Json::object()
-        .with("predicted", (n as usize).into())
-        .with("accuracy", opt(acc))
-        .with("perplexity", opt(ppl))
-        .with("bits", opt(bits))
 }
 
 fn ngram_info(m: &mut NGram) -> Json {
@@ -1003,7 +1248,7 @@ fn paths_of(body: &Json) -> Vec<String> {
     }
 }
 
-fn ngram_predict(m: &mut NGram, body: &Json) -> Json {
+pub(crate) fn ngram_predict(m: &mut NGram, body: &Json) -> Json {
     let text = body.str_or("text", "");
     let k = (body.num("k", 10.0) as usize).clamp(1, 200);
     let context: Vec<String> = {
@@ -1023,10 +1268,27 @@ fn ngram_predict(m: &mut NGram, body: &Json) -> Json {
         .with("next", Json::Array(next))
 }
 
+fn poisoned<T>(_: T) -> String {
+    "a lock is poisoned".to_string()
+}
+
+/// A route's result as a response: 404 and 405 for the routes that are not there, 400 for every other error.
+fn answer(r: Result<Json, String>) -> Response {
+    match r {
+        Ok(v) => Response::ok(&v),
+        Err(msg) if msg == "no such route" => Response::error(404, &msg),
+        Err(msg) if msg == "method not allowed" => Response::error(405, &msg),
+        Err(msg) => Response::error(400, &msg),
+    }
+}
+
 fn ngram_route(m: &mut NGram, req: &Request) -> Result<Json, String> {
     let b = &req.body;
+    let action = req.path["/api/ngram".len()..].trim_start_matches('/');
+    if let Some(r) = lm_route(m, &req.method, action, req) {
+        return r;
+    }
     match (req.method.as_str(), &req.path[5..]) {
-        ("GET", "ngram") => Ok(ngram_info(m)),
         ("POST", "ngram/new") => {
             *m = NGram::new(
                 b.num("order", 3.0) as usize,
@@ -1035,68 +1297,6 @@ fn ngram_route(m: &mut NGram, req: &Request) -> Result<Json, String> {
                 b.num("stimulation", 1.0),
             )?;
             Ok(ngram_info(m))
-        }
-        ("POST", "ngram/train") => {
-            let paths = paths_of(b);
-            learn_options(m, b);
-            let (n, test) = m.train_paths(&paths, b.num("held_out", 10.0) as usize)?;
-            let learned = online_json(m);
-            let ev = m.evaluate(&test, 1000);
-            m.history.push(
-                eval_json(&ev)
-                    .with("round", m.history.len().into())
-                    .with("source", paths.join(",").as_str().into())
-                    .with("learned", learned.get("predicted").cloned().unwrap_or(Json::Null))
-                    .with(
-                        "learned_accuracy",
-                        learned.get("accuracy").cloned().unwrap_or(Json::Null),
-                    )
-                    .with(
-                        "learned_perplexity",
-                        learned.get("perplexity").cloned().unwrap_or(Json::Null),
-                    ),
-            );
-            Ok(Json::object()
-                .with("trained", n.into())
-                .with("learned", learned)
-                .with("held_out", eval_json(&ev))
-                .with("model", ngram_info(m)))
-        }
-        ("POST", "ngram/text") => {
-            let lines: Vec<String> = crate::ngram::split_text_lines(b.str_or("text", ""));
-            learn_options(m, b);
-            let n = m.train_lines(&lines, Some("pasted text"));
-            Ok(Json::object()
-                .with("trained", n.into())
-                .with("learned", online_json(m))
-                .with("model", ngram_info(m)))
-        }
-        ("POST", "ngram/predict") => Ok(ngram_predict(m, b)),
-        ("POST", "ngram/generate") => {
-            let text = b.str_or("text", "");
-            let mut rng = Rng::new(b.num("seed", 1.0) as u64);
-            let toks = m.generate(
-                text,
-                (b.num("max_tokens", 30.0) as usize).min(5000),
-                b.num("temperature", 0.0),
-                &mut rng,
-            );
-            let completion = if m.unit == "base64" {
-                let mut all = m.prompt_tokens(text);
-                all.extend(toks.iter().cloned());
-                crate::ngram::detokenize(&all, &m.unit)
-            } else {
-                crate::ngram::detokenize(&toks, &m.unit)
-            };
-            Ok(Json::object()
-                .with("text", text.into())
-                .with("tokens", Json::strings(&toks))
-                .with("completion", completion.into())
-                .with("unit", m.unit.as_str().into()))
-        }
-        ("POST", "ngram/credit") => {
-            let n = m.credit_text(b.str_or("text", ""), b.num("amount", 1.0));
-            Ok(Json::object().with("credited", n.into()).with("model", ngram_info(m)))
         }
         ("GET", "ngram/ollama") => {
             let client = Ollama::new(req.param("url"), req.param("model"));
@@ -1151,11 +1351,6 @@ fn ngram_route(m: &mut NGram, req: &Request) -> Result<Json, String> {
                 .with("rounds", Json::Array(records))
                 .with("log", Json::strings(&log))
                 .with("model", ngram_info(m)))
-        }
-        ("POST", "ngram/save") => {
-            let path = b.str_or("path", "ngram.json.gz").to_string();
-            m.save(&path)
-                .map(|_| Json::object().with("saved", path.as_str().into()))
         }
         ("POST", "ngram/load") => {
             *m = load_ngram(b.str_or("path", "ngram.json.gz"))?;

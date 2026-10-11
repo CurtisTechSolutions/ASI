@@ -26,6 +26,10 @@ The five requirements, in the author's words, and where each is realised:
 | train on text, audio, images and video (images / differences and audio) | §14: the text, audio, image, diff and video encoders |
 | predict the next thing with N-grams, trained automatically from a corpus and with Ollama | §15: `NGram`, Kneser-Ney over adaptive edges; `autotrain` |
 | a base64 encoder and decoder for text, images, video..., and N-gram learning over it | §16: `b64`, the `base64` unit |
+| a chain of nodes, one input a node, the output node predicting; prediction depth shrinking with confidence (accuracy and reward) | §17: `Chain`, the gathered-confidence walk |
+| teach a reply, and train, until N of N | §18: `teach`, `drill`, `ceiling`; the network's `until` |
+| parse zip files of unlimited size, and other file types, in the corpus | §19: `corpus`, `archive` |
+| a frontend with the ModelKit frontend's features: predictions as chat, uploads, checkpoints as a tab | §20 |
 
 ## 1. The matrix
 
@@ -856,3 +860,168 @@ whenever one ends, until `max_tokens` letters or a padded end.
 * **Cut at whole groups** so a letter always means the same six bits of the
   same byte position in its group, the structure an N-gram can learn.
 
+
+
+## 17. The chain
+
+`Chain(nodes, unit, lower, confidence)` (`chain.py`, `chain.rs`): `nodes - 1`
+input nodes and the output node. `tables[k]` holds the nodes of depth `k`
+by context - the last `k` inputs, `<s>` before the first (depth 0 is the
+output node, context `()`); a sequence is `<s>`, its inputs, `</s>`, and at
+position `i` the contexts of depths `0..min(nodes - 1, i)` exist.
+
+A `Node` keeps `counts` (input id -> how often it came next), `total`,
+`best` (the most frequent, ties to the lower id, kept current at every
+`add`), `tested`, `right`, `rewarded`, `punished`. Its confidence is
+`(right + rewarded) / (tested + rewarded + punished + PRIOR)`, `PRIOR = 2`.
+
+**Training** (`train_tokens(tokens, predict, credit, reward)`), at every
+position `i` with next input `w`: with `predict`, the whole chain first
+predicts `w` - the walk, its guess and `P(w)` added to `online` (right,
+predicted, `Σ ln P`, nodes traversed) - and with `credit` the nodes on the
+walk whose `best` is the guess are rewarded `credit` (if it was right and
+`reward`) or punished `credit` (if wrong); then every node of depth
+`0..min(D, i)` along the context that already exists is **tested** (`tested
++= 1`, `right += best == w`), and every one, existing or new, learns `w`.
+
+**The walk** after a history `ids` (`<s>` and the inputs), at threshold
+`τ`: start at the output node, `doubt = 1 - c_0`; while `1 - doubt < τ` and
+`k < min(D, len(ids))`, take the node of depth `k + 1` along `ids` - stop if
+it does not exist - and `doubt *= 1 - c_{k+1}`. The walk is the nodes
+taken. `τ = 0` stops at the output node; no node's confidence reaches 1, so
+`τ = 1` goes as deep as the context exists.
+
+**The distribution** of a walk `n_0..n_d`: `P_{-1}(w) = 1 / (V - 1)` (0 for
+`<s>`), `P_k(w) = (c_k(w) + T_k P_{k-1}(w)) / (N_k + T_k)` (`T_k` distinct
+inputs seen, `N_k` their total), in that order, integer sums before the
+division. **The guess** is its argmax (ties to the lower id), found without
+the whole distribution: an input no node past the output node has counted
+is ranked by the output node's counts alone, so the candidates are the
+inputs in nodes `1..d` and the best of the rest by the output node's ranks.
+
+`credit_text(text, r)`: at every input of the text and `</s>`, every node on
+the walk whose `best` is that input is rewarded `r` (or punished `-r`).
+`evaluate` (perplexity, bits, accuracy, mean depth, walks per depth) and
+`sweep` (evaluate at each threshold) move nothing. The file:
+`{format: "latticefsm-chain", nodes, unit, lower, confidence, clock,
+sentences, vocab, table: [[k, *context, tested, right, rewarded, punished,
+w, c, w, c, ...]], sources, history}`, rows sorted by `[k, *context]`;
+`best` and the output node's ranks are rebuilt on reading.
+
+### 17.1 Decisions
+
+* **Gathered, not first-above-threshold.** Stopping at the first node whose
+  own confidence reaches `τ` lets one confident-but-shallow node decide;
+  gathering `1 - Π(1 - c)` lets every node shorten the walk a little, so the
+  depth falls continuously as confidence rises. Measured on letters it was
+  as accurate or more at every depth, with a lower perplexity.
+* **A node's own accuracy, measured while training,** is its confidence:
+  what it would have said, not what the whole chain said, so a node earns
+  trust by itself; two imagined misses keep an untested node at 0.
+* **Credit to the nodes that guessed it,** not only to the node the walk
+  stopped at: a reward that reached only the deepest node would never let
+  the nearer nodes stop a walk sooner.
+
+## 18. Teaching until N of N
+
+**`teach(text, reply, max_rounds)`** (both models): `of = len(reply) + 1`.
+A round: at every position of the reply and its `</s>`, the first guess
+after `text + reply[:i]` is taken; `right` counted; if `right == of` or
+`max_rounds` rounds have run, stop. Else every wrong position is corrected
+by `a = 2^s` (`s`: the rounds that position has already been wrong in a
+row) - the chain punishes the nodes on its walk whose `best` is the guess;
+the N-gram narrows the guess's edge (`credit(ctx, guess, -a)`, `<unk>` never)
+- and `text + reply` is learned once as a sequence.
+
+**`ceiling(seqs)`**: the contexts of `seqs` (the N-gram's `order - 1`
+tokens; the chain's whole reachable context, `min(D, i)` inputs) with what
+follows each and how often: `Σ max` is the most first guesses any model of
+that context length can get right. **`drill(seqs, max_rounds, patience)`**:
+the target of a context is its most frequent next token (ties to the lower
+id). A round counts the right first guesses over `seqs` (teacher-forced);
+stop at the ceiling, `max_rounds`, or `patience` rounds without a gain (the
+CLI and the server pass `patience = max_rounds`). Else, contexts in sorted
+order, every one whose guess is not its target, `a = 2^k` (`k`: the rounds
+it was corrected before): the N-gram narrows the guess's edge by `a` and
+widens the target's by `a`; the chain punishes by `a` every node on its walk
+whose `best` is not the target, and if the deepest node of the context
+prefers another input, or the walk reached it and still guessed wrong, adds
+to it as many of the target as make it its `best` (`counts[best] - counts[t]
++ [t > best]`) plus `2^k - 1`. `train --until` is round 1 (the training pass,
+measured while learning) and then the drill.
+
+The network's `teach` with `until` repeats rounds of `times` teachings
+until a round's sounds (or verdicts) are all right and its answer is the
+reply; `fit` with `until` repeats epochs until every taught pair is exactly
+right (or every taught example, by the quiet pass).
+
+### 18.1 Decisions
+
+* **A ceiling, not N of N:** when the data continues one context two ways no
+  model that reads only that context can get both right; looping until N of
+  N would never end. The ceiling is computed and printed, and reached.
+* **Doubling.** A node right a thousand times elsewhere needs a large
+  punishment to give way; a fixed one never gets there, doubling gets there
+  in a handful of rounds and does not overshoot by more than a factor of two.
+* **Targets, not the last wrong guess:** correcting toward each context's
+  most frequent token settles; correcting toward whatever was just wrong
+  flips a two-way context back and forth for ever.
+* **No retraining in the drill:** a pass over the same data again raises
+  every node's tested and right and so its confidence, shortening walks and
+  undoing the punishments; teaching a reply learns it again because its
+  tokens may never have been seen.
+
+## 19. Reading a corpus
+
+`corpus.files(paths)`: a named file as it is; a directory walked in name
+order, hidden files and directories and `README.md` left out, and files of
+no known kind too (unless everything is wanted, as for `base64`). The kind
+of a file (or member) is read off its name (`file_kind`). An archive is
+expanded: `.gz` into the file it holds, whose kind is the name without
+`.gz`; `.tar` and `.tar.gz` / `.tgz` into their regular members in order;
+`.zip` into its members in central-directory order - directories, hidden
+members (any part beginning `.` or `__MACOSX`), encrypted ones and methods
+other than stored and deflated skipped - each a document labelled
+`archive/member`, archives followed `MAX_DEPTH = 4` deep. A text document's
+lines: `text` and `jsonl` read `readline(MAX_LINE = 2^20)` at a time,
+decoded UTF-8 with replacement, split as Python's `splitlines`, stripped,
+empty dropped (`jsonl`: each line's JSON value's text, or the line); `json`,
+markup and documents read whole. `strip_markup`: comments, `<!...>`,
+`<?...?>`, scripts and styles dropped, CDATA kept, a tag whose local name
+(lower-cased, after its last `:`) is a block (`p h h1..h6 div br li tr title
+section article blockquote pre table ul ol dt dd hr header footer nav aside
+caption figcaption`) becomes `\n`, `td th tab` a space, every other tag
+nothing; then `&amp; &lt; &gt; &quot; &apos; &nbsp; &hellip; &mdash; &ndash;
+&lsquo; &rsquo; &ldquo; &rdquo; &copy;` and `&#N;` / `&#xH;` decoded.
+
+`archive.rs` reads what Python's `gzip`, `zipfile` and `tarfile` read: a
+deflate decoder that keeps only its 32 KiB window and decodes block by block
+into a buffer as it is read; gzip members one after another (zero padding
+between allowed), each CRC and length checked; the zip end record (the last
+`PK\x05\x06` in the last 64 KiB + 22 bytes), the ZIP64 end record before
+its locator, ZIP64 extra fields, CP437 names unless flagged UTF-8, data
+prepended to the archive allowed for, every member's CRC and length checked
+at its end; tar headers with their checksums, ustar prefixes, GNU long names,
+pax `path` and `size`, base-256 sizes, stopping at a zero block.
+
+Training streams (`ngram.train_corpus`): every sequence of every document
+goes straight to the model, every `held_out`-th of each document kept back
+instead - at most `MAX_HELD_OUT = 10 000` - and one source per file (an
+archive is one).
+
+## 20. The frontend and the server around the models
+
+The chain and the N-gram answer the same routes (`/api/{chain,ngram}/...`:
+train, text, predict, generate, credit, feedback, score, teach, save; the
+chain's new, load, confidence, sweep, graph; the N-gram's new, load,
+ollama, autotrain) through one trait, `routes::Lm`. Uploads (`/api/uploads`)
+are written under the upload directory, names sanitised part by part, a
+file sent in pieces with `append`, so a file may be any size; a training
+body's `uploads` names them. Checkpoints (`/api/checkpoints`) are model
+files named `{model}--{tag}--{seconds}.json.gz` in the checkpoint directory,
+listed newest first, restored into the model their name says, downloaded
+with `Content-Disposition`, uploaded in pieces. `/api/converse` continues
+each turn with the next; `/api/chat/llm` has Ollama say a line, the model
+continue it, Ollama mark it out of 10 and the reply credited `(mark -
+pass) / 5`; `/api/status` summarises every model. The frontend's tabs are
+in README.md.

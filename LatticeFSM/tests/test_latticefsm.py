@@ -1210,6 +1210,113 @@ class TestChain(unittest.TestCase):
             Chain(4, confidence=1.5)
 
 
+class TestTeaching(unittest.TestCase):
+    """Teaching until N of N: a reply taught until the model's first guess is right on every token of it, and a corpus
+    drilled until every token is right that can be - a context continued more than one way only ever one way."""
+
+    def test_a_reply_is_taught_until_every_token_is_right(self):
+        from latticefsm.chain import Chain
+        from latticefsm.ngram import NGram
+        for m in (Chain(), NGram(3)):
+            m.train_paths(["data/corpus"], held_out=10)
+            r = m.teach("what is the brain", "a lattice of adaptive edges that predicts.")
+            self.assertTrue(r["reached"], type(m).__name__)
+            self.assertEqual(r["right"], r["of"])
+            self.assertEqual(r["history"][-1], r["of"])
+            self.assertLess(r["history"][0], r["of"])
+            self.assertEqual(m.complete("what is the brain", 80).strip(" ."),
+                             "a lattice of adaptive edges that predicts")
+
+    def test_drilling_reaches_the_most_possible(self):
+        from latticefsm.chain import Chain
+        from latticefsm.ngram import NGram, train_corpus
+        for m in (Chain(), NGram(3)):
+            seqs = []
+            m.train_paths(["data/corpus/sentences.txt"], held_out=10)
+            train_corpus(["data/corpus/sentences.txt"], m.unit, m.lower, 10, lambda t: seqs.append(t) or 0, [])
+            best, n = m.ceiling(seqs)
+            self.assertLess(best, n)  # the corpus continues some contexts more than one way
+            d = m.drill(seqs, 30, 30)
+            self.assertTrue(d["reached"], type(m).__name__)
+            self.assertEqual(d["right"], best)
+            self.assertEqual(d["rounds"][-1], best)
+        tiny = Chain(4)
+        tiny.train_lines(["abcd", "abce"])
+        self.assertEqual(tiny.ceiling([list("abcd"), list("abce")]), (9, 10))  # after abc: d or e, one of them
+
+    def test_scores_are_the_probabilities(self):
+        from latticefsm.chain import Chain
+        from latticefsm.ngram import NGram
+        n = NGram(3)
+        n.train_lines(["the cat sat on the mat", "the cat ate the fish"])
+        toks = n.tokens("the cat sat")
+        scored = n.score_tokens(toks)
+        self.assertEqual([t for t, _ in scored], toks + ["</s>"])
+        self.assertEqual(scored[1][1], n.prob(n.context(toks[:1]), n.index["cat"]))
+        c = Chain(4)
+        c.train_lines(["abcd", "abcd"])
+        scored = c.score_tokens(list("abc"))
+        self.assertEqual([t for t, _, _ in scored], ["a", "b", "c", "</s>"])
+        self.assertTrue(all(0 < p <= 1 for _, p, _ in scored))
+
+
+class TestCorpus(unittest.TestCase):
+    """Every kind of file the corpus reader knows, archives of any size opened member by member, and the same lines
+    and bytes in both ports."""
+
+    def test_every_kind(self):
+        from corpus_fixture import make
+        from latticefsm.corpus import strip_markup
+        from latticefsm.ngram import corpus_lines
+        with tempfile.TemporaryDirectory() as d:
+            make(d)
+            got = {os.path.relpath(label, d): lines for label, lines in corpus_lines([d])}
+            self.assertEqual(got["a.txt"], ["plain line one", "line two", "indented three"])
+            self.assertEqual(got["b.html"][:4], ["A page", "Cats & dogs", "The cat sat on the mat.",
+                                                 "Café \u2014 done\u2026"])
+            self.assertEqual(got["c.docx"], ["The first paragraph", "and the second."])
+            self.assertEqual(got["d.epub"], ["Chapter one.", "Chapter two."])
+            self.assertEqual(got["e.jsonl.gz"], ["json one", "json two", "not json"])
+            self.assertEqual(got["i.zip/nested.tar.gz/nested.txt"], ["nested in a tar.gz in a zip"])
+            self.assertEqual(got["i.zip/inner.zip/deeper.txt"], ["zip in a zip"])
+            self.assertEqual(len(got["j.zip/big.txt"]), 2000)  # a ZIP64 member
+            self.assertEqual(got["m.odt"], ["Open document.", "A heading"])
+            self.assertTrue(any(k.startswith("f.tar/deep/") for k in got))  # a long name, from a pax header
+            for hidden in ("i.zip/.hidden.txt", "i.zip/__MACOSX/x.txt", "f.tar/.hid.txt", "README.md", "k.unknown",
+                           "i.zip/img.png"):
+                self.assertNotIn(hidden, got)
+        self.assertEqual(strip_markup("<p>a<br/>b</p><script>x<y</script>&lt;c&gt; &#65;&#x42; &bogus;"),
+                         "\na\nb\n<c> AB &bogus;")
+
+    def test_both_ports_read_the_same(self):
+        from corpus_fixture import make
+        with tempfile.TemporaryDirectory() as d:
+            make(d)
+            for unit in ("text", "base64"):
+                outs = [subprocess.run([*cmd, "corpus", d, "--unit", unit, "--show", "3"], cwd=ROOT, check=True,
+                                       capture_output=True, text=True).stdout
+                        for cmd in ([sys.executable, "-m", "latticefsm"], [RUST])]
+                self.assertEqual(outs[0], outs[1], unit)
+                self.assertIn("documents", outs[0])
+
+    def test_training_streams_a_zip(self):
+        import zipfile
+        from latticefsm.chain import Chain
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "big.zip")
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+                with zf.open("a.txt", "w", force_zip64=True) as f:
+                    for _ in range(300):
+                        f.write(b"the cat sat on the mat\nthe dog ate the bone\n")
+            m = Chain(4, "word")
+            n, held = m.train_paths([path], held_out=10)
+            lines = ["the cat sat on the mat", "the dog ate the bone"] * 300
+            trained = [ln for i, ln in enumerate(lines) if i % 10 != 9]
+            self.assertEqual(len(held), 60)
+            self.assertEqual(n, sum(len(ln.split()) + 1 for ln in trained))
+            self.assertEqual(m.sources, [[path, 540, n]])
+
+
 class TestAutotrain(unittest.TestCase):
     """The corpus, then Ollama: sentences, continuations and a judge's credit, measured every round."""
 
@@ -1498,6 +1605,25 @@ class TestRustChainParity(unittest.TestCase):
                             self.cli(reader, "chain", "credit", "the brain is", "--load", path))
                 self.assertEqual(len(set(outs.values())), 1, unit)
                 self.assertIn("input nodes traversed", outs[("py", "py")][0])
+
+
+class TestRustTeachingParity(unittest.TestCase):
+    """Teaching a reply and training until N of N print the same in both ports."""
+
+    def test_teach_and_until(self):
+        with tempfile.TemporaryDirectory() as d:
+            tiny = os.path.join(d, "tiny.txt")
+            with open(tiny, "w") as f:
+                f.write("the cat sat on the mat\nthe cat ate the fish\na dog sat on the log\n")
+            for args in (("chain", "teach", "what is the brain", "a lattice of adaptive edges."),
+                         ("ngram", "teach", "hello", "hi there, how are you today?"),
+                         ("chain", "train", "--data", tiny, "--held-out", "0", "--until"),
+                         ("ngram", "train", "--data", "data/corpus/sentences.txt", "--until"),
+                         ("chain", "train", "--data", "data/corpus/sentences.txt", "--until")):
+                outs = [subprocess.run([*cmd, *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
+                        for cmd in ([sys.executable, "-m", "latticefsm"], [RUST])]
+                self.assertEqual(outs[0], outs[1], args)
+                self.assertTrue("reached" in outs[0] or "right after" in outs[0], outs[0])
 
 
 class TestRustCompressionParity(unittest.TestCase):

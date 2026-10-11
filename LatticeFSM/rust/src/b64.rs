@@ -109,13 +109,19 @@ pub fn files_under(paths: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Every file under `paths` as (path, sequences): its bytes base64-encoded, `width` letters a sequence.
+/// Every file under `paths` as (label, sequences): its bytes base64-encoded, `width` letters a sequence; an
+/// archive's members each on their own (`corpus::byte_documents`).
 pub fn file_sequences(paths: &[String], width: usize) -> Result<Vec<(String, Vec<String>)>, String> {
     let step = (width / 4).max(1) * 3;
     let mut out = Vec::new();
-    for f in files_under(paths)? {
-        let data = fs::read(&f).map_err(|e| format!("{f}: {e}"))?;
-        out.push((f, data.chunks(step).map(encode).collect()));
-    }
-    Ok(out)
+    crate::corpus::byte_documents(paths, &mut |_, label, r| {
+        let mut seqs = Vec::new();
+        crate::corpus::read_chunks(r, step, &mut |c| {
+            seqs.push(encode(c));
+            Ok(())
+        })?;
+        out.push((label.to_string(), seqs));
+        Ok(())
+    })
+    .map(|_| out)
 }

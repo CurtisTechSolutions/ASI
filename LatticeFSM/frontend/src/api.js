@@ -58,6 +58,9 @@ const q = (params) =>
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join("&");
 
+/** The route prefix of a language model: anything but "ngram" is the chain. */
+const lmPath = (m) => (m === "ngram" ? "/api/ngram" : "/api/chain");
+
 export const api = {
   health: () => get("/api/health"),
   stats: () => get("/api/stats"),
@@ -92,7 +95,7 @@ export const api = {
   ngramPredict: (text, k) => post("/api/ngram/predict", { text, k }),
   ngramGenerate: (body) => post("/api/ngram/generate", body),
   ngramCredit: (text, amount) => post("/api/ngram/credit", { text, amount }),
-  ngramOllama: (model) => get(`/api/ngram/ollama?${q({ model })}`),
+  ngramOllama: (model, url) => get(`/api/ngram/ollama?${q({ model, url })}`),
   ngramAutotrain: (body) => post("/api/ngram/autotrain", body),
   ngramSave: (path) => post("/api/ngram/save", { path }),
   ngramLoad: (path) => post("/api/ngram/load", { path }),
@@ -103,4 +106,43 @@ export const api = {
   networkFit: (body) => post("/api/network/fit", body),
   networkSave: (path) => post("/api/network/save", { path }),
   networkLoad: (path) => post("/api/network/load", { path }),
+
+  // the language model the header's selector picks: `m` is "chain" or "ngram" (the same shapes for both)
+  lm: (m) => get(lmPath(m)),
+  lmNew: (m, body) => post(`${lmPath(m)}/new`, body),
+  lmTrain: (m, body) => post(`${lmPath(m)}/train`, body),
+  lmText: (m, text, opts = {}) => post(`${lmPath(m)}/text`, { text, ...opts }),
+  lmPredict: (m, text, k) => post(`${lmPath(m)}/predict`, { text, k }),
+  lmGenerate: (m, body) => post(`${lmPath(m)}/generate`, body),
+  lmCredit: (m, text, amount) => post(`${lmPath(m)}/credit`, { text, amount }),
+  lmFeedback: (m, body) => post(`${lmPath(m)}/feedback`, body),
+  lmScore: (m, text) => post(`${lmPath(m)}/score`, { text }),
+  lmSave: (m, path) => post(`${lmPath(m)}/save`, { path }),
+  lmLoad: (m, path) => post(`${lmPath(m)}/load`, { path }),
+  /** Teach that `reply` follows `text`, round after round, until the greedy continuation of `text` is exactly `reply`. */
+  lmTeach: (m, body) => post(`${lmPath(m)}/teach`, body),
+  // the chain alone
+  chainConfidence: (confidence) => post("/api/chain/confidence", { confidence }),
+  chainSweep: (body) => post("/api/chain/sweep", body),
+  chainGraph: (limit) => get(`/api/chain/graph?${q({ limit })}`),
+
+  status: () => get("/api/status"),
+  converse: (body) => post("/api/converse", body),
+  chatLlm: (body) => post("/api/chat/llm", body),
+  ollamaCorpus: (body) => post("/api/ollama/corpus", body),
+
+  uploads: () => get("/api/uploads"),
+  /** One piece of a file's bytes (base64; at most 8 MiB raw, see upload.js): the first starts it, `append` adds on. */
+  upload: (name, contentBase64, append = false) => post("/api/uploads", { name, content_base64: contentBase64, append }),
+  uploadText: (name, content) => post("/api/uploads", { name, content }),
+  uploadDelete: (name) => post("/api/uploads/delete", { name }),
+
+  checkpoints: () => get("/api/checkpoints"),
+  checkpointSave: (model, tag) => post("/api/checkpoints/save", { model, ...(tag ? { tag } : {}) }),
+  checkpointRestore: (name) => post("/api/checkpoints/restore", { name }),
+  checkpointDelete: (name) => post("/api/checkpoints/delete", { name }),
+  checkpointUpload: (name, contentBase64, append = false) =>
+    post("/api/checkpoints/upload", { name, content_base64: contentBase64, append }),
+  /** A plain link (the server answers with the file as an attachment), not a fetch. */
+  checkpointDownloadUrl: (name) => `${API_BASE}/api/checkpoints/download?${q({ name })}`,
 };

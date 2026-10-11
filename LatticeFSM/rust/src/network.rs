@@ -1384,7 +1384,7 @@ impl Network {
             .collect()
     }
 
-    fn target_sounds(&mut self, text: &str) -> Vec<String> {
+    pub fn target_sounds(&mut self, text: &str) -> Vec<String> {
         let labels = self.decoder().expect("checked").written();
         let mut out: Vec<String> = self.targets(text).into_iter().map(|i| labels[i].clone()).collect();
         while out.last().is_some_and(|s| s == "#") {

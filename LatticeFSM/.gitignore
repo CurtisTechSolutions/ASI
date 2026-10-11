@@ -7,3 +7,7 @@ frontend/node_modules/
 frontend/.vite/
 core.json
 core.json.gz
+
+# runtime: what the server is sent and saves
+data/uploads/
+checkpoints/

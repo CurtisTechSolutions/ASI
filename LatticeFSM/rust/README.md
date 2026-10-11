@@ -32,6 +32,12 @@ latticefsm ngram train --unit base64 --order 8 --data media/ --save b.json.gz   
 latticefsm ngram generate --load b.json.gz --out new.bin --prefix-from start.png --prefix-bytes 64
 latticefsm base64 encode photo.png --out photo.b64; latticefsm base64 decode photo.b64 --out back.png
 latticefsm ngram ollama                                                          # is Ollama there
+latticefsm chain train --nodes 8 --confidence 0.9 --data data/corpus --save chain.json.gz
+latticefsm chain predict "the bra" --load chain.json.gz                          # input nodes, walk, next
+latticefsm chain sweep --load chain.json.gz                                       # accuracy against depth
+latticefsm chain teach "what is the brain" "a lattice." --load chain.json.gz     # until every input is right
+latticefsm chain train --data data/corpus --until                                 # drilled to N of N
+latticefsm corpus data/corpus --show 2                                            # what a corpus is read as
 ```
 
 `src/ngram.rs` is the model (`../latticefsm/ngram.py` number for number),
@@ -110,6 +116,24 @@ root answers a JSON 404 that says so and the API still works:
 | `GET /api/ngram/ollama` | `?url=&model=` | is Ollama there, which models, which autotrain would use |
 | `POST /api/ngram/autotrain` | `{data?, ollama?, model?, url?, topics?, rounds?, lines?, continuations?, judge?, patience?, fresh?}` | the corpus, then rounds with Ollama; the log and each round's record |
 | `POST /api/ngram/save`, `/api/ngram/load` | `{path}` | write or read the model |
+| `GET /api/chain` | | the chain the server holds (8 nodes of letters, confidence 0.9, trained on `data/corpus` at start): stats per depth, sources, history |
+| `POST /api/chain/new` | `{nodes?, unit?, confidence?, lower?}` | a fresh chain |
+| `POST /api/{chain,ngram}/train` | `{data?, uploads?, held_out?, predict?, self_credit?, until?, max_rounds?}` | train on server paths and uploads, every token predicted first; with `until`, drilled to N of N (or the most possible); the held-out measure |
+| `POST /api/{chain,ngram}/text` | `{text, predict?, self_credit?, until?, max_rounds?}` | train on pasted text, a line a sequence |
+| `POST /api/{chain,ngram}/predict` | `{text, k?}` | the next tokens; the chain's input nodes and walk too |
+| `POST /api/{chain,ngram}/generate` | `{text, max_tokens?, temperature?, seed?, count?}` | `count` samples (the chain's walk depths with them) |
+| `POST /api/{chain,ngram}/credit`, `/feedback` | `{text, amount}`, `{good, bad, amount?}` | reward or punish |
+| `POST /api/{chain,ngram}/score` | `{text}` | every token's probability (and walk depth), perplexity, bits |
+| `POST /api/{chain,ngram}/teach` | `{text, reply, max_rounds?}` | teach `reply` after `text` until every token of it is right; the new continuation |
+| `POST /api/chain/confidence`, `/sweep` | `{confidence}`, `{data?, uploads?, held_out?, thresholds?}` | set the threshold; accuracy and depth at each threshold on held-out lines |
+| `GET /api/chain/graph` | `?limit=` | the most-seen node contexts: guess, confidence |
+| `POST /api/{chain,ngram}/save`, `/load` | `{path}` | write or read the model |
+| `GET /api/uploads`, `POST /api/uploads`, `POST /api/uploads/delete` | `{name, content_base64 \| content, append?}`, `{name}` | the uploads (any file; big ones in pieces), written under `data/uploads` or `$LATTICEFSM_UPLOADS` |
+| `GET /api/checkpoints`, `POST /api/checkpoints/{save,restore,delete,upload}`, `GET /api/checkpoints/download?name=` | `{model, tag?}`, `{name}`, `{name, content_base64, append?}` | checkpoints of any model in `checkpoints/` or `$LATTICEFSM_CHECKPOINTS` |
+| `POST /api/converse` | `{model, opening, turns?, max_tokens?, temperature?}` | the model talking to itself |
+| `POST /api/chat/llm` | `{model, topic, turns?, pass_mark?, learn?, ollama_model?, url?}` | Ollama talks with the model and marks its replies; 502 without Ollama |
+| `POST /api/ollama/corpus` | `{prompt, lines?, ollama_model?, url?}` | sentences Ollama writes |
+| `GET /api/status` | | every model in brief, uploads, checkpoints |
 | `GET /api/network` | | the network the server holds beside the machine (`enc>dec` until another is made): architecture, layers, summary |
 | `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` | a fresh network |
 | `POST /api/network/talk` | `{text}` | its reply - English from a translator (with its sounds), yes / no from a classifier - and the trace, layer by layer |
@@ -129,6 +153,9 @@ or 405. `tests/server.rs` exercises every route over a real socket.
 | `src/machine.rs` | `Machine`, `Run`, `Transition`, `Settings`: the walk, the clock, credit, stimulation, the file |
 | `src/network.rs`, `src/phonetic.rs` | networks of machines; English in and out through the phonetic tokenizer |
 | `src/ngram.rs`, `src/autotrain.rs`, `src/b64.rs` | the N-gram model, autotrain and the Ollama client, base64 |
+| `src/chain.rs` | the chain: one input a node, walks that shorten with confidence |
+| `src/corpus.rs`, `src/archive.rs` | reading a corpus: text, markup, documents; zip (ZIP64), tar, gzip streamed |
+| `src/routes.rs` | the language models' routes, uploads, checkpoints, conversations |
 | `src/media.rs` | text, audio, images, differences and video as symbols; the synthetic data sets |
 | `src/languages.rs` | the four regular languages and their examples |
 | `src/geometry.rs` | the cube's central node and shells; `center_out`, the order the code is laid out in |

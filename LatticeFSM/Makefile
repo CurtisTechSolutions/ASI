@@ -12,6 +12,7 @@
 #   make serve-prod    one process: the API and the built frontend/dist on :8000
 #   make translate-fit && make translate TEXT="cat bus"   English to English through a network of machines
 #   make ngram-train && make ngram-predict TEXT="the brain is"   predict the next thing
+#   make chain-train && make chain-predict TEXT="the bra"        one input a node; walks shorten with confidence
 #   make autotrain                 the corpus, then rounds with a local LLM through Ollama
 #
 # Override any variable on the command line, e.g. `make demo LANGUAGE=ends-ab STATES=3`.
@@ -64,6 +65,10 @@ UNIT      ?= word
 ORDER     ?= 3
 NGRAM     ?= ngram.json.gz
 CORPUS    ?= data/corpus
+NODES     ?= 8
+CONFIDENCE ?= 0.9
+CHAIN     ?= chain.json.gz
+REPLY     ?= a lattice of adaptive edges.
 ROUNDS    ?= 3
 OLLAMA_MODEL ?=
 TOPICS    ?=
@@ -84,7 +89,8 @@ MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseli
         network network-fit network-evaluate network-predict network-summary translate translate-fit py-network \
         media-data media-fit media-evaluate \
         ngram-train ngram-predict ngram-generate ngram-evaluate autotrain autotrain-corpus ollama-check fake-ollama \
-        py-autotrain base64-encode base64-decode \
+        py-autotrain base64-encode base64-decode chain-train chain-until chain-predict chain-generate chain-sweep \
+        chain-teach corpus \
         py-test py-demo py-train py-run py-stats py-experiments parity \
         frontend-install frontend-build frontend-dev frontend-preview frontend-test clean distclean
 
@@ -243,6 +249,27 @@ ollama-check: build ## Is Ollama there ($$OLLAMA_HOST or 127.0.0.1:11434), which
 
 fake-ollama: ## A stand-in Ollama on :11500 for trying autotrain without a model (OLLAMA_HOST=127.0.0.1:11500 make autotrain)
 	$(PY) tests/fake_ollama.py --port 11500
+
+chain-train: build ## A chain of NODES nodes of letters on CORPUS (zip, tar, gz, html, docx... opened), saved to CHAIN
+	$(BIN) chain train --nodes $(NODES) --confidence $(CONFIDENCE) --data $(CORPUS) --save $(CHAIN)
+
+chain-until: build ## chain-train, then drilled until every input is predicted right that can be (N of N)
+	$(BIN) chain train --nodes $(NODES) --confidence $(CONFIDENCE) --data $(CORPUS) --until --save $(CHAIN)
+
+chain-predict: build ## The input nodes CHAIN fills from TEXT, the walk back through them, the likeliest next inputs
+	$(BIN) chain predict "$(TEXT)" --load $(CHAIN)
+
+chain-generate: build ## CHAIN continuing TEXT, and how deep every walk went
+	$(BIN) chain generate "$(TEXT)" --load $(CHAIN)
+
+chain-sweep: build ## Accuracy against input nodes traversed, threshold by threshold, on CORPUS's held-out lines
+	$(BIN) chain sweep --load $(CHAIN) --data $(CORPUS)
+
+chain-teach: build ## Teach CHAIN that REPLY follows TEXT, round after round, until every input of it is right
+	$(BIN) chain teach "$(TEXT)" "$(REPLY)" --load $(CHAIN) --save $(CHAIN)
+
+corpus: build ## What CORPUS is read as: every document (archives opened) and its lines
+	$(BIN) corpus $(CORPUS) --show 2
 
 base64-encode: build ## FILE (any kind) as base64, to OUT or the screen
 	$(BIN) base64 encode $(FILE) $(if $(OUT),--out $(OUT),)

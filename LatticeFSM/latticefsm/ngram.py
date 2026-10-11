@@ -39,9 +39,10 @@ import json
 import math
 import os
 import random
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 
-__all__ = ["BOS", "EOS", "UNITS", "UNK", "NGram", "corpus_lines", "corpus_sequences", "detokenize", "load_ngram",
+__all__ = ["BOS", "EOS", "UNITS", "UNK", "NGram", "corpus_lines", "corpus_sequences", "corpus_stream", "detokenize",
+           "load_ngram", "train_corpus",
            "split_lines", "tokenize"]
 
 BOS, EOS, UNK = "<s>", "</s>", "<unk>"
@@ -138,72 +139,71 @@ def detokenize(tokens: Sequence[str], unit: str = "word") -> str:
 
 # ---- corpora -------------------------------------------------------------------------------------------------------
 
-def _json_text(value) -> str:
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        for key in ("text", "content", "sentence", "body"):
-            if isinstance(value.get(key), str):
-                return value[key]
-        return " ".join(v for v in value.values() if isinstance(v, str))
-    if isinstance(value, list):
-        return "\n".join(_json_text(v) for v in value)
-    return ""
-
-
 def corpus_lines(paths: Iterable[str]) -> list[tuple[str, list[str]]]:
-    """Every text file under ``paths`` (files, or directories walked in name order) as ``(path, lines)``: ``.txt`` /
-    ``.md`` line by line; ``.jsonl`` one JSON value a line, its ``text`` (or ``content``, ...); ``.json`` likewise;
-    empty lines dropped."""
-    files: list[str] = []
-    for p in paths:
-        if os.path.isdir(p):
-            for root, dirs, names in os.walk(p):
-                dirs.sort()
-                files += [os.path.join(root, n) for n in sorted(names)
-                          if n.lower().endswith(TEXT_EXTENSIONS) and not n.startswith(".") and n != "README.md"]
-        elif os.path.exists(p):
-            files.append(p)
-        else:
-            raise FileNotFoundError(p)
-    out = []
-    for path in files:
-        opener = gzip.open if path.endswith(".gz") else open
-        with opener(path, "rt", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-        lower = path.lower()
-        if lower.endswith(".jsonl"):
-            lines = []
-            for raw in text.splitlines():
-                raw = raw.strip()
-                if raw:
-                    try:
-                        lines += _json_text(json.loads(raw)).splitlines()
-                    except ValueError:
-                        lines.append(raw)
-        elif lower.endswith(".json"):
-            try:
-                lines = _json_text(json.loads(text)).splitlines()
-            except ValueError:
-                lines = text.splitlines()
-        else:
-            lines = text.splitlines()
-        out.append((path, [ln.strip() for ln in lines if ln.strip()]))
-    return out
+    """Every text document under ``paths`` as ``(label, lines)`` - files, directories walked in name order, and the
+    members of archives (:mod:`latticefsm.corpus`: text, ``.jsonl`` / ``.json``, HTML / XML, docx / odt / epub, zip,
+    tar, gz) - its non-empty lines, stripped."""
+    from .corpus import text_documents, text_lines
+    return [(label, list(text_lines(kind, stream))) for _, label, kind, stream in text_documents(paths)]
+
+
+def corpus_stream(paths: Iterable[str], unit: str = "word", lower: bool = True) -> Iterator[tuple[str, str, list[str]]]:
+    """Every sequence under ``paths``, one at a time, as ``(path, label, tokens)``: for ``base64`` every file's bytes
+    (archives' members') 57 bytes - 76 letters - a sequence; for the other units every non-empty line of every text
+    document, tokenized.  Nothing is held but the sequence, so a corpus may be any size."""
+    from .corpus import byte_documents, read_chunks, text_documents, text_lines
+    if unit == "base64":
+        from .b64 import CHUNK_BYTES, encode
+        for path, label, stream in byte_documents(paths):
+            for chunk in read_chunks(stream, CHUNK_BYTES):
+                yield path, label, list(encode(chunk))
+        return
+    for path, label, kind, stream in text_documents(paths):
+        for line in text_lines(kind, stream):
+            toks = tokenize(line, unit, lower)
+            if toks:
+                yield path, label, toks
 
 
 def corpus_sequences(paths: Iterable[str], unit: str = "word", lower: bool = True) -> list[tuple[str, list[list[str]]]]:
-    """Every file under ``paths`` as ``(path, token sequences)``: for ``base64``, every file of any kind, its bytes 76
-    letters a sequence (:func:`latticefsm.b64.file_sequences`); for the other units, every text file line by line
-    (:func:`corpus_lines`), each line tokenized, empty ones dropped."""
-    if unit == "base64":
-        from .b64 import file_sequences
-        return [(path, [list(seq) for seq in seqs]) for path, seqs in file_sequences(paths)]
-    out = []
-    for path, lines in corpus_lines(paths):
-        seqs = [tokenize(line, unit, lower) for line in lines]
-        out.append((path, [q for q in seqs if q]))
+    """Every document under ``paths`` as ``(label, token sequences)`` (:func:`corpus_stream`, gathered)."""
+    out: list[tuple[str, list[list[str]]]] = []
+    for _, label, toks in corpus_stream(paths, unit, lower):
+        if not out or out[-1][0] != label:
+            out.append((label, []))
+        out[-1][1].append(toks)
     return out
+
+
+MAX_HELD_OUT = 10000
+"""Held-out sequences kept at most while training on a corpus; past it, every sequence is trained on."""
+
+
+def train_corpus(paths: Iterable[str], unit: str, lower: bool, held_out: int, learn, sources: list) -> tuple[int, list]:
+    """Stream every sequence under ``paths`` into ``learn(tokens) -> counted``, every ``held_out``-th sequence of each
+    document kept back instead (up to :data:`MAX_HELD_OUT`); one ``[path, sequences, counted]`` appended to
+    ``sources`` per file (an archive is one).  Returns (counted, the held-out sequences)."""
+    total, kept = 0, []
+    path = label = None
+    count = n = index = 0
+    for p, lab, toks in corpus_stream(paths, unit, lower):
+        if p != path:
+            if path is not None:
+                sources.append([path, count, n])
+            path, count, n = p, 0, 0
+        if lab != label:
+            label, index = lab, 0
+        if held_out > 1 and index % held_out == held_out - 1 and len(kept) < MAX_HELD_OUT:
+            kept.append(toks)
+        else:
+            c = learn(toks)
+            n += c
+            total += c
+            count += 1
+        index += 1
+    if path is not None:
+        sources.append([path, count, n])
+    return total, kept
 
 
 def split_lines(lines: Sequence, every: int = 10) -> tuple[list, list]:
@@ -300,13 +300,14 @@ class NGram:
 
     # ---- training ----------------------------------------------------------------------------------------------
 
-    def train_tokens(self, tokens: Sequence[str], predict: bool = False, credit: float = 0.0) -> int:
+    def train_tokens(self, tokens: Sequence[str], predict: bool = False, credit: float = 0.0,
+                     reward: bool = True) -> int:
         """One sequence: every ``(context, next)`` counted, ``</s>`` last.  Returns how many were counted.
 
         With ``predict``, every token is first *predicted* from what has been learned so far - the model's first
         guess (:meth:`top`) and the probability it gave the true token are added to :attr:`online` - and then
-        learned; with ``credit`` as well, the guess is rewarded by ``credit`` when it was right and punished by it
-        when it was wrong, before the true token is counted.  Predicting changes nothing the counts hold, so a model
+        learned; with ``credit`` as well, the guess is rewarded by ``credit`` when it was right (unless not
+        ``reward``) and punished by it when it was wrong, before the true token is counted.  Predicting changes nothing the counts hold, so a model
         trained this way is the same model (unless it credits), and it has measured itself on every token on the way."""
         ids = [0] * (self.order - 1) + [self._id(t, True) for t in tokens] + [1]
         k = self.order - 1
@@ -320,7 +321,7 @@ class NGram:
                 self.online[0] += guess == w
                 self.online[1] += 1
                 self.online[2] += math.log(max(p, 1e-300))
-                if credit:
+                if credit and (reward or guess != w):
                     self.credit(ctx, w if guess == w else guess, credit if guess == w else -credit)
                 tables = self._tables
             if tables is not None:
@@ -375,30 +376,82 @@ class NGram:
         return {"predicted": n, "accuracy": right / n, "perplexity": math.exp(-logp / n),
                 "bits": -logp / n / math.log(2)}
 
+    def _targets(self, seqs: Sequence[Sequence[str]]) -> tuple[dict, int]:
+        """Every context of ``seqs`` and the token that follows it most often (ties: the lower id), and how many
+        tokens there are (each sequence's and its ``</s>``)."""
+        counts: dict[tuple[int, ...], dict[int, int]] = {}
+        n = 0
+        for seq in seqs:
+            for j in range(len(seq) + 1):
+                w = 1 if j == len(seq) else self._id(seq[j], False)
+                row = counts.setdefault(self.context(seq[:j]), {})
+                row[w] = row.get(w, 0) + 1
+                n += 1
+        return counts, n
+
+    def ceiling(self, seqs: Sequence[Sequence[str]]) -> tuple[int, int]:
+        """How many tokens of ``seqs`` (each sequence and its ``</s>``) any first guess could get right, of how many:
+        in every context only the token that follows it most often."""
+        counts, n = self._targets(seqs)
+        return sum(max(r.values()) for r in counts.values()), n
+
+    def drill(self, seqs: Sequence[Sequence[str]], max_rounds: int = 20, patience: int = 3) -> dict:
+        """Correct the model on ``seqs`` (already learned) round after round until its first guess in every context is
+        the token that follows it most often - every token right that can be (:meth:`ceiling`) - or ``max_rounds``, or
+        ``patience`` rounds without a gain.  A round counts the first guesses that are right, then in every context
+        whose guess is not its most frequent token narrows the guess's edge and widens the token's by ``2 ^ k`` (``k``:
+        the rounds that context has already been corrected).  Returns ``{rounds: [right, ...], right, of, best,
+        reached}``."""
+        counts, n = self._targets(seqs)
+        target = {c: min(r, key=lambda w: (-r[w], w)) for c, r in counts.items()}
+        best_possible = sum(max(r.values()) for r in counts.values())
+        streak: dict[tuple[int, ...], int] = {}
+        rounds: list[int] = []
+        best, stale = -1, 0
+        while True:
+            right = 0
+            for seq in seqs:
+                for j in range(len(seq) + 1):
+                    w = 1 if j == len(seq) else self._id(seq[j], False)
+                    right += self.top(self.context(seq[:j])) == w
+            rounds.append(right)
+            if right > best:
+                best, stale = right, 0
+            else:
+                stale += 1
+            if right >= best_possible or len(rounds) >= max_rounds or stale >= patience:
+                break
+            for c in sorted(target):
+                t = target[c]
+                g = self.top(c)
+                if g != t:
+                    a = 2.0 ** streak.get(c, 0)
+                    if g != 2:
+                        self.credit(c, g, -a)
+                    self.credit(c, t, a)
+                    streak[c] = streak.get(c, 0) + 1
+        return {"rounds": rounds, "right": right, "of": n, "best": best_possible, "reached": right >= best_possible}
+
     def train_lines(self, lines: Iterable[str | Sequence[str]], source: str | None = None, predict: bool = False,
-                    credit: float = 0.0) -> int:
+                    credit: float = 0.0, reward: bool = True) -> int:
         """Every line (a text, or a sequence of tokens) one sequence; returns the tokens counted.  ``predict`` and
         ``credit``: :meth:`train_tokens`."""
         n = count = 0
         for line in lines:
             toks = self._sequence(line)
             if toks:
-                n += self.train_tokens(toks, predict, credit)
+                n += self.train_tokens(toks, predict, credit, reward)
                 count += 1
         if source is not None:
             self.sources.append([source, count, n])
         return n
 
     def train_paths(self, paths: Iterable[str], held_out: int = 0, predict: bool = False,
-                    credit: float = 0.0) -> tuple[int, list[str]]:
-        """Train on every file under ``paths`` (:func:`corpus_sequences`); with ``held_out = k`` every ``k``-th sequence
-        is kept back and returned instead.  Returns (tokens counted, the held-out sequences)."""
-        total, kept = 0, []
-        for path, lines in corpus_sequences(paths, self.unit, self.lower):
-            train, test = split_lines(lines, held_out) if held_out else (lines, [])
-            total += self.train_lines(train, source=path, predict=predict, credit=credit)
-            kept += test
-        return total, kept
+                    credit: float = 0.0, reward: bool = True) -> tuple[int, list[list[str]]]:
+        """Train on every sequence under ``paths``, streamed (:func:`train_corpus`): every ``held_out``-th sequence of
+        each document kept back and returned instead.  Returns (tokens counted, the held-out sequences)."""
+        return train_corpus(paths, self.unit, self.lower, held_out,
+                            lambda t: self.train_tokens(t, predict, credit, reward), self.sources)
 
     # ---- Kneser-Ney ----------------------------------------------------------------------------------------------
 
@@ -638,6 +691,49 @@ class NGram:
                 n += 1
             hist.append(t)
         return n
+
+    def score_tokens(self, toks: Sequence[str]) -> list[tuple[str, float]]:
+        """Every token of ``toks`` and the ``</s>`` after it, with the probability the model gives it as it reads them."""
+        toks = list(toks)
+        out = []
+        for j in range(len(toks) + 1):
+            w = 1 if j == len(toks) else self._id(toks[j], False)
+            out.append((EOS if j == len(toks) else toks[j], self.prob(self.context(toks[:j]), w)))
+        return out
+
+    def teach(self, text: str | Sequence[str], reply: str | Sequence[str], max_rounds: int = 100) -> dict:
+        """Teach the model that ``reply`` follows ``text``, round after round, until its first guess is right on every
+        token of the reply and on the ``</s>`` after it (``of`` of them) - its greedy continuation of ``text`` is then
+        ``reply`` - or ``max_rounds`` rounds have passed.  A round narrows every wrong guess's edge (credit -1 the first
+        round a position is wrong, doubling every round it stays wrong) and then learns ``text + reply`` as one
+        sequence.  Returns ``{right, of, rounds, reached, history}`` (``history``: the
+        right guesses before each round, and after the last)."""
+        ctx = self._sequence(text)
+        rep = self._sequence(reply)
+        of = len(rep) + 1
+        history: list[int] = []
+        streak = [0] * of
+        rounds = 0
+        while True:
+            guesses = []
+            for i, t in enumerate(rep + [EOS]):
+                c = self.context(ctx + rep[:i])
+                w = 1 if i == len(rep) else self._id(t, False)
+                guesses.append((c, w, self.top(c)))
+            right = sum(g == w for _, w, g in guesses)
+            history.append(right)
+            if right == of or rounds >= max_rounds:
+                break
+            for i, (c, w, g) in enumerate(guesses):
+                if g == w:
+                    streak[i] = 0
+                    continue
+                if g != 2:
+                    self.credit(c, g, -(2.0 ** streak[i]))
+                streak[i] += 1
+            self.train_tokens(ctx + rep)
+            rounds += 1
+        return {"right": right, "of": of, "rounds": rounds, "reached": right == of, "history": history}
 
     # ---- describing --------------------------------------------------------------------------------------------
 

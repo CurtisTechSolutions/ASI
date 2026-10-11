@@ -464,3 +464,100 @@ fn the_ngram_model_predicts_and_learns() {
     let (status, _) = request(&addr, "POST", "/api/ngram/new", Some(&parse(r#"{"order":0}"#).unwrap())).unwrap();
     assert_eq!(status, 400);
 }
+
+fn post(addr: &str, path: &str, body: &str) -> (u16, Json) {
+    request(addr, "POST", path, Some(&parse(body).unwrap())).unwrap()
+}
+
+#[test]
+fn the_language_models_uploads_and_checkpoints() {
+    let base = std::env::temp_dir().join(format!("latticefsm-files-{}-{}", std::process::id(), rand_suffix()));
+    std::env::set_var("LATTICEFSM_UPLOADS", base.join("uploads"));
+    std::env::set_var("LATTICEFSM_CHECKPOINTS", base.join("checkpoints"));
+    let addr = serve(40);
+    // the chain: one input to a node, the walk, the next inputs
+    let (status, p) = post(&addr, "/api/chain/predict", r#"{"text":"the bra","k":3}"#);
+    assert_eq!(status, 200);
+    assert_eq!(p.get("inputs").unwrap().as_array().unwrap().len(), 7);
+    assert!(!p.get("walk").unwrap().as_array().unwrap().is_empty());
+    assert_eq!(p.get("next").unwrap().as_array().unwrap().len(), 3);
+    let (_, g) = post(
+        &addr,
+        "/api/chain/generate",
+        r#"{"text":"the brain","count":2,"max_tokens":20}"#,
+    );
+    let samples = g.get("samples").unwrap().as_array().unwrap();
+    assert_eq!(samples.len(), 2);
+    assert!(samples[0].get("depths").is_some());
+    let (_, s) = post(&addr, "/api/chain/score", r#"{"text":"the cat"}"#);
+    assert_eq!(s.get("tokens").unwrap().as_array().unwrap().len(), 8);
+    assert!(s.num("perplexity", 0.0) > 1.0);
+    // teaching a reply until every token of it is right
+    let (_, t) = post(&addr, "/api/chain/teach", r#"{"text":"hello","reply":"hi there."}"#);
+    assert!(t.bool_or("reached", false));
+    assert_eq!(t.num("right", 0.0), t.num("of", -1.0));
+    assert_eq!(t.str_or("completion", "").trim(), "hi there.");
+    let (_, t) = post(&addr, "/api/ngram/teach", r#"{"text":"hello","reply":"hi there ."}"#);
+    assert!(t.bool_or("reached", false));
+    // uploads, in chunks, and training on them until N of N
+    let (_, u) = post(
+        &addr,
+        "/api/uploads",
+        r#"{"name":"notes/a.txt","content_base64":"dGhlIGNhdCBzYXQK"}"#,
+    );
+    assert_eq!(u.num("bytes", 0.0), 12.0);
+    let (_, u) = post(
+        &addr,
+        "/api/uploads",
+        r#"{"name":"notes/a.txt","content":"the cat ate\n","append":true}"#,
+    );
+    assert_eq!(u.num("bytes", 0.0), 24.0);
+    let (_, list) = request(&addr, "GET", "/api/uploads", None).unwrap();
+    let ups = list.get("uploads").unwrap().as_array().unwrap();
+    assert_eq!(ups[0].str_or("name", ""), "notes/a.txt");
+    assert_eq!(ups[0].str_or("kind", ""), "text");
+    let (_, tr) = post(
+        &addr,
+        "/api/ngram/train",
+        r#"{"uploads":["notes/a.txt"],"held_out":0,"until":true}"#,
+    );
+    assert_eq!(tr.num("trained", 0.0), 8.0);
+    assert!(tr.bool_or("reached", false));
+    let (status, _) = post(&addr, "/api/ngram/train", r#"{"uploads":["nope.txt"]}"#);
+    assert_eq!(status, 400);
+    let (_, sw) = post(&addr, "/api/chain/sweep", r#"{"thresholds":[0,1]}"#);
+    let rows = sw.get("rows").unwrap().as_array().unwrap();
+    assert_eq!(rows[0].num("depth", -1.0), 0.0);
+    assert!(rows[1].num("depth", 0.0) > 1.0);
+    let (_, gr) = request(&addr, "GET", "/api/chain/graph?limit=3", None).unwrap();
+    assert_eq!(gr.get("nodes").unwrap().as_array().unwrap().len(), 3);
+    // checkpoints: save, list, download, restore, delete
+    let (_, saved) = post(&addr, "/api/checkpoints/save", r#"{"model":"chain","tag":"t1"}"#);
+    let name = saved.str_or("name", "").to_string();
+    assert!(name.starts_with("chain--t1--"), "{name}");
+    let (_, list) = request(&addr, "GET", "/api/checkpoints", None).unwrap();
+    assert_eq!(list.str_or("latest", ""), name);
+    let (status, _) = request(&addr, "GET", &format!("/api/checkpoints/download?name={name}"), None).unwrap();
+    assert_eq!(status, 200);
+    let (status, r) = post(&addr, "/api/checkpoints/restore", &format!(r#"{{"name":"{name}"}}"#));
+    assert_eq!(status, 200);
+    assert_eq!(r.str_or("model", ""), "chain");
+    let (status, _) = post(&addr, "/api/checkpoints/restore", r#"{"name":"../etc/passwd"}"#);
+    assert_eq!(status, 400);
+    let (_, st) = request(&addr, "GET", "/api/status", None).unwrap();
+    assert_eq!(st.num("checkpoints", 0.0), 1.0);
+    assert_eq!(st.num("uploads", 0.0), 1.0);
+    let (status, _) = post(&addr, "/api/checkpoints/delete", &format!(r#"{{"name":"{name}"}}"#));
+    assert_eq!(status, 200);
+    let (_, c) = post(
+        &addr,
+        "/api/converse",
+        r#"{"model":"chain","opening":"the brain is","turns":2}"#,
+    );
+    assert_eq!(c.get("turns").unwrap().as_array().unwrap().len(), 3);
+    let (status, _) = post(&addr, "/api/chat/llm", r#"{"url":"127.0.0.1:9"}"#);
+    assert_eq!(status, 502);
+    let (_, d) = post(&addr, "/api/uploads/delete", r#"{"name":"notes/a.txt"}"#);
+    assert_eq!(d.str_or("deleted", ""), "notes/a.txt");
+    std::fs::remove_dir_all(&base).ok();
+}

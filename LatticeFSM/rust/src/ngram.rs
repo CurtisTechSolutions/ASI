@@ -11,7 +11,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::Path;
 
 use crate::gzip;
 use crate::json::{parse, Json};
@@ -176,134 +175,116 @@ pub fn split_text_lines(text: &str) -> Vec<String> {
     out
 }
 
-fn json_text(v: &Json) -> String {
-    match v {
-        Json::String(s) => s.clone(),
-        Json::Object(pairs) => {
-            for key in ["text", "content", "sentence", "body"] {
-                if let Some(Json::String(s)) = v.get(key) {
-                    return s.clone();
-                }
-            }
-            pairs
-                .iter()
-                .filter_map(|(_, x)| x.as_str())
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        Json::Array(items) => items.iter().map(json_text).collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
-    }
-}
-
-fn walk(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
-    let mut files = Vec::new();
-    let mut dirs = Vec::new();
-    for e in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
-        let p = e.map_err(|e| e.to_string())?.path();
-        let name = p
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        if p.is_dir() {
-            dirs.push((name, p));
-        } else if !name.starts_with('.')
-            && name != "README.md"
-            && TEXT_EXTENSIONS.iter().any(|x| name.to_lowercase().ends_with(x))
-        {
-            files.push((name, p));
-        }
-    }
-    files.sort();
-    dirs.sort();
-    out.extend(files.into_iter().map(|(_, p)| p.to_string_lossy().into_owned()));
-    for (_, d) in dirs {
-        walk(&d, out)?;
-    }
-    Ok(())
-}
-
-/// Every text file under `paths` as (path, lines), as `ngram.corpus_lines` reads them.
+/// Every text document under `paths` as (label, lines): files, directories walked in name order, and the members
+/// of archives (`corpus.rs`: text, `.jsonl` / `.json`, HTML / XML, docx / odt / epub, zip, tar, gz), its non-empty
+/// lines, trimmed.
 pub fn corpus_lines(paths: &[String]) -> Result<Vec<(String, Vec<String>)>, String> {
-    let mut files = Vec::new();
-    for p in paths {
-        let path = Path::new(p);
-        if path.is_dir() {
-            walk(path, &mut files)?;
-        } else if path.exists() {
-            files.push(p.clone());
-        } else {
-            return Err(format!("{p}: no such file or directory"));
-        }
-    }
-    let mut out = Vec::new();
-    for f in files {
-        let raw = fs::read(&f).map_err(|e| format!("{f}: {e}"))?;
-        let raw = if f.ends_with(".gz") {
-            gzip::decompress(&raw)?
-        } else {
-            raw
-        };
-        let text = String::from_utf8_lossy(&raw).into_owned();
-        let lower = f.to_lowercase();
-        let lines: Vec<String> = if lower.ends_with(".jsonl") {
-            let mut v = Vec::new();
-            for l in split_text_lines(&text) {
-                let l = l.trim();
-                if l.is_empty() {
-                    continue;
-                }
-                match parse(l) {
-                    Ok(j) => v.extend(split_text_lines(&json_text(&j))),
-                    Err(_) => v.push(l.to_string()),
-                }
-            }
-            v
-        } else if lower.ends_with(".json") {
-            match parse(&text) {
-                Ok(j) => split_text_lines(&json_text(&j)),
-                Err(_) => split_text_lines(&text),
-            }
-        } else {
-            split_text_lines(&text)
-        };
-        out.push((
-            f,
-            lines
-                .iter()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect(),
-        ));
-    }
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    crate::corpus::text_documents(paths, &mut |_, label, kind, r| {
+        let mut lines = Vec::new();
+        crate::corpus::text_lines(kind, r, &mut |l| {
+            lines.push(l);
+            Ok(())
+        })?;
+        out.push((label.to_string(), lines));
+        Ok(())
+    })?;
     Ok(out)
 }
 
 /// A sequence of tokens.
 pub type Sequence = Vec<String>;
 
-/// Every file under `paths` as (path, token sequences): for `base64` every file of any kind, its bytes 76 letters a
-/// sequence; for the other units every text file line by line, each line tokenized, empty ones dropped.
-pub fn corpus_sequences(paths: &[String], unit: &str, lower: bool) -> Result<Vec<(String, Vec<Sequence>)>, String> {
+/// Every sequence under `paths`, one at a time, handed to `f(path, label, tokens)`: for `base64` every file's bytes
+/// (archives' members') 57 bytes - 76 letters - a sequence; for the other units every non-empty line of every text
+/// document, tokenized.  Nothing is held but the sequence, so a corpus may be any size.
+pub fn corpus_stream(
+    paths: &[String],
+    unit: &str,
+    lower: bool,
+    f: &mut dyn FnMut(&str, &str, Sequence) -> Result<(), String>,
+) -> Result<(), String> {
     if unit == "base64" {
-        return Ok(crate::b64::file_sequences(paths, 76)?
-            .into_iter()
-            .map(|(p, seqs)| (p, seqs.iter().map(|s| s.chars().map(String::from).collect()).collect()))
-            .collect());
+        return crate::corpus::byte_documents(paths, &mut |path, label, r| {
+            crate::corpus::read_chunks(r, crate::b64::CHUNK_BYTES, &mut |chunk| {
+                f(
+                    path,
+                    label,
+                    crate::b64::encode(chunk).chars().map(String::from).collect(),
+                )
+            })
+        });
     }
-    Ok(corpus_lines(paths)?
-        .into_iter()
-        .map(|(p, lines)| {
-            (
-                p,
-                lines
-                    .iter()
-                    .map(|l| tokenize(l, unit, lower))
-                    .filter(|q| !q.is_empty())
-                    .collect(),
-            )
+    crate::corpus::text_documents(paths, &mut |path, label, kind, r| {
+        crate::corpus::text_lines(kind, r, &mut |line| {
+            let toks = tokenize(&line, unit, lower);
+            if toks.is_empty() {
+                Ok(())
+            } else {
+                f(path, label, toks)
+            }
         })
-        .collect())
+    })
+}
+
+/// Every document under `paths` as (label, token sequences): `corpus_stream`, gathered.
+pub fn corpus_sequences(paths: &[String], unit: &str, lower: bool) -> Result<Vec<(String, Vec<Sequence>)>, String> {
+    let mut out: Vec<(String, Vec<Sequence>)> = Vec::new();
+    corpus_stream(paths, unit, lower, &mut |_, label, toks| {
+        match out.last_mut() {
+            Some((l, seqs)) if l == label => seqs.push(toks),
+            _ => out.push((label.to_string(), vec![toks])),
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// Held-out sequences kept at most while training on a corpus; past it, every sequence is trained on.
+pub const MAX_HELD_OUT: usize = 10000;
+
+/// Stream every sequence under `paths` into `learn(tokens) -> counted`, every `held_out`-th sequence of each document
+/// kept back instead (up to `MAX_HELD_OUT`); one (path, sequences, counted) pushed onto `sources` per file (an
+/// archive is one).  Returns (counted, the held-out sequences).
+pub fn train_corpus(
+    paths: &[String],
+    unit: &str,
+    lower: bool,
+    held_out: usize,
+    learn: &mut dyn FnMut(&[String]) -> usize,
+    sources: &mut Vec<(String, usize, usize)>,
+) -> Result<(usize, Vec<Sequence>), String> {
+    let (mut total, mut kept) = (0usize, Vec::new());
+    let (mut path, mut label): (Option<String>, Option<String>) = (None, None);
+    let (mut count, mut n, mut index) = (0usize, 0usize, 0usize);
+    corpus_stream(paths, unit, lower, &mut |p, lab, toks| {
+        if path.as_deref() != Some(p) {
+            if let Some(old) = path.take() {
+                sources.push((old, count, n));
+            }
+            path = Some(p.to_string());
+            count = 0;
+            n = 0;
+        }
+        if label.as_deref() != Some(lab) {
+            label = Some(lab.to_string());
+            index = 0;
+        }
+        if held_out > 1 && index % held_out == held_out - 1 && kept.len() < MAX_HELD_OUT {
+            kept.push(toks);
+        } else {
+            let c = learn(&toks);
+            n += c;
+            total += c;
+            count += 1;
+        }
+        index += 1;
+        Ok(())
+    })?;
+    if let Some(old) = path {
+        sources.push((old, count, n));
+    }
+    Ok((total, kept))
 }
 
 /// Every `every`-th line held out, the rest to train on.
@@ -406,6 +387,42 @@ fn add_to(tables: &mut [Order], ranks: &mut Option<BTreeMap<u64, BTreeSet<u32>>>
     }
 }
 
+/// What `teach` did: the reply's tokens (and its end) guessed right after it, of how many, in how many rounds,
+/// whether all were, and the right guesses before each round and after the last.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Teaching {
+    pub right: usize,
+    pub of: usize,
+    pub rounds: usize,
+    pub reached: bool,
+    pub history: Vec<usize>,
+}
+
+impl Teaching {
+    pub fn to_json(&self) -> crate::json::Json {
+        crate::json::Json::object()
+            .with("right", self.right.into())
+            .with("of", self.of.into())
+            .with("rounds", self.rounds.into())
+            .with("reached", self.reached.into())
+            .with(
+                "history",
+                crate::json::Json::numbers(&self.history.iter().map(|&x| x as f64).collect::<Vec<_>>()),
+            )
+    }
+}
+
+/// What `drill` did: the first guesses right after each round, the last of them, of how many, the most possible, and
+/// whether that was reached.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drill {
+    pub rounds: Vec<usize>,
+    pub right: usize,
+    pub of: usize,
+    pub best: usize,
+    pub reached: bool,
+}
+
 /// What `evaluate` measured.
 #[derive(Clone, Debug, Default)]
 pub struct Evaluation {
@@ -439,6 +456,8 @@ pub struct NGram {
     pub predict: bool,
     /// While predicting: reward a right first guess and punish a wrong one by this much; not saved.
     pub self_credit: f64,
+    /// With `self_credit`: reward right guesses too (the default), or only punish wrong ones.
+    pub self_reward: bool,
     /// While predicting: [right first guesses, tokens predicted, sum of ln P(true token)].
     pub online: (u64, u64, f64),
     tables: Option<Vec<Order>>,
@@ -472,6 +491,7 @@ impl NGram {
             history: Vec::new(),
             predict: false,
             self_credit: 0.0,
+            self_reward: true,
             online: (0, 0, 0.0),
             tables: None,
             ranks: None,
@@ -531,7 +551,7 @@ impl NGram {
                 self.online.1 += 1;
                 self.online.2 += p.max(1e-300).ln();
                 let c = self.self_credit;
-                if c != 0.0 {
+                if c != 0.0 && (self.self_reward || guess != w) {
                     if guess == w {
                         self.credit(&ctx, w, c);
                     } else {
@@ -626,6 +646,87 @@ impl NGram {
         best.0
     }
 
+    /// Every context of `seqs` with what follows it and how often, and how many tokens there are.
+    fn targets(&self, seqs: &[Sequence]) -> (HashMap<Vec<u32>, HashMap<u32, usize>>, usize) {
+        let mut counts: HashMap<Vec<u32>, HashMap<u32, usize>> = HashMap::new();
+        let mut n = 0;
+        for seq in seqs {
+            for j in 0..=seq.len() {
+                let w = if j == seq.len() { 1 } else { self.lookup(&seq[j]) };
+                *counts.entry(self.context(&seq[..j])).or_default().entry(w).or_insert(0) += 1;
+                n += 1;
+            }
+        }
+        (counts, n)
+    }
+
+    /// How many tokens of `seqs` (each sequence and its `</s>`) any first guess could get right, of how many: in every
+    /// context only the token that follows it most often.
+    pub fn ceiling(&self, seqs: &[Sequence]) -> (usize, usize) {
+        let (counts, n) = self.targets(seqs);
+        (counts.values().map(|r| r.values().copied().max().unwrap_or(0)).sum(), n)
+    }
+
+    /// Correct the model on `seqs` (already learned) round after round until its first guess in every context is the
+    /// token that follows it most often, or `max_rounds`, or `patience` rounds without a gain - as `NGram.drill`.
+    pub fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize) -> Drill {
+        let (counts, n) = self.targets(seqs);
+        let mut targets: Vec<(Vec<u32>, u32)> = counts
+            .iter()
+            .map(|(c, r)| {
+                let t = r
+                    .iter()
+                    .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                    .map(|(&w, _)| w)
+                    .unwrap_or(1);
+                (c.clone(), t)
+            })
+            .collect();
+        targets.sort();
+        let best_possible: usize = counts.values().map(|r| r.values().copied().max().unwrap_or(0)).sum();
+        let mut streak: HashMap<Vec<u32>, i32> = HashMap::new();
+        let mut rounds = Vec::new();
+        let (mut best, mut stale) = (None, 0);
+        loop {
+            let mut right = 0;
+            for seq in seqs {
+                for j in 0..=seq.len() {
+                    let w = if j == seq.len() { 1 } else { self.lookup(&seq[j]) };
+                    let c = self.context(&seq[..j]);
+                    right += (self.top(&c) == w) as usize;
+                }
+            }
+            rounds.push(right);
+            if best.is_none_or(|b| right > b) {
+                best = Some(right);
+                stale = 0;
+            } else {
+                stale += 1;
+            }
+            if right >= best_possible || rounds.len() >= max_rounds || stale >= patience {
+                return Drill {
+                    right,
+                    of: n,
+                    best: best_possible,
+                    reached: right >= best_possible,
+                    rounds,
+                };
+            }
+            for (c, t) in &targets {
+                let g = self.top(c);
+                if g != *t {
+                    let k = streak.entry(c.clone()).or_insert(0);
+                    let a = 2f64.powi(*k);
+                    *k += 1;
+                    if g != 2 {
+                        self.credit(c, g, -a);
+                    }
+                    self.credit(c, *t, a);
+                }
+            }
+        }
+    }
+
     /// Every line one sequence; returns the tokens counted.
     pub fn train_lines(&mut self, lines: &[String], source: Option<&str>) -> usize {
         let (mut n, mut count) = (0, 0);
@@ -668,19 +769,21 @@ impl NGram {
         self.tokens(text)
     }
 
-    /// Train on every file under `paths` (`corpus_sequences`), every `held_out`-th sequence kept back and returned.
+    /// Train on every sequence under `paths`, streamed (`train_corpus`), every `held_out`-th sequence of each
+    /// document kept back and returned.
     pub fn train_paths(&mut self, paths: &[String], held_out: usize) -> Result<(usize, Vec<Sequence>), String> {
-        let (mut total, mut kept) = (0, Vec::new());
-        for (path, lines) in corpus_sequences(paths, &self.unit, self.lower)? {
-            let (train, test) = if held_out > 0 {
-                split_lines(&lines, held_out)
-            } else {
-                (lines, Vec::new())
-            };
-            total += self.train_sequences(&train, Some(&path));
-            kept.extend(test);
-        }
-        Ok((total, kept))
+        let (unit, lower) = (self.unit.clone(), self.lower);
+        let mut sources = std::mem::take(&mut self.sources);
+        let r = train_corpus(
+            paths,
+            &unit,
+            lower,
+            held_out,
+            &mut |t| self.train_tokens(t),
+            &mut sources,
+        );
+        self.sources = sources;
+        r
     }
 
     // ---- Kneser-Ney ----------------------------------------------------------------------------------------------
@@ -997,6 +1100,70 @@ impl NGram {
     }
 
     /// Every edge a text takes, `</s>` included, credited `amount`.  Returns how many.
+    /// Every token of `toks` and the `</s>` after it, with the probability the model gives it as it reads them.
+    pub fn score_tokens(&mut self, toks: &[String]) -> Vec<(String, f64)> {
+        (0..=toks.len())
+            .map(|j| {
+                let w = if j == toks.len() { 1 } else { self.lookup(&toks[j]) };
+                let c = self.context(&toks[..j]);
+                let t = if j == toks.len() {
+                    EOS.to_string()
+                } else {
+                    toks[j].clone()
+                };
+                (t, self.prob(&c, w))
+            })
+            .collect()
+    }
+
+    /// Teach the model that `reply` follows `text` (tokens), round after round, until its first guess is right on every
+    /// token of the reply and on the `</s>` after it - its greedy continuation of `text` is then `reply` - or
+    /// `max_rounds` rounds have passed.  A round narrows every wrong guess's edge (credit -1 the first round a position
+    /// is wrong, doubling every round it stays wrong) and then learns `text + reply` as one sequence, as
+    /// `NGram.teach` does.
+    pub fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize) -> Teaching {
+        let of = reply.len() + 1;
+        let mut history = Vec::new();
+        let mut streak = vec![0i32; of];
+        let mut rounds = 0;
+        let mut all: Vec<String> = text.to_vec();
+        all.extend_from_slice(reply);
+        loop {
+            let mut guesses = Vec::with_capacity(of);
+            for i in 0..of {
+                let c = self.context(&all[..text.len() + i]);
+                let w = if i == reply.len() { 1 } else { self.lookup(&reply[i]) };
+                let g = self.top(&c);
+                guesses.push((c, w, g));
+            }
+            let right = guesses.iter().filter(|(_, w, g)| w == g).count();
+            history.push(right);
+            if right == of || rounds >= max_rounds {
+                return Teaching {
+                    right,
+                    of,
+                    rounds,
+                    reached: right == of,
+                    history,
+                };
+            }
+            for (i, (c, w, g)) in guesses.iter().enumerate() {
+                if w == g {
+                    streak[i] = 0;
+                    continue;
+                }
+                if *g != 2 {
+                    self.credit(c, *g, -(2f64.powi(streak[i])));
+                }
+                streak[i] += 1;
+            }
+            let predict = std::mem::replace(&mut self.predict, false);
+            self.train_tokens(&all);
+            self.predict = predict;
+            rounds += 1;
+        }
+    }
+
     pub fn credit_text(&mut self, text: &str, amount: f64) -> usize {
         let mut toks = self.tokens(text);
         toks.push(EOS.to_string());

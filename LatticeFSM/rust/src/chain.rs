@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 
 use crate::gzip;
 use crate::json::{parse, Json};
-use crate::ngram::{corpus_sequences, detokenize, split_lines, tokenize, Sequence, BOS, EOS, UNITS, UNK};
+use crate::ngram::{detokenize, tokenize, train_corpus, Drill, Sequence, Teaching, BOS, EOS, UNITS, UNK};
 use crate::rng::Rng;
 
 const FORMAT: &str = "latticefsm-chain";
@@ -40,12 +40,12 @@ impl Node {
         (self.right as f64 + self.rewarded) / (self.tested as f64 + self.rewarded + self.punished + PRIOR)
     }
 
-    /// One more `w` after this context; the guess stays the most frequent (ties: the lower id).
-    fn add(&mut self, w: u32) {
+    /// `n` more `w` after this context; the guess stays the most frequent (ties: the lower id).
+    fn add(&mut self, w: u32, n: u64) {
         let c = self.counts.entry(w).or_insert(0);
-        *c += 1;
+        *c += n;
         let c = *c;
-        self.total += 1;
+        self.total += n;
         self.best = Some(match self.best {
             None => w,
             Some(b) => {
@@ -102,6 +102,8 @@ pub struct Chain {
     pub predict: bool,
     /// While predicting, reward the nodes that guessed a right first guess, punish those that guessed a wrong one.
     pub self_credit: f64,
+    /// With `self_credit`: reward right guesses too (the default), or only punish wrong ones.
+    pub self_reward: bool,
     /// (right first guesses, inputs predicted, sum of ln P, nodes traversed) since the last `reset_online`.
     pub online: (u64, u64, f64, u64),
 }
@@ -134,6 +136,7 @@ impl Chain {
             history: Vec::new(),
             predict: true,
             self_credit: 0.0,
+            self_reward: true,
             online: (0, 0, 0.0, 0),
         })
     }
@@ -319,7 +322,7 @@ impl Chain {
                 self.online.2 += p.max(1e-300).ln();
                 self.online.3 += d.unwrap_or(0) as u64;
                 let c = self.self_credit;
-                if c != 0.0 && d.is_some() {
+                if c != 0.0 && d.is_some() && (self.self_reward || guess != w) {
                     self.credit_walk(hist, d, guess, if guess == w { c } else { -c });
                 }
             }
@@ -343,7 +346,7 @@ impl Chain {
                     }
                     self.ranks.entry(old + 1).or_default().insert(w);
                 }
-                node.add(w);
+                node.add(w, 1);
             }
             self.clock += 1;
         }
@@ -394,19 +397,131 @@ impl Chain {
         n
     }
 
-    /// Train on every file under `paths`, every `held_out`-th sequence kept back and returned.
-    pub fn train_paths(&mut self, paths: &[String], held_out: usize) -> Result<(usize, Vec<Sequence>), String> {
-        let (mut total, mut kept) = (0, Vec::new());
-        for (path, lines) in corpus_sequences(paths, &self.unit, self.lower)? {
-            let (train, test) = if held_out > 0 {
-                split_lines(&lines, held_out)
-            } else {
-                (lines, Vec::new())
-            };
-            total += self.train_sequences(&train, Some(&path));
-            kept.extend(test);
+    /// Every full context of `seqs` - all the inputs a walk can reach - with what follows it and how often, and how
+    /// many inputs there are.
+    fn targets(&self, seqs: &[Sequence]) -> (HashMap<Vec<u32>, HashMap<u32, usize>>, usize) {
+        let mut counts: HashMap<Vec<u32>, HashMap<u32, usize>> = HashMap::new();
+        let mut n = 0;
+        for seq in seqs {
+            let mut ids = self.history_ids(seq);
+            ids.push(1);
+            for i in 1..ids.len() {
+                let ctx = ids[i - self.depth().min(i)..i].to_vec();
+                *counts.entry(ctx).or_default().entry(ids[i]).or_insert(0) += 1;
+                n += 1;
+            }
         }
-        Ok((total, kept))
+        (counts, n)
+    }
+
+    /// How many inputs of `seqs` (each sequence and its `</s>`) any first guess could get right, of how many: in every
+    /// full context only the input that follows it most often.
+    pub fn ceiling(&self, seqs: &[Sequence]) -> (usize, usize) {
+        let (counts, n) = self.targets(seqs);
+        (counts.values().map(|r| r.values().copied().max().unwrap_or(0)).sum(), n)
+    }
+
+    /// Correct the chain on `seqs` (already learned) round after round until its first guess after every full context
+    /// is the input that follows it most often, or `max_rounds`, or `patience` rounds without a gain: after every
+    /// context guessed wrong the nodes on the walk that do not guess its input are punished by `2 ^ k`, and the deepest
+    /// node it reaches, when it does not know, is given enough of the input to - as `Chain.drill`.
+    pub fn drill(&mut self, seqs: &[Sequence], max_rounds: usize, patience: usize) -> Drill {
+        let (counts, n) = self.targets(seqs);
+        let mut targets: Vec<(Vec<u32>, u32)> = counts
+            .iter()
+            .map(|(c, r)| {
+                let t = r
+                    .iter()
+                    .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
+                    .map(|(&w, _)| w)
+                    .unwrap_or(1);
+                (c.clone(), t)
+            })
+            .collect();
+        targets.sort();
+        let best_possible: usize = counts.values().map(|r| r.values().copied().max().unwrap_or(0)).sum();
+        let mut streak: HashMap<Vec<u32>, i32> = HashMap::new();
+        let mut rounds = Vec::new();
+        let (mut best, mut stale) = (None, 0);
+        loop {
+            let mut right = 0;
+            for seq in seqs {
+                let mut ids = self.history_ids(seq);
+                ids.push(1);
+                for i in 1..ids.len() {
+                    let path = self.path(&ids[..i], self.walk(&ids[..i], None));
+                    right += (self.guess(&path) == ids[i]) as usize;
+                }
+            }
+            rounds.push(right);
+            if best.is_none_or(|b| right > b) {
+                best = Some(right);
+                stale = 0;
+            } else {
+                stale += 1;
+            }
+            if right >= best_possible || rounds.len() >= max_rounds || stale >= patience {
+                return Drill {
+                    right,
+                    of: n,
+                    best: best_possible,
+                    reached: right >= best_possible,
+                    rounds,
+                };
+            }
+            for (c, t) in &targets {
+                let d = self.walk(c, None);
+                let g = {
+                    let path = self.path(c, d);
+                    self.guess(&path)
+                };
+                if g != *t {
+                    let k = streak.entry(c.clone()).or_insert(0);
+                    let a = 2f64.powi(*k);
+                    let more = (1u64 << (*k).min(62)) - 1;
+                    *k += 1;
+                    if let Some(d) = d {
+                        for depth in 0..=d {
+                            let node = self.tables[depth].get_mut(&c[c.len() - depth..]).expect("walked");
+                            if node.best != Some(*t) {
+                                node.punished += a;
+                            }
+                        }
+                    }
+                    let full = d == Some(c.len());
+                    if let Some(deep) = self.tables[c.len()].get_mut(c.as_slice()) {
+                        if deep.best != Some(*t) || full {
+                            let need = match deep.best.filter(|b| b != t) {
+                                Some(b) => {
+                                    deep.counts[&b] - deep.counts.get(t).copied().unwrap_or(0) + u64::from(*t > b)
+                                }
+                                None => 0,
+                            };
+                            if need + more > 0 {
+                                deep.add(*t, need + more);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Train on every sequence under `paths`, streamed (`ngram::train_corpus`), every `held_out`-th sequence of each
+    /// document kept back and returned.
+    pub fn train_paths(&mut self, paths: &[String], held_out: usize) -> Result<(usize, Vec<Sequence>), String> {
+        let (unit, lower) = (self.unit.clone(), self.lower);
+        let mut sources = std::mem::take(&mut self.sources);
+        let r = train_corpus(
+            paths,
+            &unit,
+            lower,
+            held_out,
+            &mut |t| self.train_tokens(t),
+            &mut sources,
+        );
+        self.sources = sources;
+        r
     }
 
     // ---- predicting ----------------------------------------------------------------------------------------------
@@ -629,6 +744,85 @@ impl Chain {
             n += self.credit_walk(&ids[..i], d, ids[i], amount);
         }
         n
+    }
+
+    /// Every input of `toks` and the `</s>` after it, with the probability the chain gives it as it reads them and how
+    /// deep the walk to it went.
+    pub fn score_tokens(&self, toks: &[String]) -> Vec<(String, f64, usize)> {
+        let mut ids = self.history_ids(toks);
+        ids.push(1);
+        (1..ids.len())
+            .map(|i| {
+                let d = self.walk(&ids[..i], None);
+                let path = self.path(&ids[..i], d);
+                let p = if path.is_empty() {
+                    self.uniform()
+                } else {
+                    self.p(&path, ids[i])
+                };
+                let t = if i == ids.len() - 1 {
+                    EOS.to_string()
+                } else {
+                    toks[i - 1].clone()
+                };
+                (t, p, d.unwrap_or(0))
+            })
+            .collect()
+    }
+
+    /// Teach the chain that `reply` follows `text` (inputs), round after round, until its first guess is right on every
+    /// input of the reply and on the `</s>` after it, or `max_rounds` rounds have passed: a round punishes, at every
+    /// wrong guess, the nodes on the walk that guessed it (by 1 the first round a position is wrong, doubling every
+    /// round it stays wrong) and then learns `text + reply` as one sequence, as `Chain.teach` does.
+    pub fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize) -> Teaching {
+        let of = reply.len() + 1;
+        let mut history = Vec::new();
+        let mut streak = vec![0i32; of];
+        let mut rounds = 0;
+        let mut all: Vec<String> = text.to_vec();
+        all.extend_from_slice(reply);
+        loop {
+            let mut right = 0;
+            let mut wrong: Vec<(Vec<u32>, u32, f64)> = Vec::new();
+            let mut ids = self.history_ids(text);
+            for i in 0..of {
+                let w = if i == reply.len() {
+                    1
+                } else {
+                    self.index.get(reply[i].as_str()).copied().unwrap_or(2)
+                };
+                let g = {
+                    let path = self.path(&ids, self.walk(&ids, None));
+                    self.guess(&path)
+                };
+                if g == w {
+                    right += 1;
+                    streak[i] = 0;
+                } else {
+                    wrong.push((ids.clone(), g, 2f64.powi(streak[i])));
+                    streak[i] += 1;
+                }
+                ids.push(w);
+            }
+            history.push(right);
+            if right == of || rounds >= max_rounds {
+                return Teaching {
+                    right,
+                    of,
+                    rounds,
+                    reached: right == of,
+                    history,
+                };
+            }
+            for (hist, g, amount) in wrong {
+                let d = self.walk(&hist, None);
+                self.credit_walk(&hist, d, g, -amount);
+            }
+            let predict = std::mem::replace(&mut self.predict, false);
+            self.train_tokens(&all);
+            self.predict = predict;
+            rounds += 1;
+        }
     }
 
     // ---- describing ----------------------------------------------------------------------------------------------

@@ -158,6 +158,8 @@ commands
               generate TEXT... [--max-tokens 40]   the continuation and how deep every walk went
               evaluate | sweep [--thresholds 0,0.5,0.9,1]   accuracy and depth on held-out lines
               stats | credit TEXT --amount R   (without --load the data is learned first; --set-confidence T)
+  corpus PATH... [--unit text|base64] [--show N]   what a corpus is read as: every document (zip, tar, tar.gz,
+              gz, html, xml, docx, odt, epub, jsonl opened) and its lines, or its base64 sequences
   base64 encode|decode INPUT... [--out FILE]   anything (a file, or a text) as base64, or base64 back to bytes;
               ngram --unit base64 learns any file - text, image, audio, video - letter by letter
   experiment  --which learning|stimulation|adaptation|compression|walk|network|all, --out DIR
@@ -266,6 +268,7 @@ fn main() {
         "base64" => base64_cmd(&a),
         "ngram" => ngram_cmd(&a),
         "chain" => chain_cmd(&a),
+        "corpus" => corpus_cmd(&a),
         "accuracy" => accuracy(&a),
         "table" => table(&a),
         "stats" => machine(&a).map(|m| println!("{}", m.stats().pretty(1))),
@@ -1124,6 +1127,61 @@ fn network_cmd(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// `--until`: after the first pass (round 1), the model drilled on what it learned until every token is right (or as
+/// many as can be: a context the data continues in more than one way can only be guessed one way), as
+/// `cli._train_until` does.
+fn report_until(first: (u64, u64), best_possible: usize, d: &latticefsm::ngram::Drill) {
+    let (right, of) = first;
+    println!("round 1: {right} of {of} predicted right before learning (the most possible: {best_possible})");
+    for (k, r) in d.rounds.iter().enumerate() {
+        println!("round {}: {r} of {} right", k + 2, d.of);
+    }
+    let (rnd, right, of) = (d.rounds.len() + 1, d.right, d.of);
+    if right == of {
+        println!("{of} of {of} reached in {rnd} rounds");
+    } else if d.reached {
+        println!(
+            "{right} of {of} reached in {rnd} rounds: the most possible - the rest ({}) come after contexts the data \
+             continues in more than one way",
+            of - right
+        );
+    } else {
+        println!("stopped after {rnd} rounds at {right} of {of} (the most possible: {best_possible})");
+    }
+}
+
+/// The training sequences of `data` (every `held_out`-th of each document kept back, as training does).
+fn training_sequences(data: &[String], unit: &str, lower: bool, held_out: usize) -> Result<Vec<Vec<String>>, String> {
+    let mut seqs = Vec::new();
+    latticefsm::ngram::train_corpus(
+        data,
+        unit,
+        lower,
+        held_out,
+        &mut |t| {
+            seqs.push(t.to_vec());
+            0
+        },
+        &mut Vec::new(),
+    )?;
+    Ok(seqs)
+}
+
+fn print_teaching(text: &str, reply: &str, t: &latticefsm::ngram::Teaching, now: String) {
+    let h: Vec<String> = t.history.iter().map(|x| x.to_string()).collect();
+    println!(
+        "taught {} after {}: {} of {} right after {} rounds{}; right before each round: {}",
+        py_repr(reply),
+        py_repr(text),
+        t.right,
+        t.of,
+        t.rounds,
+        if t.reached { "" } else { " (not all: --max-rounds)" },
+        h.join(" ")
+    );
+    println!("now: {now}");
+}
+
 fn fmt_opt(v: Option<f64>, digits: usize) -> String {
     v.map(|x| format!("{x:.digits$}")).unwrap_or_else(|| "-".to_string())
 }
@@ -1165,11 +1223,12 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
         None => vec!["data/corpus".to_string()],
     };
     let held_out = a.num("held-out", 10.0) as usize;
-    m.predict = !a.has("no-predict");
+    m.predict = !a.has("no-predict") || a.has("until");
     m.self_credit = a.num("self-credit", 0.0);
     match action {
         "train" => {
             let (_, test) = m.train_paths(&data, held_out)?;
+            let first = (m.online.0, m.online.1);
             let (learned, lacc, lppl, _) = m.reset_online();
             let st = m.stats();
             let what = if m.unit == "base64" {
@@ -1192,6 +1251,13 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
                     fmt_opt(lacc, 3),
                     fmt_opt(lppl, 2)
                 );
+            }
+            if a.has("until") {
+                let seqs = training_sequences(&data, &m.unit.clone(), m.lower, held_out)?;
+                let (best_possible, _) = m.ceiling(&seqs);
+                let rounds = (a.num("max-rounds", 20.0) as usize).max(2) - 1;
+                let d = m.drill(&seqs, rounds, rounds);
+                report_until(first, best_possible, &d);
             }
             if !test.is_empty() {
                 let ev = m.evaluate(&test, 2000);
@@ -1331,18 +1397,63 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
                 );
             }
         }
+        "teach" => {
+            if texts.len() != 2 {
+                return Err("teach TEXT REPLY: the text and the reply that should follow it".to_string());
+            }
+            let (text, reply) = (&texts[0], &texts[1]);
+            let t = m.teach(&m.tokens(text), &m.tokens(reply), a.num("max-rounds", 100.0) as usize);
+            let now = m.complete(text, 2 * t.of + 10, 0.0, &mut Rng::new(1));
+            print_teaching(text, reply, &t, now);
+        }
         other => {
             return Err(format!(
-                "ngram {other:?}: train, autotrain, predict, generate, evaluate, stats, credit or ollama"
+                "ngram {other:?}: train, autotrain, predict, generate, evaluate, stats, credit, teach or ollama"
             ))
         }
     }
-    if matches!(action, "train" | "credit") {
+    if matches!(action, "train" | "credit" | "teach") {
         if let Some(path) = a.get("save") {
             m.save(path)?;
             eprintln!("saved {path}");
         }
     }
+    Ok(())
+}
+
+fn corpus_cmd(a: &Args) -> Result<(), String> {
+    use latticefsm::archive::Crc32;
+    let paths = a.positional.clone();
+    if paths.is_empty() {
+        return Err("corpus PATH...: the files or directories to read".to_string());
+    }
+    let mut docs = 0;
+    if a.str("unit", "text") == "base64" {
+        for (label, seqs) in b64::file_sequences(&paths, 76)? {
+            let text: String = seqs.concat();
+            let mut crc = Crc32::default();
+            crc.update(text.as_bytes());
+            println!(
+                "{label}: {} sequences, {} letters, crc {:08x}",
+                seqs.len(),
+                text.len(),
+                crc.value()
+            );
+            docs += 1;
+        }
+    } else {
+        let show = a.num("show", 0.0) as usize;
+        for (label, lines) in latticefsm::ngram::corpus_lines(&paths)? {
+            let mut crc = Crc32::default();
+            crc.update(lines.join("\n").as_bytes());
+            println!("{label}: {} lines, crc {:08x}", lines.len(), crc.value());
+            for l in lines.iter().take(show) {
+                println!("  {l}");
+            }
+            docs += 1;
+        }
+    }
+    println!("{docs} documents");
     Ok(())
 }
 
@@ -1387,7 +1498,7 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
     if a.has("set-confidence") {
         m.confidence = a.num("set-confidence", m.confidence);
     }
-    m.predict = !a.has("no-predict");
+    m.predict = !a.has("no-predict") || a.has("until");
     m.self_credit = a.num("self-credit", 0.0);
     let what = if m.unit == "base64" {
         "base64 letters".to_string()
@@ -1398,6 +1509,7 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
     match action {
         "train" => {
             let (_, test) = m.train_paths(&data, held_out)?;
+            let first = (m.online.0, m.online.1);
             let learned = m.reset_online();
             println!(
                 "a chain of {} nodes ({} input nodes and the output node) over {what}: {} inputs, {} distinct, {} node \
@@ -1418,6 +1530,13 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
                     fmt_opt(learned.perplexity, 2),
                     fmt_opt(learned.depth, 2)
                 );
+            }
+            if a.has("until") {
+                let seqs = training_sequences(&data, &m.unit.clone(), m.lower, held_out)?;
+                let (best_possible, _) = m.ceiling(&seqs);
+                let rounds = (a.num("max-rounds", 20.0) as usize).max(2) - 1;
+                let d = m.drill(&seqs, rounds, rounds);
+                report_until(first, best_possible, &d);
             }
             if !test.is_empty() {
                 let ev = m.evaluate(&test, None);
@@ -1593,10 +1712,19 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
                 );
             }
         }
+        "teach" => {
+            if texts.len() != 2 {
+                return Err("teach TEXT REPLY: the text and the reply that should follow it".to_string());
+            }
+            let (text, reply) = (&texts[0], &texts[1]);
+            let t = m.teach(&m.tokens(text), &m.tokens(reply), a.num("max-rounds", 100.0) as usize);
+            let now = m.complete(text, 2 * t.of + 10, 0.0, &mut Rng::new(1));
+            print_teaching(text, reply, &t, now);
+        }
         other => return Err(format!("unknown chain action {other:?}")),
     }
     if let Some(path) = a.get("save") {
-        if matches!(action, "train" | "credit") {
+        if matches!(action, "train" | "credit" | "teach") {
             m.save(path)?;
             eprintln!("saved {path}");
         }

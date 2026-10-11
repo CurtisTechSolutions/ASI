@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use crate::json::{parse, Json};
 
-/// How much of a request body is read (4 MiB): the cap keeps a bad `Content-Length` from asking for memory.
-pub const MAX_BODY: usize = 4 * 1024 * 1024;
+/// How much of a request body is read (32 MiB - an upload is sent in chunks of 8 MiB, base64 inside JSON): the cap
+/// keeps a bad `Content-Length` from asking for memory.
+pub const MAX_BODY: usize = 32 * 1024 * 1024;
 
 /// One request, parsed.
 pub struct Request {
@@ -30,11 +31,12 @@ impl Request {
     }
 }
 
-/// One response: a status, a content type and a body.
+/// One response: a status, a content type and a body (and, for a file to save, the name to save it as).
 pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
     pub body: Vec<u8>,
+    pub attachment: Option<String>,
 }
 
 impl Response {
@@ -43,6 +45,7 @@ impl Response {
             status,
             content_type: "application/json; charset=utf-8",
             body: value.dump().into_bytes(),
+            attachment: None,
         }
     }
 
@@ -54,11 +57,22 @@ impl Response {
         Response::json(status, &Json::object().with("error", message.into()))
     }
 
+    /// A file to download, saved as `name`.
+    pub fn file(content_type: &'static str, body: Vec<u8>, name: &str) -> Response {
+        Response {
+            status: 200,
+            content_type,
+            body,
+            attachment: Some(name.replace(['"', '\r', '\n'], "_")),
+        }
+    }
+
     pub fn html(text: &str) -> Response {
         Response {
             status: 200,
             content_type: "text/html; charset=utf-8",
             body: text.as_bytes().to_vec(),
+            attachment: None,
         }
     }
 }
@@ -145,8 +159,13 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
 }
 
 fn write_response(stream: &mut TcpStream, r: &Response) -> std::io::Result<()> {
+    let disposition = r
+        .attachment
+        .as_ref()
+        .map(|n| format!("Content-Disposition: attachment; filename=\"{n}\"\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{disposition}Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
         r.status,
         reason(r.status),
         r.content_type,
@@ -164,6 +183,7 @@ fn reason(status: u16) -> &'static str {
         404 => "Not Found",
         405 => "Method Not Allowed",
         500 => "Internal Server Error",
+        502 => "Bad Gateway",
         _ => "Unknown",
     }
 }

@@ -21,10 +21,12 @@
 //! if run.accepted { m.reward(1.0); } else { m.punish(1.0); }
 //! ```
 
+pub mod archive;
 pub mod autotrain;
 pub mod b64;
 pub mod chain;
 pub mod compress;
+pub mod corpus;
 pub mod edge;
 pub mod experiment;
 pub mod focus;
@@ -40,6 +42,7 @@ pub mod network;
 pub mod ngram;
 pub mod phonetic;
 pub mod rng;
+pub mod routes;
 pub mod server;
 
 pub use edge::{Edge, Weighting};

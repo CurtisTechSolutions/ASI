@@ -52,7 +52,7 @@ import math
 import random
 from collections.abc import Iterable, Sequence
 
-from .ngram import BOS, EOS, UNITS, UNK, corpus_sequences, detokenize, split_lines, tokenize
+from .ngram import BOS, EOS, UNITS, UNK, detokenize, tokenize, train_corpus
 
 __all__ = ["Chain", "PRIOR", "load_chain"]
 
@@ -81,11 +81,11 @@ class Node:
     def confidence(self) -> float:
         return (self.right + self.rewarded) / (self.tested + self.rewarded + self.punished + PRIOR)
 
-    def add(self, w: int) -> None:
-        """One more ``w`` after this context; the guess stays the most frequent (ties: the lower id)."""
-        c = self.counts.get(w, 0) + 1
+    def add(self, w: int, n: int = 1) -> None:
+        """``n`` more ``w`` after this context; the guess stays the most frequent (ties: the lower id)."""
+        c = self.counts.get(w, 0) + n
         self.counts[w] = c
-        self.total += 1
+        self.total += n
         if self.best < 0:
             self.best = w
         else:
@@ -227,12 +227,13 @@ class Chain:
 
     # ---- training ----------------------------------------------------------------------------------------------
 
-    def train_tokens(self, tokens: Sequence[str], predict: bool = True, credit: float = 0.0) -> int:
+    def train_tokens(self, tokens: Sequence[str], predict: bool = True, credit: float = 0.0,
+                     reward: bool = True) -> int:
         """One sequence, ``</s>`` last.  At every position each input node already reached in its context is tested
         (its guess right or not) and then learns the input that came.  With ``predict``, the whole chain first
         predicts it - the walk, its first guess and the probability of the true input added to :attr:`online` -
-        and with ``credit`` the node the walk stopped at is rewarded when the guess was right and punished when it
-        was wrong.  Returns how many inputs were learned."""
+        and with ``credit`` the nodes on the walk that guessed it are rewarded when the guess was right (unless not
+        ``reward``) and punished when it was wrong.  Returns how many inputs were learned."""
         ids = [0] + [self._id(t, True) for t in tokens] + [1]
         for i in range(1, len(ids)):
             w = ids[i]
@@ -244,7 +245,7 @@ class Chain:
                 self.online[1] += 1
                 self.online[2] += math.log(max(p, 1e-300))
                 self.online[3] += len(path) - 1 if path else 0
-                if credit and path:
+                if credit and path and (reward or guess != w):
                     self._credit_path(path, guess, credit if guess == w else -credit)
             for k in range(min(self.depth, i) + 1):
                 ctx = tuple(ids[i - k:i])
@@ -277,25 +278,87 @@ class Chain:
                 "bits": -logp / n / math.log(2), "depth": depth / n}
 
     def train_lines(self, lines: Iterable[str | Sequence[str]], source: str | None = None, predict: bool = True,
-                    credit: float = 0.0) -> int:
+                    credit: float = 0.0, reward: bool = True) -> int:
         n = count = 0
         for line in lines:
             toks = self._sequence(line)
             if toks:
-                n += self.train_tokens(toks, predict, credit)
+                n += self.train_tokens(toks, predict, credit, reward)
                 count += 1
         if source is not None:
             self.sources.append([source, count, n])
         return n
 
+    def _targets(self, seqs: Sequence[Sequence[str]]) -> tuple[dict, int]:
+        """Every full context of ``seqs`` - all the inputs a walk can reach - with what follows it and how often, and
+        how many inputs there are (each sequence's and its ``</s>``)."""
+        counts: dict[tuple[int, ...], dict[int, int]] = {}
+        n = 0
+        for seq in seqs:
+            ids = self.history_ids(seq) + [1]
+            for i in range(1, len(ids)):
+                row = counts.setdefault(tuple(ids[i - min(self.depth, i):i]), {})
+                row[ids[i]] = row.get(ids[i], 0) + 1
+                n += 1
+        return counts, n
+
+    def ceiling(self, seqs: Sequence[Sequence[str]]) -> tuple[int, int]:
+        """How many inputs of ``seqs`` (each sequence and its ``</s>``) any first guess could get right, of how many:
+        in every full context only the input that follows it most often."""
+        counts, n = self._targets(seqs)
+        return sum(max(r.values()) for r in counts.values()), n
+
+    def drill(self, seqs: Sequence[Sequence[str]], max_rounds: int = 20, patience: int = 3) -> dict:
+        """Correct the chain on ``seqs`` (already learned) round after round until its first guess after every full
+        context is the input that follows it most often - every input right that can be (:meth:`ceiling`) - or
+        ``max_rounds``, or ``patience`` rounds without a gain.  A round counts the first guesses that are right, then
+        after every full context whose guess is not its most frequent input punishes the nodes on the walk that
+        guessed it by ``2 ^ k`` (``k``: the rounds that context has already been corrected), so the walk goes deeper,
+        to the nodes that know; and when the deepest node the context reaches does not know - other text it learned
+        continues the context otherwise - or knows but is outvoted by the nodes nearer the output, that node is given
+        enough more of the input to make it its guess, and ``2 ^ k - 1`` more.  Returns ``{rounds: [right, ...], right, of, best, reached}``."""
+        counts, n = self._targets(seqs)
+        target = {c: min(r, key=lambda w: (-r[w], w)) for c, r in counts.items()}
+        best_possible = sum(max(r.values()) for r in counts.values())
+        streak: dict[tuple[int, ...], int] = {}
+        rounds: list[int] = []
+        best, stale = -1, 0
+        while True:
+            right = 0
+            for seq in seqs:
+                ids = self.history_ids(seq) + [1]
+                for i in range(1, len(ids)):
+                    right += self._guess(self.walk(ids[:i])) == ids[i]
+            rounds.append(right)
+            if right > best:
+                best, stale = right, 0
+            else:
+                stale += 1
+            if right >= best_possible or len(rounds) >= max_rounds or stale >= patience:
+                break
+            for c in sorted(target):
+                t = target[c]
+                path = self.walk(list(c))
+                g = self._guess(path)
+                if g != t:
+                    k = streak.get(c, 0)
+                    for node in path:
+                        if node.best != t:
+                            node.punished += 2.0 ** k
+                    deep = self.tables[len(c)].get(c)
+                    if deep is not None and (deep.best != t or len(path) == len(c) + 1):
+                        need = 0 if deep.best == t else deep.counts[deep.best] - deep.counts.get(t, 0) + (t > deep.best)
+                        if need + 2 ** k - 1 > 0:
+                            deep.add(t, need + 2 ** k - 1)
+                    streak[c] = k + 1
+        return {"rounds": rounds, "right": right, "of": n, "best": best_possible, "reached": right >= best_possible}
+
     def train_paths(self, paths: Iterable[str], held_out: int = 0, predict: bool = True,
-                    credit: float = 0.0) -> tuple[int, list[list[str]]]:
-        total, kept = 0, []
-        for path, lines in corpus_sequences(paths, self.unit, self.lower):
-            train, test = split_lines(lines, held_out) if held_out else (lines, [])
-            total += self.train_lines(train, source=path, predict=predict, credit=credit)
-            kept += test
-        return total, kept
+                    credit: float = 0.0, reward: bool = True) -> tuple[int, list[list[str]]]:
+        """Train on every sequence under ``paths``, streamed (:func:`latticefsm.ngram.train_corpus`), every
+        ``held_out``-th of each document kept back and returned."""
+        return train_corpus(paths, self.unit, self.lower, held_out,
+                            lambda t: self.train_tokens(t, predict, credit, reward), self.sources)
 
     # ---- predicting --------------------------------------------------------------------------------------------
 
@@ -420,6 +483,55 @@ class Chain:
         for i in range(1, len(ids)):
             n += self._credit_path(self.walk(ids[:i]), ids[i], amount)
         return n
+
+    def score_tokens(self, toks: Sequence[str]) -> list[tuple[str, float, int]]:
+        """Every input of ``toks`` and the ``</s>`` after it, with the probability the chain gives it as it reads them
+        and how deep the walk to it went."""
+        toks = list(toks)
+        ids = self.history_ids(toks) + [1]
+        out = []
+        for i in range(1, len(ids)):
+            path = self.walk(ids[:i])
+            p = self._p(path, ids[i]) if path else self._uniform()
+            out.append((EOS if i == len(ids) - 1 else toks[i - 1], p, max(0, len(path) - 1)))
+        return out
+
+    def teach(self, text: str | Sequence[str], reply: str | Sequence[str], max_rounds: int = 100) -> dict:
+        """Teach the chain that ``reply`` follows ``text``, round after round, until its first guess is right on every
+        input of the reply and on the ``</s>`` after it (``of`` of them) - its greedy continuation of ``text`` is then
+        ``reply`` - or ``max_rounds`` rounds have passed.  A round punishes, at every wrong guess, the nodes on the walk
+        that guessed it (so the next walk goes deeper, past them) - by 1 the first round a position is wrong, doubling
+        every round it stays wrong, so even a node right a thousand times elsewhere gives way - and then learns
+        ``text + reply`` as one sequence.  Returns ``{right, of, rounds, reached, history}``."""
+        ctx = self._sequence(text)
+        rep = self._sequence(reply)
+        of = len(rep) + 1
+        history: list[int] = []
+        streak = [0] * of
+        rounds = 0
+        while True:
+            right = 0
+            wrong = []
+            ids = self.history_ids(ctx)
+            for i, t in enumerate(rep + [EOS]):
+                w = 1 if i == len(rep) else self._id(t, False)
+                path = self.walk(ids)
+                g = self._guess(path)
+                if g == w:
+                    right += 1
+                    streak[i] = 0
+                else:
+                    wrong.append((list(ids), g, 2.0 ** streak[i]))
+                    streak[i] += 1
+                ids.append(w)
+            history.append(right)
+            if right == of or rounds >= max_rounds:
+                break
+            for hist, g, amount in wrong:
+                self._credit_path(self.walk(hist), g, -amount)
+            self.train_tokens(ctx + rep, predict=False)
+            rounds += 1
+        return {"right": right, "of": of, "rounds": rounds, "reached": right == of, "history": history}
 
     # ---- describing --------------------------------------------------------------------------------------------
 

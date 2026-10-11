@@ -1,83 +1,138 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { infoLine, useLmInfo } from "../hooks/useLmInfo.js";
 import { appendToken, showToken } from "../matrix.js";
+import { chainBoxes, joinContinuation, lmLabel, unitWord } from "../lm.js";
 import { fmtNum, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import LineChart from "./LineChart.jsx";
-import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
+import HearButton from "./HearButton.jsx";
+import { NumberField, TextArea } from "./Fields.jsx";
 
-/** "predicted 1200 tokens before learning each: first guess right 17.2%, perplexity 170.17" */
-function learnedNote(learned) {
-  if (!learned || !learned.predicted) return "";
-  return `; predicted ${learned.predicted} tokens before learning each: first guess right ${fmtNum(
-    (learned.accuracy || 0) * 100,
-    1,
-  )}%, perplexity ${fmtNum(learned.perplexity, 2)}`;
+/** An input as a box shows it: a space as ␣, an empty node as a dot. */
+function boxText(input, unit) {
+  if (input === null || input === undefined) return "·";
+  return showToken(String(input), unit) || "·";
 }
 
-const pct = (v) => (v === null || v === undefined ? "-" : fmtNum(v * 100, 1) + "%");
-
-const UNITS = [
-  ["word", "words"],
-  ["char", "characters"],
-  ["sound", "sounds (phonemes, spelled back as English)"],
-  ["base64", "base64 letters (any file: text, images, audio, video)"],
-];
-
-/** One round of training as the history records it, for the table and the chart. */
-function RoundRow({ r }) {
+/**
+ * The chain as the prediction walked it: the input nodes 1 … N-1 holding the last inputs, then the output
+ * node. The walk goes from the output node back, nearest first, and stops once its gathered confidence
+ * reaches the threshold; the nodes it traversed show their own confidence and the confidence gathered up to
+ * them, the ones it never reached are greyed.
+ */
+export function ChainWalk({ prediction, unit }) {
+  const boxes = chainBoxes(prediction);
+  const walk = Array.isArray(prediction.walk) ? prediction.walk : [];
+  // the output node shows what the whole walk predicts: the likeliest next token
+  const top = Array.isArray(prediction.next) && prediction.next.length ? prediction.next[0].token : null;
   return (
-    <tr>
-      <td>{r.round}</td>
-      <td>{r.tokens !== undefined ? r.tokens : "-"}</td>
-      <td>{r.perplexity === null || r.perplexity === undefined ? "-" : fmtNum(r.perplexity, 2)}</td>
-      <td>{pct(r.accuracy)}</td>
-      <td>{r.learned ? `${pct(r.learned_accuracy)} of ${r.learned}` : "-"}</td>
-      <td className="muted">
-        {["corpus_lines", "ollama_lines", "continuations", "judged", "approved", "source"]
-          .filter((k) => r[k] !== undefined)
-          .map((k) => `${k.replace("_", " ")} ${r[k]}`)
-          .join(" · ")}
-      </td>
-    </tr>
+    <>
+      <div className="chain-boxes" role="list" aria-label="the chain's nodes">
+        {boxes.map((b) => (
+          <div
+            key={b.node}
+            role="listitem"
+            className={`chain-box${b.output ? " output" : ""}${b.step ? " walked" : " off"}`}
+            title={
+              b.step
+                ? `depth ${b.depth}: guesses ${b.step.guess ?? "-"}, confidence ${fmtNum(b.step.confidence, 3)}, gathered ${fmtNum(
+                    b.step.gathered,
+                    3,
+                  )}; seen ${b.step.seen ?? 0}, tested ${b.step.tested ?? 0}, right ${b.step.right ?? 0}`
+                : b.output
+                  ? "the output node"
+                  : "not traversed: the walk stopped nearer the output node"
+            }
+          >
+            <span className="chain-label">{b.output ? "output" : `node ${b.node}`}</span>
+            <span className="chain-input mono">{b.output ? (top ? boxText(top, unit) : "?") : boxText(b.input, unit)}</span>
+            {b.step ? (
+              <span className="chain-conf mono">
+                c {fmtNum(b.step.confidence, 2)}
+                <br />Σ {fmtNum(b.step.gathered, 2)}
+              </span>
+            ) : (
+              <span className="chain-conf muted">–</span>
+            )}
+          </div>
+        ))}
+      </div>
+      <p className="note">
+        walked {prediction.depth ?? walk.length - 1} input node{(prediction.depth ?? walk.length - 1) === 1 ? "" : "s"} deep,
+        gathering confidence {fmtNum(prediction.confidence, 3)}
+        {walk.length ? ` (stopped at ${walk.length - 1 === 0 ? "the output node" : `node ${boxes.length - (walk.length - 1)}`})` : ""}
+      </p>
+      {walk.length ? (
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>depth</th>
+                <th>node</th>
+                <th>input</th>
+                <th>guess</th>
+                <th>confidence</th>
+                <th>gathered</th>
+                <th>seen</th>
+                <th>right / tested</th>
+                <th>rewarded / punished</th>
+              </tr>
+            </thead>
+            <tbody>
+              {walk.map((s, i) => {
+                const depth = s.depth ?? i;
+                return (
+                  <tr key={i}>
+                    <td>{depth}</td>
+                    <td>{depth === 0 ? "output" : `node ${boxes.length - depth}`}</td>
+                    <td className="mono">{depth === 0 ? "–" : boxText(s.input, unit)}</td>
+                    <td className="mono">{s.guess === undefined || s.guess === null ? "–" : boxText(s.guess, unit)}</td>
+                    <td>{fmtNum(s.confidence, 3)}</td>
+                    <td>{fmtNum(s.gathered, 3)}</td>
+                    <td>{s.seen ?? "–"}</td>
+                    <td>
+                      {s.right ?? 0} / {s.tested ?? 0}
+                    </td>
+                    <td>
+                      {fmtNum(s.rewarded ?? 0, 1)} / {fmtNum(s.punished ?? 0, 1)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </>
   );
 }
 
 /**
- * Predict the next thing: the N-gram model the server holds. Type, and the likeliest next tokens are listed as you
- * go - click one to take it; continue the text; reward or punish what it wrote; train it on a corpus or on pasted
- * text, or let it train itself with a local language model through Ollama, round after round.
+ * Predict the next thing with the chosen language model. Type, and the likeliest next tokens are listed as you
+ * go - click one to take it; continue the text, and reward or punish what it wrote. For the chain, the input
+ * nodes are drawn holding what you typed, with the walk the prediction took through them: which nodes it
+ * traversed, each one's confidence, and the confidence gathered.
  */
-export default function PredictPanel({ onMoved }) {
-  const [info, setInfo] = useState(null);
+export default function PredictPanel({ lm, tick, onMoved }) {
+  const [info, setInfo, infoError] = useLmInfo(lm, tick);
   const [text, setText] = useStoredState("predict.text", "the brain is");
   const [k, setK] = useStoredState("predict.k", "10");
   const [maxTokens, setMaxTokens] = useStoredState("predict.max", "30");
   const [temperature, setTemperature] = useStoredState("predict.temperature", "0");
-  const [order, setOrder] = useStoredState("predict.order", "3");
-  const [unit, setUnit] = useStoredState("predict.unit", "word");
-  const [data, setData] = useStoredState("predict.data", "data/corpus");
-  const [paste, setPaste] = useStoredState("predict.paste", "");
-  const [useOllama, setUseOllama] = useStoredState("predict.ollama", true);
-  const [model, setModel] = useStoredState("predict.model", "");
-  const [topics, setTopics] = useStoredState("predict.topics", "");
-  const [rounds, setRounds] = useStoredState("predict.rounds", "3");
-  const [path, setPath] = useStoredState("predict.path", "ngram.json.gz");
-  const [predictFirst, setPredictFirst] = useStoredState("predict.first", true);
-  const [selfCredit, setSelfCredit] = useStoredState("predict.selfCredit", "0");
   const [next, setNext] = useState(null);
   const [completion, setCompletion] = useState(null);
-  const [ollama, setOllama] = useState(null);
-  const [log, setLog] = useState(null);
   const [note, setNote] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const typing = useRef(0);
 
+  // a switched model has its own next tokens and its own continuation
   useEffect(() => {
-    api.ngram().then(setInfo).catch((err) => setError(err.message));
-  }, []);
+    setNext(null);
+    setCompletion(null);
+    setNote(null);
+  }, [lm]);
 
   // the next tokens follow the text as it is typed (a moment after the last key)
   useEffect(() => {
@@ -85,7 +140,7 @@ export default function PredictPanel({ onMoved }) {
     window.clearTimeout(typing.current);
     typing.current = window.setTimeout(() => {
       api
-        .ngramPredict(text, parseNumber(k, 10))
+        .lmPredict(lm, text, parseNumber(k, 10))
         .then((r) => {
           setNext(r);
           setError(null);
@@ -93,7 +148,7 @@ export default function PredictPanel({ onMoved }) {
         .catch((err) => setError(err.message));
     }, 150);
     return () => window.clearTimeout(typing.current);
-  }, [text, k, info]);
+  }, [text, k, info, lm]);
 
   async function act(fn) {
     setBusy(true);
@@ -107,51 +162,45 @@ export default function PredictPanel({ onMoved }) {
     }
   }
 
-  const learning = () => ({ predict: predictFirst, self_credit: predictFirst ? parseNumber(selfCredit, 0) : 0 });
-
-  const refresh = async (r) => {
-    setInfo(r && r.model ? r.model : await api.ngram());
-    if (onMoved) onMoved();
-  };
-
   const generate = () =>
     act(async () => {
-      setCompletion(
-        await api.ngramGenerate({
-          text,
-          max_tokens: parseNumber(maxTokens, 30),
-          temperature: parseNumber(temperature, 0),
-          seed: Math.floor(Math.random() * 1e9),
-        }),
-      );
+      const r = await api.lmGenerate(lm, {
+        text,
+        max_tokens: parseNumber(maxTokens, 30),
+        temperature: parseNumber(temperature, 0),
+        seed: Math.floor(Math.random() * 1e9),
+      });
+      setCompletion({ ...r, prompt: text });
     });
 
   const credit = (amount) =>
     act(async () => {
-      const written = completion.unit === "base64" ? completion.completion : `${text} ${completion.completion}`;
-      const r = await api.ngramCredit(written, amount);
-      setNote(`${amount > 0 ? "rewarded" : "punished"} ${r.credited} edges of what it wrote`);
-      await refresh(r);
+      const written = joinContinuation(completion.prompt, completion.completion, completion.unit);
+      const r = await api.lmCredit(lm, written, amount);
+      setNote(`${amount > 0 ? "rewarded" : "punished"} ${r.credited} ${lm === "chain" ? "nodes" : "edges"} of what it wrote`);
+      if (r && r.model) setInfo(r.model);
+      if (onMoved) onMoved();
     });
 
-  const maxPerplexity = info && info.history ? info.history.filter((r) => r.perplexity != null) : [];
-  const unitName = info ? (info.unit === "base64" ? "base64 letter" : info.unit) : "token";
+  const unit = info ? info.unit : next ? next.unit : "word";
+  const chain = lm === "chain";
   return (
     <div className="panel">
       <div className="card wide">
         <h2>Predict the next thing</h2>
         <p className="note">
-          An N-gram model over the lattice's adaptive edges: the context is the last {info ? info.order - 1 : "N-1"}{" "}
-          {unitName}s, the next one is predicted by interpolated Kneser-Ney, and every edge you reward or punish is
-          widened or narrowed - the wider, the likelier, the more stimulated the model is.
+          {chain
+            ? `The chain: ${info ? info.nodes - 1 : "N-1"} input nodes hold the last ${unitWord(unit)}s and the output node predicts the next one. The prediction walks back from the output node, nearest input first, only until it has gathered the confidence it needs (${
+                info ? fmtNum(info.confidence, 2) : "the threshold"
+              }) - the more confident the nodes near the output, the shorter the walk.`
+            : `An N-gram model over the lattice's adaptive edges: the context is the last ${info ? info.order - 1 : "N-1"} ${unitWord(
+                unit,
+              )}s, the next one is predicted by interpolated Kneser-Ney, and every edge you reward or punish is widened or narrowed.`}
         </p>
-        {info ? (
-          <p className="mono">
-            {info.order}-grams of {unitName}s · {info.tokens} tokens trained · {info.vocab} distinct · {info.ngrams}{" "}
-            n-grams · {info.credited_edges} credited edges
-          </p>
-        ) : null}
+        {info ? <p className="mono">{infoLine(lm, info)}</p> : null}
+        <Alert message={infoError ? `${lmLabel(lm)}: ${infoError}` : null} />
         <TextArea label="Text" value={text} onChange={setText} rows={3} hint="the next token follows it as you type" />
+        {chain && next && Array.isArray(next.walk) ? <ChainWalk prediction={next} unit={next.unit || unit} /> : null}
         {next && next.next ? (
           <div className="next-tokens">
             {next.next.map(({ token, p }) => (
@@ -187,6 +236,7 @@ export default function PredictPanel({ onMoved }) {
               <button type="button" disabled={busy} onClick={() => credit(-1)}>
                 Bad - punish it
               </button>
+              <HearButton text={joinContinuation(completion.prompt, completion.completion, completion.unit)} unit={completion.unit} label="what it wrote" />
             </>
           ) : null}
         </div>
@@ -196,7 +246,8 @@ export default function PredictPanel({ onMoved }) {
               completion.completion
             ) : (
               <>
-                <span className="muted">{text} </span>
+                <span className="muted">{completion.prompt}</span>
+                {completion.unit === "char" ? "" : " "}
                 <strong>{completion.completion || "(it would end here)"}</strong>
               </>
             )}
@@ -204,174 +255,7 @@ export default function PredictPanel({ onMoved }) {
         ) : null}
         {note ? <p className="note">{note}</p> : null}
         <Alert message={error} onDismiss={() => setError(null)} />
-      </div>
-
-      <div className="card wide">
-        <h2>Train it</h2>
-        <div className="row">
-          <SelectField label="Unit" value={unit} onChange={setUnit} options={UNITS} />
-          <NumberField label="N" value={order} onChange={setOrder} min="1" max="12" step="1" hint="the context is N-1 units" />
-          <TextField label="Data" value={data} onChange={setData} hint="files or directories on the server, comma-separated" />
-        </div>
-        <div className="row">
-          <CheckField
-            label="Predict while learning"
-            checked={predictFirst}
-            onChange={setPredictFirst}
-            hint="guess every next token before it is learned, and measure the guesses"
-          />
-          <NumberField
-            label="Self-credit"
-            value={selfCredit}
-            onChange={setSelfCredit}
-            min="0"
-            step="0.05"
-            hint="reward a right guess, punish a wrong one, by this much (0: off)"
-          />
-        </div>
-        <div className="actions">
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() =>
-              act(async () => {
-                setInfo(await api.ngramNew({ order: parseNumber(order, 3), unit }));
-                setNext(null);
-                setCompletion(null);
-              })
-            }
-          >
-            New model
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() =>
-              act(async () => {
-                const r = await api.ngramTrain({ data, ...learning() });
-                setNote(
-                  `trained ${r.trained} tokens${learnedNote(r.learned)}; held out: perplexity ${fmtNum(
-                    r.held_out.perplexity,
-                    2,
-                  )}, next-token accuracy ${pct(r.held_out.accuracy || 0)}`,
-                );
-                await refresh(r);
-              })
-            }
-          >
-            Train on the data
-          </button>
-        </div>
-        <TextArea label="Or paste text" value={paste} onChange={setPaste} rows={3} hint="every line one sequence" />
-        <div className="actions">
-          <button
-            type="button"
-            disabled={busy || !paste.trim()}
-            onClick={() =>
-              act(async () => {
-                const r = await api.ngramText(paste, learning());
-                setNote(`trained ${r.trained} tokens of pasted text${learnedNote(r.learned)}`);
-                await refresh(r);
-              })
-            }
-          >
-            Train on this text
-          </button>
-          <TextField label="File" value={path} onChange={setPath} />
-          <button type="button" disabled={busy} onClick={() => act(async () => setNote(`saved ${(await api.ngramSave(path)).saved}`))}>
-            Save
-          </button>
-          <button type="button" disabled={busy} onClick={() => act(async () => setInfo(await api.ngramLoad(path)))}>
-            Load
-          </button>
-        </div>
-      </div>
-
-      <div className="card wide">
-        <h2>Train itself with Ollama</h2>
-        <p className="note">
-          Round 0 trains a fresh model on the data, every tenth line held out. Each round after it a local language model
-          (Ollama) writes sentences on the corpus's own topics, continues the model's own contexts, and judges texts the
-          model wrote - what it approves is rewarded, what it rejects punished - and the model is measured on the held-out
-          lines again; it stops when that stops improving. Every token it learns, it first tries to predict - the
-          guesses are measured as it goes.
-        </p>
-        <div className="row">
-          <CheckField label="Use Ollama" checked={useOllama} onChange={setUseOllama} hint="off: the data only" />
-          <TextField label="Model" value={model} onChange={setModel} hint="blank: $LATTICEFSM_OLLAMA_MODEL or llama3.2" />
-          <TextField label="Topics" value={topics} onChange={setTopics} hint="comma-separated; blank: the corpus's own words" />
-          <NumberField label="Rounds" value={rounds} onChange={setRounds} min="0" max="50" step="1" />
-        </div>
-        <div className="actions">
-          <button type="button" disabled={busy} onClick={() => act(async () => setOllama(await api.ngramOllama(model)))}>
-            Is Ollama there?
-          </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() =>
-              act(async () => {
-                const r = await api.ngramAutotrain({
-                  data,
-                  ollama: useOllama,
-                  model: model || undefined,
-                  topics,
-                  rounds: parseNumber(rounds, 3),
-                  ...learning(),
-                });
-                setLog(r.log);
-                await refresh(r);
-              })
-            }
-          >
-            {busy ? "Training…" : "Auto-train"}
-          </button>
-        </div>
-        {ollama ? (
-          <p className={`note${ollama.available ? "" : " error-text"}`}>
-            {ollama.available
-              ? `Ollama at ${ollama.url}: ${ollama.models.join(", ") || "no models pulled"}; it would use ${ollama.model}`
-              : ollama.error}
-          </p>
-        ) : null}
-        {log ? <pre className="mono run-log">{log.join("\n")}</pre> : null}
-        {info && info.history && info.history.length ? (
-          <>
-            {maxPerplexity.length > 1 ? (
-              <LineChart
-                series={[
-                  {
-                    name: "held-out perplexity",
-                    color: "var(--accent)",
-                    values: maxPerplexity.map((r, i) => ({ x: i, y: r.perplexity })),
-                  },
-                ]}
-                xLabel="round"
-                yLabel="perplexity"
-                height={200}
-              />
-            ) : null}
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>round</th>
-                    <th>tokens</th>
-                    <th>held-out perplexity</th>
-                    <th>next-token accuracy</th>
-                    <th>guessed right while learning</th>
-                    <th>what it learned from</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {info.history.map((r, i) => (
-                    <RoundRow key={i} r={r} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </>
-        ) : null}
+        <p className="muted">Training is on the Train tab, Ollama's auto-training on the Ollama tab, saving and loading on the Checkpoints tab.</p>
       </div>
     </div>
   );

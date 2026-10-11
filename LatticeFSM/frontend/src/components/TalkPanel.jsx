@@ -1,114 +1,147 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { fmtNum, parseNumber } from "../util.js";
+import { useLmInfo } from "../hooks/useLmInfo.js";
+import { lmLabel, mean, untilNote } from "../lm.js";
+import { askModel, turnText } from "../talk.js";
+import { fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, SelectField, TextField } from "./Fields.jsx";
+import HearButton from "./HearButton.jsx";
+import { CheckField, NumberField } from "./Fields.jsx";
+import { RateButtons } from "./RatingsCard.jsx";
+import TokenText, { DepthNote } from "./TokenText.jsx";
 
-const PRESETS = [
-  ["enc>dec", "enc>dec - English in, English out"],
-  ["enc>13>dec", "enc>13>dec - with a hidden machine"],
-  ["text>13", "text>13 - a yes / no classifier of text"],
-  ["enc>13", "enc>13 - a yes / no classifier of sounds"],
-];
-
-/** One layer's part of a reply, as the trace returns it. */
-function TraceLine({ step }) {
+/**
+ * The conversation as it stands, oldest at the top, newest at the bottom where the next line lands: what you
+ * said, and the model's reply - its continuation of it - with 👍 / 👎 (crediting the two together) and 🔊.
+ * For the chain each reply token is tinted by its walk's depth (subscripted when `subscripts`), with the mean.
+ * Shared by the Talk and Voice tabs.
+ */
+export function TalkLog({ turns, busy, onRate, onTeach, maxDepth, subscripts, empty }) {
+  const logRef = useRef(null);
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [turns]);
   return (
-    <li className="mono">
-      <strong>{step.layer}</strong> read {step.read || "-"}
-      {step.states && step.states.length ? <> · walked {step.states.join(" ")}</> : null} · wrote {step.wrote || "-"}
-      {step.english !== null && step.english !== undefined ? <span className="muted"> = "{step.english}"</span> : null}
-      {step.accepted ? <span className="muted"> (accepting)</span> : null}
-    </li>
-  );
-}
-
-/** The network's reply in the conversation: what it said, its sounds, its trace, and the two ways to teach it. */
-function Reply({ turn, busy, onTeach }) {
-  const [correction, setCorrection] = useState("");
-  const [open, setOpen] = useState(false);
-  const r = turn.reply;
-  const said = r.translator ? r.reply || "(silence)" : r.reply;
-  return (
-    <li className={`turn a${turn.taught ? " rated up" : ""}`}>
-      <div className="speaker">network</div>
-      <div className="bubble">
-        {said}
-        {r.translator && r.sounds && r.sounds.length ? <div className="meta units">{r.sounds.join(" ")}</div> : null}
-        {turn.taught ? <div className="meta">{turn.taught}</div> : null}
-      </div>
-      <div className="actions">
-        <button type="button" className="link" disabled={busy} onClick={() => onTeach(turn, r.reply)}>
-          right - reinforce it
-        </button>
-        <span className="inline-form">
-          <input
-            value={correction}
-            placeholder={r.translator ? "the right reply, in English" : "yes or no"}
-            onChange={(e) => setCorrection(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && correction.trim()) onTeach(turn, correction.trim());
-            }}
-          />
-          <button
-            type="button"
-            disabled={busy || !correction.trim()}
-            onClick={() => onTeach(turn, correction.trim())}
-          >
-            Teach this reply
-          </button>
-        </span>
-        <button type="button" className="link" onClick={() => setOpen(!open)}>
-          {open ? "hide" : "show"} how it got there
-        </button>
-      </div>
-      {open ? (
-        <ol className="lines">
-          {r.trace.map((step, i) => (
-            <TraceLine key={i} step={step} />
+    <div className="voice-log" ref={logRef}>
+      {turns.length === 0 ? (
+        <p className="empty muted">{empty}</p>
+      ) : (
+        <ol className="dialogue voice">
+          {turns.map((turn) => (
+            <TalkTurn
+              key={turn.id}
+              turn={turn}
+              busy={busy}
+              onRate={onRate}
+              onTeach={onTeach}
+              maxDepth={maxDepth}
+              subscripts={subscripts}
+            />
           ))}
         </ol>
-      ) : null}
-    </li>
+      )}
+    </div>
   );
 }
 
 /**
- * Talk to a network of machines: type, and it replies - in English from a translator (an encoder that reads the
- * sounds of what you typed, a decoder whose states are sounds, spelled back), or yes / no from a classifier. Every
- * reply can be reinforced or corrected, and the network learns from it on the spot (POST /api/network/teach).
+ * One exchange: what you said and the model's reply, with the thumbs, the voice and - when `onTeach` is given -
+ * a box to type the right reply in and teach it (until its continuation is exactly that, or the rounds run out).
  */
-export default function TalkPanel({ onMoved }) {
-  const [info, setInfo] = useState(null);
-  const [arch, setArch] = useStoredState("talk.arch", "enc>dec");
-  const [credit, setCredit] = useStoredState("talk.credit", "shared");
-  const [task, setTask] = useStoredState("talk.task", "plural");
-  const [epochs, setEpochs] = useStoredState("talk.epochs", "20");
-  const [times, setTimes] = useStoredState("talk.times", "3");
-  const [language, setLanguage] = useStoredState("talk.language", "even-b");
-  const [data, setData] = useStoredState("talk.data", "");
-  const [path, setPath] = useStoredState("talk.path", "network.json.gz");
-  const [draft, setDraft] = useStoredState("talk.draft", "cat");
+function TalkTurn({ turn, busy, onRate, onTeach, maxDepth, subscripts }) {
+  const [correction, setCorrection] = useState("");
+  const teach = () => {
+    if (correction.trim() && !busy) onTeach(turn, correction.trim());
+  };
+  const tokenView = turn.unit !== "base64" && turn.tokens && turn.tokens.length;
+  return (
+    <>
+      <li className="turn b">
+        <div className="speaker">you{turn.learned ? ` · learned ${turn.learned} tokens` : ""}</div>
+        <div className="bubble">{turn.text}</div>
+      </li>
+      <li className={`turn a${turn.rated ? ` rated ${turn.rated > 0 ? "up" : "down"}` : ""}`}>
+        <div className="speaker">
+          {turn.model}
+          {turn.depths ? <DepthNote depths={turn.depths} maxDepth={maxDepth} /> : null}
+        </div>
+        <div className="bubble">
+          {tokenView ? (
+            <TokenText tokens={turn.tokens} depths={turn.depths} unit={turn.unit} maxDepth={maxDepth} subscripts={subscripts} />
+          ) : (
+            turn.reply || <span className="muted">(nothing follows)</span>
+          )}
+        </div>
+        <div className="meta">
+          <RateButtons rated={turn.rated || 0} disabled={busy} onRate={(amount) => onRate(turn, amount)} label="the reply" />
+          <HearButton text={turn.reply} unit={turn.unit} label="the reply" />
+          {turn.credited ? <span className="muted">{turn.credited}</span> : null}
+        </div>
+        {onTeach ? (
+          <div className="meta">
+            <span className="inline-form">
+              <input
+                value={correction}
+                placeholder="the right reply"
+                aria-label="the right reply"
+                onChange={(e) => setCorrection(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") teach();
+                }}
+              />
+              <button type="button" className="small" disabled={busy || !correction.trim()} onClick={teach}>
+                Teach this reply
+              </button>
+            </span>
+          </div>
+        ) : null}
+        {turn.taught ? (
+          <div className="meta">
+            <span className={turn.taught.reached ? "ok-text" : "error-text"}>{turn.taught.note}</span>
+            {" - now: "}
+            <b>{turn.taught.completion || "(nothing)"}</b>
+          </div>
+        ) : null}
+      </li>
+    </>
+  );
+}
+
+/** The turns' state and the two things done to it, shared by Talk and Voice: say a line, rate a reply. */
+export function useTalk(lm, onMoved) {
   const [turns, setTurns] = useState([]);
-  const [fit, setFit] = useState(null);
-  const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const logRef = useRef(null);
+  const [error, setError] = useState(null);
+  const nextId = useRef(0);
 
-  useEffect(() => {
-    api.network().then(setInfo).catch((err) => setError(err.message));
-  }, []);
-
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [turns]);
-
-  async function act(fn) {
+  async function say(message, opts) {
+    const text = String(message ?? "").trim();
+    if (!text) return null;
     setBusy(true);
     try {
-      await fn();
+      const turn = await askModel(lm, text, opts);
+      const full = { ...turn, id: nextId.current++, model: lmLabel(lm), lm, rated: 0 };
+      setTurns((t) => [...t, full]);
       setError(null);
+      if (opts && opts.learn && onMoved) onMoved();
+      return full;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rate(turn, amount) {
+    setBusy(true);
+    try {
+      const r = await api.lmCredit(turn.lm, turnText(turn), amount);
+      const credited = `${amount > 0 ? "rewarded" : "punished"} ${r.credited}`;
+      setTurns((t) => t.map((x) => (x.id === turn.id ? { ...x, rated: amount, credited } : x)));
+      setError(null);
+      if (onMoved) onMoved();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -116,161 +149,105 @@ export default function TalkPanel({ onMoved }) {
     }
   }
 
-  const send = () =>
-    act(async () => {
-      const text = draft.trim();
-      if (!text) return;
-      const reply = await api.talk(text);
-      setTurns((t) => [...t, { id: t.length, text, reply, taught: null }]);
-      setDraft("");
-    });
-
-  const teach = (turn, reply) =>
-    act(async () => {
-      const r = await api.networkTeach({ text: turn.text, reply, times: Math.max(1, parseNumber(times, 3)) });
-      const note = `taught "${reply}" ${Math.max(1, parseNumber(times, 3))}× (${r.right} of ${r.of} right) - now: ${
-        r.after.translator ? r.after.reply || "(silence)" : r.after.reply
-      }`;
-      setTurns((t) => t.map((x) => (x.id === turn.id ? { ...x, taught: note } : x)));
-      setInfo(await api.network());
+  /** Teach that `reply` follows the turn's message (POST /api/{m}/teach), round after round until N of N. */
+  async function teach(turn, reply, maxRounds = 100) {
+    setBusy(true);
+    try {
+      const r = await api.lmTeach(turn.lm, { text: turn.text, reply, max_rounds: maxRounds });
+      const taught = { reply, note: `taught "${reply}": ${untilNote(r)}`, reached: Boolean(r.reached), completion: r.completion };
+      setTurns((t) => t.map((x) => (x.id === turn.id ? { ...x, taught } : x)));
+      setError(null);
       if (onMoved) onMoved();
-    });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
-  const make = () =>
-    act(async () => {
-      setInfo(await api.networkNew({ arch, credit }));
-      setTurns([]);
-      setFit(null);
-    });
+  return { turns, setTurns, busy, error, setError, say, rate, teach, clear: () => setTurns([]) };
+}
 
-  const teachTask = () =>
-    act(async () => {
-      const body = info && info.translator
-        ? { task, epochs: parseNumber(epochs, 20) }
-        : data
-          ? { data, epochs: parseNumber(epochs, 20) }
-          : { language, episodes: 2000, epochs: parseNumber(epochs, 1) };
-      const r = await api.networkFit(body);
-      setFit(r);
-      setInfo(r.network);
-    });
+/**
+ * Talk to the chosen language model: type a message and its reply is the model's prediction - its own
+ * continuation of what you said. "Learn what I say" trains it on every message first. A reply can be
+ * rewarded or punished (👍 / 👎 credit the message and the reply together), heard, or corrected: type the
+ * right reply and it is taught, round after round, until the model's own continuation is exactly that (N of
+ * N tokens right, and the end) or the rounds run out. For the chain every
+ * reply token is tinted by how deep the walk went to predict it, with the mean depth beside it. Enter sends.
+ */
+export default function TalkPanel({ lm, tick, onMoved }) {
+  const [info] = useLmInfo(lm, tick);
+  const [draft, setDraft] = useStoredState("lmtalk.draft", "");
+  const [maxTokens, setMaxTokens] = useStoredState("lmtalk.max", "40");
+  const [temperature, setTemperature] = useStoredState("lmtalk.temperature", "0");
+  const [learn, setLearn] = useStoredState("lmtalk.learn", false);
+  const [subscripts, setSubscripts] = useStoredState("lmtalk.subscripts", false);
+  const [maxRounds, setMaxRounds] = useStoredState("lmtalk.maxRounds", "100");
+  const talk = useTalk(lm, onMoved);
 
-  const translator = info && info.translator;
+  const send = async () => {
+    if (talk.busy || !draft.trim()) return;
+    const said = await talk.say(draft, {
+      learn,
+      maxTokens: Math.max(1, parseInteger(maxTokens, 40)),
+      temperature: parseNumber(temperature, 0),
+    });
+    if (said) setDraft("");
+  };
+
+  const chain = lm === "chain";
+  const maxDepth = info && info.nodes ? info.nodes - 1 : 8;
+  const allDepths = talk.turns.flatMap((t) => (t.depths ? t.depths : []));
+  const overall = mean(allDepths);
   return (
-    <div className="panel">
-      <div className="card wide">
-        <h2>The network</h2>
-        <p className="note">
-          The server holds a network of machines beside the single machine the other tabs show. A translator reads what
-          you type as its sounds (the phonetic tokenizer), walks them, and spells what its decoder writes back as
-          English; a classifier answers yes or no. Make one from an architecture string, teach it a task, then talk
-          to it below.
-        </p>
-        {info ? (
-          <p className="mono">
-            <strong>{info.architecture || "a network"}</strong> · reads {info.reads} ·{" "}
-            {translator ? "replies in English" : "replies yes / no"} · {info.layers.length} layer
-            {info.layers.length === 1 ? "" : "s"} (
-            {info.layers.map((l) => `${l.name} ${l.shape.join("×")}, ${l.touched} touched`).join("; ")}) ·{" "}
-            {info.examples} examples taught
-          </p>
-        ) : null}
-        <div className="row">
-          <SelectField label="Preset" value={PRESETS.some(([v]) => v === arch) ? arch : ""} onChange={(v) => v && setArch(v)}
-            options={[["", "(your own)"], ...PRESETS]} />
-          <TextField label="Architecture" value={arch} onChange={setArch} hint="> in a row, (a|b) side by side; enc dec text audio image" />
-          <SelectField label="Credit" value={credit} onChange={setCredit}
-            options={[["shared", "shared"], ["own", "own (voting branches)"]]} />
-        </div>
-        <div className="actions">
-          <button type="button" disabled={busy || !arch} onClick={make}>
-            New network
-          </button>
-        </div>
-        <div className="row">
-          {translator ? (
-            <SelectField label="Task" value={task} onChange={setTask}
-              options={[["plural", "plural: cat → cats"], ["past", "past tense: walk → walked"]]} />
-          ) : (
-            <>
-              <TextField label="Language" value={language} onChange={setLanguage} hint="even-b, contains-aa, ends-ab, mod3-a" />
-              <TextField label="Or a data file" value={data} onChange={setData} hint="labels.tsv on the server: input<TAB>yes/no" />
-            </>
-          )}
-          <NumberField label="Epochs" value={epochs} onChange={setEpochs} min="1" step="1" />
-          <NumberField label="Teach a reply" value={times} onChange={setTimes} min="1" step="1" hint="times, when you correct it" />
-        </div>
-        <div className="actions">
-          <button type="button" disabled={busy || !info} onClick={teachTask}>
-            {translator ? "Teach the task" : "Teach"}
-          </button>
-          <TextField label="File" value={path} onChange={setPath} />
-          <button type="button" disabled={busy} onClick={() => act(async () => setFit({ saved: (await api.networkSave(path)).saved }))}>
-            Save
-          </button>
-          <button type="button" disabled={busy} onClick={() => act(async () => { setInfo(await api.networkLoad(path)); setTurns([]); })}>
-            Load
-          </button>
-        </div>
-        {fit && fit.exact ? (
-          <p className="note">
-            after {fit.exact.length} epochs: {fmtNum(fit.exact[fit.exact.length - 1] * 100, 0)}% of the taught pairs exactly right,{" "}
-            {fmtNum(fit.held_out[fit.held_out.length - 1] * 100, 0)}% of the held-out ones;{" "}
-            {fit.examples.map(([x, got, want]) => `${x} → ${got || "(silence)"}${got === want ? "" : ` (${want})`}`).join(", ")}
-          </p>
-        ) : null}
-        {fit && fit.taught ? (
-          <p className="note">
-            right while taught {fmtNum(fit.taught[fit.taught.length - 1] * 100, 0)}%, held out{" "}
-            {fmtNum(fit.held_out[fit.held_out.length - 1] * 100, 0)}%
-          </p>
-        ) : null}
-        {fit && fit.saved ? <p className="note">saved {fit.saved}</p> : null}
-        <Alert message={error} onDismiss={() => setError(null)} />
-      </div>
+    <div className="panel single">
       <div className="card wide voice-room">
-        <h2>Talk</h2>
-        <div className="voice-log" ref={logRef}>
-          {turns.length === 0 ? (
-            <p className="empty muted">
-              {translator
-                ? "Type an English word or a few - a noun, say - and it answers in English. Untaught it is silent; teach it the plural task above, or correct it reply by reply."
-                : "Type a string and it answers yes or no; correct it to teach it."}
-            </p>
-          ) : (
-            <ol className="dialogue voice">
-              {turns.map((turn) => (
-                <FragmentTurn key={turn.id} turn={turn} busy={busy} onTeach={teach} />
-              ))}
-            </ol>
-          )}
+        <div className="toolbar">
+          <h2>Talk to the {lmLabel(lm)} model</h2>
+          <button type="button" className="small" disabled={talk.busy || talk.turns.length === 0} onClick={talk.clear}>
+            Clear
+          </button>
         </div>
+        <p className="muted">
+          Its reply is its prediction: what it thinks comes after what you said, token by token.
+          {chain ? ` Each reply token is tinted by how deep the chain walked to predict it (of ${maxDepth} input nodes): pale, the nodes nearest the output were sure; dark, it had to go far back.` : ""}
+          {chain && overall !== null ? ` Mean depth so far ${fmtNum(overall, 2)}.` : ""}
+        </p>
+        <div className="row">
+          <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min="1" step="1" />
+          <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" hint="0: the likeliest" />
+          <NumberField label="Teach rounds" value={maxRounds} onChange={setMaxRounds} min="1" step="1" hint="at most, teaching a reply until it is all right" />
+          <CheckField label="Learn what I say" checked={learn} onChange={setLearn} hint="train on every message first" />
+          {chain ? <CheckField label="Depth subscripts" checked={subscripts} onChange={setSubscripts} hint="each token's depth beside it" /> : null}
+        </div>
+        <TalkLog
+          turns={talk.turns}
+          busy={talk.busy}
+          onRate={talk.rate}
+          onTeach={(turn, reply) => talk.teach(turn, reply, Math.max(1, parseInteger(maxRounds, 100)))}
+          maxDepth={chain ? maxDepth : null}
+          subscripts={chain && subscripts}
+          empty="Say something - a few words it might know how to go on with - and it carries on from there."
+        />
+        <Alert message={talk.error} onDismiss={() => talk.setError(null)} />
         <div className="voice-composer">
           <input
             value={draft}
-            placeholder={translator ? "say something in English" : "a string to judge"}
+            placeholder="say something"
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !busy) send();
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
             }}
           />
-          <button type="button" disabled={busy || !draft.trim()} onClick={send}>
-            Send
+          <button type="button" className="primary" disabled={talk.busy || !draft.trim()} onClick={send}>
+            {talk.busy ? "…" : "Send"}
           </button>
         </div>
       </div>
     </div>
-  );
-}
-
-function FragmentTurn({ turn, busy, onTeach }) {
-  return (
-    <>
-      <li className="turn b">
-        <div className="speaker">you</div>
-        <div className="bubble">{turn.text}</div>
-      </li>
-      <Reply turn={turn} busy={busy} onTeach={onTeach} />
-    </>
   );
 }

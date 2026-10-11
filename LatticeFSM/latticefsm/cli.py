@@ -19,6 +19,7 @@
     ngram       predict the next thing: train an N-gram model on a corpus or with Ollama, predict, generate
     chain       one input to a node, the output node predicts the next: walks only as deep as confidence needs
     base64      encode anything (text, an image, a video) as base64, or decode it back
+    corpus      what a corpus is read as: every document (archives opened) and its lines or base64 sequences
     experiment  the learning, stimulation, adaptation and compression experiments
     test        run the test suite
 
@@ -432,6 +433,35 @@ def _ngram(args):
     return NGram(args.order, args.unit, lower=not args.keep_case, stimulation=args.stimulation)
 
 
+def _train_until(m, data, args, right: int, of: int) -> None:
+    """``--until``: after the first pass (round 1: every token predicted before it was learned), drill the model on
+    what it learned (:meth:`drill`) until every token is right - or as many as can be: a context the data continues
+    in more than one way can only ever be guessed one way - or ``--max-rounds``."""
+    from .ngram import train_corpus
+    seqs: list = []
+    train_corpus(data, m.unit, m.lower, args.held_out, lambda t: seqs.append(t) or 0, [])
+    best_possible, _ = m.ceiling(seqs)
+    print(f"round 1: {right} of {of} predicted right before learning (the most possible: {best_possible})")
+    d = m.drill(seqs, max(2, args.max_rounds) - 1, max(2, args.max_rounds) - 1)
+    for k, r in enumerate(d["rounds"]):
+        print(f"round {k + 2}: {r} of {d['of']} right")
+    rnd, right, of = len(d["rounds"]) + 1, d["right"], d["of"]
+    if right == of:
+        print(f"{of} of {of} reached in {rnd} rounds")
+    elif d["reached"]:
+        print(f"{right} of {of} reached in {rnd} rounds: the most possible - the rest ({of - right}) come after "
+              f"contexts the data continues in more than one way")
+    else:
+        print(f"stopped after {rnd} rounds at {right} of {of} (the most possible: {best_possible})")
+
+
+def _print_teaching(m, text, reply, r) -> None:
+    print(f"taught {reply!r} after {text!r}: {r['right']} of {r['of']} right after {r['rounds']} rounds"
+          + ("" if r["reached"] else " (not all: --max-rounds)") + "; right before each round: "
+          + " ".join(map(str, r["history"])))
+    print(f"now: {m.complete(text, 2 * r['of'] + 10)}")
+
+
 def _fmt(v, digits=3) -> str:
     return "-" if v is None else f"{v:.{digits}f}"
 
@@ -454,7 +484,9 @@ def cmd_ngram(args) -> int:
     m = _ngram(args)
     data = [p for d in (args.data or ["data/corpus"]) for p in d.split(",") if p]
     if args.action == "train":
-        _, test = m.train_paths(data, held_out=args.held_out, predict=not args.no_predict, credit=args.self_credit)
+        _, test = m.train_paths(data, held_out=args.held_out, predict=not args.no_predict or args.until,
+                                credit=args.self_credit)
+        first = (m.online[0], m.online[1])
         learned = m.reset_online()
         st = m.stats()
         what = "base64 letters" if st["unit"] == "base64" else st["unit"] + "s"
@@ -463,6 +495,8 @@ def cmd_ngram(args) -> int:
         if learned["predicted"]:
             print(f"while training: predicted {learned['predicted']} tokens before learning each, first guess right "
                   f"{_fmt(learned['accuracy'])}, perplexity {_fmt(learned['perplexity'], 2)}")
+        if args.until:
+            _train_until(m, data, args, *first)
         if test:
             ev = m.evaluate(test)
             print(f"held out ({len(test)} lines, {ev['tokens']} tokens): perplexity {_fmt(ev['perplexity'], 2)}, "
@@ -519,7 +553,11 @@ def cmd_ngram(args) -> int:
     elif args.action == "credit":
         for text in args.text:
             print(f"credited {m.credit_text(text, args.amount)} edges of {text!r} with {args.amount:+}")
-    if args.save and args.action in ("train", "credit"):
+    elif args.action == "teach":
+        if len(args.text) != 2:
+            raise SystemExit("teach TEXT REPLY: the text and the reply that should follow it")
+        _print_teaching(m, args.text[0], args.text[1], m.teach(args.text[0], args.text[1], args.max_rounds))
+    if args.save and args.action in ("train", "credit", "teach"):
         m.save(args.save)
         print(f"saved {args.save}", file=sys.stderr)
     return 0
@@ -557,8 +595,9 @@ def cmd_chain(args) -> int:
         m.confidence = args.set_confidence
     what = "base64 letters" if m.unit == "base64" else m.unit + "s"
     if args.action == "train":
-        _, test = m.train_paths(_chain_data(args), held_out=args.held_out, predict=not args.no_predict,
+        _, test = m.train_paths(_chain_data(args), held_out=args.held_out, predict=not args.no_predict or args.until,
                                 credit=args.self_credit)
+        first = (m.online[0], m.online[1])
         learned = m.reset_online()
         st = m.stats()
         print(f"a chain of {m.nodes} nodes ({m.depth} input nodes and the output node) over {what}: {st['tokens']} "
@@ -567,6 +606,8 @@ def cmd_chain(args) -> int:
             print(f"while training: predicted {learned['predicted']} inputs before learning each, first guess right "
                   f"{_fmt(learned['accuracy'])}, perplexity {_fmt(learned['perplexity'], 2)}, "
                   f"{_fmt(learned['depth'], 2)} input nodes traversed")
+        if args.until:
+            _train_until(m, _chain_data(args), args, *first)
         if test:
             ev = m.evaluate(test)
             print(f"held out ({len(test)} lines, {ev['tokens']} inputs) at confidence {m.confidence:.2f}: perplexity "
@@ -621,9 +662,33 @@ def cmd_chain(args) -> int:
     elif args.action == "credit":
         for text in args.text:
             print(f"credited {m.credit_text(text, args.amount)} nodes on the walks of {text!r} with {args.amount:+}")
-    if args.save and args.action in ("train", "credit"):
+    elif args.action == "teach":
+        if len(args.text) != 2:
+            raise SystemExit("teach TEXT REPLY: the text and the reply that should follow it")
+        _print_teaching(m, args.text[0], args.text[1], m.teach(args.text[0], args.text[1], args.max_rounds))
+    if args.save and args.action in ("train", "credit", "teach"):
         m.save(args.save)
         print(f"saved {args.save}", file=sys.stderr)
+    return 0
+
+
+def cmd_corpus(args) -> int:
+    import zlib
+    from .b64 import file_sequences
+    from .ngram import corpus_lines
+    docs = 0
+    if args.unit == "base64":
+        for label, seqs in file_sequences(args.paths):
+            text = "".join(seqs)
+            print(f"{label}: {len(seqs)} sequences, {len(text)} letters, crc {zlib.crc32(text.encode()):08x}")
+            docs += 1
+    else:
+        for label, lines in corpus_lines(args.paths):
+            print(f"{label}: {len(lines)} lines, crc {zlib.crc32(chr(10).join(lines).encode('utf-8')):08x}")
+            for ln in lines[:args.show]:
+                print(f"  {ln}")
+            docs += 1
+    print(f"{docs} documents")
     return 0
 
 
@@ -825,7 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = add("ngram", cmd_ngram, "predict the next thing: an N-gram model trained on a corpus or with Ollama",
             machine=False, load=False)
     q.add_argument("action", choices=("train", "autotrain", "predict", "generate", "evaluate", "stats", "credit",
-                                      "ollama"))
+                                      "teach", "ollama"))
     q.add_argument("text", nargs="*", help="predict / generate / credit: the texts")
     q.add_argument("--data", nargs="+", default=None, help="text files or directories (default data/corpus)")
     q.add_argument("--load", default=None, help="a saved model (train / autotrain continue it when it exists)")
@@ -840,6 +905,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="train / autotrain: only count (by default every token is predicted first, then learned)")
     q.add_argument("--self-credit", type=float, default=0.0,
                    help="while predicting: reward a right first guess, punish a wrong one by this much (default 0)")
+    q.add_argument("--until", action="store_true", help="train: drill the model on what it learned until every token is "
+                   "predicted right (N of N; or every one that can be) or --max-rounds")
+    q.add_argument("--max-rounds", type=int, default=None, help="--until: at most this many passes (default 20); teach: "
+                   "at most this many rounds (default 100)")
     q.add_argument("-k", type=int, default=10, help="predict: how many next tokens")
     q.add_argument("--max-tokens", type=int, default=30)
     q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")
@@ -860,7 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--prefix-bytes", type=int, default=64)
     q = add("chain", cmd_chain, "one input to a node, the output node predicts the next: walks only as deep as "
             "confidence needs", machine=False, load=False)
-    q.add_argument("action", choices=("train", "predict", "generate", "evaluate", "sweep", "stats", "credit"))
+    q.add_argument("action", choices=("train", "predict", "generate", "evaluate", "sweep", "stats", "credit", "teach"))
     q.add_argument("text", nargs="*", help="predict / generate / credit: the texts")
     q.add_argument("--data", nargs="+", default=None, help="files or directories (default data/corpus)")
     q.add_argument("--load", default=None, help="a saved chain (without one, the data is learned first)")
@@ -879,6 +948,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--self-credit", type=float, default=0.0,
                    help="train: reward the nodes behind a right first guess, punish those behind a wrong one")
     q.add_argument("--thresholds", default="0,0.3,0.5,0.7,0.8,0.9,0.95,1", help="sweep: the confidences")
+    q.add_argument("--until", action="store_true", help="train: drill the model on what it learned until every token is "
+                   "predicted right (N of N; or every one that can be) or --max-rounds")
+    q.add_argument("--max-rounds", type=int, default=None, help="--until: at most this many passes (default 20); teach: "
+                   "at most this many rounds (default 100)")
     q.add_argument("-k", type=int, default=10, help="predict: how many next inputs")
     q.add_argument("--max-tokens", type=int, default=40)
     q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")
@@ -889,10 +962,16 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("action", choices=("encode", "decode"))
     q.add_argument("input", nargs="*", help="files, or texts (- or nothing: standard input)")
     q.add_argument("--out", default=None, help="write the result here instead of printing it")
+    q = add("corpus", cmd_corpus, "what a corpus is read as: every document, archives opened", machine=False, load=False)
+    q.add_argument("paths", nargs="+", help="files or directories (zip, tar, tar.gz, gz, html, docx, ... opened)")
+    q.add_argument("--unit", choices=("text", "base64"), default="text", help="base64: every file's bytes")
+    q.add_argument("--show", type=int, default=0, help="print the first N lines of each document")
     add("test", cmd_test, "run the test suite", machine=False, load=False)
     return p
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "max_rounds", 0) is None:
+        args.max_rounds = 100 if args.action == "teach" else 20
     return args.fn(args)

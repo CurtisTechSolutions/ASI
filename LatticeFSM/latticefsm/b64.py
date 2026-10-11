@@ -88,12 +88,9 @@ def files_under(paths: Iterable[str]) -> list[str]:
 
 
 def file_sequences(paths: Iterable[str], width: int = 76) -> list[tuple[str, list[str]]]:
-    """Every file under ``paths`` as ``(path, sequences)``: its bytes base64-encoded, ``width`` letters a sequence
-    (``width`` is rounded down to a multiple of 4), the last one shorter and padded."""
+    """Every file under ``paths`` as ``(label, sequences)``: its bytes base64-encoded, ``width`` letters a sequence
+    (``width`` is rounded down to a multiple of 4), the last one shorter and padded; an archive's members each on
+    their own (:func:`latticefsm.corpus.byte_documents`)."""
+    from .corpus import byte_documents, read_chunks
     step = max(1, width // 4) * 3
-    out = []
-    for path in files_under(paths):
-        with open(path, "rb") as f:
-            data = f.read()
-        out.append((path, [encode(data[i:i + step]) for i in range(0, len(data), step)]))
-    return out
+    return [(label, [encode(c) for c in read_chunks(stream, step)]) for _, label, stream in byte_documents(paths)]

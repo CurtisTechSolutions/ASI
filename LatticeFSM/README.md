@@ -162,18 +162,37 @@ lock, answers JSON under `/api/`, and serves the React frontend from
 shape — Vite, plain JSX, one stylesheet, no UI or chart libraries, settings
 remembered in the browser — with these tabs:
 
+A selector in the header picks the language model the language tabs use -
+the **chain** (below) or the **N-gram** - and the status bar shows both.
+
 | tab | what it does |
 |---|---|
-| **Predict** | the N-gram model: type, and the likeliest next tokens follow as bars - click one to take it; continue the text; reward or punish what it wrote; train it on files or pasted text, or let it train itself with Ollama round after round, with the held-out perplexity charted |
-| **Talk** | talk to a network of machines the server holds beside the machine: type English and a translator (`enc>dec` by default) answers in English - or a classifier yes or no - with how each layer got there; reinforce a reply or correct it and it learns on the spot; make another network from an architecture string, teach it the plural or past-tense task (or a language, or a labels file), save and load it |
+| **Train** | a new chain (nodes, unit, confidence) or N-gram (N, unit); train on server paths and on **uploads** - pick many files or a whole folder, any kind (zip, tar, gz, HTML, docx, images...), sent in 8 MiB chunks so a file may be any size - or on pasted text; every token predicted before it is learned; **until N of N**; the held-out measure charted; for the chain, the confidence sweep (accuracy and depth against the threshold) and "use this confidence" |
+| **Predict** | type, and the likeliest next tokens follow as bars - click one to take it; for the chain the input nodes holding the last inputs, the walk back through them (each node's confidence, the confidence gathered) and where it stopped |
+| **Generate** | several samples at a temperature; 👍 / 👎 each, marks out of 10 applied as feedback, 🔊 heard |
+| **Talk** | a chat whose replies are the model's **predictions**: what you say, continued; each token tinted by how deep the chain walked for it; 👍 / 👎; **teach this reply** - the reply it should have given, taught round after round until N of N |
+| **Network** | the network of machines (a translator, `enc>dec`, or a classifier): reinforce or correct a reply - taught until N of N - and fit a task until every pair is right |
+| **Converse** | the model talking to itself, turn after turn |
+| **Chat** | a local LLM (Ollama) talking with the model and marking every reply out of 10, the marks credited |
+| **Score** | how likely the model finds a text, token by token |
+| **Nodes** | the chain's most-seen node contexts, their guesses and confidence, and each depth's accuracy |
+| **Feedback** | good and bad texts, rewarded and punished in one go |
+| **Ollama** | is it there; a corpus from a prompt, trained on or saved as an upload; autotrain |
+| **Voice** | the browser listens, the model answers, the browser speaks (Web Speech, no server audio) |
+| **Checkpoints** | save any model (chain, N-gram, machine, network) as a checkpoint; list, restore, download, upload, delete; save and load each to a server path |
+| **Settings** | the settings this browser remembers, and forgetting them |
 | **Matrix** | the matrix one symbol-slice at a time: each row a state, each cell the probability of moving to that column's state, shaded by it, with the channel's width and `seen` beneath; click a cell for every field of the edge and its weighting function |
 | **3D** | the whole matrix as a cube of cells - source top to bottom, symbol into the page, target across - drawn on a canvas by hand: drag to turn, scroll to zoom, hover to read, click for the edge's record; colour by probability, seen, width or net; only the inner shells, the touched edges or one symbol; the central node, the central vertical vector and the focus node outlined |
 | **Run** | read a string at a stimulation of your choosing, traversing it or asking quietly; reward or punish the last run |
-| **Train** | teach a language for some episodes, with the accuracy curve and the greedy table it ends in |
-| **Time** | let ticks pass; raise or set the stimulation |
 | **Walk** | the focus: a slider over the central vertical vector, none, or learned from the input (and what the learner reads off a string); skips and their margin; the nodes rearranging themselves (one pass, until settled, every N transitions) or two of them swapped |
+| **Teach** | teach the machine a language for some episodes, with the accuracy curve and the greedy table it ends in |
+| **Time** | let ticks pass; raise or set the stimulation |
 | **Compress** | fold the matrix into its central node at a precision or a budget; the code's size, its loss in state and behaviour, and its rebuild shell by shell from the centre outward; rebuild the machine to any shell; walk straight from the code, from the start or the middle; save and load codes |
 | **Machine** | a fresh machine of any shape; compress every N transitions (precision, rebuild); save and load; teach one edge deliberately |
+
+Uploads go to `data/uploads` (or `$LATTICEFSM_UPLOADS`), checkpoints to
+`checkpoints/` (or `$LATTICEFSM_CHECKPOINTS`), named
+`{model}--{tag}--{unix seconds}.json.gz`.
 
 The Run tab can start the walk from the middle state and shows a skip as one
 move past the node it skips; the Matrix tab rings the central node on its
@@ -548,6 +567,118 @@ the same text: words compress it best, but words, characters and sounds are
 lower-cased (and sounds forget spelling), while base64 keeps every byte -
 case, punctuation, line ends - and still comes within a bit a byte of
 characters, from an alphabet of 64 letters that each carry 6 bits.
+
+## The chain: one input to a node, walks that shorten with confidence
+
+`latticefsm/chain.py` and `rust/src/chain.rs` (the same model, number for
+number). Reading `"abc"`, input node 1 holds `a`, node 2 `b`, node 3 `c`,
+and the **output node** after them predicts the next input. A chain of
+`--nodes 8` has 7 input nodes; the inputs are letters by default (or words,
+sounds, base64 letters).
+
+Every input node, in its context (the inputs it and the nodes after it
+hold), keeps what came next, its own guess, and how often that guess was
+right when it was tested while training. Its **confidence** is
+`(right + rewarded) / (tested + rewarded + punished + 2)`: accuracy and
+reward for it, misses and punishment against it, and two imagined misses so
+that a node has to earn it.
+
+A prediction walks from the output node back through the input nodes,
+nearest first, gathering confidence `1 - (1 - c0)(1 - c1)...`, and **stops as
+soon as that reaches the threshold** (`--confidence`, default 0.9). Every
+node's confidence shortens the walk, continuously: the more confident the
+nodes near the output, the fewer are traversed - and as training and reward
+make them more confident, paths keep getting shorter; the less confident, the
+further the walk has to go. It predicts the distribution of the node it
+stopped at, smoothed through the nodes nearer the output (Witten-Bell). A
+reward goes to every node on the walk that guessed what was rewarded (so the
+next walk stops there sooner), a punishment the same way (so it goes deeper).
+
+On `data/corpus`, letters, 8 nodes, every tenth line held out:
+
+| threshold | accuracy | perplexity | input nodes traversed |
+|---|---|---|---|
+| 0 (the output node alone) | 0.161 | 20.53 | 0.00 |
+| 0.5 | 0.415 | 7.45 | 2.15 |
+| 0.7 | 0.520 | 6.01 | 3.21 |
+| 0.9 (default) | 0.584 | 5.61 | 4.23 |
+| 0.95 | 0.594 | 5.59 | 4.54 |
+| 1 (always as deep as it can) | 0.599 | 5.88 | 5.55 |
+
+At 0.9 a walk traverses 24% fewer nodes than the deepest walk for 1.5 points
+of accuracy, and its perplexity is lower. Trained a second time on the same
+lines, the nodes grow more confident and the held-out walks shorten (at 0.7:
+3.21 to 3.04 nodes, accuracy 0.520 to 0.514). Gathering confidence was as
+accurate as stopping at the first node above the threshold, or more, at every
+depth measured.
+
+```bash
+make chain-train && make chain-predict TEXT="the bra"
+latticefsm chain predict "the bra" --load chain.json.gz
+#   input nodes: t h e _ b r a
+#   walk: node 8 (output) 0.166 > node 7 'a' 0.174 > node 6 'r' 0.179 > node 5 'b' 0.826; 3 of 7 input nodes, ...
+#   i                0.843175
+latticefsm chain sweep --load chain.json.gz          # the table above
+latticefsm chain generate "the brain" --load chain.json.gz
+```
+
+## Teaching until N of N
+
+Teaching a reply, and training, go on until every token is right:
+
+* `teach TEXT REPLY` (`POST /api/{chain,ngram}/teach`, the Talk tab's
+  "teach this reply") repeats rounds until the model's first guess is right
+  on every token of the reply and on its end - its greedy continuation of the
+  text is the reply. A round punishes what guessed wrong (the chain: the
+  nodes on the walk that guessed it, so the walk goes deeper; the N-gram: the
+  wrong edge narrowed) by 1, doubling every round a position stays wrong -
+  so even a node right a thousand times elsewhere gives way - and learns
+  text and reply once more. "a lattice of adaptive edges that predicts."
+  after "what is the brain": 16 of 43 right before, 43 of 43 after 11 rounds
+  (the chain); held-out accuracy unchanged (0.5845) after two such teachings.
+* `train --until` (`"until": true` on the train and text routes) trains,
+  then **drills** the model on what it learned until every token is right
+  that can be: a context the data continues in more than one way can only
+  ever be guessed one way, so the goal is the most possible (the ceiling,
+  printed) - N of N when nothing is ambiguous. Every round, in every context
+  whose guess is not the token that follows it most often, the chain's nodes
+  that do not guess it are punished by `2^k` and its deepest node, when
+  outvoted, is given enough of the token (and `2^k - 1` more); the N-gram's
+  wrong edge narrowed and right one widened. On `data/corpus` (letters, 8
+  nodes): 28 599 of 52 229 right while first learning, 44 715 of 44 715
+  possible after 12 rounds, held-out accuracy 0.584 to 0.596.
+* The network's "teach this reply" (`until`) repeats until a whole round is
+  right and its answer is the reply; its fit (`until`) until every taught
+  pair is exactly right.
+
+```bash
+latticefsm chain teach "what is the brain" "a lattice of adaptive edges."
+latticefsm chain train --data data/corpus/sentences.txt --until
+#   round 1: 700 of 1673 predicted right before learning (the most possible: 1550)
+#   ...
+#   1550 of 1673 reached in 8 rounds: the most possible - the rest (123) come after contexts the data continues in more than one way
+```
+
+## A corpus of any kind and size
+
+`latticefsm/corpus.py` and `rust/src/corpus.rs` (with `archive.rs`, a
+streaming inflate, gzip, zip and tar reader written out on the standard
+library) read the same files into the same lines and bytes:
+
+| kind | files |
+|---|---|
+| text | `.txt .md .text .csv .tsv .log .rst .tex .org .srt .vtt`, a line at a time |
+| JSON | `.jsonl` (a value a line) and `.json`: its `text` / `content` / `sentence` / `body` |
+| markup | `.html .htm .xhtml .xml`: the text, a block tag ending a line, scripts, styles and comments dropped, entities decoded |
+| documents | `.docx` (word/document.xml), `.odt` (content.xml), `.epub` (every chapter) |
+| archives | `.zip` (ZIP64 too: any size; stored or deflated), `.tar`, `.tar.gz` / `.tgz`, `.gz` - opened member by member, archives inside archives followed four deep |
+
+Archives are read member by member and text a line at a time, and training
+streams every sequence straight into the model, so the corpus's size is not
+bounded by memory: a 135 MB text inside a 51 MB zip trains in 25 s in 47 MB
+of memory (Rust). For `base64` every file is its bytes, archives giving their
+members' bytes. `latticefsm corpus PATH` (`make corpus`) shows what a path
+is read as; both ports print the same.
 
 ## Networks of machines
 
