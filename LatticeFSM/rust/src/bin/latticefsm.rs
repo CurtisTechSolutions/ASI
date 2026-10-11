@@ -159,6 +159,8 @@ commands
               evaluate | sweep [--thresholds 0,0.5,0.9,1]   accuracy and depth on held-out lines
               stats | credit TEXT --amount R   (without --load the data is learned first; --set-confidence T)
               teach TEXT REPLY [--max-rounds 100] [--threshold 0.95]; train --until [--max-rounds 20] [--threshold]
+  guard ACTION [TEXT...] --load F --save F   the negative network: blame TEXT --reason R --severity S | clear TEXT |
+              judge TEXT (reject / suspect / pass, why) | forget --reason R | reset | stats
   corpus PATH... [--unit text|base64] [--show N]   what a corpus is read as: every document (zip, tar, tar.gz,
               gz, html, xml, docx, odt, epub, jsonl opened) and its lines, or its base64 sequences
   base64 encode|decode INPUT... [--out FILE]   anything (a file, or a text) as base64, or base64 back to bytes;
@@ -270,6 +272,7 @@ fn main() {
         "ngram" => ngram_cmd(&a),
         "chain" => chain_cmd(&a),
         "corpus" => corpus_cmd(&a),
+        "guard" => guard_cmd(&a),
         "accuracy" => accuracy(&a),
         "table" => table(&a),
         "stats" => machine(&a).map(|m| println!("{}", m.stats().pretty(1))),
@@ -1451,6 +1454,115 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
             m.save(path)?;
             eprintln!("saved {path}");
         }
+    }
+    Ok(())
+}
+
+fn guard_cmd(a: &Args) -> Result<(), String> {
+    use latticefsm::guard::{clean_reason, load_guard, Guard};
+    let action = a.positional.first().map(String::as_str).unwrap_or("stats");
+    let texts: Vec<String> = a.positional.iter().skip(1).cloned().collect();
+    let mut g = match a.get("load") {
+        Some(p) if std::path::Path::new(p).exists() => load_guard(p)?,
+        _ => Guard::new(
+            &a.str("unit", "word"),
+            a.num("order", 3.0) as usize,
+            true,
+            a.num("threshold", 1.0),
+            a.num("min-coverage", 0.5),
+        )?,
+    };
+    let reason = a.str("reason", "");
+    match action {
+        "blame" => {
+            let severity = a.num("severity", 1.0);
+            for text in &texts {
+                let n = g.blame(text, &reason, severity);
+                println!(
+                    "blamed {n} transitions of {} ({}, {severity:.2})",
+                    py_repr(text),
+                    py_repr(&clean_reason(&reason))
+                );
+            }
+        }
+        "clear" => {
+            for text in &texts {
+                println!(
+                    "cleared {} transitions of {}",
+                    g.clear(text, a.num("amount", 1.0)),
+                    py_repr(text)
+                );
+            }
+        }
+        "judge" => {
+            for text in &texts {
+                let j = g.judge(text, None, None, 5);
+                println!(
+                    "{}: {}: risk {:.3}, coverage {:.3}, peak {:.3}",
+                    j.str_or("verdict", ""),
+                    py_repr(text),
+                    j.num("risk", 0.0),
+                    j.num("coverage", 0.0),
+                    j.num("peak", 0.0)
+                );
+                println!("  {}", j.str_or("why", ""));
+                let reasons = j.get("reasons").and_then(Json::as_array).cloned().unwrap_or_default();
+                if !reasons.is_empty() {
+                    let parts: Vec<String> = reasons
+                        .iter()
+                        .map(|r| format!("{} {:.0}%", r.str_or("reason", ""), r.num("share", 0.0) * 100.0))
+                        .collect();
+                    println!("  reasons: {}", parts.join(", "));
+                }
+                for sp in j.get("spans").and_then(Json::as_array).cloned().unwrap_or_default() {
+                    let toks: Vec<String> = sp
+                        .get("tokens")
+                        .and_then(Json::as_array)
+                        .map(|v| v.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect())
+                        .unwrap_or_default();
+                    let end = if sp.str_or("next", "") == "</s>" { " </s>" } else { "" };
+                    println!(
+                        "  '{}{end}' ({:.2}, {})",
+                        toks.join(" "),
+                        sp.num("evidence", 0.0),
+                        sp.str_or("reason", "")
+                    );
+                }
+            }
+        }
+        "forget" => {
+            let n = g.forget(&reason);
+            println!("forgot {}: {n} transitions", py_repr(&clean_reason(&reason)));
+        }
+        "reset" => {
+            g.reset();
+            println!("the guard is empty");
+        }
+        "stats" => {}
+        other => return Err(format!("guard {other:?}: blame, clear, judge, forget, reset or stats")),
+    }
+    if action == "stats" {
+        let st = g.stats();
+        println!(
+            "a guard over {}s, order {}, threshold {:.2}, min coverage {:.2}: {} transitions, {} blamed, {} cleared, {} \
+             judged, {} rejected",
+            g.unit,
+            g.order,
+            g.threshold,
+            g.min_coverage,
+            g.edges.len(),
+            g.blamed,
+            g.cleared,
+            g.judgements,
+            g.rejected
+        );
+        for r in st.get("reasons").and_then(Json::as_array).cloned().unwrap_or_default() {
+            println!("  {}: {:.2}", r.str_or("reason", ""), r.num("blame", 0.0));
+        }
+    }
+    if let Some(path) = a.get("save") {
+        g.save(path)?;
+        eprintln!("saved {path}");
     }
     Ok(())
 }

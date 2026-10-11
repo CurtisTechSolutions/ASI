@@ -10,6 +10,7 @@ import HearButton from "./HearButton.jsx";
 import { CheckField, NumberField } from "./Fields.jsx";
 import { RateButtons } from "./RatingsCard.jsx";
 import TokenText, { DepthNote } from "./TokenText.jsx";
+import { GuardBadge } from "./Verdict.jsx";
 
 /**
  * The conversation as it stands, oldest at the top, newest at the bottom where the next line lands: what you
@@ -65,6 +66,7 @@ function TalkTurn({ turn, busy, onRate, onTeach, maxDepth, subscripts }) {
         <div className="speaker">
           {turn.model}
           {turn.depths ? <DepthNote depths={turn.depths} maxDepth={maxDepth} /> : null}
+          <GuardBadge guard={turn.guard} text={String(turn.reply ?? "").trim()} vetoed={turn.vetoed} />
         </div>
         <div className="bubble">
           {tokenView ? (
@@ -77,6 +79,7 @@ function TalkTurn({ turn, busy, onRate, onTeach, maxDepth, subscripts }) {
           <RateButtons rated={turn.rated || 0} disabled={busy} onRate={(amount) => onRate(turn, amount)} label="the reply" />
           <HearButton text={turn.reply} unit={turn.unit} label="the reply" />
           {turn.credited ? <span className="muted">{turn.credited}</span> : null}
+          {turn.guarded ? <span className="muted">{turn.guarded}</span> : null}
         </div>
         {onTeach ? (
           <div className="meta">
@@ -134,12 +137,27 @@ export function useTalk(lm, onMoved) {
     }
   }
 
-  async function rate(turn, amount) {
+  /**
+   * Credit the turn (👍 / 👎). With `teachGuard`, the guard learns from it too: 👎 blames the reply ("thumbs
+   * down"), 👍 clears it.
+   */
+  async function rate(turn, amount, { teachGuard = false } = {}) {
     setBusy(true);
     try {
       const r = await api.lmCredit(turn.lm, turnText(turn), amount);
       const credited = `${amount > 0 ? "rewarded" : "punished"} ${r.credited}`;
-      setTurns((t) => t.map((x) => (x.id === turn.id ? { ...x, rated: amount, credited } : x)));
+      let guarded = null;
+      const reply = String(turn.reply ?? "").trim();
+      if (teachGuard && reply) {
+        if (amount < 0) {
+          const g = await api.guardBlame([reply], "thumbs down", 1);
+          guarded = `the guard blamed ${g.blamed}`;
+        } else {
+          const g = await api.guardClear([reply]);
+          guarded = `the guard cleared ${g.cleared}`;
+        }
+      }
+      setTurns((t) => t.map((x) => (x.id === turn.id ? { ...x, rated: amount, credited, guarded } : x)));
       setError(null);
       if (onMoved) onMoved();
     } catch (err) {
@@ -175,6 +193,8 @@ export function useTalk(lm, onMoved) {
  * right reply and it is taught, round after round, until the model's own continuation is exactly that (N of
  * N tokens right, and the end) or the rounds run out. For the chain every
  * reply token is tinted by how deep the walk went to predict it, with the mean depth beside it. Enter sends.
+ * "Guard" puts the guard in front of the reply (a rejected one is vetoed for another; its verdict beside it),
+ * and "👎 teaches the guard" makes 👎 blame the reply in the guard and 👍 clear it.
  */
 export default function TalkPanel({ lm, tick, onMoved }) {
   const [info] = useLmInfo(lm, tick);
@@ -185,6 +205,8 @@ export default function TalkPanel({ lm, tick, onMoved }) {
   const [subscripts, setSubscripts] = useStoredState("lmtalk.subscripts", false);
   const [maxRounds, setMaxRounds] = useStoredState("lmtalk.maxRounds", "100");
   const [goal, setGoal] = useStoredState("lmtalk.goal", "95");
+  const [guard, setGuard] = useStoredState("lmtalk.guard", false);
+  const [teachGuard, setTeachGuard] = useStoredState("lmtalk.teachGuard", false);
   const talk = useTalk(lm, onMoved);
 
   const send = async () => {
@@ -193,6 +215,7 @@ export default function TalkPanel({ lm, tick, onMoved }) {
       learn,
       maxTokens: Math.max(1, parseInteger(maxTokens, 40)),
       temperature: parseNumber(temperature, 0),
+      guard,
     });
     if (said) setDraft("");
   };
@@ -222,11 +245,13 @@ export default function TalkPanel({ lm, tick, onMoved }) {
           <NumberField label="Goal %" value={goal} onChange={setGoal} min="1" max="100" step="1" hint="of the reply's tokens right; 100: every one" />
           <CheckField label="Learn what I say" checked={learn} onChange={setLearn} hint="train on every message first" />
           {chain ? <CheckField label="Depth subscripts" checked={subscripts} onChange={setSubscripts} hint="each token's depth beside it" /> : null}
+          <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard judges the reply, and vetoes a rejected one" />
+          <CheckField label="👎 teaches the guard" checked={teachGuard} onChange={setTeachGuard} hint="👎 blames the reply in the guard, 👍 clears it" />
         </div>
         <TalkLog
           turns={talk.turns}
           busy={talk.busy}
-          onRate={talk.rate}
+          onRate={(turn, amount) => talk.rate(turn, amount, { teachGuard })}
           onTeach={(turn, reply) => talk.teach(turn, reply, Math.max(1, parseInteger(maxRounds, 100)), goalShare(goal))}
           maxDepth={chain ? maxDepth : null}
           subscripts={chain && subscripts}

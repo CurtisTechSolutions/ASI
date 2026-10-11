@@ -101,7 +101,8 @@ export const api = {
   ngramLoad: (path) => post("/api/ngram/load", { path }),
   network: () => get("/api/network"),
   networkNew: (body) => post("/api/network/new", body),
-  talk: (text) => post("/api/network/talk", { text }),
+  /** The network's reply; with `guard`, judged by the guard too (`guard`, the verdict in brief, and `vetoed`). */
+  talk: (text, guard = false) => post("/api/network/talk", guard ? { text, guard: true } : { text }),
   networkTeach: (body) => post("/api/network/teach", body),
   networkFit: (body) => post("/api/network/fit", body),
   networkSave: (path) => post("/api/network/save", { path }),
@@ -125,6 +126,20 @@ export const api = {
   chainConfidence: (confidence) => post("/api/chain/confidence", { confidence }),
   chainSweep: (body) => post("/api/chain/sweep", body),
   chainGraph: (limit) => get(`/api/chain/graph?${q({ limit })}`),
+
+  // the guard: a negative network of failures alone, blamed with a reason and cleared by good text
+  guard: () => get("/api/guard"),
+  guardNew: (body = {}) => post("/api/guard/new", body),
+  guardSettings: (body) => post("/api/guard/settings", body),
+  guardBlame: (texts, reason, severity) =>
+    post("/api/guard/blame", { texts, reason, ...(severity === undefined || severity === null ? {} : { severity }) }),
+  guardClear: (texts, amount) => post("/api/guard/clear", { texts, ...(amount === undefined || amount === null ? {} : { amount }) }),
+  /** `{verdicts}`: each text judged - reject / suspect / pass, its risk, coverage, peak, reasons and blamed spans. */
+  guardJudge: (texts, opts = {}) => post("/api/guard/judge", { texts, ...opts }),
+  guardForget: (reason) => post("/api/guard/forget", { reason }),
+  guardReset: () => post("/api/guard/reset"),
+  guardSave: (path) => post("/api/guard/save", { path }),
+  guardLoad: (path) => post("/api/guard/load", { path }),
 
   status: () => get("/api/status"),
   converse: (body) => post("/api/converse", body),

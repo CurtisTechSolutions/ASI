@@ -6,12 +6,13 @@ import { asArray, cleanName, fmtAgo, fmtBytes, fmtTime } from "../util.js";
 import Alert from "./Alert.jsx";
 import { SelectField, TextField } from "./Fields.jsx";
 
-/** The four models the server holds, and how each is saved to and loaded from a path on the server. */
+/** The models the server holds (the guard among them), and how each is saved to and loaded from a path on the server. */
 const MODELS = [
   { id: "chain", label: "the chain", path: "chain.json.gz", save: (p) => api.lmSave("chain", p), load: (p) => api.lmLoad("chain", p) },
   { id: "ngram", label: "the N-gram model", path: "ngram.json.gz", save: (p) => api.lmSave("ngram", p), load: (p) => api.lmLoad("ngram", p) },
   { id: "machine", label: "the machine", path: "machine.json.gz", save: api.save, load: api.load },
   { id: "network", label: "the network", path: "network.json.gz", save: api.networkSave, load: api.networkLoad },
+  { id: "guard", label: "the guard", path: "guard.json.gz", save: api.guardSave, load: api.guardLoad },
 ];
 
 /** One model's row: its path on the server, Save and Load. */
@@ -53,7 +54,7 @@ function ModelRow({ model, busy, onAct }) {
 
 /**
  * Saving and restoring. The models card saves and loads each of the server's models - the chain, the N-gram
- * model, the machine, the network - to a path on the server. The checkpoints card keeps named snapshots in
+ * model, the machine, the network, the guard - to a path on the server. The checkpoints card keeps named snapshots in
  * the server's checkpoint directory (GET /api/checkpoints): save one of any model with a tag, restore one
  * (the model of its kind is replaced), download it as a file, delete it (two clicks), or upload a checkpoint
  * file from this computer (in pieces of at most 8 MiB, like any upload).

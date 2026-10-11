@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::autotrain::{parse_lines, Ollama};
 use crate::chain::{load_chain, Chain, ChainEvaluation};
+use crate::guard::Guard;
 use crate::http::Request;
 use crate::json::Json;
 use crate::ngram::{detokenize, split_text_lines, train_corpus, Drill, NGram, Sequence, Teaching};
@@ -340,6 +341,88 @@ pub fn joined(m: &dyn Lm, prompt: &str, completion: &str) -> String {
     }
 }
 
+/// The guard's verdict on a sample, in brief.
+pub fn verdict_brief(j: &Json) -> Json {
+    Json::object()
+        .with("verdict", j.get("verdict").cloned().unwrap_or(Json::Null))
+        .with("risk", j.get("risk").cloned().unwrap_or(Json::Null))
+        .with("coverage", j.get("coverage").cloned().unwrap_or(Json::Null))
+        .with("why", j.get("why").cloned().unwrap_or(Json::Null))
+        .with("reasons", j.get("reasons").cloned().unwrap_or(Json::Null))
+        .with("spans", j.get("spans").cloned().unwrap_or(Json::Null))
+}
+
+/// `count` samples continuing `text`; with a guard every one is judged and the rejected ones vetoed - `over` times as
+/// many drawn to make up for them, the first at `temperature` and the rest at 0.7 or more, so a vetoed greedy reply
+/// has others to give way to; when every one is vetoed the least risky is kept and said so.  Returns the samples
+/// (each with its `guard` verdict) and the guard's summary.
+/// How samples are drawn: the most tokens, the temperature, the first seed, how many, how many times as many to draw
+/// when guarded.
+#[derive(Clone, Copy)]
+pub struct Draw {
+    pub max: usize,
+    pub temperature: f64,
+    pub seed: u64,
+    pub count: usize,
+    pub over: usize,
+}
+
+pub fn guarded_samples(m: &mut dyn Lm, text: &str, d: &Draw, guard: Option<&mut Guard>) -> (Vec<Json>, Option<Json>) {
+    let Draw {
+        max,
+        temperature,
+        seed,
+        count,
+        over,
+    } = *d;
+    let Some(g) = guard else {
+        return (
+            (0..count)
+                .map(|i| generate(m, text, max, temperature, seed + i as u64))
+                .collect(),
+            None,
+        );
+    };
+    let n = count * over.max(1);
+    let mut judged: Vec<(Json, Json)> = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = if i == 0 { temperature } else { temperature.max(0.7) };
+        let s = generate(m, text, max, t, seed + i as u64);
+        let j = g.judge(s.str_or("completion", "").trim(), None, None, 5);
+        judged.push((s, j));
+    }
+    let mut kept = Vec::new();
+    let mut vetoes = Vec::new();
+    for (s, j) in &judged {
+        if j.str_or("verdict", "") == "reject" {
+            vetoes.push(
+                Json::object()
+                    .with("completion", s.get("completion").cloned().unwrap_or(Json::Null))
+                    .with("risk", j.get("risk").cloned().unwrap_or(Json::Null))
+                    .with("why", j.get("why").cloned().unwrap_or(Json::Null)),
+            );
+        } else if kept.len() < count {
+            kept.push(s.clone().with("guard", verdict_brief(j)));
+        }
+    }
+    let all_vetoed = kept.is_empty();
+    if all_vetoed {
+        let mut best = 0;
+        for (i, (_, j)) in judged.iter().enumerate() {
+            if j.num("risk", 0.0) < judged[best].1.num("risk", 0.0) {
+                best = i;
+            }
+        }
+        kept.push(judged[best].0.clone().with("guard", verdict_brief(&judged[best].1)));
+    }
+    let summary = Json::object()
+        .with("judged", n.into())
+        .with("vetoed", vetoes.len().into())
+        .with("all_vetoed", all_vetoed.into())
+        .with("vetoes", Json::Array(vetoes.into_iter().take(5).collect()));
+    (kept, Some(summary))
+}
+
 fn generate(m: &mut dyn Lm, text: &str, max: usize, temperature: f64, seed: u64) -> Json {
     let toks = m.prompt_tokens(text);
     let mut rng = Rng::new(seed);
@@ -641,8 +724,9 @@ pub fn chain_route(m: &mut Chain, method: &str, action: &str, req: &Request) -> 
 
 // ---- conversations -------------------------------------------------------------------------------------------------
 
-/// The model talks to itself: the opening line, then `turns` turns, each continuing the one before it.
-pub fn converse(m: &mut dyn Lm, b: &Json) -> Json {
+/// The model talks to itself: the opening line, then `turns` turns, each continuing the one before it (each turn
+/// guarded when a guard is given).
+pub fn converse(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Json {
     let opening = b.str_or("opening", "hello").to_string();
     let turns = (b.num("turns", 6.0) as usize).clamp(1, 100);
     let max = (b.num("max_tokens", 60.0) as usize).clamp(1, 2000);
@@ -651,14 +735,32 @@ pub fn converse(m: &mut dyn Lm, b: &Json) -> Json {
         .with("speaker", "A".into())
         .with("text", opening.as_str().into())];
     let mut last = opening;
+    let over = (b.num("over_sample", 3.0) as usize).clamp(1, 20);
     for i in 0..turns {
-        let g = generate(m, &last, max, t, seed + i as u64);
+        let (samples, summary) = guarded_samples(
+            m,
+            &last,
+            &Draw {
+                max,
+                temperature: t,
+                seed: seed + 101 * i as u64,
+                count: 1,
+                over,
+            },
+            guard.as_deref_mut(),
+        );
+        let g = samples.into_iter().next().unwrap_or(Json::Null);
         let text = g.str_or("completion", "").trim().to_string();
         let mut turn = Json::object()
             .with("speaker", if i % 2 == 0 { "B" } else { "A" }.into())
             .with("text", text.as_str().into());
         if let Some(d) = g.get("depths") {
             turn = turn.with("depths", d.clone());
+        }
+        if let (Some(v), Some(sm)) = (g.get("guard"), summary) {
+            turn = turn
+                .with("guard", v.clone())
+                .with("vetoed", sm.get("vetoed").cloned().unwrap_or(Json::Null));
         }
         out.push(turn);
         if text.is_empty() {
@@ -683,8 +785,10 @@ fn mark_of(text: &str) -> Option<f64> {
 }
 
 /// A local LLM talks with the model: it says a line on the topic, the model continues it as its reply, the LLM marks
-/// the reply out of 10, and with `learn` the reply is credited `(mark - pass_mark) / 5`.
-pub fn chat_llm(m: &mut dyn Lm, b: &Json) -> Result<Json, String> {
+/// the reply out of 10, and with `learn` the reply is credited `(mark - pass_mark) / 5`.  With a guard the replies
+/// are guarded, and (`teach_guard`, the default) a reply marked under the pass mark is blamed in it - "marked 3/10",
+/// severity `(pass_mark - mark) / 5` - and one marked at or above it cleared.
+pub fn chat_llm(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Result<Json, String> {
     let client = Ollama::new(
         b.get("url").and_then(Json::as_str),
         b.get("ollama_model").and_then(Json::as_str),
@@ -725,7 +829,20 @@ pub fn chat_llm(m: &mut dyn Lm, b: &Json) -> Result<Json, String> {
                 .with("text", line.as_str().into()),
         );
         said.push(format!("You: {line}"));
-        let g = generate(m, &line, max, t, seed + i as u64);
+        let over = (b.num("over_sample", 3.0) as usize).clamp(1, 20);
+        let (samples, summary) = guarded_samples(
+            m,
+            &line,
+            &Draw {
+                max,
+                temperature: t,
+                seed: seed + 101 * i as u64,
+                count: 1,
+                over,
+            },
+            guard.as_deref_mut(),
+        );
+        let g = samples.into_iter().next().unwrap_or(Json::Null);
         let reply = g.str_or("completion", "").trim().to_string();
         said.push(format!("Model: {reply}"));
         let judge = format!(
@@ -738,6 +855,21 @@ pub fn chat_llm(m: &mut dyn Lm, b: &Json) -> Result<Json, String> {
             .with("speaker", "model".into())
             .with("text", reply.as_str().into())
             .with("mark", mark.into());
+        if let (Some(v), Some(sm)) = (g.get("guard"), summary) {
+            turn = turn
+                .with("guard", v.clone())
+                .with("vetoed", sm.get("vetoed").cloned().unwrap_or(Json::Null));
+        }
+        if let Some(gd) = guard.as_deref_mut() {
+            if b.bool_or("teach_guard", true) && !reply.is_empty() {
+                if mark < pass {
+                    gd.blame(&reply, &format!("marked {mark}/10"), (pass - mark) / 5.0);
+                    turn = turn.with("blamed", true.into());
+                } else {
+                    gd.clear(&reply, 1.0);
+                }
+            }
+        }
         if learn {
             let amount = (mark - pass) / 5.0;
             let credited = if amount != 0.0 {
@@ -929,7 +1061,7 @@ pub fn uploads_route(method: &str, action: &str, b: &Json) -> Result<Json, Strin
 }
 
 /// The models a checkpoint can hold.
-pub const CHECKPOINT_MODELS: [&str; 4] = ["chain", "ngram", "machine", "network"];
+pub const CHECKPOINT_MODELS: [&str; 5] = ["chain", "ngram", "machine", "network", "guard"];
 
 /// `{model}--{tag}--{unix seconds}.json.gz`, a new name (a counter added if the second is taken).
 pub fn checkpoint_name(model: &str, tag: &str) -> Result<String, String> {
@@ -1021,4 +1153,130 @@ pub fn checkpoint_upload(b: &Json) -> Result<Json, String> {
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let (name, _) = write_file(&dir, b)?;
     Ok(Json::object().with("name", name.as_str().into()))
+}
+
+// ---- the guard -------------------------------------------------------------------------------------------------------
+
+/// A body's texts: `texts` (a list) or `text` (one).
+pub fn texts_of(b: &Json) -> Vec<String> {
+    match b.get("texts").and_then(Json::as_array) {
+        Some(a) => a.iter().filter_map(|t| t.as_str().map(String::from)).collect(),
+        None => b
+            .get("text")
+            .and_then(Json::as_str)
+            .map(|t| vec![t.to_string()])
+            .unwrap_or_default(),
+    }
+}
+
+/// `/api/guard`: the stats; a new guard; its settings; blame, clear, judge, forget, reset; save and load.
+pub fn guard_route(g: &mut Guard, method: &str, action: &str, b: &Json) -> Result<Json, String> {
+    match (method, action) {
+        ("GET", "") => Ok(g.stats()),
+        ("POST", "new") => {
+            *g = Guard::new(
+                b.str_or("unit", "word"),
+                b.num("order", 3.0) as usize,
+                b.bool_or("lower", true),
+                b.num("threshold", 1.0),
+                b.num("min_coverage", 0.5),
+            )?;
+            Ok(g.stats())
+        }
+        ("POST", "settings") => {
+            g.threshold = b.num("threshold", g.threshold).max(0.0);
+            g.min_coverage = b.num("min_coverage", g.min_coverage).clamp(0.0, 1.0);
+            Ok(g.stats())
+        }
+        ("POST", "blame") => {
+            let (reason, severity) = (b.str_or("reason", ""), b.num("severity", 1.0));
+            let n: usize = texts_of(b).iter().map(|t| g.blame(t, reason, severity)).sum();
+            Ok(Json::object().with("blamed", n.into()).with("guard", g.stats()))
+        }
+        ("POST", "clear") => {
+            let amount = b.num("amount", 1.0);
+            let n: usize = texts_of(b).iter().map(|t| g.clear(t, amount)).sum();
+            Ok(Json::object().with("cleared", n.into()).with("guard", g.stats()))
+        }
+        ("POST", "judge") => {
+            let (th, cov) = (
+                b.get("threshold").and_then(Json::as_f64),
+                b.get("min_coverage").and_then(Json::as_f64),
+            );
+            let verdicts: Vec<Json> = texts_of(b).iter().map(|t| g.judge(t, th, cov, 5)).collect();
+            Ok(Json::object().with("verdicts", Json::Array(verdicts)))
+        }
+        ("POST", "forget") => {
+            let n = g.forget(b.str_or("reason", ""));
+            Ok(Json::object().with("forgotten", n.into()).with("guard", g.stats()))
+        }
+        ("POST", "reset") => {
+            g.reset();
+            Ok(g.stats())
+        }
+        ("POST", "save") => {
+            let path = b.str_or("path", "guard.json.gz").to_string();
+            g.save(&path)
+                .map(|_| Json::object().with("saved", path.as_str().into()))
+        }
+        ("POST", "load") => {
+            *g = crate::guard::load_guard(b.str_or("path", "guard.json.gz"))?;
+            Ok(g.stats())
+        }
+        ("GET", _) | ("POST", _) => Err("no such route".to_string()),
+        _ => Err("method not allowed".to_string()),
+    }
+}
+
+/// `POST /api/{model}/generate` with `guard: true`: the samples guarded (`over_sample`, default 3).
+pub fn generate_guarded(m: &mut dyn Lm, b: &Json, g: &mut Guard) -> Json {
+    let text = b.str_or("text", "");
+    let count = (b.num("count", 1.0) as usize).clamp(1, 50);
+    let max = (b.num("max_tokens", 30.0) as usize).clamp(1, 5000);
+    let (t, seed) = (b.num("temperature", 0.0), b.num("seed", 1.0) as u64);
+    let over = (b.num("over_sample", 3.0) as usize).clamp(1, 20);
+    let (samples, summary) = guarded_samples(
+        m,
+        text,
+        &Draw {
+            max,
+            temperature: t,
+            seed,
+            count,
+            over,
+        },
+        Some(g),
+    );
+    let first = samples[0].clone();
+    Json::object()
+        .with("text", text.into())
+        .with("unit", m.unit().as_str().into())
+        .with("completion", first.get("completion").cloned().unwrap_or(Json::Null))
+        .with("tokens", first.get("tokens").cloned().unwrap_or(Json::Null))
+        .with("samples", Json::Array(samples))
+        .with("guard", summary.unwrap_or(Json::Null))
+}
+
+/// `POST /api/{model}/feedback` with `guard: true`: the model credited, and the bad texts blamed in the guard
+/// (`reason`, default "feedback") and the good ones cleared.
+pub fn feedback_guarded(m: &mut dyn Lm, b: &Json, g: &mut Guard) -> Json {
+    let a = b.num("amount", 1.0).abs();
+    let list = |key: &str| -> Vec<String> {
+        b.get(key)
+            .and_then(Json::as_array)
+            .map(|v| v.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+    let (good, bad) = (list("good"), list("bad"));
+    let rewarded: usize = good.iter().map(|t| m.credit_text(t, a)).sum();
+    let punished: usize = bad.iter().map(|t| m.credit_text(t, -a)).sum();
+    let reason = b.str_or("reason", "feedback");
+    let blamed: usize = bad.iter().map(|t| g.blame(t, reason, a)).sum();
+    let cleared: usize = good.iter().map(|t| g.clear(t, a)).sum();
+    Json::object()
+        .with("rewarded", rewarded.into())
+        .with("punished", punished.into())
+        .with("blamed", blamed.into())
+        .with("cleared", cleared.into())
+        .with("model", m.info())
 }

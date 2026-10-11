@@ -64,9 +64,11 @@
 //! | `POST /api/chat/llm` | `{model, topic, turns?, pass_mark?, learn?, ollama_model?, url?}`: Ollama talks with the model and marks its replies; 502 without Ollama |
 //! | `POST /api/ollama/corpus` | `{prompt, lines?, ollama_model?, url?}`: sentences Ollama writes |
 //! | `GET /api/status` | every model in brief, uploads, checkpoints |
+//! | `GET /api/guard`, `POST /api/guard/{new,settings,blame,clear,judge,forget,reset,save,load}` | the guard: blame failures with a reason, clear good text, judge text |
+//! | `guard: true` on generate, feedback, converse, chat and network talk | the guard in front: rejected samples vetoed |
 //! | `GET /api/network` | the network the server also holds (`enc>dec` until another is made): its blocks and summary |
 //! | `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` |
-//! | `POST /api/network/talk` | `{text}`: the network's reply - English from a translator, yes / no from a classifier - and its trace |
+//! | `POST /api/network/talk` | `{text, guard?}`: the network's reply - English from a translator, yes / no from a classifier - and its trace |
 //! | `POST /api/network/teach` | `{text, reply, times?}`: teach it that `reply` is the answer to `text` |
 //! | `POST /api/network/fit` | `{task?, epochs?}` (plural, past), `{language, episodes?}`, or `{data, epochs?}` (a labels file) |
 //! | `POST /api/network/save`, `/api/network/load` | `{path}`: write or read the network |
@@ -78,6 +80,7 @@ use crate::autotrain::Ollama;
 use crate::chain::{load_chain, Chain};
 use crate::compress::{compress, expansion, fidelity, load_core, Precision};
 use crate::experiment::teach_language;
+use crate::guard::{load_guard, Guard};
 use crate::http::{self, Handler, Request, Response};
 use crate::json::Json;
 use crate::languages::{examples, language, LANGUAGES};
@@ -87,7 +90,8 @@ use crate::ngram::{load_ngram, Evaluation, NGram};
 use crate::rng::Rng;
 use crate::routes::{
     chain_route, chat_llm, checkpoint_model, checkpoint_name, checkpoint_path, checkpoint_upload, checkpoints_dir,
-    checkpoints_list, converse, default_chain, lm_route, ollama_corpus, uploads_route, Lm,
+    checkpoints_list, converse, default_chain, feedback_guarded, generate_guarded, guard_route, lm_route,
+    ollama_corpus, uploads_route, Lm,
 };
 use crate::VERSION;
 
@@ -97,6 +101,8 @@ pub struct Service {
     pub network: Mutex<Option<Network>>,
     pub ngram: Mutex<Option<NGram>>,
     pub chain: Mutex<Option<Chain>>,
+    /// The negative network in front of every model's text (`/api/guard`).
+    pub guard: Mutex<Guard>,
     pub frontend: Option<PathBuf>,
 }
 
@@ -107,6 +113,7 @@ impl Service {
             network: Mutex::new(None),
             ngram: Mutex::new(None),
             chain: Mutex::new(None),
+            guard: Mutex::new(Guard::default()),
             frontend: None,
         })
     }
@@ -118,6 +125,7 @@ impl Service {
             network: Mutex::new(None),
             ngram: Mutex::new(None),
             chain: Mutex::new(None),
+            guard: Mutex::new(Guard::default()),
             frontend: dir,
         })
     }
@@ -141,6 +149,26 @@ impl Service {
 
     fn with_lm(&self, b: &Json, f: impl FnOnce(&mut dyn Lm) -> Result<Json, String>) -> Response {
         answer(self.with_lm_result(b, f))
+    }
+
+    /// A language model's generate or feedback with `guard: true`, guarded; `None` for every other request.
+    fn guarded(&self, m: &mut dyn Lm, req: &Request) -> Option<Response> {
+        if req.method != "POST" || !req.body.bool_or("guard", false) {
+            return None;
+        }
+        let action = req.path.rsplit('/').next().unwrap_or("");
+        if !matches!(action, "generate" | "feedback") {
+            return None;
+        }
+        let mut g = match self.guard.lock() {
+            Ok(g) => g,
+            Err(_) => return Some(Response::error(500, "the guard's lock is poisoned")),
+        };
+        Some(Response::ok(&if action == "generate" {
+            generate_guarded(m, &req.body, &mut g)
+        } else {
+            feedback_guarded(m, &req.body, &mut g)
+        }))
     }
 
     /// Every model in brief, and how many uploads and checkpoints there are.
@@ -179,11 +207,19 @@ impl Service {
             .and_then(Json::as_array)
             .map(Vec::len)
             .unwrap_or(0);
+        let guard = self.guard.lock().ok().map(|g| {
+            Json::object()
+                .with("transitions", g.edges.len().into())
+                .with("blamed", (g.blamed as f64).into())
+                .with("judgements", (g.judgements as f64).into())
+                .with("rejected", (g.rejected as f64).into())
+        });
         Json::object()
             .with("version", VERSION.into())
             .with("chain", chain.unwrap_or(Json::Null))
             .with("ngram", ngram.unwrap_or(Json::Null))
             .with("machine", machine.unwrap_or(Json::Null))
+            .with("guard", guard.unwrap_or(Json::Null))
             .with("uploads", uploads.into())
             .with("checkpoints", checkpoints.into())
     }
@@ -204,6 +240,7 @@ impl Service {
                 .get_or_insert_with(default_ngram)
                 .save(path),
             "machine" => self.machine.lock().map_err(poisoned)?.save(path),
+            "guard" => self.guard.lock().map_err(poisoned)?.save(path),
             "network" => match self.network.lock().map_err(poisoned)?.as_ref() {
                 Some(n) => n.save(path),
                 None => Err("there is no network yet: make one first".to_string()),
@@ -225,6 +262,11 @@ impl Service {
             "machine" => {
                 let mut g = self.machine.lock().map_err(poisoned)?;
                 *g = load_machine(path)?;
+                g.stats()
+            }
+            "guard" => {
+                let mut g = self.guard.lock().map_err(poisoned)?;
+                *g = load_guard(path)?;
                 g.stats()
             }
             "network" => {
@@ -300,6 +342,9 @@ impl Service {
                 Err(_) => return Response::error(500, "the N-gram model's lock is poisoned"),
             };
             let m = guard.get_or_insert_with(default_ngram);
+            if let Some(r) = self.guarded(m, req) {
+                return r;
+            }
             return answer(ngram_route(m, req));
         }
         if req.path == "/api/chain" || req.path.starts_with("/api/chain/") {
@@ -308,6 +353,9 @@ impl Service {
                 Err(_) => return Response::error(500, "the chain's lock is poisoned"),
             };
             let m = guard.get_or_insert_with(default_chain);
+            if let Some(r) = self.guarded(m, req) {
+                return r;
+            }
             let action = req.path["/api/chain".len()..].trim_start_matches('/');
             return answer(chain_route(m, &req.method, action, req));
         }
@@ -315,14 +363,34 @@ impl Service {
             let action = req.path["/api/uploads".len()..].trim_start_matches('/');
             return answer(uploads_route(&req.method, action, &req.body));
         }
+        if req.path == "/api/guard" || req.path.starts_with("/api/guard/") {
+            let mut g = match self.guard.lock() {
+                Ok(g) => g,
+                Err(_) => return Response::error(500, "the guard's lock is poisoned"),
+            };
+            let action = req.path["/api/guard".len()..].trim_start_matches('/');
+            return answer(guard_route(&mut g, &req.method, action, &req.body));
+        }
         if req.path == "/api/checkpoints" || req.path.starts_with("/api/checkpoints/") {
             return self.checkpoints_route(req);
         }
         match (req.method.as_str(), req.path.as_str()) {
             ("GET", "/api/status") => return answer(Ok(self.status())),
-            ("POST", "/api/converse") => return self.with_lm(&req.body, |m| Ok(converse(m, &req.body))),
+            ("POST", "/api/converse") => {
+                return self.with_lm(&req.body, |m| {
+                    let mut g = self.guard.lock().map_err(poisoned)?;
+                    Ok(converse(
+                        m,
+                        &req.body,
+                        req.body.bool_or("guard", false).then_some(&mut *g),
+                    ))
+                })
+            }
             ("POST", "/api/chat/llm") => {
-                return match self.with_lm_result(&req.body, |m| chat_llm(m, &req.body)) {
+                return match self.with_lm_result(&req.body, |m| {
+                    let mut g = self.guard.lock().map_err(poisoned)?;
+                    chat_llm(m, &req.body, req.body.bool_or("guard", false).then_some(&mut *g))
+                }) {
                     Ok(v) => Response::ok(&v),
                     Err(e) => Response::error(502, &e),
                 }
@@ -472,7 +540,19 @@ impl Service {
                 *net = fresh;
                 network_info(net)
             }),
-            ("POST", "network/talk") => talk(net, req.body.str_or("text", "")),
+            ("POST", "network/talk") => talk(net, req.body.str_or("text", "")).and_then(|reply| {
+                if !req.body.bool_or("guard", false) {
+                    return Ok(reply);
+                }
+                // the guard judges what it said: a rejected reply is marked vetoed
+                let said = reply.str_or("reply", "").to_string();
+                let mut g = self.guard.lock().map_err(poisoned)?;
+                let j = g.judge(&said, None, None, 5);
+                let vetoed = j.str_or("verdict", "") == "reject";
+                Ok(reply
+                    .with("guard", crate::routes::verdict_brief(&j))
+                    .with("vetoed", vetoed.into()))
+            }),
             ("POST", "network/teach") => network_teach(net, &req.body),
             ("POST", "network/fit") => network_fit(net, &req.body),
             ("POST", "network/save") => {

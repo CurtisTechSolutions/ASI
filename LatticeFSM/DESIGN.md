@@ -30,6 +30,7 @@ The five requirements, in the author's words, and where each is realised:
 | teach a reply, and train, until N of N | §18: `teach`, `drill`, `ceiling`; the network's `until` |
 | parse zip files of unlimited size, and other file types, in the corpus | §19: `corpus`, `archive` |
 | a frontend with the ModelKit frontend's features: predictions as chat, uploads, checkpoints as a tab | §20 |
+| the guard (ModelKit's negative network) applied to this network | §21: `Guard`; `guard: true` on the routes |
 
 ## 1. The matrix
 
@@ -1030,3 +1031,49 @@ each turn with the next; `/api/chat/llm` has Ollama say a line, the model
 continue it, Ollama mark it out of 10 and the reply credited `(mark -
 pass) / 5`; `/api/status` summarises every model. The frontend's tabs are
 in README.md.
+
+
+## 21. The guard
+
+`Guard(unit = "word", order = 3, lower, threshold = 1, min_coverage = 0.5)`
+(`guard.py`, `guard.rs`). A text's transitions are `(*the last order - 1
+tokens, next)` over `<s>`-padded tokens and `</s>`; `edges` maps each to
+`blame`, `fails`, `clear` and `reasons` (`{reason: blame}`).
+
+* `blame(text, reason, severity)`: the reason cleaned (whitespace collapsed,
+  ASCII lower-cased, 60 characters, `unspecified` when empty); every
+  transition gains `severity` blame, a fail and the reason's share; a ninth
+  reason drops the smallest (ties: the alphabetically first); the reason's
+  total and a journal entry (the last 200) are kept.
+* `clear(text, amount)`: every transition of it that exists gains `amount`
+  clear. `forget(reason)`: the reason's blame taken out of every
+  transition, a transition left with none dropped.
+* `judge(text, threshold, min_coverage, spans = 5)`: per transition the
+  evidence `max(0, blame - clear)`; `risk = Σ evidence / max(1, n)`,
+  `coverage = blamed / n`, `peak = max evidence`; reasons: each blamed
+  transition's reasons weighted by `evidence / blame`, summed, sorted by
+  blame then name, with shares; spans: the blamed transitions by evidence
+  (ties: the earlier), each the token window `[i - (order - 1), i + 1)` and
+  its heaviest reason; `reject` if any is blamed and `coverage >=
+  min_coverage` and `risk >= threshold`, else `suspect` if any is, else
+  `pass`. Every sum runs in one fixed order, so both ports agree.
+
+Around the models: `routes::guarded_samples` draws `count · over_sample`
+candidates (the first at the asked temperature, the rest at `max(t, 0.7)`),
+judges each completion, keeps the first `count` not rejected, and when all
+are keeps the least risky; generate, converse and chat take `guard: true`;
+chat's `teach_guard` blames a reply marked under the pass mark ("marked
+m/10", severity `(pass - m) / 5`) and clears one at or above it; feedback's
+`guard` blames the bad texts and clears the good; the network's talk judges
+its reply. The lock order is always model, then guard.
+
+### 21.1 Decisions
+
+* **Transitions, not texts:** a failure is remembered as its parts, so a
+  new text that reuses enough of them is caught, and one that shares a
+  common word or two is not (coverage) - unless that part keeps failing
+  (risk).
+* **Clearing cancels blame** so the guard does not learn to fear the
+  language itself: what good text says often stops counting against it.
+* **A filter, not a censor:** with nothing blamed every text passes, and
+  when every candidate is vetoed the least risky is still served, marked.

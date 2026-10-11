@@ -570,3 +570,47 @@ fn the_language_models_uploads_and_checkpoints() {
     assert_eq!(d.str_or("deleted", ""), "notes/a.txt");
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn the_guard_vetoes_what_it_was_told_failed() {
+    let addr = serve(12);
+    let (_, g) = post(&addr, "/api/chain/generate", r#"{"text":"the brain","max_tokens":30}"#);
+    let reply = g.str_or("completion", "").trim().to_string();
+    let blame = Json::object()
+        .with("text", reply.as_str().into())
+        .with("reason", "repeats itself".into())
+        .with("severity", 2.0.into());
+    let (status, b) = request(&addr, "POST", "/api/guard/blame", Some(&blame)).unwrap();
+    assert_eq!(status, 200);
+    assert!(b.num("blamed", 0.0) > 0.0);
+    let judge = Json::object().with("texts", Json::strings(&[reply.clone(), "a lattice".to_string()]));
+    let (_, j) = request(&addr, "POST", "/api/guard/judge", Some(&judge)).unwrap();
+    let v = j.get("verdicts").unwrap().as_array().unwrap();
+    assert_eq!(v[0].str_or("verdict", ""), "reject");
+    assert_eq!(v[1].str_or("verdict", ""), "pass");
+    // generating with the guard: the blamed greedy reply is vetoed, a sampled one served
+    let (_, gg) = post(
+        &addr,
+        "/api/chain/generate",
+        r#"{"text":"the brain","max_tokens":30,"guard":true}"#,
+    );
+    let summary = gg.get("guard").unwrap();
+    assert!(summary.num("vetoed", 0.0) >= 1.0);
+    assert!(!summary.bool_or("all_vetoed", true));
+    let first = &gg.get("samples").unwrap().as_array().unwrap()[0];
+    assert_ne!(first.get("guard").unwrap().str_or("verdict", ""), "reject");
+    let (_, f) = post(
+        &addr,
+        "/api/ngram/feedback",
+        r#"{"good":["the cat"],"bad":["buy now buy now"],"guard":true}"#,
+    );
+    assert_eq!(f.num("blamed", 0.0), 5.0);
+    let (_, t) = post(&addr, "/api/network/talk", r#"{"text":"cat","guard":true}"#);
+    assert!(t.get("guard").is_some());
+    let (_, st) = request(&addr, "GET", "/api/guard", None).unwrap();
+    assert_eq!(st.num("blamed", 0.0), 2.0);
+    let (_, fo) = post(&addr, "/api/guard/forget", r#"{"reason":"repeats itself"}"#);
+    assert!(fo.num("forgotten", 0.0) > 0.0);
+    let (_, r) = post(&addr, "/api/guard/reset", "{}");
+    assert_eq!(r.num("transitions", -1.0), 0.0);
+}

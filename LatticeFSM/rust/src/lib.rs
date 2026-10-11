@@ -31,6 +31,7 @@ pub mod edge;
 pub mod experiment;
 pub mod focus;
 pub mod geometry;
+pub mod guard;
 pub mod gzip;
 pub mod http;
 pub mod json;

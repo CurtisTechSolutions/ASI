@@ -13,7 +13,7 @@ const STATUS_POLL_MS = 5000;
  * at once rather than at the next poll.
  *
  * Beside it, /api/status every 5 s: the language models' brief stats (the
- * chain's and the N-gram model's), the uploads and the checkpoints, handed
+ * chain's and the N-gram model's), the guard's, the uploads and the checkpoints, handed
  * to `onStatus`. A server without that route (404) is asked no more, and the
  * bar shows the machine alone, as it always has.
  */
@@ -78,6 +78,7 @@ export default function StatusBar({ onStats, onStatus, tick }) {
   const shape = Array.isArray(s.shape) ? s.shape.join(" × ") : "–";
   const chain = status && status.chain;
   const ngram = status && status.ngram;
+  const guard = status && status.guard;
   return (
     <div className="statusbar" aria-live="polite">
       {error ? <span className="stat err">API offline: {error}</span> : null}
@@ -103,6 +104,12 @@ export default function StatusBar({ onStats, onStatus, tick }) {
               <b>none</b>
             )}
           </span>
+          {guard ? (
+            <span className="stat" title="The guard: the transitions it knows as failures, the texts blamed, and the texts judged and rejected">
+              guard <b>{fmtInt(guard.transitions)}</b> transitions · {fmtInt(guard.blamed)} blamed · judged{" "}
+              <b>{fmtInt(guard.judgements)}</b> · rejected <b className={guard.rejected ? "bad" : undefined}>{fmtInt(guard.rejected)}</b>
+            </span>
+          ) : null}
           <span className="stat" title="Files in the upload directory, and saved checkpoints">
             uploads <b>{fmtInt(status.uploads)}</b> · checkpoints <b>{fmtInt(status.checkpoints)}</b>
           </span>

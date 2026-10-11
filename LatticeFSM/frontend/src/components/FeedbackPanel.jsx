@@ -4,16 +4,19 @@ import { useStoredState } from "../hooks/useStoredState.js";
 import { lmLabel } from "../lm.js";
 import { parseNumber, splitLines } from "../util.js";
 import Alert from "./Alert.jsx";
-import { NumberField, TextArea } from "./Fields.jsx";
+import { CheckField, NumberField, TextArea, TextField } from "./Fields.jsx";
 
 /**
  * Feedback in bulk (POST /api/{m}/feedback): good texts, one a line, are all rewarded and bad ones all
  * punished, by an amount - what the chosen model would have written in them is made likelier or less likely.
+ * "Teach the guard too" also blames the bad texts in the guard (under a reason) and clears the good ones.
  */
 export default function FeedbackPanel({ lm, onMoved }) {
   const [good, setGood] = useStoredState("feedback.good", "");
   const [bad, setBad] = useStoredState("feedback.bad", "");
   const [amount, setAmount] = useStoredState("feedback.amount", "1");
+  const [guard, setGuard] = useStoredState("feedback.guard", false);
+  const [reason, setReason] = useStoredState("feedback.guardReason", "feedback");
   const [note, setNote] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -24,8 +27,16 @@ export default function FeedbackPanel({ lm, onMoved }) {
     event.preventDefault();
     setBusy(true);
     try {
-      const r = await api.lmFeedback(lm, { good: goods, bad: bads, amount: parseNumber(amount, 1) });
-      setNote(`${lmLabel(lm)}: rewarded ${r.rewarded}, punished ${r.punished}`);
+      const r = await api.lmFeedback(lm, {
+        good: goods,
+        bad: bads,
+        amount: parseNumber(amount, 1),
+        ...(guard ? { guard: true, reason: reason.trim() || "feedback" } : {}),
+      });
+      setNote(
+        `${lmLabel(lm)}: rewarded ${r.rewarded}, punished ${r.punished}` +
+          (guard && r.blamed !== undefined ? ` · the guard: blamed ${r.blamed}, cleared ${r.cleared}` : ""),
+      );
       setError(null);
       if (onMoved) onMoved();
     } catch (err) {
@@ -50,6 +61,8 @@ export default function FeedbackPanel({ lm, onMoved }) {
         </div>
         <div className="actions">
           <NumberField label="Amount" value={amount} onChange={setAmount} min="0" step="0.1" hint="per text" />
+          <CheckField label="Teach the guard too" checked={guard} onChange={setGuard} hint="bad texts blamed in the guard, good ones cleared" />
+          {guard ? <TextField label="Reason" value={reason} onChange={setReason} hint="the guard's reason for the bad ones" /> : null}
         </div>
         <div className="actions">
           <button type="submit" className="primary" disabled={busy || (goods.length === 0 && bads.length === 0)}>

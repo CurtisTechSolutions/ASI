@@ -8,9 +8,10 @@ import { joinContinuation } from "./lm.js";
 /**
  * Say `message` to model `lm`: `{text, reply, tokens, depths, unit, learned}` - the reply the continuation,
  * with its tokens (and, for the chain, how deep each walk went). With `learn`, the message is trained on
- * first (`POST /api/{m}/text`), so the model hears what you say.
+ * first (`POST /api/{m}/text`), so the model hears what you say. With `guard`, the guard judges the reply (and
+ * vetoes it for another if it rejects it): the turn carries `guard` (its verdict in brief) and `vetoed` (how many).
  */
-export async function askModel(lm, message, { learn = false, maxTokens = 40, temperature = 0 } = {}) {
+export async function askModel(lm, message, { learn = false, maxTokens = 40, temperature = 0, guard = false } = {}) {
   let learned = null;
   if (learn) {
     const r = await api.lmText(lm, message);
@@ -21,6 +22,7 @@ export async function askModel(lm, message, { learn = false, maxTokens = 40, tem
     max_tokens: maxTokens,
     temperature,
     seed: Math.floor(Math.random() * 1e9),
+    ...(guard ? { guard: true } : {}),
   });
   const sample = r && Array.isArray(r.samples) && r.samples.length ? r.samples[0] : null;
   const unit = r ? r.unit : undefined;
@@ -34,6 +36,9 @@ export async function askModel(lm, message, { learn = false, maxTokens = 40, tem
     tokens: sample && Array.isArray(sample.tokens) ? sample.tokens : [],
     depths: sample && Array.isArray(sample.depths) ? sample.depths : null,
     learned,
+    guard: sample && sample.guard ? sample.guard : null,
+    vetoed: r && r.guard ? Number(r.guard.vetoed) || 0 : 0,
+    guardSummary: r && r.guard ? r.guard : null,
   };
 }
 

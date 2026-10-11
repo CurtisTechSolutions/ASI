@@ -20,6 +20,7 @@
     chain       one input to a node, the output node predicts the next: walks only as deep as confidence needs
     base64      encode anything (text, an image, a video) as base64, or decode it back
     corpus      what a corpus is read as: every document (archives opened) and its lines or base64 sequences
+    guard       the negative network: blame failures with a reason, clear good text, judge new text (reject / pass)
     experiment  the learning, stimulation, adaptation and compression experiments
     test        run the test suite
 
@@ -685,6 +686,52 @@ def cmd_chain(args) -> int:
     return 0
 
 
+def cmd_guard(args) -> int:
+    from .guard import Guard, load_guard
+    if args.load and os.path.exists(args.load):
+        g = load_guard(args.load)
+    else:
+        g = Guard(args.unit, args.order, threshold=args.threshold, min_coverage=args.min_coverage)
+    if args.action == "blame":
+        for text in args.text:
+            print(f"blamed {g.blame(text, args.reason, args.severity)} transitions of {text!r} "
+                  f"({clean_reason_of(args.reason)!r}, {args.severity:.2f})")
+    elif args.action == "clear":
+        for text in args.text:
+            print(f"cleared {g.clear(text, args.amount)} transitions of {text!r}")
+    elif args.action == "judge":
+        for text in args.text:
+            j = g.judge(text)
+            print(f"{j['verdict']}: {text!r}: risk {j['risk']:.3f}, coverage {j['coverage']:.3f}, peak {j['peak']:.3f}")
+            print(f"  {j['why']}")
+            if j["reasons"]:
+                print("  reasons: " + ", ".join(f"{r['reason']} {r['share'] * 100:.0f}%" for r in j["reasons"]))
+            for sp in j["spans"]:
+                end = " </s>" if sp["next"] == "</s>" else ""
+                print(f"  '{' '.join(sp['tokens'])}{end}' ({sp['evidence']:.2f}, {sp['reason']})")
+    elif args.action == "forget":
+        print(f"forgot {clean_reason_of(args.reason)!r}: {g.forget(args.reason)} transitions")
+    elif args.action == "reset":
+        g.reset()
+        print("the guard is empty")
+    st = g.stats()
+    if args.action == "stats":
+        print(f"a guard over {st['unit']}s, order {st['order']}, threshold {st['threshold']:.2f}, min coverage "
+              f"{st['min_coverage']:.2f}: {st['transitions']} transitions, {st['blamed']} blamed, {st['cleared']} "
+              f"cleared, {st['judgements']} judged, {st['rejected']} rejected")
+        for r in st["reasons"]:
+            print(f"  {r['reason']}: {r['blame']:.2f}")
+    if args.save:
+        g.save(args.save)
+        print(f"saved {args.save}", file=sys.stderr)
+    return 0
+
+
+def clean_reason_of(reason) -> str:
+    from .guard import clean_reason
+    return clean_reason(reason)
+
+
 def cmd_corpus(args) -> int:
     import zlib
     from .b64 import file_sequences
@@ -979,6 +1026,19 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("action", choices=("encode", "decode"))
     q.add_argument("input", nargs="*", help="files, or texts (- or nothing: standard input)")
     q.add_argument("--out", default=None, help="write the result here instead of printing it")
+    q = add("guard", cmd_guard, "the negative network: blame failures, clear good text, judge new text", machine=False,
+            load=False)
+    q.add_argument("action", choices=("blame", "clear", "judge", "forget", "reset", "stats"))
+    q.add_argument("text", nargs="*", help="blame / clear / judge: the texts")
+    q.add_argument("--load", default=None, help="a saved guard (else a new one)")
+    q.add_argument("--save", default=None, help="write the guard here (.json or .json.gz)")
+    q.add_argument("--reason", default=None, help="blame / forget: why it failed")
+    q.add_argument("--severity", type=float, default=1.0, help="blame: how much")
+    q.add_argument("--amount", type=float, default=1.0, help="clear: how much")
+    q.add_argument("--unit", choices=("word", "char", "sound", "base64"), default="word")
+    q.add_argument("--order", type=int, default=3, help="a transition is the last ORDER-1 tokens and the next")
+    q.add_argument("--threshold", type=float, default=1.0, help="reject at this much blame a transition")
+    q.add_argument("--min-coverage", type=float, default=0.5, help="... over at least this share of the text")
     q = add("corpus", cmd_corpus, "what a corpus is read as: every document, archives opened", machine=False, load=False)
     q.add_argument("paths", nargs="+", help="files or directories (zip, tar, tar.gz, gz, html, docx, ... opened)")
     q.add_argument("--unit", choices=("text", "base64"), default="text", help="base64: every file's bytes")

@@ -5,6 +5,7 @@ import { goalShare, untilNote } from "../lm.js";
 import { fmtNum, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import { GuardBadge } from "./Verdict.jsx";
 
 const PRESETS = [
   ["enc>dec", "enc>dec - English in, English out"],
@@ -33,7 +34,9 @@ function Reply({ turn, busy, onTeach }) {
   const said = r.translator ? r.reply || "(silence)" : r.reply;
   return (
     <li className={`turn a${turn.taught ? " rated up" : ""}`}>
-      <div className="speaker">network</div>
+      <div className="speaker">
+        network <GuardBadge guard={r.guard} text={String(r.reply ?? "").trim()} vetoed={r.vetoed === true} />
+      </div>
       <div className="bubble">
         {said}
         {r.translator && r.sounds && r.sounds.length ? <div className="meta units">{r.sounds.join(" ")}</div> : null}
@@ -80,7 +83,8 @@ function Reply({ turn, busy, onTeach }) {
  * sounds of what you typed, a decoder whose states are sounds, spelled back), or yes / no from a classifier. Every
  * reply can be reinforced or corrected, and the network learns from it on the spot (POST /api/network/teach):
  * round after round until it gets every part of the reply right (N of N), or the rounds run out. Teaching a
- * task can go on the same way, epoch after epoch, until every taught pair is right.
+ * task can go on the same way, epoch after epoch, until every taught pair is right. "Guard" has the guard judge
+ * every reply: its verdict beside it, and a reply it rejects marked vetoed.
  */
 export default function NetworkPanel({ onMoved }) {
   const [info, setInfo] = useState(null);
@@ -97,6 +101,7 @@ export default function NetworkPanel({ onMoved }) {
   const [until, setUntil] = useStoredState("talk.until", true);
   const [maxEpochs, setMaxEpochs] = useStoredState("talk.maxEpochs", "200");
   const [goal, setGoal] = useStoredState("talk.goal", "95");
+  const [guard, setGuard] = useStoredState("talk.guard", false);
   const [turns, setTurns] = useState([]);
   const [fit, setFit] = useState(null);
   const [error, setError] = useState(null);
@@ -127,7 +132,7 @@ export default function NetworkPanel({ onMoved }) {
     act(async () => {
       const text = draft.trim();
       if (!text) return;
-      const reply = await api.talk(text);
+      const reply = await api.talk(text, guard);
       setTurns((t) => [...t, { id: t.length, text, reply, taught: null }]);
       setDraft("");
     });
@@ -288,6 +293,7 @@ export default function NetworkPanel({ onMoved }) {
             Send
           </button>
         </div>
+        <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard judges every reply; a rejected one is marked vetoed" />
       </div>
     </div>
   );

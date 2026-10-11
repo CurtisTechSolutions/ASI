@@ -176,7 +176,8 @@ the **chain** (below) or the **N-gram** - and the status bar shows both.
 | **Chat** | a local LLM (Ollama) talking with the model and marking every reply out of 10, the marks credited |
 | **Score** | how likely the model finds a text, token by token |
 | **Nodes** | the chain's most-seen node contexts, their guesses and confidence, and each depth's accuracy |
-| **Feedback** | good and bad texts, rewarded and punished in one go |
+| **Feedback** | good and bad texts, rewarded and punished in one go (and, ticked, taught to the guard) |
+| **Guard** | the negative network: judge any text (verdict, risk, coverage, reasons, blamed spans highlighted), blame with a reason, clear, settings, the reasons (forget one, or all) and the journal; a Guard toggle on Generate, Talk, Converse, Chat, Feedback and Network |
 | **Ollama** | is it there; a corpus from a prompt, trained on or saved as an upload; autotrain |
 | **Voice** | the browser listens, the model answers, the browser speaks (Web Speech, no server audio) |
 | **Checkpoints** | save any model (chain, N-gram, machine, network) as a checkpoint; list, restore, download, upload, delete; save and load each to a server path |
@@ -664,6 +665,39 @@ latticefsm chain train --data data/corpus/sentences.txt --until
 #   round 1: 700 of 1673 predicted right before learning (the most possible: 1550)
 #   ...
 #   1550 of 1673 reached in 8 rounds: the most possible - the rest (123) come after contexts the data continues in more than one way
+```
+
+## The guard
+
+`latticefsm/guard.py` and `rust/src/guard.rs`: a negative network - only the
+failures, and why. Every transition of a blamed text (the last two words,
+then the next) is charged the blame under its reason; accepted text clears
+what it crosses, and the evidence against a transition is
+`max(0, blame - clear)`, so a fragment good text crosses as often as bad
+text carries no verdict. Judging a text gives its **risk** (evidence per
+transition: about 1 for a repeat of a failure blamed once), **coverage**
+(the share of its transitions that are known failures), peak, reasons and
+worst spans, and a verdict: **reject** (coverage at least 0.5 and risk at
+least 1, by default), **suspect** or **pass** - a text it never saw fail
+passes.
+
+The server holds one guard in front of everything that writes text. With
+`guard: true`, generate draws three times as many candidates (the first at
+the asked temperature, the rest at 0.7 or more, so a vetoed greedy reply has
+others to give way to) and vetoes the rejected ones; converse and chat guard
+every turn; the network's replies are judged and marked vetoed. What feeds
+it: 👎 in the frontend, bad feedback, a local LLM marking a reply under the
+pass mark ("marked 3/10"), and explicit blames; 👍, good feedback and pass
+marks clear. Its tab judges any text (blamed spans highlighted), blames,
+clears, forgets a reason, and lists the reasons and the journal; it saves
+and restores as a checkpoint.
+
+```bash
+latticefsm guard blame "the cat ate the dog" --reason violent --severity 2 --save guard.json
+latticefsm guard judge "the cat ate the fish" --load guard.json
+#   reject: 'the cat ate the fish': risk 1.333, coverage 0.667, peak 2.000
+#     rejected: 67% of its transitions are known failures, 1.33 blame each on average (the limit 1.00), mostly 'violent'
+curl -s -X POST localhost:8000/api/chain/generate -d '{"text":"the brain","guard":true}'
 ```
 
 ## A corpus of any kind and size

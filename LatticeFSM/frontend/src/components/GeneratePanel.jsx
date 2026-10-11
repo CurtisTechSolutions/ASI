@@ -6,15 +6,18 @@ import { joinContinuation, lmLabel } from "../lm.js";
 import { asArray, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import HearButton from "./HearButton.jsx";
-import { NumberField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, TextField } from "./Fields.jsx";
+import GuardNotice from "./GuardNotice.jsx";
 import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 import TokenText, { DepthNote } from "./TokenText.jsx";
+import { GuardBadge } from "./Verdict.jsx";
 
 /**
  * Generate texts with the chosen language model: a number of samples continuing a prompt (or from nothing),
  * up to a number of tokens, at a temperature, from a seed. Every sample can be rewarded or punished at once
  * (👍 / 👎, ±1 to what it wrote in context), marked out of 10 for the marks card (☆), and heard (🔊). For the
- * chain, each token is tinted by how deep its walk went.
+ * chain, each token is tinted by how deep its walk went. With "Guard" on, the guard judges every sample (drawing
+ * over-sample times as many) and vetoes the ones it rejects; each kept sample carries its verdict.
  */
 export default function GeneratePanel({ lm, tick, onMoved }) {
   const [info] = useLmInfo(lm, tick);
@@ -23,6 +26,8 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
   const [maxTokens, setMaxTokens] = useStoredState("generate.max", "40");
   const [temperature, setTemperature] = useStoredState("generate.temperature", "0.8");
   const [seed, setSeed] = useStoredState("generate.seed", "");
+  const [guard, setGuard] = useStoredState("generate.guard", false);
+  const [overSample, setOverSample] = useStoredState("generate.overSample", "3");
   const [result, setResult] = useState(null);
   const [rated, setRated] = useState({}); // sample index -> +1 / -1, once credited
   const [note, setNote] = useState(null);
@@ -49,6 +54,7 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
         max_tokens: Math.max(1, parseInteger(maxTokens, 40)),
         temperature: parseNumber(temperature, 0.8),
         seed: seed === "" ? Math.floor(Math.random() * 1e9) : parseInteger(seed, 0),
+        ...(guard ? { guard: true, over_sample: Math.max(1, parseInteger(overSample, 3)) } : {}),
       });
       setResult({ ...r, prompt });
       setRated({});
@@ -95,6 +101,10 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" />
           <NumberField label="Seed" value={seed} onChange={setSeed} step="1" placeholder="random" hint="blank: a new one each time" />
         </div>
+        <div className="row">
+          <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard vetoes the samples it rejects" />
+          <NumberField label="Over-sample" value={overSample} onChange={setOverSample} min="1" max="20" step="1" disabled={!guard} hint="times as many drawn, to make up for vetoes" />
+        </div>
         <div className="actions">
           <button type="submit" className="primary" disabled={busy}>
             {generating ? "Generating…" : "Generate"}
@@ -105,6 +115,7 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
 
       <div className="card">
         <h2>Samples</h2>
+        {result ? <GuardNotice guard={result.guard} /> : null}
         {result === null ? (
           <p className="muted">Press Generate.</p>
         ) : samples.length === 0 ? (
@@ -141,6 +152,7 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
                       {ratings.has(text) ? "★" : "☆"}
                     </button>
                     <HearButton text={text} unit={result.unit} label={`sample ${i + 1}`} />
+                    <GuardBadge guard={s.guard} text={String(s.completion ?? "").trim()} />
                   </div>
                 </li>
               );

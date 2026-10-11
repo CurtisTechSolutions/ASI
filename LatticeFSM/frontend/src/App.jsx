@@ -13,6 +13,7 @@ import ChatPanel from "./components/ChatPanel.jsx";
 import ScorePanel from "./components/ScorePanel.jsx";
 import NodesPanel from "./components/NodesPanel.jsx";
 import FeedbackPanel from "./components/FeedbackPanel.jsx";
+import GuardPanel from "./components/GuardPanel.jsx";
 import OllamaPanel from "./components/OllamaPanel.jsx";
 import VoicePanel from "./components/VoicePanel.jsx";
 import CheckpointPanel from "./components/CheckpointPanel.jsx";
@@ -40,6 +41,7 @@ const TABS = [
   { id: "score", label: "Score", Component: ScorePanel },
   { id: "nodes", label: "Nodes", Component: NodesPanel },
   { id: "feedback", label: "Feedback", Component: FeedbackPanel },
+  { id: "guard", label: "Guard", Component: GuardPanel },
   { id: "ollama", label: "Ollama", Component: OllamaPanel },
   { id: "voice", label: "Voice", Component: VoicePanel },
   { id: "checkpoints", label: "Checkpoints", Component: CheckpointPanel },

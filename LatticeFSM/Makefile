@@ -69,6 +69,8 @@ NODES     ?= 8
 CONFIDENCE ?= 0.9
 CHAIN     ?= chain.json.gz
 REPLY     ?= a lattice of adaptive edges.
+GUARD     ?= guard.json.gz
+REASON    ?= unspecified
 ROUNDS    ?= 3
 OLLAMA_MODEL ?=
 TOPICS    ?=
@@ -90,7 +92,7 @@ MACHINE_OPTS = --states $(STATES) --alphabet $(ALPHABET) --life $(LIFE) --baseli
         media-data media-fit media-evaluate \
         ngram-train ngram-predict ngram-generate ngram-evaluate autotrain autotrain-corpus ollama-check fake-ollama \
         py-autotrain base64-encode base64-decode chain-train chain-until chain-predict chain-generate chain-sweep \
-        chain-teach corpus \
+        chain-teach corpus guard-blame guard-clear guard-judge guard-stats \
         py-test py-demo py-train py-run py-stats py-experiments parity \
         frontend-install frontend-build frontend-dev frontend-preview frontend-test clean distclean
 
@@ -267,6 +269,18 @@ chain-sweep: build ## Accuracy against input nodes traversed, threshold by thres
 
 chain-teach: build ## Teach CHAIN that REPLY follows TEXT, round after round, until every input of it is right
 	$(BIN) chain teach "$(TEXT)" "$(REPLY)" --load $(CHAIN) --save $(CHAIN)
+
+guard-blame: build ## Tell the guard (GUARD) that TEXT failed, because REASON
+	$(BIN) guard blame "$(TEXT)" --reason "$(REASON)" --load $(GUARD) --save $(GUARD)
+
+guard-clear: build ## Tell the guard (GUARD) that TEXT was fine
+	$(BIN) guard clear "$(TEXT)" --load $(GUARD) --save $(GUARD)
+
+guard-judge: build ## The guard's verdict on TEXT: reject / suspect / pass, and why
+	$(BIN) guard judge "$(TEXT)" --load $(GUARD)
+
+guard-stats: build ## What the guard has been told: transitions, reasons
+	$(BIN) guard stats --load $(GUARD)
 
 corpus: build ## What CORPUS is read as: every document (archives opened) and its lines
 	$(BIN) corpus $(CORPUS) --show 2

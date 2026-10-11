@@ -6,14 +6,16 @@ import { joinContinuation, lmLabel } from "../lm.js";
 import { asArray, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import HearButton from "./HearButton.jsx";
-import { NumberField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, TextField } from "./Fields.jsx";
 import { RateButtons } from "./RatingsCard.jsx";
 import { DepthNote } from "./TokenText.jsx";
+import { GuardBadge } from "./Verdict.jsx";
 
 /**
  * The model talks to itself (POST /api/converse): from an opening line, two voices A and B take turns, each
  * turn the model's continuation of the turn before it. A turn can be rewarded or punished (👍 / 👎 credit it
- * together with the turn it answered, the context it continued) and heard.
+ * together with the turn it answered, the context it continued) and heard. With "Guard" on, every turn is judged
+ * by the guard (a rejected one vetoed for another), its verdict beside it.
  */
 export default function ConversePanel({ lm, tick, onMoved }) {
   const [info] = useLmInfo(lm, tick);
@@ -21,6 +23,7 @@ export default function ConversePanel({ lm, tick, onMoved }) {
   const [turns, setTurns] = useStoredState("converse.turns", "6");
   const [maxTokens, setMaxTokens] = useStoredState("converse.max", "60");
   const [temperature, setTemperature] = useStoredState("converse.temperature", "0");
+  const [guard, setGuard] = useStoredState("converse.guard", false);
   const [result, setResult] = useState(null); // {model, opening, turns}
   const [rated, setRated] = useState({});
   const [note, setNote] = useState(null);
@@ -46,6 +49,7 @@ export default function ConversePanel({ lm, tick, onMoved }) {
         max_tokens: Math.max(1, parseInteger(maxTokens, 60)),
         temperature: parseNumber(temperature, 0),
         seed: Math.floor(Math.random() * 1e9),
+        ...(guard ? { guard: true } : {}),
       });
       setResult({ model: lm, opening, turns: asArray(r && r.turns) });
       setRated({});
@@ -95,6 +99,7 @@ export default function ConversePanel({ lm, tick, onMoved }) {
           <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min="1" step="1" hint="a turn" />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" />
         </div>
+        <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard judges every turn, and vetoes a rejected one" />
         <div className="actions">
           <button type="submit" className="primary" disabled={busy}>
             {talking ? "Talking…" : "Start"}
@@ -120,6 +125,7 @@ export default function ConversePanel({ lm, tick, onMoved }) {
                 <div className="speaker">
                   <b>{t.speaker || (i % 2 ? "B" : "A")}</b>
                   {t.depths ? <DepthNote depths={t.depths} maxDepth={maxDepth} /> : null}
+                  <GuardBadge guard={t.guard} text={t.text} vetoed={t.vetoed} />
                 </div>
                 <p className="bubble">{t.text || <span className="muted">(nothing follows)</span>}</p>
                 <div className="meta">

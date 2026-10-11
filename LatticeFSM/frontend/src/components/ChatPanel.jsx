@@ -7,6 +7,7 @@ import Alert from "./Alert.jsx";
 import HearButton from "./HearButton.jsx";
 import { CheckField, NumberField, TextField } from "./Fields.jsx";
 import LineChart from "./LineChart.jsx";
+import { GuardBadge } from "./Verdict.jsx";
 
 /** A mark out of 10 as a bar, green from the pass mark up, red below it. */
 function MarkBar({ mark, pass }) {
@@ -22,7 +23,9 @@ function MarkBar({ mark, pass }) {
  * The model in conversation with a local language model (Ollama) that marks it (POST /api/chat/llm). Ollama
  * says a line on the topic, the chosen model continues it as its reply, and Ollama marks the reply out of 10;
  * they take turns. With "learn", every reply is credited by how far its mark is from the pass mark
- * ((mark - pass) / 5): a good reply rewarded, a poor one punished.
+ * ((mark - pass) / 5): a good reply rewarded, a poor one punished. With "Guard", the guard judges every reply (a
+ * rejected one vetoed for another), and with "teach the guard" a reply marked under the pass mark is blamed in
+ * it ("marked 3/10") and one at or above it cleared.
  */
 export default function ChatPanel({ lm, onMoved }) {
   const [topic, setTopic] = useStoredState("chat.topic", "the brain");
@@ -31,6 +34,8 @@ export default function ChatPanel({ lm, onMoved }) {
   const [temperature, setTemperature] = useStoredState("chat.temperature", "0.7");
   const [pass, setPass] = useStoredState("chat.pass", "5");
   const [learn, setLearn] = useStoredState("chat.learn", true);
+  const [guard, setGuard] = useStoredState("chat.guard", false);
+  const [teachGuard, setTeachGuard] = useStoredState("chat.teachGuard", true);
   const [ollamaModel, setOllamaModel] = useStoredState("chat.ollamaModel", "");
   const [url, setUrl] = useStoredState("chat.url", "");
   const [result, setResult] = useState(null);
@@ -51,6 +56,7 @@ export default function ChatPanel({ lm, onMoved }) {
         temperature: parseNumber(temperature, 0.7),
         pass_mark: passMark,
         learn,
+        ...(guard ? { guard: true, teach_guard: teachGuard } : {}),
         ...(ollamaModel.trim() ? { ollama_model: ollamaModel.trim() } : {}),
         ...(url.trim() ? { url: url.trim() } : {}),
       });
@@ -58,7 +64,7 @@ export default function ChatPanel({ lm, onMoved }) {
       setResult({ ...r, model: lm, pass: passMark, marks });
       setHistory((h) => [...h, ...marks]);
       setError(null);
-      if (learn && onMoved) onMoved();
+      if ((learn || guard) && onMoved) onMoved();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -88,7 +94,17 @@ export default function ChatPanel({ lm, onMoved }) {
           <TextField label="Ollama model" value={ollamaModel} onChange={setOllamaModel} hint="blank: the server's default" />
           <TextField label="Ollama URL" value={url} onChange={setUrl} hint="blank: the server's default" />
         </div>
-        <CheckField label="Learn" checked={learn} onChange={setLearn} hint="credit every reply by its mark" />
+        <div className="row">
+          <CheckField label="Learn" checked={learn} onChange={setLearn} hint="credit every reply by its mark" />
+          <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard judges every reply, and vetoes a rejected one" />
+          <CheckField
+            label="Teach the guard"
+            checked={teachGuard}
+            disabled={!guard}
+            onChange={setTeachGuard}
+            hint="a reply under the pass mark is blamed, one at or above it cleared"
+          />
+        </div>
         <div className="actions">
           <button type="submit" className="primary" disabled={busy}>
             {busy ? "Chatting…" : "Chat"}
@@ -121,6 +137,12 @@ export default function ChatPanel({ lm, onMoved }) {
                         </>
                       ) : null}
                       {t.credited ? <span className="muted">credited {fmtNum(t.credited, 2)}</span> : null}
+                      {!llm ? <GuardBadge guard={t.guard} text={t.text} vetoed={t.vetoed} /> : null}
+                      {t.blamed ? (
+                        <span className="badge tight fail" title={`blamed in the guard: marked ${t.mark}/10, under the pass mark`}>
+                          blamed
+                        </span>
+                      ) : null}
                     </div>
                     <p className="bubble">{t.text || <span className="muted">(nothing)</span>}</p>
                     {!llm ? (

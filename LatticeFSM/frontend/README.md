@@ -19,12 +19,14 @@ browser's speech synthesis), **Talk** (a chat whose replies are the model's cont
 for the chain; teach a reply until it is exactly right), **Network** (the chat with the network of machines,
 teaching until N of N), **Converse** (the model with itself), **Chat** (Ollama talks with it and marks it),
 **Score** (token-by-token probability), **Nodes** (the chain's contexts as rings, accuracy by depth),
-**Feedback** (good and bad texts in bulk), **Ollama** (connection, a corpus from a prompt, auto-training),
+**Feedback** (good and bad texts in bulk), **Guard** (the negative network: judge texts with their blamed
+spans marked, blame, clear, settings, reasons, journal; a "Guard" checkbox on Generate, Talk, Converse, Chat,
+Feedback and Network puts it in front of what a model writes), **Ollama** (connection, a corpus from a prompt, auto-training),
 **Voice** (browser speech recognition and synthesis), **Checkpoints** (save / load every model to a path;
 named checkpoints listed, restored, downloaded, deleted, uploaded), **Settings** (the model, text size, the
 remembered settings), then the lattice's own: **Matrix**, **3D**, **Run**, **Walk**, **Teach** (a regular
 language), **Time**, **Compress**, **Machine**. The status bar polls `/api/stats` every 2 s and `/api/status`
-every 5 s (the language models, uploads, checkpoints; skipped on a server without it).
+every 5 s (the language models, the guard, uploads, checkpoints; skipped on a server without it).
 
 Panel settings (the string, the stimulation, episodes, the file path) are
 remembered in `localStorage` under `latticefsm.v1.`; results are not. The
@@ -61,6 +63,7 @@ the API URLs in a build that is served from another origin.
 | `src/components/ModelSelector.jsx`, `UploadPicker.jsx`, `RatingsCard.jsx`, `HearButton.jsx`, `TokenText.jsx` | shared by them |
 | `src/components/CheckpointPanel.jsx`, `SettingsPanel.jsx`, `NetworkPanel.jsx`, `CubePanel.jsx` | saving and restoring; this browser's settings; the conversation with a network; the 3D view of the matrix |
 | `src/components/RunPanel.jsx`, `WalkPanel.jsx`, `TrainPanel.jsx`, `TimePanel.jsx`, `CompressPanel.jsx`, `MachinePanel.jsx` | the other tabs |
+| `src/guard.js`, `src/components/GuardPanel.jsx`, `Verdict.jsx`, `GuardNotice.jsx` | the guard: pure helpers (the server's tokens, spans laid on a text, the notice's line); its tab; a verdict and a reply's badge; what a guarded draw vetoed |
 | `src/components/StatusBar.jsx` | the poll of `/api/stats` and `/api/status` |
 | `src/components/Fields.jsx`, `Alert.jsx`, `LineChart.jsx`, `src/hooks/useStoredState.js`, `src/storage.js`, `src/util.js`, `src/styles.css` | ModelKit's, as they are (the storage prefix renamed; `util.js` cut to what this app uses; a block for the matrix added to the stylesheet) |
-| `test/` | `node --test`: the settings store (ModelKit's test), the matrix helpers, the language-model, speech and formatting helpers, and the chunked upload |
+| `test/` | `node --test`: the settings store (ModelKit's test), the matrix helpers, the language-model, speech and formatting helpers, the chunked upload, and the guard's helpers |

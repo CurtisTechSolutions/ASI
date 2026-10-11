@@ -1275,6 +1275,78 @@ class TestTeaching(unittest.TestCase):
         self.assertTrue(all(0 < p <= 1 for _, p, _ in scored))
 
 
+class TestGuard(unittest.TestCase):
+    """The guard: only failures, with their reasons; a text built from them is rejected, one sharing a little is
+    suspect, a new one passes; clearing and forgetting take blame back out."""
+
+    def guard(self):
+        from latticefsm.guard import Guard
+        g = Guard()
+        g.blame("the cat ate the dog", "Violent  Content", 2)
+        g.blame("buy now buy now", "spam")
+        return g
+
+    def test_verdicts(self):
+        g = self.guard()
+        j = g.judge("the cat ate the dog")
+        self.assertEqual(j["verdict"], "reject")
+        self.assertEqual((j["coverage"], j["risk"], j["peak"]), (1.0, 2.0, 2.0))
+        self.assertEqual(j["reasons"][0]["reason"], "violent content")
+        self.assertEqual(j["spans"][0]["tokens"], ["the"])
+        self.assertIn("rejected", j["why"])
+        self.assertEqual(g.judge("buy now buy now cheap")["verdict"], "suspect")  # 4 of 6, under the limit
+        self.assertEqual(g.judge("hello there")["verdict"], "pass")
+        self.assertEqual(g.judge("the cat ate the fish", threshold=5)["verdict"], "suspect")
+        self.assertEqual((g.judgements, g.rejected), (4, 1))
+
+    def test_clearing_and_forgetting(self):
+        g = self.guard()
+        g.clear("the cat ate the dog", 2)
+        self.assertEqual(g.judge("the cat ate the dog")["verdict"], "pass")  # blame and clearing cancel
+        self.assertEqual(g.forget("spam"), 5)
+        self.assertEqual(g.judge("buy now buy now")["verdict"], "pass")
+        self.assertNotIn("spam", g.totals)
+        for i in range(10):
+            g.blame("the cat ate the dog", f"reason {i}", 1 + i)
+        self.assertLessEqual(max(len(e.reasons) for e in g.edges.values()), 8)
+
+    def test_the_file(self):
+        from latticefsm.guard import load_guard
+        g = self.guard()
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("g.json", "g.json.gz"):
+                path = os.path.join(d, name)
+                g.save(path)
+                back = load_guard(path)
+                self.assertEqual(back.to_dict(), g.to_dict())
+                self.assertEqual(back.judge("the cat ate the fish"), g.judge("the cat ate the fish"))
+
+    def test_both_ports_judge_the_same(self):
+        with tempfile.TemporaryDirectory() as d:
+            outs = []
+            for i, cmd in enumerate(([sys.executable, "-m", "latticefsm"], [RUST])):
+                path = os.path.join(d, f"g{i}.json")
+                run = lambda *a: subprocess.run([*cmd, "guard", *a], cwd=ROOT, check=True, capture_output=True,
+                                                text=True).stdout
+                out = run("blame", "the cat ate the dog", "--reason", "Violent  Content", "--severity", "2",
+                          "--save", path)
+                out += run("blame", "buy now buy now", "--reason", "spam", "--load", path, "--save", path)
+                out += run("clear", "the cat sat on the mat", "--load", path, "--save", path)
+                out += run("judge", "the cat ate the dog", "the cat ate the fish", "buy now buy now cheap", "hello",
+                           "--load", path)
+                out += run("stats", "--load", path)
+                outs.append(out)
+            self.assertEqual(outs[0], outs[1])
+            self.assertIn("reject: 'the cat ate the dog'", outs[0])
+            # each port reads the other's file
+            other = subprocess.run([RUST, "guard", "judge", "the cat ate the fish", "--load", os.path.join(d, "g0.json")],
+                                   cwd=ROOT, check=True, capture_output=True, text=True).stdout
+            mine = subprocess.run([sys.executable, "-m", "latticefsm", "guard", "judge", "the cat ate the fish", "--load",
+                                   os.path.join(d, "g1.json")], cwd=ROOT, check=True, capture_output=True,
+                                  text=True).stdout
+            self.assertEqual(other, mine)
+
+
 class TestCorpus(unittest.TestCase):
     """Every kind of file the corpus reader knows, archives of any size opened member by member, and the same lines
     and bytes in both ports."""

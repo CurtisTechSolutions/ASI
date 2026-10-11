@@ -38,6 +38,8 @@ latticefsm chain sweep --load chain.json.gz                                     
 latticefsm chain teach "what is the brain" "a lattice." --load chain.json.gz     # until every input is right
 latticefsm chain train --data data/corpus --until                                 # drilled to N of N
 latticefsm corpus data/corpus --show 2                                            # what a corpus is read as
+latticefsm guard blame "a bad reply" --reason "off topic" --save guard.json       # the guard learns a failure
+latticefsm guard judge "another reply" --load guard.json                          # reject / suspect / pass, why
 ```
 
 `src/ngram.rs` is the model (`../latticefsm/ngram.py` number for number),
@@ -134,6 +136,8 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/chat/llm` | `{model, topic, turns?, pass_mark?, learn?, ollama_model?, url?}` | Ollama talks with the model and marks its replies; 502 without Ollama |
 | `POST /api/ollama/corpus` | `{prompt, lines?, ollama_model?, url?}` | sentences Ollama writes |
 | `GET /api/status` | | every model in brief, uploads, checkpoints |
+| `GET /api/guard`, `POST /api/guard/{new,settings,blame,clear,judge,forget,reset,save,load}` | `{texts \| text, reason?, severity?, amount?, threshold?, min_coverage?, path?}` | the guard: blame failures with a reason, clear good text, judge text (reject / suspect / pass, risk, coverage, reasons, spans) |
+| `guard: true` on `/api/{chain,ngram}/generate`, `/feedback`, `/api/converse`, `/api/chat/llm`, `/api/network/talk` | `{over_sample?, teach_guard?}` | the guard in front: rejected samples vetoed (over-sampled), bad feedback and low marks blamed, replies judged |
 | `GET /api/network` | | the network the server holds beside the machine (`enc>dec` until another is made): architecture, layers, summary |
 | `POST /api/network/new` | `{arch?, alphabet?, seed?, accepting?, credit?, layer_discount?, temperature?, discount?, life?}` | a fresh network |
 | `POST /api/network/talk` | `{text}` | its reply - English from a translator (with its sounds), yes / no from a classifier - and the trace, layer by layer |
@@ -156,6 +160,7 @@ or 405. `tests/server.rs` exercises every route over a real socket.
 | `src/chain.rs` | the chain: one input a node, walks that shorten with confidence |
 | `src/corpus.rs`, `src/archive.rs` | reading a corpus: text, markup, documents; zip (ZIP64), tar, gzip streamed |
 | `src/routes.rs` | the language models' routes, uploads, checkpoints, conversations |
+| `src/guard.rs` | the guard: the negative network that vetoes known failures |
 | `src/media.rs` | text, audio, images, differences and video as symbols; the synthetic data sets |
 | `src/languages.rs` | the four regular languages and their examples |
 | `src/geometry.rs` | the cube's central node and shells; `center_out`, the order the code is laid out in |

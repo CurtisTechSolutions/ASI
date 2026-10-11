@@ -2511,3 +2511,39 @@ ol.dialogue .meta .inline-form input {
   color: var(--text);
   min-width: 14em;
 }
+
+/* the guard: a reply's verdict beside it, opened in place, and what a guarded draw vetoed */
+button.link.guard-why {
+  font-size: 12px;
+  text-decoration: underline;
+  color: var(--muted);
+}
+
+.guard-open {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.guard-open .verdict {
+  margin-top: 6px;
+}
+
+ul.vetoes {
+  margin: 4px 0 6px;
+  padding-left: 18px;
+  font-size: 12px;
+}
+
+ul.vetoes li {
+  margin: 2px 0;
+  word-break: break-word;
+}
+
+p.blamed mark[style] {
+  box-shadow: none;
+}
+
+.meta .badge.tight,
+.speaker .badge.tight {
+  vertical-align: middle;
+}
