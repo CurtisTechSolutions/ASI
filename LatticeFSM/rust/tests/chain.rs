@@ -101,3 +101,48 @@ fn the_file_and_generation() {
     assert!(Chain::new(1, "char", true, 0.5).is_err());
     assert!(Chain::new(4, "char", true, 1.5).is_err());
 }
+
+#[test]
+fn parallel_batches_preserve_chain_learning_and_measurements() {
+    let lines: Vec<String> = (0..280)
+        .map(|i| {
+            if i % 29 == 0 {
+                String::new()
+            } else {
+                format!("the cat {} sat on the mat ", i % 11).repeat(3)
+            }
+        })
+        .collect();
+    let mut batched = Chain::new(4, "word", true, 0.9).unwrap();
+    batched.predict = true;
+    batched.self_credit = 0.25;
+    let mut serial = Chain::from_json(&batched.to_json()).unwrap();
+    serial.predict = true;
+    serial.self_credit = 0.25;
+    batched.train_lines(&lines, None);
+    let seqs: Vec<_> = lines.iter().map(|line| serial.tokens(line)).collect();
+    for tokens in seqs.iter().filter(|s| !s.is_empty()) {
+        serial.train_tokens(tokens);
+    }
+    assert_eq!(batched.to_json().dump(), serial.to_json().dump());
+    let before = batched.to_json().dump();
+    let mut logp = 0.0;
+    let (mut count, mut right, mut depth) = (0, 0, 0);
+    let mut depths = vec![0; batched.nodes];
+    for tokens in seqs.iter().filter(|s| !s.is_empty()) {
+        for (j, (token, prob, d)) in serial.score_tokens(tokens).into_iter().enumerate() {
+            logp += prob.max(1e-300).ln();
+            right += usize::from(serial.predict_tokens(&tokens[..j], 1)[0].0 == token);
+            count += 1;
+            depth += d;
+            depths[d] += 1;
+        }
+    }
+    let got = batched.evaluate(&seqs, None);
+    assert_eq!(got.tokens, count);
+    assert_eq!(got.perplexity, Some((-logp / count as f64).exp()));
+    assert_eq!(got.accuracy, Some(right as f64 / count as f64));
+    assert_eq!(got.depth, Some(depth as f64 / count as f64));
+    assert_eq!(got.depths, depths);
+    assert_eq!(batched.to_json().dump(), before);
+}

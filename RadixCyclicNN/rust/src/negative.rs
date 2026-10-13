@@ -1400,7 +1400,7 @@ impl Model {
         let enc = self.g.enc;
         let kept: Vec<&String> = texts.iter().filter(|t| enc.len(t) >= enc.n).collect();
         let skipped_short = texts.len() - kept.len();
-        let grams: Vec<Vec<String>> = kept.iter().map(|t| enc.encode(t)).collect();
+        let grams: Vec<Vec<String>> = self.encode_all(&kept);
         if blame {
             self.meta.trained_texts.add(kept.len() as i64);
             self.meta

@@ -845,12 +845,12 @@ impl Model {
         } else {
             None
         };
-        let grams: Vec<Vec<String>> = kept.iter().map(|t| enc.encode(t)).collect();
+        let grams: Vec<Vec<String>> = self.encode_all(&kept);
         let mut transitions = self.observe_grams(origin, &grams, true)?;
         let rehearsed = plan.as_ref().map(|p| p.replayed()).unwrap_or_default();
         if !rehearsed.is_empty() {
             // a rehearsed text is not new: nothing to count
-            let again: Vec<Vec<String>> = rehearsed.iter().map(|t| enc.encode(t)).collect();
+            let again: Vec<Vec<String>> = self.encode_all(&rehearsed.iter().collect::<Vec<_>>());
             self.observe_grams(origin, &again, false)?;
             transitions = self.observe_grams(origin, &grams, false)?;
         }
@@ -869,11 +869,8 @@ impl Model {
             let started = Instant::now();
             if let Some(p) = plan.as_ref().filter(|p| !p.plain()) {
                 // this epoch's texts: the order, the curriculum and the rehearsal
-                let walked: Vec<Vec<String>> = p
-                    .epoch_texts(k, self.meta.epochs_total.bumped(1).value)
-                    .iter()
-                    .map(|t| enc.encode(t))
-                    .collect();
+                let epoch_texts = p.epoch_texts(k, self.meta.epochs_total.bumped(1).value);
+                let walked = self.encode_all(&epoch_texts.iter().collect::<Vec<_>>());
                 transitions = self.observe_grams(origin, &walked, false)?;
                 observed_version = self.g.structure_version;
                 arrays_version = None;

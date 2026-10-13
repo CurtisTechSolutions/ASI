@@ -41,6 +41,7 @@ pub mod machine;
 pub mod media;
 pub mod network;
 pub mod ngram;
+pub mod parallel;
 pub mod phonetic;
 pub mod rng;
 pub mod routes;
