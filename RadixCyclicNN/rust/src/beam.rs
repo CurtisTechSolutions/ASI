@@ -120,9 +120,7 @@ fn less_state(a: &BeamState, b: &BeamState, traversal: Traversal) -> std::cmp::O
 
 /// The knobs of one beam.
 #[derive(Clone, Copy)]
-struct BeamRun<'a> {
-    /// The punishment traversal's cost function, or `None` for the graph's own.
-    costs: Option<&'a PenaltyCosts>,
+struct BeamRun {
     start_node: usize,
     start_chars: usize,
     min_chars: usize,
@@ -140,7 +138,7 @@ struct BeamRun<'a> {
 }
 
 /// One beam: the k best (or, with `worst`, the k worst) complete paths.
-fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
+fn run_beam(g: &Graph, o: BeamRun, costs: Option<&PenaltyCosts>) -> (Vec<Finished>, usize) {
     let mut entries: Vec<BeamEntry> = vec![BeamEntry {
         node: o.start_node,
         parent: None,
@@ -222,7 +220,7 @@ fn run_beam(g: &Graph, o: BeamRun<'_>) -> (Vec<Finished>, usize) {
                 None if crate::graph::is_origin(st.node) => Some(st.node),
                 None => None,
             };
-            g.step_costs_into(st.node, prev, o.costs, &mut children);
+            g.step_costs_into(st.node, prev, costs, &mut children);
             onward(&mut children);
             if o.traversal == Traversal::LeastPunished && !o.worst {
                 // the top beam refuses a blamed step; the bottom one is looking for the
@@ -494,9 +492,8 @@ impl Graph {
     /// The k best complete paths (best first) and the k worst ones not among
     /// them, plus the expansions both beams made.
     ///
-    /// The Go port runs the two beams on two goroutines; here they run in turn
-    /// on the calling thread, which is why the benchmark compares the two ports
-    /// with one worker each as well as at their own default parallelism.
+    /// Independent top and bottom beams run concurrently when workers permit.
+    /// An uncapped `to_end` search stays ordered: its bottom cap needs the top result.
     pub fn beam_predict(
         &mut self,
         start_node: usize,
@@ -545,7 +542,6 @@ impl Graph {
             return Ok((Vec::new(), Vec::new(), 0));
         }
         let run = BeamRun {
-            costs,
             start_node,
             start_chars,
             min_chars,
@@ -560,7 +556,32 @@ impl Graph {
             traversal: opts.traversal,
             diversity: opts.diversity,
         };
-        let (best, expanded) = run_beam(self, run);
+        let mut concurrent_worst = None;
+        let (best, expanded) =
+            if (max_chars.is_some() || !opts.to_end) && crate::parallel::effective_workers(self.workers) > 1 {
+                // PenaltyCosts caches are local to a search and are not Sync.
+                // Give each beam its own cache, sharing only the prepared graph.
+                let mut jobs = [
+                    (costs.map(PenaltyCosts::fork), None),
+                    (costs.map(PenaltyCosts::fork), None),
+                ];
+                crate::parallel::parallel_fill(&mut jobs, self.workers, |i, (cache, result)| {
+                    *result = Some(run_beam(
+                        self,
+                        BeamRun {
+                            worst: i == 1,
+                            diversity: if i == 1 { 0.0 } else { run.diversity },
+                            ..run
+                        },
+                        cache.as_ref(),
+                    ));
+                });
+                let [(_, best), (_, worst)] = jobs;
+                concurrent_worst = worst;
+                best.expect("the top beam")
+            } else {
+                run_beam(self, run, costs)
+            };
         let mut bottom_cap = max_chars;
         if bottom_cap.is_none() && opts.to_end {
             // the bottom cap depends on the best side
@@ -577,15 +598,18 @@ impl Graph {
             }
             bottom_cap = Some((2 * emitted + longest + 8).max(min_chars).max(16));
         }
-        let (worst_paths, expanded_worst) = run_beam(
-            self,
-            BeamRun {
-                cap: bottom_cap,
-                worst: true,
-                diversity: 0.0, // only the top side is spread out
-                ..run
-            },
-        );
+        let (worst_paths, expanded_worst) = concurrent_worst.unwrap_or_else(|| {
+            run_beam(
+                self,
+                BeamRun {
+                    cap: bottom_cap,
+                    worst: true,
+                    diversity: 0.0, // only the top side is spread out
+                    ..run
+                },
+                costs,
+            )
+        });
         let expanded = expanded + expanded_worst;
 
         let mut top = Vec::with_capacity(best.len());

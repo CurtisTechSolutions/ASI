@@ -197,7 +197,8 @@ pub type Sequence = Vec<String>;
 
 /// Every sequence under `paths`, one at a time, handed to `f(path, label, tokens)`: for `base64` every file's bytes
 /// (archives' members') 57 bytes - 76 letters - a sequence; for the other units every non-empty line of every text
-/// document, tokenized.  Nothing is held but the sequence, so a corpus may be any size.
+/// document, tokenized in bounded batches on the CPU workers. Callbacks remain in
+/// corpus order; the whole corpus is never held in memory.
 pub fn corpus_stream(
     paths: &[String],
     unit: &str,
@@ -216,15 +217,37 @@ pub fn corpus_stream(
         });
     }
     crate::corpus::text_documents(paths, &mut |path, label, kind, r| {
-        crate::corpus::text_lines(kind, r, &mut |line| {
-            let toks = tokenize(&line, unit, lower);
-            if toks.is_empty() {
-                Ok(())
-            } else {
-                f(path, label, toks)
+        let mut lines = Vec::new();
+        let mut bytes = 0usize;
+        let mut flush = |lines: &mut Vec<String>| -> Result<(), String> {
+            let sequences = tokenize_lines(lines, unit, lower);
+            lines.clear();
+            for toks in sequences.into_iter().filter(|t| !t.is_empty()) {
+                f(path, label, toks)?;
             }
-        })
+            Ok(())
+        };
+        crate::corpus::text_lines(kind, r, &mut |line| {
+            bytes += line.len();
+            lines.push(line);
+            if lines.len() >= 256 || bytes >= 1 << 20 {
+                flush(&mut lines)?;
+                bytes = 0;
+            }
+            Ok(())
+        })?;
+        flush(&mut lines)
     })
+}
+
+/// Tokenize independent lines concurrently, retaining their original order.
+pub(crate) fn tokenize_lines(lines: &[String], unit: &str, lower: bool) -> Vec<Sequence> {
+    let workers = if lines.iter().map(String::len).sum::<usize>() < 8192 {
+        1
+    } else {
+        0
+    };
+    crate::parallel::parallel_map(lines, workers, |line| tokenize(line, unit, lower))
 }
 
 /// Every document under `paths` as (label, token sequences): `corpus_stream`, gathered.
@@ -746,18 +769,20 @@ impl NGram {
 
     /// Every line one sequence; returns the tokens counted.
     pub fn train_lines(&mut self, lines: &[String], source: Option<&str>) -> usize {
-        let (mut n, mut count) = (0, 0);
-        for line in lines {
-            let toks = self.tokens(line);
-            if !toks.is_empty() {
-                n += self.train_tokens(&toks);
-                count += 1;
+        let mut total = 0;
+        let mut count = 0;
+        for batch in lines.chunks(256) {
+            for toks in tokenize_lines(batch, &self.unit, self.lower) {
+                if !toks.is_empty() {
+                    total += self.train_tokens(&toks);
+                    count += 1;
+                }
             }
         }
         if let Some(s) = source {
-            self.sources.push((s.to_string(), count, n));
+            self.sources.push((s.to_string(), count, total));
         }
-        n
+        total
     }
 
     /// Every sequence of tokens trained on; returns the tokens counted.
@@ -846,6 +871,11 @@ impl NGram {
     /// `P_KN(w | ctx)`: interpolated Kneser-Ney, from the uniform floor up through every order.
     pub fn kn(&mut self, ctx: &[u32], w: u32) -> f64 {
         self.derive();
+        self.kn_ready(ctx, w)
+    }
+
+    // Derived tables are immutable for the duration of a measurement.
+    fn kn_ready(&self, ctx: &[u32], w: u32) -> f64 {
         let mut p = self.floor(w);
         let tables = self.tables.as_ref().expect("derived");
         for (k, t) in tables.iter().enumerate().skip(1) {
@@ -862,22 +892,27 @@ impl NGram {
         p
     }
 
-    fn boost(&mut self, ctx: &[u32]) -> Option<(BTreeMap<u32, [f64; 4]>, f64)> {
+    fn boost(&self, ctx: &[u32]) -> Option<(BTreeMap<u32, [f64; 4]>, f64)> {
         let recs = self.edges.get(ctx)?.clone();
         if recs.is_empty() || self.stimulation == 0.0 {
             return None;
         }
         let mut z = 1.0;
         for (&w, rec) in &recs {
-            z += self.kn(ctx, w) * (rec[0].powf(self.stimulation) - 1.0);
+            z += self.kn_ready(ctx, w) * (rec[0].powf(self.stimulation) - 1.0);
         }
         Some((recs, z))
     }
 
     /// `P(w | ctx)`: Kneser-Ney, every credited edge out of `ctx` weighted by its width ^ stimulation.
     pub fn prob(&mut self, ctx: &[u32], w: u32) -> f64 {
+        self.derive();
+        self.prob_ready(ctx, w)
+    }
+
+    fn prob_ready(&self, ctx: &[u32], w: u32) -> f64 {
         let boost = self.boost(ctx);
-        let p = self.kn(ctx, w);
+        let p = self.kn_ready(ctx, w);
         match boost {
             None => p,
             Some((recs, z)) => {
@@ -893,6 +928,10 @@ impl NGram {
     /// `P(w | ctx)` for every id (`<s>` has 0), computed order by order as `prob` computes it.
     pub fn distribution(&mut self, ctx: &[u32]) -> Vec<f64> {
         self.derive();
+        self.distribution_ready(ctx)
+    }
+
+    fn distribution_ready(&self, ctx: &[u32]) -> Vec<f64> {
         let floor = 1.0 / (self.vocab.len() - 1) as f64;
         let mut out = vec![floor; self.vocab.len()];
         out[0] = 0.0;
@@ -1055,31 +1094,59 @@ impl NGram {
     /// Perplexity, bits a token, and the next-token accuracy (first guess, first five) over the first `max_ranked`
     /// positions, on held-out lines.  Nothing moves.
     pub fn evaluate(&mut self, seqs: &[Sequence], max_ranked: usize) -> Evaluation {
+        self.derive();
         let (mut logp, mut n, mut ranked, mut top1, mut top5) = (0.0f64, 0usize, 0usize, 0usize, 0usize);
-        for toks in seqs {
-            if toks.is_empty() {
-                continue;
-            }
-            let mut ids: Vec<u32> = toks.iter().map(|t| self.lookup(t)).collect();
-            ids.push(1);
-            let mut hist: Vec<String> = Vec::new();
-            for (j, &w) in ids.iter().enumerate() {
-                let ctx = self.context(&hist);
-                let p = self.prob(&ctx, w);
-                logp += p.max(1e-300).ln();
+        for batch in seqs.chunks(256) {
+            let mut offset = n;
+            let jobs: Vec<_> = batch
+                .iter()
+                .map(|toks| {
+                    let start = offset;
+                    if !toks.is_empty() {
+                        offset += toks.len() + 1;
+                    }
+                    (toks, start)
+                })
+                .collect();
+            let workers = if offset - n < 256 { 1 } else { 0 };
+            let measured = crate::parallel::parallel_map(&jobs, workers, |&(toks, start)| {
+                if toks.is_empty() {
+                    return Vec::new();
+                }
+                let mut ids: Vec<u32> = toks.iter().map(|t| self.lookup(t)).collect();
+                ids.push(1);
+                let mut hist: Vec<String> = Vec::new();
+                ids.iter()
+                    .enumerate()
+                    .map(|(j, &w)| {
+                        let ctx = self.context(&hist);
+                        let logp = self.prob_ready(&ctx, w).max(1e-300).ln();
+                        let (first, five) = if start + j < max_ranked {
+                            let dist = self.distribution_ready(&ctx);
+                            let order = NGram::ranked(&dist, 5);
+                            (order[0] == w as usize, order.contains(&(w as usize)))
+                        } else {
+                            (false, false)
+                        };
+                        hist.push(if j < toks.len() {
+                            toks[j].clone()
+                        } else {
+                            EOS.to_string()
+                        });
+                        (logp, first, five)
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // Fold individual positions in corpus order, retaining the exact
+            // floating-point sum and the global max_ranked cutoff.
+            for (p, first, five) in measured.into_iter().flatten() {
+                logp += p;
                 n += 1;
                 if ranked < max_ranked {
-                    let dist = self.distribution(&ctx);
-                    let order = NGram::ranked(&dist, 5);
-                    top1 += (order[0] == w as usize) as usize;
-                    top5 += order.contains(&(w as usize)) as usize;
+                    top1 += first as usize;
+                    top5 += five as usize;
                     ranked += 1;
                 }
-                hist.push(if j < toks.len() {
-                    toks[j].clone()
-                } else {
-                    EOS.to_string()
-                });
             }
         }
         if n == 0 {

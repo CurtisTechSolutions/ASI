@@ -379,8 +379,17 @@ impl Chain {
 
     /// Every line one sequence; returns the inputs learned.
     pub fn train_lines(&mut self, lines: &[String], source: Option<&str>) -> usize {
-        let seqs: Vec<Sequence> = lines.iter().map(|l| self.tokens(l)).collect();
-        self.train_sequences(&seqs, source)
+        let mut total = 0;
+        let mut count = 0;
+        for batch in lines.chunks(256) {
+            let seqs = crate::ngram::tokenize_lines(batch, &self.unit, self.lower);
+            count += seqs.iter().filter(|s| !s.is_empty()).count();
+            total += self.train_sequences(&seqs, None);
+        }
+        if let Some(s) = source {
+            self.sources.push((s.to_string(), count, total));
+        }
+        total
     }
 
     pub fn train_sequences(&mut self, seqs: &[Sequence], source: Option<&str>) -> usize {
@@ -679,24 +688,36 @@ impl Chain {
     pub fn evaluate(&self, seqs: &[Sequence], confidence: Option<f64>) -> ChainEvaluation {
         let (mut logp, mut n, mut right, mut depth) = (0.0, 0usize, 0usize, 0usize);
         let mut depths = vec![0usize; self.nodes];
-        for toks in seqs {
-            if toks.is_empty() {
-                continue;
-            }
-            let mut ids = self.history_ids(toks);
-            ids.push(1);
-            for i in 1..ids.len() {
-                let w = ids[i];
-                let d = self.walk(&ids[..i], confidence);
-                let path = self.path(&ids[..i], d);
-                let p = if path.is_empty() {
-                    self.uniform()
-                } else {
-                    self.p(&path, w)
-                };
-                logp += p.max(1e-300).ln();
-                right += (self.guess(&path) == w) as usize;
-                let d = d.unwrap_or(0);
+        for batch in seqs.chunks(256) {
+            let workers = if batch.iter().map(Vec::len).sum::<usize>() < 256 {
+                1
+            } else {
+                0
+            };
+            let measured = crate::parallel::parallel_map(batch, workers, |toks| {
+                if toks.is_empty() {
+                    return Vec::new();
+                }
+                let mut ids = self.history_ids(toks);
+                ids.push(1);
+                (1..ids.len())
+                    .map(|i| {
+                        let w = ids[i];
+                        let d = self.walk(&ids[..i], confidence);
+                        let path = self.path(&ids[..i], d);
+                        let p = if path.is_empty() {
+                            self.uniform()
+                        } else {
+                            self.p(&path, w)
+                        };
+                        (p.max(1e-300).ln(), self.guess(&path) == w, d.unwrap_or(0))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            // Preserve the serial floating-point summation order.
+            for (p, correct, d) in measured.into_iter().flatten() {
+                logp += p;
+                right += correct as usize;
                 depth += d;
                 depths[d] += 1;
                 n += 1;
@@ -725,7 +746,7 @@ impl Chain {
 
     /// `evaluate` at every threshold: how deep the walks go against how well they predict.
     pub fn sweep(&self, seqs: &[Sequence], thresholds: &[f64]) -> Vec<(f64, ChainEvaluation)> {
-        thresholds.iter().map(|&t| (t, self.evaluate(seqs, Some(t)))).collect()
+        crate::parallel::parallel_map(thresholds, 0, |&t| (t, self.evaluate(seqs, Some(t))))
     }
 
     // ---- credit --------------------------------------------------------------------------------------------------

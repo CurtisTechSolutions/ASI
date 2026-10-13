@@ -737,12 +737,28 @@ impl Block {
                 offsets,
                 ..
             } => {
-                let mut outs: Vec<Vec<usize>> = Vec::new();
+                let tracing = trace.is_some();
+                let mut jobs: Vec<_> = branches
+                    .iter_mut()
+                    .zip(offsets.iter())
+                    .map(|(b, &off)| (b, off, Vec::new(), false, Vec::new()))
+                    .collect();
+                // Thread startup is only worthwhile for substantial walks.
+                let workers = if symbols.len() < 128 { 1 } else { 0 };
+                crate::parallel::parallel_fill(&mut jobs, workers, |_, (b, off, out, accepted, steps)| {
+                    let mut local_trace = tracing.then_some(&mut *steps);
+                    let (written, yes) = b.forward(symbols, quiet, temperature, &mut local_trace);
+                    *out = written.into_iter().map(|s| s + *off).collect();
+                    *accepted = yes;
+                });
+                let mut outs = Vec::with_capacity(jobs.len());
                 let mut yes = 0;
-                for (b, &off) in branches.iter_mut().zip(offsets.iter()) {
-                    let (out, a) = b.forward(symbols, quiet, temperature, trace);
-                    outs.push(out.into_iter().map(|s| s + off).collect());
-                    yes += a as usize;
+                for (_, _, out, accepted, steps) in jobs {
+                    outs.push(out);
+                    yes += accepted as usize;
+                    if let Some(trace) = trace.as_deref_mut() {
+                        trace.extend(steps);
+                    }
                 }
                 let merged = match merge {
                     Merge::Concat => outs.concat(),

@@ -169,6 +169,16 @@ impl PenaltyCosts {
         })
     }
 
+    /// Same scoring rule, with a private cache for a concurrent search.
+    pub(crate) fn fork(&self) -> Self {
+        Self {
+            penalty_scale: self.penalty_scale,
+            merit_scale: self.merit_scale,
+            cache: std::cell::RefCell::new(map()),
+            version: std::cell::Cell::new(-1),
+        }
+    }
+
     /// `p`'s out-edges as a walk that arrived from `prev` sees them.
     pub fn costs(&self, g: &Graph, p: usize, prev: Option<usize>) -> Vec<ChildCost> {
         let version = g.version().value;

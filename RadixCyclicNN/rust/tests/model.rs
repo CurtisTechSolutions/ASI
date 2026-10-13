@@ -247,3 +247,40 @@ fn the_workers_do_not_change_the_answer() {
     };
     assert_eq!(run(1), run(4));
 }
+
+#[test]
+fn workers_preserve_training_counts_and_both_beams() {
+    let corpus: Vec<String> = (0..79).map(|i| CORPUS[i % CORPUS.len()].repeat(i % 7 + 1)).collect();
+    let mut serial = Model::new(7, GraphOptions::default()).unwrap();
+    serial.workers = 1;
+    serial.g.workers = 1;
+    let mut parallel = Model::new(7, GraphOptions::default()).unwrap();
+    parallel.workers = 4;
+    parallel.g.workers = 4;
+    let options = TrainOptions {
+        epochs: 3,
+        chunk_size: 23,
+        ..Default::default()
+    };
+    serial.train(&corpus, &options).unwrap();
+    parallel.train(&corpus, &options).unwrap();
+    parallel.g.check_invariants(&corpus, true).unwrap();
+    assert_eq!(serial.g.to_doc(), parallel.g.to_doc());
+    for traversal in ["reward", "least-punished", "punishment"] {
+        for (to_end, max_chars) in [(false, None), (true, Some(24)), (true, None)] {
+            let options = PredictOptions {
+                k: 3,
+                length: 6,
+                traversal: traversal.into(),
+                to_end,
+                max_length: max_chars,
+                diversity: 0.5,
+                ..Default::default()
+            };
+            assert_eq!(
+                format!("{:?}", serial.predict("the cat", &options).unwrap()),
+                format!("{:?}", parallel.predict("the cat", &options).unwrap())
+            );
+        }
+    }
+}

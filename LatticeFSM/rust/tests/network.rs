@@ -127,3 +127,41 @@ fn english_in_and_out() {
     }
     assert!(net("enc>13", &ab(), 1).translate("cat").is_err());
 }
+
+#[test]
+fn concurrent_branches_keep_rng_training_and_trace_order() {
+    use latticefsm::parallel::parallel_fill;
+    for merge in [Merge::Concat, Merge::Interleave] {
+        for vote in [Vote::Majority, Vote::Any, Vote::All] {
+            let mut parallel =
+                Network::from_architecture("(3>3|(3|3))>3", &ab(), 17, merge, vote, &Settings::default()).unwrap();
+            let mut serial = Network::from_json(&parallel.to_json()).unwrap();
+            let text = "abba".repeat(64);
+            let symbols = parallel.tokenize(&text).unwrap();
+            for _ in 0..3 {
+                let mut expected = None;
+                // Two outer jobs enable the nesting guard without changing
+                // global environment variables in the parallel test harness.
+                let mut jobs = [Some((&mut serial, &mut expected)), None];
+                parallel_fill(&mut jobs, 2, |_, job| {
+                    if let Some((net, result)) = job {
+                        **result = Some(net.forward(&symbols, false, None));
+                    }
+                });
+                assert_eq!(parallel.forward(&symbols, false, None), expected.take().unwrap());
+                assert_eq!(parallel.to_json().dump(), serial.to_json().dump());
+            }
+            let mut expected = None;
+            let mut jobs = [Some((&mut serial, &mut expected)), None];
+            parallel_fill(&mut jobs, 2, |_, job| {
+                if let Some((net, result)) = job {
+                    **result = Some(net.trace(&text).unwrap());
+                }
+            });
+            let (steps, output, accepted) = parallel.trace(&text).unwrap();
+            let (want_steps, want_output, want_accepted) = expected.take().unwrap();
+            assert_eq!((output, accepted), (want_output, want_accepted));
+            assert_eq!(format!("{steps:?}"), format!("{want_steps:?}"));
+        }
+    }
+}
