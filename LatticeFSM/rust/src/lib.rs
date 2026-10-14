@@ -22,6 +22,7 @@
 //! ```
 
 pub mod archive;
+pub mod autotemp;
 pub mod autotrain;
 pub mod b64;
 pub mod chain;

@@ -714,3 +714,60 @@ fn training_runs_as_a_job_and_the_server_answers_meanwhile() {
     assert_eq!(post(&addr, "/api/job/stop", "{}").0, 400);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_reply_that_is_no_answer_is_drawn_again_hotter() {
+    let addr = serve(40);
+    // a model that has learned nothing ends every reply at once: nothing at every rung, and it says so
+    post(&addr, "/api/ngram/new", r#"{"order":2,"unit":"word"}"#);
+    let (status, r) = post(
+        &addr,
+        "/api/ngram/generate",
+        r#"{"text":"hi","auto_temperature":true,"max_temperature":0.4,"tries":2}"#,
+    );
+    assert_eq!(status, 200);
+    let auto = r.get("samples").unwrap().as_array().unwrap()[0]
+        .get("auto")
+        .unwrap()
+        .clone();
+    assert_eq!(auto.get("found"), Some(&Json::Bool(false)));
+    assert_eq!(auto.str_or("why", ""), "nothing");
+    let attempts = auto.get("attempts").unwrap().as_array().unwrap();
+    let temps: Vec<f64> = attempts.iter().map(|a| a.num("temperature", -1.0)).collect();
+    assert_eq!(temps, vec![0.0, 0.2, 0.2, 0.4, 0.4]);
+    assert!(auto.str_or("note", "").starts_with("no answer up to 0.4"));
+    // one that goes round: the greedy reply loops (a context comes back), a hotter one gets out
+    post(
+        &addr,
+        "/api/ngram/text",
+        r#"{"text":"a b a b a b a b\na b c d e f g\na b a b a b a b"}"#,
+    );
+    let (_, r) = post(
+        &addr,
+        "/api/ngram/generate",
+        r#"{"text":"a","max_tokens":12,"auto_temperature":true}"#,
+    );
+    let sample = r.get("samples").unwrap().as_array().unwrap()[0].clone();
+    let auto = sample.get("auto").unwrap();
+    let attempts = auto.get("attempts").unwrap().as_array().unwrap();
+    assert_eq!(attempts[0].str_or("why", ""), "a loop");
+    assert_eq!(attempts[0].num("temperature", -1.0), 0.0);
+    if auto.get("found") == Some(&Json::Bool(true)) {
+        assert!(auto.num("temperature", 0.0) > 0.0);
+        assert_eq!(sample.num("temperature", -1.0), auto.num("temperature", 0.0));
+    }
+    // without it the reply is the greedy one, and says nothing of a ladder
+    let (_, plain) = post(&addr, "/api/ngram/generate", r#"{"text":"a","max_tokens":12}"#);
+    let first = plain.get("samples").unwrap().as_array().unwrap()[0].clone();
+    assert!(first.get("auto").is_none());
+    assert_eq!(first.get("completion"), attempts[0].get("completion"));
+    // guarded too: every sample still carries the guard's verdict
+    let (status, g) = post(
+        &addr,
+        "/api/ngram/generate",
+        r#"{"text":"a","max_tokens":12,"auto_temperature":true,"guard":true}"#,
+    );
+    assert_eq!(status, 200);
+    assert!(g.get("samples").unwrap().as_array().unwrap()[0].get("guard").is_some());
+    assert!(g.get("guard").unwrap().num("judged", 0.0) >= 1.0);
+}

@@ -3,15 +3,21 @@
  * learned first, then the model's reply is its own continuation of it - its prediction of what comes next.
  */
 import { api } from "./api.js";
-import { joinContinuation } from "./lm.js";
+import { MAX_TEMPERATURE, autoBody, joinContinuation } from "./lm.js";
 
 /**
  * Say `message` to model `lm`: `{text, reply, tokens, depths, unit, learned}` - the reply the continuation,
  * with its tokens (and, for the chain, how deep each walk went). With `learn`, the message is trained on
  * first (`POST /api/{m}/text`), so the model hears what you say. With `guard`, the guard judges the reply (and
  * vetoes it for another if it rejects it): the turn carries `guard` (its verdict in brief) and `vetoed` (how many).
+ * With `auto`, a reply that is no answer (nothing, no words, a loop) is drawn again hotter, up to `maxTemperature`:
+ * the turn carries `auto` (the temperature it was found at, and the draws before it).
  */
-export async function askModel(lm, message, { learn = false, maxTokens = 40, temperature = 0, guard = false } = {}) {
+export async function askModel(
+  lm,
+  message,
+  { learn = false, maxTokens = 40, temperature = 0, guard = false, auto = false, maxTemperature = MAX_TEMPERATURE } = {},
+) {
   let learned = null;
   if (learn) {
     const r = await api.lmLearn(lm, message);
@@ -23,6 +29,7 @@ export async function askModel(lm, message, { learn = false, maxTokens = 40, tem
     temperature,
     seed: Math.floor(Math.random() * 1e9),
     ...(guard ? { guard: true } : {}),
+    ...autoBody(auto, maxTemperature),
   });
   const sample = r && Array.isArray(r.samples) && r.samples.length ? r.samples[0] : null;
   const unit = r ? r.unit : undefined;
@@ -38,6 +45,8 @@ export async function askModel(lm, message, { learn = false, maxTokens = 40, tem
     learned,
     guard: sample && sample.guard ? sample.guard : null,
     vetoed: r && r.guard ? Number(r.guard.vetoed) || 0 : 0,
+    // how auto-temperature found the reply (the temperature it was drawn at, the draws before it), when it was on
+    auto: sample && sample.auto ? sample.auto : null,
     guardSummary: r && r.guard ? r.guard : null,
   };
 }

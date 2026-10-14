@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { useLmInfo } from "../hooks/useLmInfo.js";
-import { joinContinuation, lmLabel } from "../lm.js";
+import { MAX_TEMPERATURE, autoBody, joinContinuation, lmLabel } from "../lm.js";
 import { asArray, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
+import { AutoBadge, AutoTempFields } from "./AutoTemperature.jsx";
 import HearButton from "./HearButton.jsx";
 import { CheckField, NumberField, TextField } from "./Fields.jsx";
 import { RateButtons } from "./RatingsCard.jsx";
@@ -24,6 +25,8 @@ export default function ConversePanel({ lm, tick, onMoved }) {
   const [maxTokens, setMaxTokens] = useStoredState("converse.max", "60");
   const [temperature, setTemperature] = useStoredState("converse.temperature", "0");
   const [guard, setGuard] = useStoredState("converse.guard", false);
+  const [auto, setAuto] = useStoredState("converse.auto", true);
+  const [autoTop, setAutoTop] = useStoredState("converse.autoTop", String(MAX_TEMPERATURE));
   const [result, setResult] = useState(null); // {model, opening, turns}
   const [rated, setRated] = useState({});
   const [note, setNote] = useState(null);
@@ -50,6 +53,7 @@ export default function ConversePanel({ lm, tick, onMoved }) {
         temperature: parseNumber(temperature, 0),
         seed: Math.floor(Math.random() * 1e9),
         ...(guard ? { guard: true } : {}),
+        ...autoBody(auto, parseNumber(autoTop, MAX_TEMPERATURE)),
       });
       setResult({ model: lm, opening, turns: asArray(r && r.turns) });
       setRated({});
@@ -98,6 +102,7 @@ export default function ConversePanel({ lm, tick, onMoved }) {
           <NumberField label="Turns" value={turns} onChange={setTurns} min="1" max="40" step="1" />
           <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min="1" step="1" hint="a turn" />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" />
+          <AutoTempFields on={auto} onChange={setAuto} top={autoTop} onTop={setAutoTop} />
         </div>
         <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard judges every turn, and vetoes a rejected one" />
         <div className="actions">
@@ -126,6 +131,7 @@ export default function ConversePanel({ lm, tick, onMoved }) {
                   <b>{t.speaker || (i % 2 ? "B" : "A")}</b>
                   {t.depths ? <DepthNote depths={t.depths} maxDepth={maxDepth} /> : null}
                   <GuardBadge guard={t.guard} text={t.text} vetoed={t.vetoed} />
+                  <AutoBadge auto={t.auto} />
                 </div>
                 <p className="bubble">{t.text || <span className="muted">(nothing follows)</span>}</p>
                 <div className="meta">

@@ -36,6 +36,7 @@ import random
 import sys
 
 from . import experiment
+from .autotemp import MAX_TEMPERATURE, TRIES, climb, climb_note
 from .compress import PRECISIONS, compress, fidelity, load_core
 from .languages import LANGUAGES, all_strings, examples, language
 from .machine import BASELINE, DEFAULT_ALPHABET, DEFAULT_STATES, DISCOUNT, LIFE, Machine, load_machine
@@ -478,6 +479,19 @@ def _fmt(v, digits=3) -> str:
     return "-" if v is None else f"{v:.{digits}f}"
 
 
+def _drawn(toks, unit):
+    """A draw for :func:`_climb`: the tokens, their text, and the tokens to keep."""
+    from .ngram import detokenize
+    return toks, detokenize(toks, unit), toks
+
+
+def _climb(args, start, context, draw):
+    """``generate --auto-temperature``: one reply drawn up the ladder from ``--temperature`` to ``--max-temperature``
+    (``autotemp.climb``)."""
+    top = MAX_TEMPERATURE if args.max_temperature is None else args.max_temperature
+    return climb(start, context, args.temperature, top, TRIES if args.tries is None else args.tries, args.seed, draw)
+
+
 def cmd_ngram(args) -> int:
     from .autotrain import Ollama, OllamaError, autotrain
     from .ngram import corpus_sequences, detokenize, split_lines
@@ -550,8 +564,17 @@ def cmd_ngram(args) -> int:
             if m.unit == "base64":
                 print(m.complete(text, args.max_tokens, args.temperature, rng))
                 continue
-            toks = m.generate(text, args.max_tokens, args.temperature, rng)
+            note = None
+            if args.auto_temperature:
+                start = m.prompt_tokens(text)
+                c = _climb(args, start, m.order - 1,
+                           lambda t, s: _drawn(m.continue_tokens(start, args.max_tokens, t, _random.Random(s)), m.unit))
+                toks, note = c.pick, climb_note(c.found, c.temperature, c.why, c.tried)
+            else:
+                toks = m.generate(text, args.max_tokens, args.temperature, rng)
             print(f"{text}{' ' if text and toks and m.unit == 'word' else ''}{detokenize(toks, m.unit)}")
+            if note:
+                print(f"  (auto-temperature: {note})")
     elif args.action == "evaluate":
         test = []
         for _, seqs in corpus_sequences(data, m.unit, m.lower):
@@ -643,7 +666,15 @@ def cmd_chain(args) -> int:
         rng = _random.Random(args.seed)
         for text in args.text or [""]:
             start = m.prompt_tokens(text)
-            toks, depths = m.continue_tokens(start, args.max_tokens, args.temperature, rng)
+            note = None
+            if args.auto_temperature:
+                def draw(t, s, start=start):
+                    toks, depths = m.continue_tokens(start, args.max_tokens, t, _random.Random(s))
+                    return toks, detokenize(toks, m.unit), (toks, depths)
+                c = _climb(args, start, m.nodes - 1, draw)
+                (toks, depths), note = c.pick, climb_note(c.found, c.temperature, c.why, c.tried)
+            else:
+                toks, depths = m.continue_tokens(start, args.max_tokens, args.temperature, rng)
             if m.unit == "base64":
                 line = detokenize(start + toks, m.unit)
             else:
@@ -651,6 +682,8 @@ def cmd_chain(args) -> int:
             mean = sum(depths) / len(depths) if depths else 0.0
             print(f"{line}\n  ({len(depths)} walks, {mean:.2f} input nodes traversed on average: "
                   f"{' '.join(str(d) for d in depths)})")
+            if note:
+                print(f"  (auto-temperature: {note})")
     elif args.action == "evaluate":
         test = _chain_test(m, args)
         ev = m.evaluate(test)
@@ -974,6 +1007,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("-k", type=int, default=10, help="predict: how many next tokens")
     q.add_argument("--max-tokens", type=int, default=30)
     q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")
+    q.add_argument("--auto-temperature", action="store_true", help="generate: a reply that is nothing, no words or a "
+                   "loop is drawn again, 0.2 hotter each rung, until it is an answer")
+    q.add_argument("--max-temperature", type=float, default=None, help="--auto-temperature: the hottest rung (0.8)")
+    q.add_argument("--tries", type=int, default=None, help="--auto-temperature: draws at each rung above 0 (3)")
     q.add_argument("--seed", type=int, default=1)
     q.add_argument("--amount", type=float, default=1.0, help="credit: positive rewards, negative punishes")
     q.add_argument("--ollama", action="store_true", help="autotrain: use Ollama (else the corpus only)")
@@ -1019,6 +1056,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("-k", type=int, default=10, help="predict: how many next inputs")
     q.add_argument("--max-tokens", type=int, default=40)
     q.add_argument("--temperature", type=float, default=0.0, help="generate: 0 is the likeliest every time")
+    q.add_argument("--auto-temperature", action="store_true", help="generate: a reply that is nothing, no words or a "
+                   "loop is drawn again, 0.2 hotter each rung, until it is an answer")
+    q.add_argument("--max-temperature", type=float, default=None, help="--auto-temperature: the hottest rung (0.8)")
+    q.add_argument("--tries", type=int, default=None, help="--auto-temperature: draws at each rung above 0 (3)")
     q.add_argument("--seed", type=int, default=1)
     q.add_argument("--amount", type=float, default=1.0, help="credit: positive rewards, negative punishes")
     q = add("base64", cmd_base64, "encode anything (a file or a text) as base64, or decode it back", machine=False,

@@ -25,6 +25,7 @@
 use std::env;
 use std::process;
 
+use latticefsm::autotemp;
 use latticefsm::autotrain::{self, Ollama};
 use latticefsm::b64;
 use latticefsm::chain::{load_chain, Chain};
@@ -149,6 +150,8 @@ commands
                          continuations of its contexts, a judge's credit on its texts; --rounds 3 --lines 20
                          --continuations 20 --judge 10 --patience 2 --keep FILE --save F --model M --url U
               predict TEXT... [-k 10]   the likeliest next tokens        generate TEXT... [--temperature 0]
+                         [--auto-temperature [--max-temperature 0.8] [--tries 3]]: a reply that is nothing, no
+                         words or a loop drawn again, 0.2 hotter each rung, until it is an answer
               evaluate --data ...       perplexity and next-token accuracy on held-out lines
               stats | credit TEXT --amount R | ollama (is it there, which models)
   chain ACTION     one input to a node (\"abc\": a in node 1, b in node 2, c in node 3), the output node predicts the
@@ -157,6 +160,7 @@ commands
                          (--no-predict, --self-credit R as for ngram)
               predict TEXT... [-k 10]   the input nodes, the walk and the likeliest next inputs
               generate TEXT... [--max-tokens 40]   the continuation and how deep every walk went
+                         [--auto-temperature ...] as for ngram
               evaluate | sweep [--thresholds 0,0.5,0.9,1]   accuracy and depth on held-out lines
               stats | credit TEXT --amount R   (without --load the data is learned first; --set-confidence T)
               teach TEXT REPLY [--max-rounds 100] [--threshold 0.95]; train --until [--max-rounds 20] [--threshold]
@@ -1387,18 +1391,37 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
                     );
                     continue;
                 }
-                let toks = m.generate(
-                    text,
-                    a.num("max-tokens", 30.0) as usize,
-                    a.num("temperature", 0.0),
-                    &mut rng,
-                );
+                let max = a.num("max-tokens", 30.0) as usize;
+                let (toks, note) = if a.has("auto-temperature") {
+                    let start = m.prompt_tokens(text);
+                    let (k, unit) = (m.order - 1, m.unit.clone());
+                    let c = autotemp::climb(
+                        &start,
+                        k,
+                        a.num("temperature", 0.0),
+                        a.num("max-temperature", autotemp::MAX_TEMPERATURE),
+                        a.num("tries", autotemp::TRIES as f64) as usize,
+                        a.num("seed", 1.0) as u64,
+                        |t, seed| {
+                            let toks = m.continue_tokens(&start, max, t, &mut Rng::new(seed));
+                            (toks.clone(), detokenize(&toks, &unit), toks)
+                        },
+                        |_, _| None,
+                    );
+                    let note = autotemp::climb_note(c.found, c.temperature, c.why, &c.tried);
+                    (c.pick, Some(note))
+                } else {
+                    (m.generate(text, max, a.num("temperature", 0.0), &mut rng), None)
+                };
                 let sep = if !text.is_empty() && !toks.is_empty() && m.unit == "word" {
                     " "
                 } else {
                     ""
                 };
                 println!("{text}{sep}{}", detokenize(&toks, &m.unit));
+                if let Some(note) = note {
+                    println!("  (auto-temperature: {note})");
+                }
             }
         }
         "evaluate" => {
@@ -1889,12 +1912,27 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
                 texts.clone()
             } {
                 let start = m.prompt_tokens(&text);
-                let (toks, depths) = m.continue_tokens(
-                    &start,
-                    a.num("max-tokens", 40.0) as usize,
-                    a.num("temperature", 0.0),
-                    &mut rng,
-                );
+                let max = a.num("max-tokens", 40.0) as usize;
+                let (mut note, k) = (None, m.nodes - 1);
+                let (toks, depths) = if a.has("auto-temperature") {
+                    let c = autotemp::climb(
+                        &start,
+                        k,
+                        a.num("temperature", 0.0),
+                        a.num("max-temperature", autotemp::MAX_TEMPERATURE),
+                        a.num("tries", autotemp::TRIES as f64) as usize,
+                        a.num("seed", 1.0) as u64,
+                        |t, seed| {
+                            let (toks, depths) = m.continue_tokens(&start, max, t, &mut Rng::new(seed));
+                            (toks.clone(), detokenize(&toks, &m.unit), (toks, depths))
+                        },
+                        |_, _| None,
+                    );
+                    note = Some(autotemp::climb_note(c.found, c.temperature, c.why, &c.tried));
+                    c.pick
+                } else {
+                    m.continue_tokens(&start, max, a.num("temperature", 0.0), &mut rng)
+                };
                 let line = if m.unit == "base64" {
                     let mut all = start.clone();
                     all.extend(toks);
@@ -1918,6 +1956,9 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
                     depths.len(),
                     ds.join(" ")
                 );
+                if let Some(note) = note {
+                    println!("  (auto-temperature: {note})");
+                }
             }
         }
         "evaluate" => {

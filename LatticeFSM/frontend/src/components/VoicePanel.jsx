@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { useLmInfo } from "../hooks/useLmInfo.js";
-import { lmLabel } from "../lm.js";
+import { MAX_TEMPERATURE, lmLabel } from "../lm.js";
 import { hush, recognitionText, speak, speechSupport } from "../speech.js";
 import { parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, TextField } from "./Fields.jsx";
+import { AutoTempFields } from "./AutoTemperature.jsx";
 import { TalkLog, useTalk } from "./TalkPanel.jsx";
 
 /**
@@ -21,6 +22,8 @@ export default function VoicePanel({ lm, tick, onMoved }) {
   const [maxTokens, setMaxTokens] = useStoredState("voice.max", "30");
   const [temperature, setTemperature] = useStoredState("voice.temperature", "0");
   const [learn, setLearn] = useStoredState("voice.learn", false);
+  const [auto, setAuto] = useStoredState("voice.auto", true);
+  const [autoTop, setAutoTop] = useStoredState("voice.autoTop", String(MAX_TEMPERATURE));
   const [speakReplies, setSpeakReplies] = useStoredState("voice.speak", true);
   const [draft, setDraft] = useState("");
   const [listening, setListening] = useState(false);
@@ -38,6 +41,8 @@ export default function VoicePanel({ lm, tick, onMoved }) {
       learn,
       maxTokens: Math.max(1, parseInteger(maxTokens, 30)),
       temperature: parseNumber(temperature, 0),
+      auto,
+      maxTemperature: parseNumber(autoTop, MAX_TEMPERATURE),
     });
     if (said && speakReplies && support.synthesis && said.reply) {
       // the ear closes while the mouth speaks, and opens again after
@@ -143,6 +148,7 @@ export default function VoicePanel({ lm, tick, onMoved }) {
           <TextField label="Language" value={lang} onChange={setLang} hint="what you speak, e.g. en-GB" />
           <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min="1" step="1" />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" />
+          <AutoTempFields on={auto} onChange={setAuto} top={autoTop} onTop={setAutoTop} />
           <CheckField label="Learn what I say" checked={learn} onChange={setLearn} />
           <CheckField label="Speak the replies" checked={speakReplies} onChange={setSpeakReplies} disabled={!support.synthesis} />
         </div>

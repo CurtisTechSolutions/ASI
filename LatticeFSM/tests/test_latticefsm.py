@@ -1720,6 +1720,119 @@ class TestRustChainParity(unittest.TestCase):
                 self.assertIn("input nodes traversed", outs[("py", "py")][0])
 
 
+class TestAutoTemperature(unittest.TestCase):
+    """A reply that is no answer - nothing, no words, a loop - is drawn again a little hotter until it is one."""
+
+    def test_what_is_no_answer(self):
+        from latticefsm.autotemp import loop_period, why_no_answer
+        cases = {
+            "": "nothing", "   ": "nothing", " . ": "no words", "............": "no words", "?!": "no words",
+            "is a directed cycle is recorded in a brain is a directed cycle is recorded in a": "a loop",
+            "the context would be surprised the context would be surprised the context wo": "a loop",
+            "ab" * 10: "a loop",
+            "the cat sat on the mat": None, "hello world": None, "the brain is a directed cyclic graph can be.": None,
+            "a b c d e f g h i j k l m n o p": None, "x": None,
+        }
+        for text, why in cases.items():
+            self.assertEqual(why_no_answer(text), why, text)
+        self.assertEqual(loop_period("ab" * 10), 2)
+        self.assertEqual(loop_period("is a directed cycle is recorded in a brain is a directed cycle is recorded in a"),
+                         43)
+        self.assertIsNone(loop_period("the cat sat on the mat"))
+
+    def test_a_greedy_loop_is_a_context_come_back(self):
+        from latticefsm.autotemp import repeats_context, why_draw
+        toks = list("abcabc")
+        self.assertTrue(repeats_context(toks, 0, 2))
+        # the same context in the prompt is not the model's doing: what it drew after it may differ
+        self.assertFalse(repeats_context(toks, 3, 2))
+        self.assertFalse(repeats_context(list("abcd"), 0, 2))
+        # contexts still reaching back to <s> are their own; with no context at all, two draws are a loop
+        self.assertFalse(repeats_context(list("ab"), 0, 5))
+        self.assertTrue(repeats_context(list("aa"), 0, 0))
+        # greedy: the context decides, not the text; sampled: the text
+        self.assertEqual(why_draw("bcabc", 0, list("abcabc"), 1, 2), "a loop")
+        self.assertIsNone(why_draw("bcabc", 0.5, list("abcabc"), 1, 2))
+        self.assertEqual(why_draw("", 0, ["a"], 1, 2), "nothing")
+
+    def test_the_ladder(self):
+        from latticefsm.autotemp import attempts, ladder
+        self.assertEqual(ladder(0, 0.8), [0, 0.2, 0.4, 0.6, 0.8])
+        self.assertEqual(ladder(0.5, 0.8), [0.5, 0.7])
+        self.assertEqual(ladder(1.0, 0.8), [1.0])
+        self.assertEqual(ladder(-1, 0.2), [0, 0.2])
+        self.assertEqual(attempts(0, 0.4, 2), [(0, 0), (0.2, 7919), (0.2, 15838), (0.4, 23757), (0.4, 31676)])
+
+    def test_climbing_until_an_answer(self):
+        from latticefsm.autotemp import climb, climb_note
+        drawn = []
+
+        def draw(t, seed):
+            drawn.append((t, seed))
+            text = "an answer" if t >= 0.4 else ("" if t == 0 else ".")
+            return list(text), text, text
+        c = climb([], 1, 0, 0.8, 2, 10, draw)
+        self.assertTrue(c.found)
+        self.assertEqual((c.pick, c.temperature, c.seed), ("an answer", 0.4, 10 + 3 * 7919))
+        self.assertEqual(drawn, [(0, 10), (0.2, 10 + 7919), (0.2, 10 + 2 * 7919), (0.4, 10 + 3 * 7919)])
+        self.assertEqual(climb_note(c.found, c.temperature, c.why, c.tried),
+                         "found at temperature 0.4: 0 nothing, 0.2 no words, 0.2 no words, 0.4 an answer")
+        # nothing is an answer: the least bad is kept (a loop says something), the coolest of equals
+        c = climb([], 1, 0, 0.4, 1, 1, lambda t, s: ([], "" if t == 0 else "ab" * 10, t))
+        self.assertFalse(c.found)
+        self.assertEqual((c.pick, c.why), (0.2, "a loop"))
+        self.assertTrue(climb_note(c.found, c.temperature, c.why, c.tried).startswith(
+            "no answer up to 0.4 (kept the one at 0.2: a loop)"))
+        # a check (the guard) can turn an answer down
+        c = climb([], 1, 0, 0.4, 1, 1, lambda t, s: ([], "fine words", t),
+                  check=lambda text, t: "rejected by the guard" if t < 0.4 else None)
+        self.assertEqual((c.found, c.pick), (True, 0.4))
+
+    def test_the_command_line(self):
+        def cli(*args):
+            return subprocess.run([sys.executable, "-m", "latticefsm", *args], cwd=ROOT, check=True,
+                                  capture_output=True, text=True).stdout
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "c.json")
+            cli("chain", "train", "--nodes", "8", "--data", "data/corpus", "--save", path)
+            # an answer at temperature 0 is the plain reply
+            plain = cli("chain", "generate", "how are you", "--load", path, "--max-tokens", "60")
+            auto = cli("chain", "generate", "how are you", "--load", path, "--max-tokens", "60", "--auto-temperature")
+            self.assertEqual(auto, plain + "  (auto-temperature: found at temperature 0: 0 an answer)\n")
+            # a greedy loop is drawn again hotter
+            auto = cli("chain", "generate", "why", "--load", path, "--max-tokens", "60", "--auto-temperature")
+            self.assertIn("(auto-temperature: found at temperature 0.2: 0 a loop, 0.2 an answer)", auto)
+
+
+@unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+class TestRustAutoTemperatureParity(unittest.TestCase):
+    """Both ports judge a greedy reply alike (an answer, nothing, no words, a loop); an answer at temperature 0 is the
+    same reply in both.  Hotter draws are each port's own (their random generators differ)."""
+
+    def cli(self, port, *args):
+        cmd = [sys.executable, "-m", "latticefsm"] if port == "py" else [RUST]
+        return subprocess.run([*cmd, *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
+
+    def test_greedy_verdicts_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            for model, train in (("chain", ("--nodes", "8")), ("ngram", ("--order", "3"))):
+                path = os.path.join(d, f"{model}.json")
+                self.cli("rs", model, "train", *train, "--data", "data/corpus", "--save", path)
+                verdicts = set()
+                for text in ("the brain", "why", "hello", "how are you", "the", "xyzzy"):
+                    outs = {port: self.cli(port, model, "generate", text, "--load", path, "--max-tokens", "60",
+                                           "--auto-temperature") for port in ("py", "rs")}
+                    first = {port: out.split("(auto-temperature: ")[1].split(": ", 1)[1].split(",")[0]
+                             for port, out in outs.items()}
+                    self.assertEqual(first["py"], first["rs"], (model, text))
+                    verdicts.add(first["py"].strip(")\n"))
+                    if "found at temperature 0:" in outs["rs"]:
+                        self.assertEqual(outs["py"], outs["rs"], (model, text))
+                # the prompts cover answers and failures
+                self.assertIn("0 an answer", verdicts, model)
+                self.assertTrue(verdicts - {"0 an answer"}, model)
+
+
 class TestRustTeachingParity(unittest.TestCase):
     """Teaching a reply and training until N of N print the same in both ports."""
 

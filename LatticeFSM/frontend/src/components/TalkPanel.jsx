@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { useLmInfo } from "../hooks/useLmInfo.js";
-import { goalShare, lmLabel, mean, untilNote } from "../lm.js";
+import { MAX_TEMPERATURE, goalShare, lmLabel, mean, untilNote } from "../lm.js";
 import { askModel, turnText } from "../talk.js";
 import { fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
+import { AutoBadge, AutoTempFields } from "./AutoTemperature.jsx";
 import HearButton from "./HearButton.jsx";
 import JobProgress from "./JobProgress.jsx";
 import { CheckField, NumberField } from "./Fields.jsx";
@@ -68,6 +69,7 @@ function TalkTurn({ turn, busy, onRate, onTeach, maxDepth, subscripts }) {
           {turn.model}
           {turn.depths ? <DepthNote depths={turn.depths} maxDepth={maxDepth} /> : null}
           <GuardBadge guard={turn.guard} text={String(turn.reply ?? "").trim()} vetoed={turn.vetoed} />
+          <AutoBadge auto={turn.auto} />
         </div>
         <div className="bubble">
           {tokenView ? (
@@ -210,6 +212,8 @@ export default function TalkPanel({ lm, tick, onMoved }) {
   const [goal, setGoal] = useStoredState("lmtalk.goal", "95");
   const [guard, setGuard] = useStoredState("lmtalk.guard", false);
   const [teachGuard, setTeachGuard] = useStoredState("lmtalk.teachGuard", false);
+  const [auto, setAuto] = useStoredState("lmtalk.auto", true);
+  const [autoTop, setAutoTop] = useStoredState("lmtalk.autoTop", String(MAX_TEMPERATURE));
   const talk = useTalk(lm, onMoved);
 
   const send = async () => {
@@ -219,6 +223,8 @@ export default function TalkPanel({ lm, tick, onMoved }) {
       maxTokens: Math.max(1, parseInteger(maxTokens, 40)),
       temperature: parseNumber(temperature, 0),
       guard,
+      auto,
+      maxTemperature: parseNumber(autoTop, MAX_TEMPERATURE),
     });
     if (said) setDraft("");
   };
@@ -244,6 +250,7 @@ export default function TalkPanel({ lm, tick, onMoved }) {
         <div className="row">
           <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min="1" step="1" />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" hint="0: the likeliest" />
+          <AutoTempFields on={auto} onChange={setAuto} top={autoTop} onTop={setAutoTop} />
           <NumberField label="Teach rounds" value={maxRounds} onChange={setMaxRounds} min="1" step="1" hint="at most, teaching a reply until it is all right" />
           <NumberField label="Goal %" value={goal} onChange={setGoal} min="1" max="100" step="1" hint="of the reply's tokens right; 100: every one" />
           <CheckField label="Learn what I say" checked={learn} onChange={setLearn} hint="train on every message first" />

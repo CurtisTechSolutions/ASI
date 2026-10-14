@@ -220,8 +220,8 @@ busy.
 |---|---|
 | **Train** | a new chain (nodes, unit, confidence) or N-gram (N, unit); train on server paths and on **uploads** - pick many files or a whole folder, any kind (zip, tar, gz, HTML, docx, images...), sent in 8 MiB chunks so a file may be any size - or on pasted text; every token predicted before it is learned; **until N of N**; the held-out measure charted; for the chain, the confidence sweep (accuracy and depth against the threshold) and "use this confidence" |
 | **Predict** | type, and the likeliest next tokens follow as bars - click one to take it; for the chain the input nodes holding the last inputs, the walk back through them (each node's confidence, the confidence gathered) and where it stopped |
-| **Generate** | several samples at a temperature; 👍 / 👎 each, marks out of 10 applied as feedback, 🔊 heard |
-| **Talk** | a chat whose replies are the model's **predictions**: what you say, continued; each token tinted by how deep the chain walked for it; 👍 / 👎; **teach this reply** - the reply it should have given, taught round after round until N of N |
+| **Generate** | several samples at a temperature; 👍 / 👎 each, marks out of 10 applied as feedback, 🔊 heard; **auto temperature** (off by default here) |
+| **Talk** | a chat whose replies are the model's **predictions**: what you say, continued; each token tinted by how deep the chain walked for it; 👍 / 👎; **teach this reply** - the reply it should have given, taught round after round until N of N; **auto temperature** (on by default, as in Voice, Converse and Chat): a reply that is no answer is drawn again hotter, marked 🌡 |
 | **Network** | the network of machines (a translator, `enc>dec`, or a classifier): reinforce or correct a reply - taught until N of N - and fit a task until every pair is right |
 | **Converse** | the model talking to itself, turn after turn |
 | **Chat** | a local LLM (Ollama) talking with the model and marking every reply out of 10, the marks credited |
@@ -721,6 +721,54 @@ latticefsm chain train --data data/corpus/sentences.txt --until
 #   ...
 #   1550 of 1673 reached in 8 rounds: the most possible - the rest (123) come after contexts the data continues in more than one way
 ```
+
+## Auto-temperature: no answer, draw again hotter
+
+A greedy reply (temperature 0) fails in two ways. It can be **nothing**: the
+N-gram model ends "why" at once, and answers "hello" with only ".". Or it
+can **loop**: the chain answers "why" with "the context would be surprised
+the context would be surprised…". With **auto-temperature**
+(`auto_temperature: true` on generate, converse and chat; `--auto-temperature`
+on both command lines), such a reply is drawn again a little hotter, step
+by step, until one is an answer:
+
+* **No answer** means nothing, no letter or digit, or a loop. A loop in a
+  greedy reply is found exactly: the model's next token depends only on its
+  context (the last N-1 tokens, or the chain's input nodes), so once a
+  context comes back the reply repeats for ever. A sampled reply is read for
+  a stretch of 12 characters or more said again. With the guard on, a reply
+  it rejects is no answer either.
+* **The ladder** starts at the temperature asked for and climbs 0.2 at a
+  time up to `max_temperature`, 0.8 by default. It draws `tries` times (3) on
+  each step above 0. The first draw is the plain one, so a reply that was
+  already an answer is unchanged. If nothing is an answer, the least bad
+  draw is kept and marked: a loop before a rejected reply, before one with
+  no words, before nothing.
+* Each sample reports `auto`: whether an answer was `found`, the
+  `temperature` it was drawn at, every attempt, and a `note`.
+
+```bash
+latticefsm chain generate "why" --load chain.json --max-tokens 60 --auto-temperature
+#   why the cost function is a direction the monitor is the same reason a regular ...
+#   (auto-temperature: found at temperature 0.2: 0 a loop, 0.2 an answer)
+```
+
+**Is temperature the right knob?** Partly. It is a re-roll, not a repair: a
+hotter draw gets out of a loop or past an early end only by chance, and the
+hotter it is, the less it follows what the model learned. On `data/corpus`,
+0.3 still reads well, while 1.0 is word salad, hence the 0.8 cap. Measured
+here:
+* **Loops:** it works well. Every greedy loop above was broken at 0.2, on the
+  first draw.
+* **Empty replies:** it works poorly. When the model's likeliest token is
+  the end of the reply (`</s>` after "why"), most draws still end at once.
+  "why" took five draws and 0.4 to get ", and the", and a conversation's
+  turns took up to ten draws and 0.6.
+
+For empty replies, a direct fix would be better: never end a reply before
+its first few tokens. That changes no other choice. For loops, so would
+refusing to repeat a context, which is exact for greedy replies. Both are
+cheap to add.
 
 ## The guard
 

@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::autotemp;
 use crate::autotrain::{parse_lines, Ollama};
 use crate::chain::{load_chain, Chain, ChainEvaluation};
 use crate::guard::Guard;
@@ -24,6 +25,8 @@ pub trait Lm {
     fn lower(&self) -> bool;
     fn tokens(&self, text: &str) -> Sequence;
     fn prompt_tokens(&self, text: &str) -> Sequence;
+    /// How many tokens before the next the model predicts it from (a greedy draw after the same ones is the same).
+    fn context_len(&self) -> usize;
     /// Predict every token before learning it, crediting the guess by `credit` (rewards too unless not `reward`).
     fn learning(&mut self, predict: bool, credit: f64, reward: bool);
     fn train_paths(&mut self, paths: &[String], held_out: usize) -> Result<(usize, Vec<Sequence>), String>;
@@ -73,6 +76,9 @@ pub fn sources_json(sources: &[(String, usize, usize)]) -> Json {
 impl Lm for NGram {
     fn name(&self) -> &'static str {
         "ngram"
+    }
+    fn context_len(&self) -> usize {
+        self.order - 1
     }
     fn info(&mut self) -> Json {
         self.stats()
@@ -176,6 +182,9 @@ pub fn chain_eval_json(ev: &ChainEvaluation) -> Json {
 impl Lm for Chain {
     fn name(&self) -> &'static str {
         "chain"
+    }
+    fn context_len(&self) -> usize {
+        self.nodes - 1
     }
     fn info(&mut self) -> Json {
         self.stats()
@@ -357,7 +366,7 @@ pub fn verdict_brief(j: &Json) -> Json {
 /// has others to give way to; when every one is vetoed the least risky is kept and said so.  Returns the samples
 /// (each with its `guard` verdict) and the guard's summary.
 /// How samples are drawn: the most tokens, the temperature, the first seed, how many, how many times as many to draw
-/// when guarded.
+/// when guarded, and whether a sample that is no answer is drawn again hotter (`auto`).
 #[derive(Clone, Copy)]
 pub struct Draw {
     pub max: usize,
@@ -365,15 +374,35 @@ pub struct Draw {
     pub seed: u64,
     pub count: usize,
     pub over: usize,
+    pub auto: Option<Auto>,
+}
+
+/// Auto-temperature (`autotemp`): the hottest rung, and the draws at each rung.
+#[derive(Clone, Copy, Debug)]
+pub struct Auto {
+    pub top: f64,
+    pub tries: usize,
+}
+
+/// A request's auto-temperature: `{auto_temperature: true, max_temperature?, tries?}`; `None` when it is off.
+pub fn auto_of(b: &Json) -> Option<Auto> {
+    b.bool_or("auto_temperature", false).then(|| Auto {
+        top: b.num("max_temperature", autotemp::MAX_TEMPERATURE).clamp(0.0, 2.0),
+        tries: (b.num("tries", autotemp::TRIES as f64) as usize).clamp(1, 10),
+    })
 }
 
 pub fn guarded_samples(m: &mut dyn Lm, text: &str, d: &Draw, guard: Option<&mut Guard>) -> (Vec<Json>, Option<Json>) {
+    if let Some(a) = d.auto {
+        return auto_samples(m, text, d, a, guard);
+    }
     let Draw {
         max,
         temperature,
         seed,
         count,
         over,
+        auto: _,
     } = *d;
     let Some(g) = guard else {
         return (
@@ -421,6 +450,112 @@ pub fn guarded_samples(m: &mut dyn Lm, text: &str, d: &Draw, guard: Option<&mut 
         .with("all_vetoed", all_vetoed.into())
         .with("vetoes", Json::Array(vetoes.into_iter().take(5).collect()));
     (kept, Some(summary))
+}
+
+/// `count` samples, each drawn up the auto-temperature ladder until it is an answer - not nothing, not without words,
+/// not a loop, and (with a guard) not rejected by it - or the ladder ends, when the least bad draw is kept (a loop
+/// before a rejected one before one without words before nothing; the coolest of equals).  Every sample says how it
+/// was found (`auto`: `found`, the `temperature` it was drawn at, `why` when it is still no answer, and every
+/// `attempt`); the guard's summary as `guarded_samples` gives it.
+fn auto_samples(
+    m: &mut dyn Lm,
+    text: &str,
+    d: &Draw,
+    a: Auto,
+    mut guard: Option<&mut Guard>,
+) -> (Vec<Json>, Option<Json>) {
+    let prompt = m.prompt_tokens(text);
+    let k = m.context_len();
+    let (mut judged, mut vetoes, mut all_vetoed) = (0usize, Vec::new(), false);
+    let mut samples = Vec::with_capacity(d.count);
+    for i in 0..d.count {
+        // the sample and the guard's verdict on it
+        let c = autotemp::climb(
+            &prompt,
+            k,
+            d.temperature,
+            a.top,
+            a.tries,
+            d.seed + i as u64,
+            |t, seed| {
+                let s = generate(m, text, d.max, t, seed);
+                let toks = s
+                    .get("tokens")
+                    .and_then(Json::as_array)
+                    .map(|v| v.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let completion = s.str_or("completion", "").to_string();
+                (toks, completion, (s, None::<Json>))
+            },
+            |completion, (s, verdict)| {
+                let g = guard.as_deref_mut()?;
+                let j = g.judge(completion.trim(), None, None, 5);
+                judged += 1;
+                let rejected = j.str_or("verdict", "") == "reject";
+                if rejected {
+                    vetoes.push(
+                        Json::object()
+                            .with("completion", s.get("completion").cloned().unwrap_or(Json::Null))
+                            .with("risk", j.get("risk").cloned().unwrap_or(Json::Null))
+                            .with("why", j.get("why").cloned().unwrap_or(Json::Null)),
+                    );
+                }
+                *verdict = Some(j);
+                rejected.then_some("rejected by the guard")
+            },
+        );
+        all_vetoed |= c.why == Some("rejected by the guard");
+        let (s, verdict) = c.pick;
+        // a kept sample the guard never saw (a loop, say) is judged now, so a guarded sample always has its verdict
+        let verdict = match (verdict, guard.as_deref_mut()) {
+            (Some(v), _) => Some(v),
+            (None, Some(g)) => {
+                judged += 1;
+                Some(g.judge(s.str_or("completion", "").trim(), None, None, 5))
+            }
+            (None, None) => None,
+        };
+        let attempts: Vec<Json> = c
+            .tried
+            .iter()
+            .map(|x| {
+                Json::object()
+                    .with("temperature", x.temperature.into())
+                    .with("seed", (x.seed as f64).into())
+                    .with("completion", x.text.as_str().into())
+                    .with("why", x.why.map(Json::from).unwrap_or(Json::Null))
+            })
+            .collect();
+        let mut out = s
+            .with("temperature", c.temperature.into())
+            .with("seed", (c.seed as f64).into())
+            .with(
+                "auto",
+                Json::object()
+                    .with("found", c.found.into())
+                    .with("temperature", c.temperature.into())
+                    .with("why", c.why.map(Json::from).unwrap_or(Json::Null))
+                    .with(
+                        "note",
+                        autotemp::climb_note(c.found, c.temperature, c.why, &c.tried)
+                            .as_str()
+                            .into(),
+                    )
+                    .with("attempts", Json::Array(attempts)),
+            );
+        if let Some(v) = verdict {
+            out = out.with("guard", verdict_brief(&v));
+        }
+        samples.push(out);
+    }
+    let summary = guard.map(|_| {
+        Json::object()
+            .with("judged", judged.into())
+            .with("vetoed", vetoes.len().into())
+            .with("all_vetoed", all_vetoed.into())
+            .with("vetoes", Json::Array(vetoes.into_iter().take(5).collect()))
+    });
+    (samples, summary)
 }
 
 fn generate(m: &mut dyn Lm, text: &str, max: usize, temperature: f64, seed: u64) -> Json {
@@ -555,7 +690,15 @@ pub fn lm_route(m: &mut dyn Lm, method: &str, action: &str, req: &Request) -> Op
             let count = (b.num("count", 1.0) as usize).clamp(1, 50);
             let max = (b.num("max_tokens", 30.0) as usize).clamp(1, 5000);
             let (t, seed) = (b.num("temperature", 0.0), b.num("seed", 1.0) as u64);
-            let samples: Vec<Json> = (0..count).map(|i| generate(m, text, max, t, seed + i as u64)).collect();
+            let draw = Draw {
+                max,
+                temperature: t,
+                seed,
+                count,
+                over: 1,
+                auto: auto_of(b),
+            };
+            let (samples, _) = guarded_samples(m, text, &draw, None);
             let first = samples[0].clone();
             Ok(Json::object()
                 .with("text", text.into())
@@ -746,6 +889,7 @@ pub fn converse(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Json
                 seed: seed + 101 * i as u64,
                 count: 1,
                 over,
+                auto: auto_of(b),
             },
             guard.as_deref_mut(),
         );
@@ -756,6 +900,9 @@ pub fn converse(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Json
             .with("text", text.as_str().into());
         if let Some(d) = g.get("depths") {
             turn = turn.with("depths", d.clone());
+        }
+        if let Some(a) = g.get("auto") {
+            turn = turn.with("auto", a.clone());
         }
         if let (Some(v), Some(sm)) = (g.get("guard"), summary) {
             turn = turn
@@ -839,6 +986,7 @@ pub fn chat_llm(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Resu
                 seed: seed + 101 * i as u64,
                 count: 1,
                 over,
+                auto: auto_of(b),
             },
             guard.as_deref_mut(),
         );
@@ -855,6 +1003,9 @@ pub fn chat_llm(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Resu
             .with("speaker", "model".into())
             .with("text", reply.as_str().into())
             .with("mark", mark.into());
+        if let Some(a) = g.get("auto") {
+            turn = turn.with("auto", a.clone());
+        }
         if let (Some(v), Some(sm)) = (g.get("guard"), summary) {
             turn = turn
                 .with("guard", v.clone())
@@ -1244,6 +1395,7 @@ pub fn generate_guarded(m: &mut dyn Lm, b: &Json, g: &mut Guard) -> Json {
             seed,
             count,
             over,
+            auto: auto_of(b),
         },
         Some(g),
     );

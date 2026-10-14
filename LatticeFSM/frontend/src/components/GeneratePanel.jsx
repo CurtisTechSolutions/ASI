@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
 import { useLmInfo } from "../hooks/useLmInfo.js";
-import { joinContinuation, lmLabel } from "../lm.js";
+import { MAX_TEMPERATURE, autoBody, joinContinuation, lmLabel } from "../lm.js";
 import { asArray, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
+import { AutoBadge, AutoTempFields } from "./AutoTemperature.jsx";
 import HearButton from "./HearButton.jsx";
 import { CheckField, NumberField, TextField } from "./Fields.jsx";
 import GuardNotice from "./GuardNotice.jsx";
@@ -28,6 +29,8 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
   const [seed, setSeed] = useStoredState("generate.seed", "");
   const [guard, setGuard] = useStoredState("generate.guard", false);
   const [overSample, setOverSample] = useStoredState("generate.overSample", "3");
+  const [auto, setAuto] = useStoredState("generate.auto", false);
+  const [autoTop, setAutoTop] = useStoredState("generate.autoTop", String(MAX_TEMPERATURE));
   const [result, setResult] = useState(null);
   const [rated, setRated] = useState({}); // sample index -> +1 / -1, once credited
   const [note, setNote] = useState(null);
@@ -55,6 +58,7 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
         temperature: parseNumber(temperature, 0.8),
         seed: seed === "" ? Math.floor(Math.random() * 1e9) : parseInteger(seed, 0),
         ...(guard ? { guard: true, over_sample: Math.max(1, parseInteger(overSample, 3)) } : {}),
+        ...autoBody(auto, parseNumber(autoTop, MAX_TEMPERATURE)),
       });
       setResult({ ...r, prompt });
       setRated({});
@@ -105,6 +109,9 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
           <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard vetoes the samples it rejects" />
           <NumberField label="Over-sample" value={overSample} onChange={setOverSample} min="1" max="20" step="1" disabled={!guard} hint="times as many drawn, to make up for vetoes" />
         </div>
+        <div className="row">
+          <AutoTempFields on={auto} onChange={setAuto} top={autoTop} onTop={setAutoTop} />
+        </div>
         <div className="actions">
           <button type="submit" className="primary" disabled={busy}>
             {generating ? "Generating…" : "Generate"}
@@ -153,6 +160,7 @@ export default function GeneratePanel({ lm, tick, onMoved }) {
                     </button>
                     <HearButton text={text} unit={result.unit} label={`sample ${i + 1}`} />
                     <GuardBadge guard={s.guard} text={String(s.completion ?? "").trim()} />
+                    <AutoBadge auto={s.auto} />
                   </div>
                 </li>
               );

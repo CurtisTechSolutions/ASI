@@ -290,3 +290,28 @@ export function goalShare(percent, fallback = 95) {
   const p = Number.isFinite(v) ? v : fallback;
   return Math.min(1, Math.max(0, p / 100));
 }
+
+/** The hottest rung auto-temperature climbs to by default (the server's `autotemp::MAX_TEMPERATURE`). */
+export const MAX_TEMPERATURE = 0.8;
+
+/** A request's auto-temperature: `{auto_temperature, max_temperature}` when on, nothing when off. */
+export function autoBody(on, maxTemperature) {
+  if (!on) return {};
+  const top = Number(maxTemperature);
+  return { auto_temperature: true, max_temperature: Number.isFinite(top) && top >= 0 ? top : MAX_TEMPERATURE };
+}
+
+/**
+ * A sample's `auto` (how auto-temperature found it) in a few words, or "" when there is nothing to say - the first,
+ * coolest draw was already an answer: "at 0.4 (0: nothing)", "no answer up to 0.8: a loop".
+ */
+export function autoLabel(auto) {
+  if (!auto || !Array.isArray(auto.attempts) || !auto.attempts.length) return "";
+  const first = auto.attempts[0];
+  if (auto.found && auto.attempts.length === 1) return "";
+  const t = (x) => String(Math.round((Number(x) || 0) * 100) / 100);
+  if (!auto.found) {
+    return `no answer up to ${t(Math.max(...auto.attempts.map((a) => Number(a.temperature) || 0)))}: ${auto.why || "kept the least bad"}`;
+  }
+  return `at ${t(auto.temperature)} (${t(first.temperature)}: ${first.why || "?"})`;
+}

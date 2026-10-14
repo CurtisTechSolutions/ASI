@@ -147,6 +147,7 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/{chain,ngram}/text` | `{text, predict?, self_credit?, until?, max_rounds?}` | train on pasted text, a line a sequence |
 | `POST /api/{chain,ngram}/predict` | `{text, k?}` | the next tokens; the chain's input nodes and walk too |
 | `POST /api/{chain,ngram}/generate` | `{text, max_tokens?, temperature?, seed?, count?}` | `count` samples (the chain's walk depths with them) |
+| `auto_temperature: true` on `/api/{chain,ngram}/generate`, `/api/converse`, `/api/chat/llm` | `{max_temperature? (0.8), tries? (3)}` | a sample that is no answer (nothing, no words, a loop, or rejected by the guard) drawn again 0.2 hotter each step; every sample says how (`auto: {found, temperature, why, note, attempts}`) |
 | `POST /api/{chain,ngram}/credit`, `/feedback` | `{text, amount}`, `{good, bad, amount?}` | reward or punish |
 | `POST /api/{chain,ngram}/score` | `{text}` | every token's probability (and walk depth), perplexity, bits |
 | `POST /api/{chain,ngram}/teach` | `{text, reply, max_rounds?, threshold?}` | teach `reply` after `text` until `threshold` (default 0.95) of its tokens are right; the new continuation |

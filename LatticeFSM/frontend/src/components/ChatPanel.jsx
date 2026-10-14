@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { lmLabel, mean } from "../lm.js";
+import { MAX_TEMPERATURE, autoBody, lmLabel, mean } from "../lm.js";
 import { asArray, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
+import { AutoBadge, AutoTempFields } from "./AutoTemperature.jsx";
 import HearButton from "./HearButton.jsx";
 import { CheckField, NumberField, TextField } from "./Fields.jsx";
 import LineChart from "./LineChart.jsx";
@@ -32,6 +33,8 @@ export default function ChatPanel({ lm, onMoved }) {
   const [turns, setTurns] = useStoredState("chat.turns", "4");
   const [maxTokens, setMaxTokens] = useStoredState("chat.max", "60");
   const [temperature, setTemperature] = useStoredState("chat.temperature", "0.7");
+  const [auto, setAuto] = useStoredState("chat.auto", true);
+  const [autoTop, setAutoTop] = useStoredState("chat.autoTop", String(MAX_TEMPERATURE));
   const [pass, setPass] = useStoredState("chat.pass", "5");
   const [learn, setLearn] = useStoredState("chat.learn", true);
   const [guard, setGuard] = useStoredState("chat.guard", false);
@@ -57,6 +60,7 @@ export default function ChatPanel({ lm, onMoved }) {
         pass_mark: passMark,
         learn,
         ...(guard ? { guard: true, teach_guard: teachGuard } : {}),
+        ...autoBody(auto, parseNumber(autoTop, MAX_TEMPERATURE)),
         ...(ollamaModel.trim() ? { ollama_model: ollamaModel.trim() } : {}),
         ...(url.trim() ? { url: url.trim() } : {}),
       });
@@ -88,6 +92,7 @@ export default function ChatPanel({ lm, onMoved }) {
           <NumberField label="Turns" value={turns} onChange={setTurns} min="1" max="20" step="1" />
           <NumberField label="Max tokens" value={maxTokens} onChange={setMaxTokens} min="1" step="1" hint="a reply" />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" />
+          <AutoTempFields on={auto} onChange={setAuto} top={autoTop} onTop={setAutoTop} />
           <NumberField label="Pass mark" value={pass} onChange={setPass} min="0" max="10" step="1" hint="out of 10" />
         </div>
         <div className="row">
@@ -138,6 +143,7 @@ export default function ChatPanel({ lm, onMoved }) {
                       ) : null}
                       {t.credited ? <span className="muted">credited {fmtNum(t.credited, 2)}</span> : null}
                       {!llm ? <GuardBadge guard={t.guard} text={t.text} vetoed={t.vetoed} /> : null}
+                      {!llm ? <AutoBadge auto={t.auto} /> : null}
                       {t.blamed ? (
                         <span className="badge tight fail" title={`blamed in the guard: marked ${t.mark}/10, under the pass mark`}>
                           blamed

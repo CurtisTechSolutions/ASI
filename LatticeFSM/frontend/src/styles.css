@@ -2621,3 +2621,17 @@ p.blamed mark[style] {
 .stat.job {
   color: var(--accent);
 }
+
+/* auto-temperature: a reply drawn again hotter */
+.badge.auto {
+  background: transparent;
+  border: 1px solid var(--accent-2);
+  color: var(--accent-2);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.badge.auto.miss {
+  border-color: var(--warn);
+  color: var(--warn);
+}

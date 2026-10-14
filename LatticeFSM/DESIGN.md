@@ -1122,3 +1122,56 @@ its reply. The lock order is always model, then guard.
   language itself: what good text says often stops counting against it.
 * **A filter, not a censor:** with nothing blamed every text passes, and
   when every candidate is vetoed the least risky is still served, marked.
+
+## 22. Auto-temperature
+
+`autotemp.py` and `autotemp.rs` decide when a reply is no answer, and climb
+a ladder of temperatures until one is an answer. The server's samples
+(`routes::auto_samples`), converse, chat and both command lines all use
+`climb`.
+
+**No answer.** A reply is no answer when it is empty, has no letter or
+digit, or loops. Greedy and sampled replies are checked for loops in
+different ways:
+* **A greedy draw** (temperature 0) is checked exactly
+  (`repeats_context`). Both models draw the next token from a fixed number
+  of tokens before it: N-1 for the N-gram model, and the input nodes
+  (`nodes - 1`) for the chain. Nothing they read changes during a draw. So
+  if a context recurs while the reply is being drawn, the reply goes round
+  for ever. Contexts that come from the prompt don't count, because the
+  model did not draw what followed them there. Contexts still reaching back
+  to `<s>` are unique.
+* **A sampled draw** can't be checked that way, so its text is read
+  (`loop_period`). It loops if a stretch of at least 12 characters comes
+  back `p` characters later, having covered at least half its period
+  (`r >= p/2`). A reply cut off by its token limit has seldom gone round
+  twice in full.
+
+With the guard on, `check` turns an otherwise good reply down when the guard
+rejects it. That replaces the guard's fixed re-draw at 0.7 whenever
+auto-temperature is on.
+
+**The ladder.** It starts at the temperature asked for, steps by 0.2 up to
+`max_temperature` (0.8 by default), and makes `tries` draws (3) on each step
+above 0. Attempt `k` uses seed `seed + 7919 k`, so attempt 0 is exactly the
+plain request. When nothing is an answer, the least bad draw is kept, coolest
+first among equals: a loop, then a guard rejection, then no words, then
+nothing.
+
+Both ports agree on every verdict and on the ladder. Greedy replies are the
+same in both, so the same prompts climb. Sampled draws are each port's own,
+as in §9.
+
+### 22.1 Decisions
+
+* **Small steps, an early cap, several tries a step.** On `data/corpus`,
+  replies at 0.2–0.4 still follow the model, at 0.7 they wander, and at 1.0
+  they are noise. Retrying at a cool temperature beats jumping to a hot
+  one.
+* **Exact where it can be:** a greedy loop is a context come back, which
+  never fires on a text that merely repeats a phrase.
+* **Temperature is not the right knob for every failure.** It breaks loops
+  at once (every greedy loop measured was broken at 0.2, first try). It
+  rarely helps when the model's likeliest token is the end of the reply:
+  "why" needed five draws and 0.4. Forbidding `</s>` before a minimum
+  length would fix that deterministically, and is left as the next step.
