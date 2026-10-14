@@ -89,7 +89,7 @@ D-076 HTTPS through the system curl · D-077 the rest of Python, by area
 **Part XVIII — More ways to search and to train** · D-078 every method off by default, and none draws a random
 number · D-079 a setting's home is decided by who keeps it · D-080 thinking is a fourth sentinel that faces both
 ways, and a thought is a walk that begins there · D-084 a model is taught backwards by its run, and asked
-backwards by its caller
+backwards by its caller · D-095 a search with no answer walks again, hotter: auto-temperature
 
 **Part XIX — The copy editor** · D-082 a correction is a diff, and the LLM is asked for the smallest one ·
 D-083 the veto can keep its provenance to itself
@@ -3387,6 +3387,86 @@ teaching the network where to question.
 **Lives in** `../ModelKit/modelkit/thinking.py`, `radixnet/graph.py::observe_think`, `radixnet/search.py::onward`,
 `../ModelKit/modelkit/dialogue.py::think_back`, `../ModelKit/modelkit/ollama.py::thoughts_from_prompt`,
 `../ModelKit/modelkit/tutor.py::TutorTrainer.teach_thinking`, `../ModelKit/go/kit/thinking.go`, `../ModelKit/rust/src/thinking.rs`
+
+---
+
+### D-095 — A search with no answer walks again, hotter: auto-temperature, and why the ladder stops at 2
+
+**Status** Accepted · 2026-10-14 · **Layer** search · **Extends** D-078 (every method off by default)
+
+**Context — my reason** *"Add a new feature for auto-temperature, where if we cannot find an answer, raise the
+temperature. Is this the correct value for this?"* Three things leave a caller with no answer:
+* a walk that writes nothing, because it took END at once;
+* a walk asked for the end of a text that goes round a cycle until its cap;
+* a guard that vetoes everything the search offered.
+
+A reply whose every candidate is one of these has "nothing to say". The question was whether the temperature is
+the dial to turn for them.
+
+**Decision** It is, for some of them, and that was measured before anything was built. A count model was trained
+on 1,500 lines of prose, and 300 continuations of 60 prefixes were sampled at each temperature:
+
+| temperature | walks that reach END | walks that say nothing | nats per character |
+|---|---|---|---|
+| 0 (greedy) | 1.7% | 1.7% | 1.01 |
+| 0.5 | 35% | 4.0% | 1.13 |
+| 1 | 89% | 5.7% | 1.48 |
+| 2 | 93% | 7.0% | 1.62 |
+| 4 | 95% | 13% | 1.72 |
+
+A cold walk goes round, and warming it mends that. Past 2 nothing more ends, an empty answer gets *likelier*,
+and every character is less likely. So:
+* **A ceiling, not a switch.** `auto_temperature` is a number, 0 is off and 2 is the recommended value.
+* **The search as asked runs first**, exactly as it would have, and only a search with no answer climbs.
+* **A ladder by a factor.** The rungs are the asked temperature, then doubling (from 0.5 when it was greedy) up
+  to the ceiling. The temperature divides a log-probability, so each doubling is the same change in how flat a
+  step is.
+* **Three draws a rung, one when greedy.** An empty or vetoed walk is mended by another draw as often as by a
+  hotter one, and a hotter walk is a less likely one. So the temperature rises only when the draws at the
+  current one have run out.
+* **An answer is defined once.** It wrote something, and it reached END when the caller asked for the end. The
+  guard's veto counts as no answer. A beam whose best path is cut at the cap but which holds an ending path
+  lower in its top K answers with that one, and nothing is walked.
+* **Every mode climbs.** Dijkstra, the beam and the k-best read no temperature, so for them the ladder is where
+  sampling starts.
+* **Every output path climbs.**
+  * predict, through the guard;
+  * generate, for the samples that said nothing or were vetoed;
+  * a reply with nothing to say (converse, today's format, chat, voice), which the thinking narrates.
+* **The answer says what it cost.** The record `{ceiling, climbed, found, temperature, tries}` goes beside it.
+
+**Alternatives rejected**
+* **One walk a rung.** The table shows a hotter walk says nothing *more* often. Three draws at one temperature
+  mend an empty walk more surely than one draw at the next.
+* **An unbounded climb, or a high default ceiling.** Above about 2 a step is nearly uniform over a node's
+  options, and what comes back is an answer in name only.
+* **Widening the beam instead.** It is the right first move for a beam, and the climb takes it: an answer
+  further down the beam's own top K is taken before any walk. Past K, a walk at a temperature reaches what a
+  wider beam would only rank.
+* **A parameter of every kind's `predict`.** A wrapper (`radixnet.autotemp`) works for every kind and leaves the
+  four searches untouched. The kit composes it with the guard.
+
+**Consequences**
+* A climbed answer is a less likely text, and the record says so.
+* Where the graph has no way on, no temperature finds one: the search as asked comes back, with `found: false`.
+* The extra searches draw from the generator the request was drawing from, so a seeded run reproduces and the
+  ports draw alike. A generation re-seeds per call, so its k-th retry draws from `seed + k`.
+* Off, it is the search it always was, draw for draw, and no record gains a key.
+
+**Lives in**
+* Python: `radixnet/autotemp.py`, `../ModelKit/modelkit/duo.py` (`guarded_predict`, `NegativeFilter.generate`),
+  `../ModelKit/modelkit/dialogue.py` (`reply`, `converse`), `../ModelKit/modelkit/assistant.py`,
+  `../ModelKit/modelkit/cli.py`, `../ModelKit/modelkit/api.py`.
+* Go: `go/radixnet/autotemp.go`, `../ModelKit/go/kit/duo.go` (`GuardedPredict`, `Filter.AutoGenerate`),
+  `../ModelKit/go/kit/dialogue.go`, `../ModelKit/go/kit/assistant.go`, `../ModelKit/go/server/service.go`,
+  `../ModelKit/go/server/http.go`, `../ModelKit/go/cmd/radixnet-count/main.go`, `talk.go`.
+* Rust: `rust/src/autotemp.rs`, `../ModelKit/rust/src/duo.rs` (`guarded_predict`, `Filter::generate_climbing`),
+  `../ModelKit/rust/src/dialogue.rs` (`reply`, `converse`), `../ModelKit/rust/src/assistant.rs`,
+  `../ModelKit/rust/src/service.rs`, `../ModelKit/rust/src/cli.rs`, `../ModelKit/rust/src/bin/radixnet.rs`.
+* Frontend: `../ModelKit/frontend/src/settings.js` (`climbBody`, `climbLine`), `SearchFields.jsx`, and the
+  Predict, Generate, Converse and Talk panels.
+* Spec: `SPEC-SearchAndTraining.md` §10.
+* Tests: `tests/test_autotemp.py`, `../ModelKit/tests/test_autotemp.py` and the parity suites.
 
 ---
 
