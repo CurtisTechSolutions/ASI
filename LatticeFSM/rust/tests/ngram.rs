@@ -244,3 +244,50 @@ fn crediting_its_own_guesses() {
         }
     }
 }
+
+#[test]
+fn parallel_training_and_evaluation_preserve_online_state_and_rank_limit() {
+    let lines: Vec<String> = (0..280)
+        .map(|i| {
+            if i % 29 == 0 {
+                String::new()
+            } else {
+                format!("the cat {} sat on the mat ", i % 11).repeat(3)
+            }
+        })
+        .collect();
+    let mut batched = NGram::new(3, "word", true, 1.0).unwrap();
+    batched.predict = true;
+    batched.self_credit = 0.25;
+    let mut serial = NGram::from_json(&batched.to_json()).unwrap();
+    serial.predict = true;
+    serial.self_credit = 0.25;
+    batched.train_lines(&lines, None);
+    let seqs: Vec<_> = lines.iter().map(|line| serial.tokens(line)).collect();
+    for tokens in seqs.iter().filter(|s| !s.is_empty()) {
+        serial.train_tokens(tokens);
+    }
+    assert_eq!(batched.to_json().dump(), serial.to_json().dump());
+    let before = batched.to_json().dump();
+    let limit = 283;
+    let mut logp = 0.0;
+    let (mut count, mut right, mut five) = (0, 0, 0);
+    for tokens in seqs.iter().filter(|s| !s.is_empty()) {
+        for (j, (token, prob)) in serial.score_tokens(tokens).into_iter().enumerate() {
+            logp += prob.max(1e-300).ln();
+            if count < limit {
+                let prediction = serial.predict_tokens(&tokens[..j], 5);
+                right += usize::from(prediction[0].0 == token);
+                five += usize::from(prediction.iter().any(|(t, _)| t == &token));
+            }
+            count += 1;
+        }
+    }
+    let got = batched.evaluate(&seqs, limit);
+    assert_eq!(got.tokens, count);
+    assert_eq!(got.ranked, limit);
+    assert_eq!(got.perplexity, Some((-logp / count as f64).exp()));
+    assert_eq!(got.accuracy, Some(right as f64 / limit as f64));
+    assert_eq!(got.top5, Some(five as f64 / limit as f64));
+    assert_eq!(batched.to_json().dump(), before);
+}

@@ -21,6 +21,29 @@ make serve        # the server on :8000 and the Vite dev frontend on :5173 toget
 rust/target/release/latticefsm --help
 ```
 
+## CPU workers
+
+Rust uses the logical CPU count available to the process by default. Set
+`LATTICEFSM_WORKERS=1` to run serially, or a positive number to limit workers:
+
+```bash
+LATTICEFSM_WORKERS=8 rust/target/release/latticefsm ngram train --unit word --data data/corpus --save ngram.json.gz
+```
+
+Corpus tokenization, N-gram and chain evaluation, chain threshold sweeps, and
+independent network branches can run concurrently. Streamed text is tokenized
+in batches of at most 256 lines or approximately 1 MiB, then learned in corpus
+order. Small tokenization batches and short network walks stay serial to avoid
+thread startup overhead. Evaluation sums token results in the original order,
+so worker count does not change the floating-point measurements.
+
+Workers claim disjoint chunks as they finish, and the calling thread also
+works. Nested parallel operations stay on their outer worker. Training updates,
+random draws within each machine, and autoregressive generation steps remain
+ordered because each depends on the previous result. More cores help most with
+large corpora, evaluation sets, and networks with independent branches; they
+do not guarantee full CPU utilization for every command.
+
 ## Predicting the next thing
 
 ```bash

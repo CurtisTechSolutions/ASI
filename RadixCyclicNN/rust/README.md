@@ -147,6 +147,26 @@ make rust-parity       # the contract with Python
 make bench-compare     # both ports over one corpus -> bench/RESULTS.md
 ```
 
+## CPU workers
+
+`--workers 0` (the default) uses all logical CPUs available to the process;
+`--workers 1` runs serially, and a positive value selects a worker limit. Library
+callers set both `model.workers` and `model.g.workers` to control training and
+graph/search work respectively.
+
+All four model kinds encode training texts concurrently. Count training also
+traces and counts concurrently, and large graph weight/cost passes distribute
+ranges dynamically. Independent best/worst beam searches share the prepared
+graph while keeping their mutable punishment caches separate. Nested parallel
+passes stay on their existing worker rather than multiplying thread counts.
+
+Structural changes, sliding-window updates, gradient accumulation and phase
+learning retain their original order. The phonetic tokenizer still synchronizes
+its shared spelling memory. These dependencies, small workloads and memory
+bandwidth can limit CPU utilization; additional workers do not guarantee a
+speedup for every model or corpus. Graph contents, arithmetic order and seeded
+predictions are preserved.
+
 ## Logging
 
 `RADIXNET_LOG` (or `--log`) takes a level, optionally per target:
@@ -259,11 +279,12 @@ it, and `bench/RESULTS.md` says what that cost:
 And two structural ones, which the benchmark handles by comparing both ports at
 one worker as well as at their own default parallelism:
 
-* **Fan-out.** Go spawns one goroutine per text; an OS thread is not a goroutine,
-  so this port fans out over a pool the size of the machine.
-* **The two beams.** Go runs the top and the bottom beam on two goroutines; here
-  they run in turn on the calling thread. Go's `--workers 1` runs them in turn
-  too, which is the row to read for a like-for-like comparison.
+* **Fan-out.** Go spawns one goroutine per text. Rust uses up to the available
+  logical CPU count, including the caller, and dynamically assigns disjoint
+  chunks so workers can pick up more work after finishing a short text.
+* **The two beams.** Independent top and bottom beams run concurrently, with
+  private punishment caches. An uncapped `to_end` search remains sequential
+  because the bottom beam's length limit depends on the top beam's result.
 
 ## The one `unsafe`
 

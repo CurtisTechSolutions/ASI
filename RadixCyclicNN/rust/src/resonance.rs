@@ -1187,11 +1187,8 @@ impl Model {
         let rehearsed = plan.as_ref().map(|p| p.replayed()).unwrap_or_default();
         let base = self.meta.epochs_total.value; // `train` counts the epochs once the run is over
         if !cleaned.is_empty() {
-            let grams: Vec<Vec<String>> = cleaned
-                .iter()
-                .map(|t| enc.encode(t))
-                .chain(rehearsed.iter().map(|t| enc.encode(t)))
-                .collect();
+            let texts: Vec<&String> = cleaned.iter().copied().chain(rehearsed.iter()).collect();
+            let grams = self.encode_all(&texts);
             self.observe_all(o.origin, &grams)?;
             if o.auto_compress {
                 self.g.compress();
