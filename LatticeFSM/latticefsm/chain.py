@@ -52,7 +52,7 @@ import math
 import random
 from collections.abc import Iterable, Sequence
 
-from .ngram import BOS, EOS, UNITS, UNK, detokenize, goal_of, tokenize, train_corpus
+from .ngram import BOS, EOS, UNITS, UNK, detokenize, goal_of, predict_now, tokenize, train_corpus
 
 __all__ = ["Chain", "PRIOR", "load_chain"]
 
@@ -120,6 +120,7 @@ class Chain:
         self.sentences = 0
         self.sources: list[list] = []
         self.history: list[dict] = []
+        self._seen = 0
         self.online = [0, 0, 0.0, 0]
         """While training with ``predict``: ``[right first guesses, inputs predicted, sum of ln P, nodes traversed]``."""
 
@@ -237,7 +238,7 @@ class Chain:
         ids = [0] + [self._id(t, True) for t in tokens] + [1]
         for i in range(1, len(ids)):
             w = ids[i]
-            if predict:
+            if predict and predict_now(self._seen):
                 path = self.walk(ids[:i])
                 guess = self._guess(path)
                 p = self._p(path, w)
@@ -247,6 +248,8 @@ class Chain:
                 self.online[3] += len(path) - 1 if path else 0
                 if credit and path and (reward or guess != w):
                     self._credit_path(path, guess, credit if guess == w else -credit)
+            if predict:
+                self._seen += 1
             for k in range(min(self.depth, i) + 1):
                 ctx = tuple(ids[i - k:i])
                 node = self.tables[k].get(ctx)
@@ -272,6 +275,7 @@ class Chain:
         """What predicting while training measured since the last reset, and a fresh start."""
         right, n, logp, depth = self.online
         self.online = [0, 0, 0.0, 0]
+        self._seen = 0
         if n == 0:
             return {"predicted": 0, "accuracy": None, "perplexity": None, "bits": None, "depth": None}
         return {"predicted": n, "accuracy": right / n, "perplexity": math.exp(-logp / n),

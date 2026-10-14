@@ -34,6 +34,7 @@ pub mod geometry;
 pub mod guard;
 pub mod gzip;
 pub mod http;
+pub mod job;
 pub mod json;
 pub mod languages;
 pub mod lattice;

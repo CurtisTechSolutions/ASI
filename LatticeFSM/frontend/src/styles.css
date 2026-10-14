@@ -2547,3 +2547,77 @@ p.blamed mark[style] {
 .speaker .badge.tight {
   vertical-align: middle;
 }
+
+/* Background jobs ------------------------------------------------------- */
+
+.job-progress {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+
+.job-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.job-head button {
+  margin-left: auto;
+}
+
+.job-bar {
+  position: relative;
+  height: 4px;
+  margin: 10px 0 8px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--chip);
+}
+
+/* how far is unknown (a corpus streams), so the bar says "working" rather than "this far" */
+.job-bar span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 30%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: job-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes job-slide {
+  from {
+    left: -30%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-bar span {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
+.job-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 13px;
+}
+
+.small-note {
+  font-size: 12px;
+  margin: 6px 0 0;
+}
+
+.stat.job {
+  color: var(--accent);
+}

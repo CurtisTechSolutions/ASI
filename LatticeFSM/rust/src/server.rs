@@ -74,7 +74,8 @@
 //! | `POST /api/network/save`, `/api/network/load` | `{path}`: write or read the network |
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use crate::autotrain::Ollama;
 use crate::chain::{load_chain, Chain};
@@ -82,6 +83,7 @@ use crate::compress::{compress, expansion, fidelity, load_core, Precision};
 use crate::experiment::teach_language;
 use crate::guard::{load_guard, Guard};
 use crate::http::{self, Handler, Request, Response};
+use crate::job::Job;
 use crate::json::Json;
 use crate::languages::{examples, language, LANGUAGES};
 use crate::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
@@ -103,6 +105,9 @@ pub struct Service {
     pub chain: Mutex<Option<Chain>>,
     /// The negative network in front of every model's text (`/api/guard`).
     pub guard: Mutex<Guard>,
+    /// The background job, running or the last one (`/api/job`).
+    pub job: Mutex<Option<Job>>,
+    pub next_job: AtomicU64,
     pub frontend: Option<PathBuf>,
 }
 
@@ -114,6 +119,8 @@ impl Service {
             ngram: Mutex::new(None),
             chain: Mutex::new(None),
             guard: Mutex::new(Guard::default()),
+            job: Mutex::new(None),
+            next_job: AtomicU64::new(0),
             frontend: None,
         })
     }
@@ -126,6 +133,8 @@ impl Service {
             ngram: Mutex::new(None),
             chain: Mutex::new(None),
             guard: Mutex::new(Guard::default()),
+            job: Mutex::new(None),
+            next_job: AtomicU64::new(0),
             frontend: dir,
         })
     }
@@ -133,22 +142,168 @@ impl Service {
     /// Run `f` on the language model a body names (`model`: chain, the default, or ngram).
     fn with_lm_result(&self, b: &Json, f: impl FnOnce(&mut dyn Lm) -> Result<Json, String>) -> Result<Json, String> {
         if b.str_or("model", "chain") == "ngram" {
-            let mut g = self
-                .ngram
-                .lock()
-                .map_err(|_| "the N-gram model's lock is poisoned".to_string())?;
+            let mut g = self.take(&self.ngram, "the N-gram model")?;
             f(g.get_or_insert_with(default_ngram))
         } else {
-            let mut g = self
-                .chain
-                .lock()
-                .map_err(|_| "the chain's lock is poisoned".to_string())?;
+            let mut g = self.take(&self.chain, "the chain")?;
             f(g.get_or_insert_with(default_chain))
         }
     }
 
     fn with_lm(&self, b: &Json, f: impl FnOnce(&mut dyn Lm) -> Result<Json, String>) -> Response {
-        answer(self.with_lm_result(b, f))
+        match self.with_lm_result(b, f) {
+            Err(e) if e.starts_with(BUSY) => self.refuse(e),
+            r => answer(r),
+        }
+    }
+
+    /// A model's lock: waited for on a job's own thread; anywhere else taken only when it is free, so a request
+    /// to a model a job is training is answered at once (`busy: ...`) instead of waiting behind it.
+    fn take<'a, T>(&self, m: &'a Mutex<T>, what: &str) -> Result<MutexGuard<'a, T>, String> {
+        if crate::job::in_job() {
+            return m.lock().map_err(|_| format!("{what}'s lock is poisoned"));
+        }
+        match m.try_lock() {
+            Ok(g) => Ok(g),
+            Err(TryLockError::WouldBlock) => {
+                let doing = self
+                    .job
+                    .lock()
+                    .ok()
+                    .and_then(|j| {
+                        j.as_ref()
+                            .filter(|j| j.running())
+                            .map(|j| format!("job {} ({} {})", j.id, j.model, j.kind))
+                    })
+                    .unwrap_or_else(|| "another request".to_string());
+                Err(format!("{BUSY} {what} is in use by {doing} - try again when it is done (GET /api/job), or stop it (POST /api/job/stop)"))
+            }
+            Err(TryLockError::Poisoned(_)) => Err(format!("{what}'s lock is poisoned")),
+        }
+    }
+
+    /// The answer to a request a busy model cannot take: 409, the message and the job.
+    fn refuse(&self, e: String) -> Response {
+        if !e.starts_with(BUSY) {
+            return Response::error(500, &e);
+        }
+        let job = self
+            .job
+            .lock()
+            .ok()
+            .and_then(|j| j.as_ref().map(Job::to_json))
+            .unwrap_or(Json::Null);
+        Response::json(
+            409,
+            &Json::object()
+                .with("error", e.as_str().into())
+                .with("busy", true.into())
+                .with("job", job),
+        )
+    }
+
+    /// `POST` with `"job": true`: the same request run on its own thread; `{job}` at once, its progress, result or
+    /// error at `GET /api/job`.  One job at a time.
+    fn start_job(self: &Arc<Self>, req: &Request) -> Response {
+        let segments: Vec<&str> = req.path.trim_start_matches("/api/").split('/').collect();
+        let (model, kind) = match segments.as_slice() {
+            [m, k, ..] => (m.to_string(), k.to_string()),
+            [k] => ("".to_string(), k.to_string()),
+            _ => ("".to_string(), "job".to_string()),
+        };
+        let mut slot = match self.job.lock() {
+            Ok(s) => s,
+            Err(_) => return Response::error(500, "the job's lock is poisoned"),
+        };
+        if let Some(j) = slot.as_ref().filter(|j| j.running()) {
+            return Response::json(
+                409,
+                &Json::object()
+                    .with(
+                        "error",
+                        format!("{BUSY} job {} ({} {}) is still running", j.id, j.model, j.kind)
+                            .as_str()
+                            .into(),
+                    )
+                    .with("busy", true.into())
+                    .with("job", j.to_json()),
+            );
+        }
+        let id = self.next_job.fetch_add(1, Ordering::Relaxed) + 1;
+        let job = Job::new(id, &kind, &model);
+        let progress = Arc::clone(&job.progress);
+        let summary = job.to_json();
+        *slot = Some(job);
+        drop(slot);
+        let body = match &req.body {
+            Json::Object(items) => Json::Object(items.iter().filter(|(k, _)| k != "job").cloned().collect()),
+            other => other.clone(),
+        };
+        let inner = Request {
+            method: req.method.clone(),
+            path: req.path.clone(),
+            query: req.query.clone(),
+            body,
+        };
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            let stop = Arc::clone(&progress);
+            // a panic must not leave the job "running" for ever: it ends as failed, with the panic's message
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::job::with_progress(progress, || me.route(&inner))
+            }))
+            .unwrap_or_else(|e| {
+                let msg = e
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| e.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "it panicked".to_string());
+                Response::error(500, &format!("the job failed: {msg}"))
+            });
+            let parsed = crate::json::parse(&String::from_utf8_lossy(&response.body)).unwrap_or(Json::Null);
+            if let Ok(mut slot) = me.job.lock() {
+                if let Some(j) = slot.as_mut().filter(|j| j.id == id) {
+                    j.finished = Some(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0),
+                    );
+                    if response.status == 200 {
+                        j.state = "done".to_string();
+                        j.result = Some(parsed);
+                    } else {
+                        let msg = parsed.str_or("error", "failed").to_string();
+                        j.state = if stop.stop.load(Ordering::Relaxed) || msg.contains(crate::job::STOPPED) {
+                            "stopped".to_string()
+                        } else {
+                            "failed".to_string()
+                        };
+                        j.error = Some(msg);
+                    }
+                }
+            }
+        });
+        Response::ok(&Json::object().with("job", summary))
+    }
+
+    /// `GET /api/job` (the running or last job), `POST /api/job/stop`.
+    fn job_route(&self, req: &Request) -> Response {
+        let mut slot = match self.job.lock() {
+            Ok(s) => s,
+            Err(_) => return Response::error(500, "the job's lock is poisoned"),
+        };
+        match (req.method.as_str(), req.path.as_str()) {
+            ("GET", "/api/job") => Response::ok(&slot.as_ref().map(Job::to_json).unwrap_or(Json::Null)),
+            ("POST", "/api/job/stop") => match slot.as_mut().filter(|j| j.running()) {
+                Some(j) => {
+                    j.progress.stop.store(true, Ordering::Relaxed);
+                    Response::ok(&j.to_json())
+                }
+                None => Response::error(400, "no job is running"),
+            },
+            _ => Response::error(404, "no such route"),
+        }
     }
 
     /// A language model's generate or feedback with `guard: true`, guarded; `None` for every other request.
@@ -160,9 +315,9 @@ impl Service {
         if !matches!(action, "generate" | "feedback") {
             return None;
         }
-        let mut g = match self.guard.lock() {
+        let mut g = match self.take(&self.guard, "the guard") {
             Ok(g) => g,
-            Err(_) => return Some(Response::error(500, "the guard's lock is poisoned")),
+            Err(e) => return Some(self.refuse(e)),
         };
         Some(Response::ok(&if action == "generate" {
             generate_guarded(m, &req.body, &mut g)
@@ -173,7 +328,8 @@ impl Service {
 
     /// Every model in brief, and how many uploads and checkpoints there are.
     fn status(&self) -> Json {
-        let chain = self.chain.lock().ok().map(|mut g| {
+        let busy = || Json::object().with("busy", true.into());
+        let chain = self.chain.try_lock().ok().map(|mut g| {
             let m = g.get_or_insert_with(default_chain);
             Json::object()
                 .with("nodes", m.nodes.into())
@@ -183,7 +339,7 @@ impl Service {
                 .with("contexts", m.tables.iter().map(|t| t.len()).sum::<usize>().into())
                 .with("vocab", (m.vocab.len() - 3).into())
         });
-        let ngram = self.ngram.lock().ok().map(|mut g| {
+        let ngram = self.ngram.try_lock().ok().map(|mut g| {
             let m = g.get_or_insert_with(default_ngram);
             Json::object()
                 .with("order", m.order.into())
@@ -192,7 +348,7 @@ impl Service {
                 .with("ngrams", m.n_grams().into())
                 .with("vocab", (m.vocab.len() - 3).into())
         });
-        let machine = self.machine.lock().ok().map(|m| {
+        let machine = self.machine.try_lock().ok().map(|m| {
             let st = m.stats();
             Json::object()
                 .with("shape", st.get("shape").cloned().unwrap_or(Json::Null))
@@ -207,7 +363,7 @@ impl Service {
             .and_then(Json::as_array)
             .map(Vec::len)
             .unwrap_or(0);
-        let guard = self.guard.lock().ok().map(|g| {
+        let guard = self.guard.try_lock().ok().map(|g| {
             Json::object()
                 .with("transitions", g.edges.len().into())
                 .with("blamed", (g.blamed as f64).into())
@@ -216,10 +372,18 @@ impl Service {
         });
         Json::object()
             .with("version", VERSION.into())
-            .with("chain", chain.unwrap_or(Json::Null))
-            .with("ngram", ngram.unwrap_or(Json::Null))
-            .with("machine", machine.unwrap_or(Json::Null))
-            .with("guard", guard.unwrap_or(Json::Null))
+            .with("chain", chain.unwrap_or_else(busy))
+            .with("ngram", ngram.unwrap_or_else(busy))
+            .with("machine", machine.unwrap_or_else(busy))
+            .with("guard", guard.unwrap_or_else(busy))
+            .with(
+                "job",
+                self.job
+                    .lock()
+                    .ok()
+                    .and_then(|j| j.as_ref().map(Job::to_json))
+                    .unwrap_or(Json::Null),
+            )
             .with("uploads", uploads.into())
             .with("checkpoints", checkpoints.into())
     }
@@ -240,8 +404,8 @@ impl Service {
                 .get_or_insert_with(default_ngram)
                 .save(path),
             "machine" => self.machine.lock().map_err(poisoned)?.save(path),
-            "guard" => self.guard.lock().map_err(poisoned)?.save(path),
-            "network" => match self.network.lock().map_err(poisoned)?.as_ref() {
+            "guard" => self.take(&self.guard, "the guard")?.save(path),
+            "network" => match self.take(&self.network, "the network")?.as_ref() {
                 Some(n) => n.save(path),
                 None => Err("there is no network yet: make one first".to_string()),
             },
@@ -252,11 +416,11 @@ impl Service {
     fn load_model(&self, model: &str, path: &str) -> Result<Json, String> {
         Ok(match model {
             "chain" => {
-                let mut g = self.chain.lock().map_err(poisoned)?;
+                let mut g = self.take(&self.chain, "the chain")?;
                 Lm::info(g.insert(load_chain(path)?))
             }
             "ngram" => {
-                let mut g = self.ngram.lock().map_err(poisoned)?;
+                let mut g = self.take(&self.ngram, "the N-gram model")?;
                 Lm::info(g.insert(load_ngram(path)?))
             }
             "machine" => {
@@ -265,12 +429,12 @@ impl Service {
                 g.stats()
             }
             "guard" => {
-                let mut g = self.guard.lock().map_err(poisoned)?;
+                let mut g = self.take(&self.guard, "the guard")?;
                 *g = load_guard(path)?;
                 g.stats()
             }
             "network" => {
-                let mut g = self.network.lock().map_err(poisoned)?;
+                let mut g = self.take(&self.network, "the network")?;
                 network_info(g.insert(load_network(path)?))
             }
             other => return Err(format!("no model {other:?}")),
@@ -329,17 +493,23 @@ impl Service {
         Arc::new(move |req: &Request| service.route(req))
     }
 
-    pub fn route(&self, req: &Request) -> Response {
+    pub fn route(self: &Arc<Self>, req: &Request) -> Response {
         if !req.path.starts_with("/api/") {
             return self.serve_static(req);
+        }
+        if req.path == "/api/job" || req.path.starts_with("/api/job/") {
+            return self.job_route(req);
+        }
+        if req.method == "POST" && req.body.bool_or("job", false) && !crate::job::in_job() {
+            return self.start_job(req);
         }
         if req.path == "/api/network" || req.path.starts_with("/api/network/") {
             return self.network_route(req);
         }
         if req.path == "/api/ngram" || req.path.starts_with("/api/ngram/") {
-            let mut guard = match self.ngram.lock() {
+            let mut guard = match self.take(&self.ngram, "the N-gram model") {
                 Ok(g) => g,
-                Err(_) => return Response::error(500, "the N-gram model's lock is poisoned"),
+                Err(e) => return self.refuse(e),
             };
             let m = guard.get_or_insert_with(default_ngram);
             if let Some(r) = self.guarded(m, req) {
@@ -348,9 +518,9 @@ impl Service {
             return answer(ngram_route(m, req));
         }
         if req.path == "/api/chain" || req.path.starts_with("/api/chain/") {
-            let mut guard = match self.chain.lock() {
+            let mut guard = match self.take(&self.chain, "the chain") {
                 Ok(g) => g,
-                Err(_) => return Response::error(500, "the chain's lock is poisoned"),
+                Err(e) => return self.refuse(e),
             };
             let m = guard.get_or_insert_with(default_chain);
             if let Some(r) = self.guarded(m, req) {
@@ -364,9 +534,9 @@ impl Service {
             return answer(uploads_route(&req.method, action, &req.body));
         }
         if req.path == "/api/guard" || req.path.starts_with("/api/guard/") {
-            let mut g = match self.guard.lock() {
+            let mut g = match self.take(&self.guard, "the guard") {
                 Ok(g) => g,
-                Err(_) => return Response::error(500, "the guard's lock is poisoned"),
+                Err(e) => return self.refuse(e),
             };
             let action = req.path["/api/guard".len()..].trim_start_matches('/');
             return answer(guard_route(&mut g, &req.method, action, &req.body));
@@ -378,7 +548,7 @@ impl Service {
             ("GET", "/api/status") => return answer(Ok(self.status())),
             ("POST", "/api/converse") => {
                 return self.with_lm(&req.body, |m| {
-                    let mut g = self.guard.lock().map_err(poisoned)?;
+                    let mut g = self.take(&self.guard, "the guard")?;
                     Ok(converse(
                         m,
                         &req.body,
@@ -388,7 +558,7 @@ impl Service {
             }
             ("POST", "/api/chat/llm") => {
                 return match self.with_lm_result(&req.body, |m| {
-                    let mut g = self.guard.lock().map_err(poisoned)?;
+                    let mut g = self.take(&self.guard, "the guard")?;
                     chat_llm(m, &req.body, req.body.bool_or("guard", false).then_some(&mut *g))
                 }) {
                     Ok(v) => Response::ok(&v),
@@ -523,9 +693,9 @@ impl Service {
 
 impl Service {
     fn network_route(&self, req: &Request) -> Response {
-        let mut guard = match self.network.lock() {
+        let mut guard = match self.take(&self.network, "the network") {
             Ok(g) => g,
-            Err(_) => return Response::error(500, "the network's lock is poisoned"),
+            Err(e) => return self.refuse(e),
         };
         if guard.is_none() {
             match new_network(&Json::object()) {
@@ -1360,6 +1530,9 @@ pub(crate) fn ngram_predict(m: &mut NGram, body: &Json) -> Json {
         .with("next", Json::Array(next))
 }
 
+/// How a busy model's refusal begins.
+const BUSY: &str = "busy:";
+
 fn poisoned<T>(_: T) -> String {
     "a lock is poisoned".to_string()
 }
@@ -1367,6 +1540,12 @@ fn poisoned<T>(_: T) -> String {
 /// A route's result as a response: 404 and 405 for the routes that are not there, 400 for every other error.
 fn answer(r: Result<Json, String>) -> Response {
     match r {
+        Err(msg) if msg.starts_with(BUSY) => Response::json(
+            409,
+            &Json::object()
+                .with("error", msg.as_str().into())
+                .with("busy", true.into()),
+        ),
         Ok(v) => Response::ok(&v),
         Err(msg) if msg == "no such route" => Response::error(404, &msg),
         Err(msg) if msg == "method not allowed" => Response::error(405, &msg),

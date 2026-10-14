@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { jobLine } from "../jobs.js";
 
 /**
  * The chosen language model's info (GET /api/{m}): fetched again whenever the model is switched or any
@@ -21,6 +22,11 @@ export function useLmInfo(lm, tick) {
       })
       .catch((err) => {
         if (!alive) return;
+        // a model a job is training answers 409 at once: keep what was shown, and say why it is not fresh
+        if (err.status === 409) {
+          setError(`busy: ${jobLine(err.data && err.data.job) || "a job is using it"} - shown as it was before`);
+          return;
+        }
         setInfo(null);
         setError(err.message);
       });

@@ -8,7 +8,7 @@ use std::thread;
 use latticefsm::autotrain::{autotrain, parse_judgements, parse_lines, Ollama, Options};
 use latticefsm::b64;
 use latticefsm::json::{parse, Json};
-use latticefsm::ngram::{load_ngram, tokenize, NGram};
+use latticefsm::ngram::{load_ngram, predict_now, tokenize, NGram};
 use latticefsm::rng::Rng;
 
 fn toy(order: usize) -> NGram {
@@ -211,7 +211,8 @@ fn predicting_while_learning() {
         // predicting first changes nothing that is learned
         assert_eq!(learner.to_json().dump(), plain.to_json().dump(), "{unit} {order}");
         let (predicted, acc, ppl, bits) = learner.reset_online();
-        assert_eq!(predicted as usize, n);
+        // every token of the first PREDICT_ALL, a thinning sample after
+        assert_eq!(predicted, (0..n as u64).filter(|&i| predict_now(i)).count() as u64);
         assert!(acc.unwrap() > 0.0 && acc.unwrap() < 1.0);
         assert!(ppl.unwrap() > 1.0 && (bits.unwrap() - ppl.unwrap().log2()).abs() < 1e-9);
         assert_eq!(learner.reset_online().0, 0);

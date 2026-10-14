@@ -165,6 +165,17 @@ remembered in the browser — with these tabs:
 A selector in the header picks the language model the language tabs use -
 the **chain** (below) or the **N-gram** - and the status bar shows both.
 
+Training never freezes the page: training, teaching a reply, the confidence
+sweep, network fitting, Ollama's corpus and auto-training run as
+**background jobs** (`"job": true` on the request). The server answers at
+once and trains on its own thread. The tab shows the job's progress twice a
+second, and the status bar shows it from every tab: what it is reading,
+sequences, tokens, tokens a second, the round, the time so far. A **Stop**
+button ends it at the next sequence, keeping what was learned. Meanwhile
+every other request is answered. The model being trained answers 409 "busy"
+straight away instead of waiting behind it, and the status bar calls it
+busy.
+
 | tab | what it does |
 |---|---|
 | **Train** | a new chain (nodes, unit, confidence) or N-gram (N, unit); train on server paths and on **uploads** - pick many files or a whole folder, any kind (zip, tar, gz, HTML, docx, images...), sent in 8 MiB chunks so a file may be any size - or on pasted text; every token predicted before it is learned; **until N of N**; the held-out measure charted; for the chain, the confidence sweep (accuracy and depth against the threshold) and "use this confidence" |
@@ -478,7 +489,11 @@ when it was last taken, what it was rewarded and punished, and a width.
   also rewards a right guess and punishes a wrong one by `R`; it is off by
   default because it measured worse (held-out perplexity, word trigrams:
   180.07 off, 178.45 at 0.25, 190.5 at 1.0; char 5-grams: 4.485, 4.695,
-  5.085). `--no-predict` just counts.
+  5.085). `--no-predict` just counts. A long run predicts every token of
+  the first 50 000 and then a thinning sample - every 2nd of the next
+  50 000, every 3rd of the next, ... (`PREDICT_ALL`, `predict_now`) - so the
+  measure stays honest without the guessing slowing a big corpus down
+  (a 10 MB file: 290 615 of its tokens predicted).
 * Counts are integers and every probability is computed in one fixed order:
   both ports give the same probabilities, the same greedy texts and the same
   measurements, and read each other's files (`make parity`).

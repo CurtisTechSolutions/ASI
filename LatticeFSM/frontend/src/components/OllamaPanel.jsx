@@ -5,6 +5,7 @@ import { historyPoints, lmLabel, pct } from "../lm.js";
 import { asArray, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, TextField } from "./Fields.jsx";
+import JobProgress from "./JobProgress.jsx";
 import LineChart from "./LineChart.jsx";
 
 /** "corpus 12 · ollama lines 40 · approved 3": what an auto-training round learned from. */
@@ -38,6 +39,7 @@ export default function OllamaPanel({ lm, onMoved }) {
   const [note, setNote] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
+  const [job, setJob] = useState(null); // a running job's progress (writing, training, auto-training)
 
   async function act(name, fn) {
     setBusy(name);
@@ -45,9 +47,10 @@ export default function OllamaPanel({ lm, onMoved }) {
       await fn();
       setError(null);
     } catch (err) {
-      setError(err.message);
+      setError(err.data && err.data.state === "stopped" ? "stopped; what was learned until then is kept" : err.message);
     } finally {
       setBusy(null);
+      setJob(null);
     }
   }
 
@@ -95,11 +98,12 @@ export default function OllamaPanel({ lm, onMoved }) {
             type="button"
             className="primary"
             disabled={busy !== null || !prompt.trim()}
-            onClick={() => act("corpus", async () => setCorpus(await api.ollamaCorpus({ prompt, lines: Math.max(1, parseInteger(lines, 20)), ...ollama() })))}
+            onClick={() => act("corpus", async () => setCorpus(await api.ollamaCorpus({ prompt, lines: Math.max(1, parseInteger(lines, 20)), ...ollama() }, setJob)))}
           >
             {busy === "corpus" ? "Writing…" : "Write"}
           </button>
         </div>
+        {busy === "corpus" ? <JobProgress job={job} /> : null}
         {corpus ? (
           <>
             <p className="muted">
@@ -118,7 +122,7 @@ export default function OllamaPanel({ lm, onMoved }) {
                 disabled={busy !== null || !corpusLines.length}
                 onClick={() =>
                   act("train", async () => {
-                    const r = await api.lmText(lm, corpusLines.join("\n"));
+                    const r = await api.lmText(lm, corpusLines.join("\n"), {}, setJob);
                     setNote(`${lmLabel(lm)}: trained ${r.trained} tokens of Ollama's lines`);
                     if (onMoved) onMoved();
                   })
@@ -141,6 +145,7 @@ export default function OllamaPanel({ lm, onMoved }) {
                 Save as upload
               </button>
             </div>
+            {busy === "train" ? <JobProgress job={job} /> : null}
           </>
         ) : null}
       </div>
@@ -181,7 +186,7 @@ export default function OllamaPanel({ lm, onMoved }) {
                   rounds: parseNumber(rounds, 3),
                   predict: predictFirst,
                   self_credit: predictFirst ? parseNumber(selfCredit, 0) : 0,
-                });
+                }, setJob);
                 setAuto({ log: asArray(r && r.log), history: asArray(r && r.model && r.model.history) });
                 if (onMoved) onMoved();
               })
@@ -190,6 +195,7 @@ export default function OllamaPanel({ lm, onMoved }) {
             {busy === "auto" ? "Training…" : "Auto-train"}
           </button>
         </div>
+        {busy === "auto" ? <JobProgress job={job} /> : null}
         {auto && auto.log.length ? <pre className="mono run-log">{auto.log.join("\n")}</pre> : null}
         {perplexity.length > 1 ? (
           <LineChart

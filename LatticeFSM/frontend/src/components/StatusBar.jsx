@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
+import { jobLine } from "../jobs.js";
 import { fmtInt, fmtNum } from "../util.js";
 
 const POLL_MS = 2000;
 const STATUS_POLL_MS = 5000;
+const JOB_STATUS_POLL_MS = 1000; // while a job runs, its progress is worth following closely
 
 /**
  * Polls /api/stats every 2 s: the matrix's shape, the clock, the stimulation,
@@ -16,6 +18,9 @@ const STATUS_POLL_MS = 5000;
  * chain's and the N-gram model's), the guard's, the uploads and the checkpoints, handed
  * to `onStatus`. A server without that route (404) is asked no more, and the
  * bar shows the machine alone, as it always has.
+ *
+ * A background job (training, teaching, a sweep) shows first, from whichever tab started it, with a button that
+ * asks it to stop; a model it holds reads "busy" until it ends.
  */
 export default function StatusBar({ onStats, onStatus, tick }) {
   const [stats, setStats] = useState(null);
@@ -28,12 +33,14 @@ export default function StatusBar({ onStats, onStatus, tick }) {
     let alive = true;
     let timer = null;
     async function poll() {
+      let running = false;
       try {
         const next = await api.status();
         if (!alive) return;
         const value = next && typeof next === "object" ? next : null;
         setStatus(value);
         if (onStatus) onStatus(value);
+        running = Boolean(value && value.job && value.job.state === "running");
       } catch (err) {
         if (!alive) return;
         if (err.status === 404) {
@@ -41,7 +48,7 @@ export default function StatusBar({ onStats, onStatus, tick }) {
           return;
         }
       }
-      if (alive) timer = setTimeout(poll, STATUS_POLL_MS);
+      if (alive) timer = setTimeout(poll, running ? JOB_STATUS_POLL_MS : STATUS_POLL_MS);
     }
     poll();
     return () => {
@@ -79,14 +86,30 @@ export default function StatusBar({ onStats, onStatus, tick }) {
   const chain = status && status.chain;
   const ngram = status && status.ngram;
   const guard = status && status.guard;
+  const job = status && status.job && status.job.state === "running" ? status.job : null;
   return (
     <div className="statusbar" aria-live="polite">
       {error ? <span className="stat err">API offline: {error}</span> : null}
+      {job ? (
+        <span className="stat job" title="A background job: the server answers everything else meanwhile">
+          ⏳ {jobLine(job)}{" "}
+          <button
+            type="button"
+            className="link"
+            disabled={Boolean(job.progress && job.progress.stopping)}
+            onClick={() => api.jobStop().catch(() => {})}
+          >
+            stop
+          </button>
+        </span>
+      ) : null}
       {status ? (
         <>
           <span className="stat" title="The chain: its nodes, its unit, its confidence threshold, the tokens it has read">
             chain{" "}
-            {chain ? (
+            {chain && chain.busy ? (
+              <b>busy</b>
+            ) : chain ? (
               <>
                 <b>{chain.nodes}</b> nodes of {chain.unit}s · conf <b>{fmtNum(chain.confidence, 2)}</b> · <b>{fmtInt(chain.tokens)}</b> tokens
               </>
@@ -96,7 +119,9 @@ export default function StatusBar({ onStats, onStatus, tick }) {
           </span>
           <span className="stat" title="The N-gram model: N, its unit, the tokens it has read, its n-grams">
             ngram{" "}
-            {ngram ? (
+            {ngram && ngram.busy ? (
+              <b>busy</b>
+            ) : ngram ? (
               <>
                 <b>{ngram.order}</b>-grams of {ngram.unit}s · <b>{fmtInt(ngram.tokens)}</b> tokens · {fmtInt(ngram.ngrams)} n-grams
               </>
@@ -104,7 +129,11 @@ export default function StatusBar({ onStats, onStatus, tick }) {
               <b>none</b>
             )}
           </span>
-          {guard ? (
+          {guard && guard.busy ? (
+            <span className="stat">
+              guard <b>busy</b>
+            </span>
+          ) : guard ? (
             <span className="stat" title="The guard: the transitions it knows as failures, the texts blamed, and the texts judged and rejected">
               guard <b>{fmtInt(guard.transitions)}</b> transitions · {fmtInt(guard.blamed)} blamed · judged{" "}
               <b>{fmtInt(guard.judgements)}</b> · rejected <b className={guard.rejected ? "bad" : undefined}>{fmtInt(guard.rejected)}</b>

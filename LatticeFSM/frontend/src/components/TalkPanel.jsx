@@ -7,6 +7,7 @@ import { askModel, turnText } from "../talk.js";
 import { fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import HearButton from "./HearButton.jsx";
+import JobProgress from "./JobProgress.jsx";
 import { CheckField, NumberField } from "./Fields.jsx";
 import { RateButtons } from "./RatingsCard.jsx";
 import TokenText, { DepthNote } from "./TokenText.jsx";
@@ -116,6 +117,7 @@ export function useTalk(lm, onMoved) {
   const [turns, setTurns] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [job, setJob] = useState(null); // teaching a reply runs as a background job
   const nextId = useRef(0);
 
   async function say(message, opts) {
@@ -171,7 +173,7 @@ export function useTalk(lm, onMoved) {
   async function teach(turn, reply, maxRounds = 100, threshold = 0.95) {
     setBusy(true);
     try {
-      const r = await api.lmTeach(turn.lm, { text: turn.text, reply, max_rounds: maxRounds, threshold });
+      const r = await api.lmTeach(turn.lm, { text: turn.text, reply, max_rounds: maxRounds, threshold }, setJob);
       const taught = { reply, note: `taught "${reply}": ${untilNote(r)}`, reached: Boolean(r.reached), completion: r.completion };
       setTurns((t) => t.map((x) => (x.id === turn.id ? { ...x, taught } : x)));
       setError(null);
@@ -180,10 +182,11 @@ export function useTalk(lm, onMoved) {
       setError(err.message);
     } finally {
       setBusy(false);
+      setJob(null);
     }
   }
 
-  return { turns, setTurns, busy, error, setError, say, rate, teach, clear: () => setTurns([]) };
+  return { turns, setTurns, busy, job, error, setError, say, rate, teach, clear: () => setTurns([]) };
 }
 
 /**
@@ -257,6 +260,7 @@ export default function TalkPanel({ lm, tick, onMoved }) {
           subscripts={chain && subscripts}
           empty="Say something - a few words it might know how to go on with - and it carries on from there."
         />
+        <JobProgress job={talk.job} />
         <Alert message={talk.error} onDismiss={() => talk.setError(null)} />
         <div className="voice-composer">
           <input

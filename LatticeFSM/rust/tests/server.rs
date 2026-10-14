@@ -614,3 +614,92 @@ fn the_guard_vetoes_what_it_was_told_failed() {
     let (_, r) = post(&addr, "/api/guard/reset", "{}");
     assert_eq!(r.num("transitions", -1.0), 0.0);
 }
+
+fn get(addr: &str, path: &str) -> (u16, Json) {
+    request(addr, "GET", path, None).unwrap()
+}
+
+/// Poll `GET /api/job` until job `id` is no longer running.
+fn wait_for_job(addr: &str, id: f64) -> Json {
+    for _ in 0..2000 {
+        let (_, j) = get(addr, "/api/job");
+        assert_eq!(j.num("id", -1.0), id);
+        if j.str_or("state", "") != "running" {
+            return j;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("job {id} never ended");
+}
+
+#[test]
+fn training_runs_as_a_job_and_the_server_answers_meanwhile() {
+    let dir = std::env::temp_dir().join(format!("latticefsm-jobs-{}-{}", std::process::id(), rand_suffix()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let big = dir.join("big.txt");
+    let line = "the quick brown fox jumps over the lazy dog and the cat sat on the mat\n";
+    std::fs::write(&big, line.repeat(60_000)).unwrap();
+    let addr = serve(4000);
+    assert_eq!(get(&addr, "/api/job").1, Json::Null);
+    // a short job, start to finish: its result is what the plain request would have answered
+    let (status, started) = post(
+        &addr,
+        "/api/chain/text",
+        r#"{"text":"the cat sat\nthe dog sat","job":true}"#,
+    );
+    assert_eq!(status, 200);
+    let job = started.get("job").unwrap();
+    assert_eq!(job.str_or("model", ""), "chain");
+    assert_eq!(job.str_or("kind", ""), "text");
+    let done = wait_for_job(&addr, job.num("id", 0.0));
+    assert_eq!(done.str_or("state", ""), "done");
+    let result = done.get("result").unwrap();
+    assert!(result.num("trained", 0.0) > 0.0);
+    assert!(result.get("model").is_some());
+    // a long one: the server answers meanwhile, the model it trains answers busy (409), a second job is refused
+    let body = Json::object()
+        .with("data", big.to_string_lossy().as_ref().into())
+        .with("job", true.into());
+    let (status, started) = request(&addr, "POST", "/api/chain/train", Some(&body)).unwrap();
+    assert_eq!(status, 200);
+    let id = started.get("job").unwrap().num("id", 0.0);
+    assert_eq!(id, 2.0);
+    let (status, s) = get(&addr, "/api/status");
+    assert_eq!(status, 200);
+    let running = s.get("job").unwrap();
+    assert_eq!(running.num("id", 0.0), id);
+    if running.str_or("state", "") == "running" {
+        assert_eq!(s.get("chain").unwrap().get("busy"), Some(&Json::Bool(true)));
+        let (status, busy) = post(&addr, "/api/chain/predict", r#"{"text":"the","k":3}"#);
+        assert_eq!(status, 409);
+        assert_eq!(busy.get("busy"), Some(&Json::Bool(true)));
+        assert!(busy.str_or("error", "").starts_with("busy:"));
+        assert_eq!(busy.get("job").unwrap().num("id", 0.0), id);
+        let (status, _) = post(&addr, "/api/ngram/text", r#"{"text":"another model","job":true}"#);
+        assert_eq!(status, 409);
+        // the other models answer
+        let (status, _) = post(&addr, "/api/ngram/predict", r#"{"text":"the","k":3}"#);
+        assert_eq!(status, 200);
+        // it reports how far it has got, and stops when asked, keeping what it learned
+        let (status, stopping) = post(&addr, "/api/job/stop", "{}");
+        assert_eq!(status, 200);
+        assert_eq!(
+            stopping.get("progress").unwrap().get("stopping"),
+            Some(&Json::Bool(true))
+        );
+    }
+    let ended = wait_for_job(&addr, id);
+    let tokens = ended.get("progress").unwrap().num("tokens", 0.0);
+    if ended.str_or("state", "") == "stopped" {
+        assert!(ended.str_or("error", "").contains("stopped"));
+        assert!(tokens < 60_000.0 * 73.0);
+    } else {
+        assert_eq!(ended.str_or("state", ""), "done");
+    }
+    let (status, info) = get(&addr, "/api/chain");
+    assert_eq!(status, 200);
+    assert!(info.num("tokens", 0.0) >= tokens);
+    // nothing to stop now
+    assert_eq!(post(&addr, "/api/job/stop", "{}").0, 400);
+    std::fs::remove_dir_all(&dir).ok();
+}

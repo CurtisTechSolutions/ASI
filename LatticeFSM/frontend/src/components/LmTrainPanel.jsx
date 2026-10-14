@@ -7,6 +7,7 @@ import { fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextArea, TextField } from "./Fields.jsx";
 import LineChart from "./LineChart.jsx";
+import JobProgress from "./JobProgress.jsx";
 import UploadPicker from "./UploadPicker.jsx";
 
 const THRESHOLDS = "0, 0.3, 0.5, 0.7, 0.8, 0.9, 0.95, 1";
@@ -68,6 +69,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
   const [note, setNote] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
+  const [job, setJob] = useState(null); // the running job's progress: training runs in the background
 
   const chain = lm === "chain";
   const unit = chain ? chainUnit : ngramUnit;
@@ -79,9 +81,17 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
       await fn();
       setError(null);
     } catch (err) {
-      setError(err.message);
+      // a stopped job kept what it learned: say so, and show the model as it now is
+      if (err.data && err.data.state === "stopped") {
+        setError(null);
+        setNote(`stopped after ${err.data.progress ? err.data.progress.tokens : 0} tokens; what was learned until then is kept`);
+        if (onMoved) onMoved();
+      } else {
+        setError(err.message);
+      }
     } finally {
       setBusy(null);
+      setJob(null);
     }
   }
 
@@ -121,14 +131,14 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
 
   const train = () =>
     act("train", async () => {
-      const r = await api.lmTrain(lm, { ...sources(), held_out: parseInteger(heldOut, 10), ...learning(), ...untilBody(untilData) });
+      const r = await api.lmTrain(lm, { ...sources(), held_out: parseInteger(heldOut, 10), ...learning(), ...untilBody(untilData) }, setJob);
       setNote(`trained ${r.trained} tokens${learnedNote(r.learned)}${heldOutNote(r.held_out)}${untilResult(r)}`);
       moved(r);
     });
 
   const trainText = () =>
     act("text", async () => {
-      const r = await api.lmText(lm, paste, { ...learning(), ...untilBody(untilText) });
+      const r = await api.lmText(lm, paste, { ...learning(), ...untilBody(untilText) }, setJob);
       setNote(`trained ${r.trained} tokens of pasted text${learnedNote(r.learned)}${untilResult(r)}`);
       moved(r);
     });
@@ -140,7 +150,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
         ...sources(),
         held_out: parseInteger(heldOut, 10),
         ...(list.length ? { thresholds: list } : {}),
-      });
+      }, setJob);
       setSweep(Array.isArray(r && r.rows) ? r.rows : []);
     });
 
@@ -231,6 +241,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
             {!(useData && data.trim()) && !uploads.length ? "nothing chosen: the server's data/corpus" : ""}
           </span>
         </div>
+        {busy === "train" ? <JobProgress job={job} /> : null}
       </div>
 
       <div className="card">
@@ -247,6 +258,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
             {busy === "text" ? "Training…" : "Train on this text"}
           </button>
         </div>
+        {busy === "text" ? <JobProgress job={job} /> : null}
         <p className="muted">Predict while learning, self-credit, max rounds and the goal (in the card beside) apply here too.</p>
       </div>
 
@@ -342,6 +354,7 @@ export default function LmTrainPanel({ lm, tick, onMoved }) {
             </button>
             {info ? <span className="note muted">now {fmtNum(info.confidence, 2)}</span> : null}
           </div>
+          {busy === "sweep" ? <JobProgress job={job} /> : null}
           {sweep && sweep.length ? (
             <>
               <div className="row">

@@ -15,7 +15,9 @@ use std::io::{Read, Write};
 
 use crate::gzip;
 use crate::json::{parse, Json};
-use crate::ngram::{detokenize, goal_of, tokenize, train_corpus, Drill, Sequence, Teaching, BOS, EOS, UNITS, UNK};
+use crate::ngram::{
+    detokenize, goal_of, predict_now, tokenize, train_corpus, Drill, Sequence, Teaching, BOS, EOS, UNITS, UNK,
+};
 use crate::rng::Rng;
 
 const FORMAT: &str = "latticefsm-chain";
@@ -106,6 +108,8 @@ pub struct Chain {
     pub self_reward: bool,
     /// (right first guesses, inputs predicted, sum of ln P, nodes traversed) since the last `reset_online`.
     pub online: (u64, u64, f64, u64),
+    /// Positions considered for predicting since the last `reset_online`.
+    pub seen: u64,
 }
 
 impl Chain {
@@ -138,6 +142,7 @@ impl Chain {
             self_credit: 0.0,
             self_reward: true,
             online: (0, 0, 0.0, 0),
+            seen: 0,
         })
     }
 
@@ -234,16 +239,43 @@ impl Chain {
         let u = self.uniform();
         let mut dist = vec![u; self.vocab.len()];
         dist[0] = 0.0;
+        let mut counted: Vec<(usize, f64)> = Vec::new();
         for node in path {
             let t = node.counts.len() as u64;
             let (tf, n) = (t as f64, (node.total + t) as f64);
-            for (w, p) in dist.iter_mut().enumerate() {
-                let c = node.counts.get(&(w as u32)).copied().unwrap_or(0);
-                *p = (c as f64 + tf * *p) / n;
+            // `(c + t p) / n` for every input: the counted ones from their counts, the rest (`c = 0`, so `t p`
+            // exactly) in one pass - the same arithmetic as `p`, without a lookup per input
+            counted.clear();
+            counted.extend(
+                node.counts
+                    .iter()
+                    .map(|(&w, &c)| (w as usize, (c as f64 + tf * dist[w as usize]) / n)),
+            );
+            for p in dist.iter_mut() {
+                *p = (tf * *p) / n;
+            }
+            for &(w, v) in &counted {
+                dist[w] = v;
             }
         }
         dist[0] = 0.0;
         dist
+    }
+
+    /// The first guess after `path` and the probability of `w`: from the whole distribution when the vocabulary is
+    /// small (letters), from the candidates when it is not.
+    fn guess_and_p(&self, path: &[&Node], w: u32) -> (u32, f64) {
+        if path.is_empty() || self.vocab.len() > 4096 {
+            return (self.guess(path), self.p(path, w));
+        }
+        let dist = self.dist(path);
+        let mut best = 1;
+        for (i, &p) in dist.iter().enumerate().skip(1) {
+            if p > dist[best] {
+                best = i;
+            }
+        }
+        (best as u32, dist[w as usize])
     }
 
     /// The likeliest input after `path` (ties: the lower id; never `<s>`): an input no node past the output node has
@@ -311,11 +343,15 @@ impl Chain {
         for i in 1..ids.len() {
             let w = ids[i];
             let hist = &ids[..i];
+            let sample = self.predict && predict_now(self.seen);
             if self.predict {
+                self.seen += 1;
+            }
+            if sample {
                 let d = self.walk(hist, None);
                 let (guess, p) = {
                     let path = self.path(hist, d);
-                    (self.guess(&path), self.p(&path, w))
+                    self.guess_and_p(&path, w)
                 };
                 self.online.0 += (guess == w) as u64;
                 self.online.1 += 1;
@@ -358,6 +394,7 @@ impl Chain {
     pub fn reset_online(&mut self) -> Online {
         let (right, n, logp, depth) = self.online;
         self.online = (0, 0, 0.0, 0);
+        self.seen = 0;
         if n == 0 {
             return Online {
                 predicted: 0,
@@ -387,7 +424,11 @@ impl Chain {
         let (mut n, mut count) = (0, 0);
         for toks in seqs {
             if !toks.is_empty() {
+                if crate::job::stopped() {
+                    break;
+                }
                 n += self.train_tokens(toks);
+                crate::job::tick("", toks.len());
                 count += 1;
             }
         }
@@ -455,13 +496,14 @@ impl Chain {
                 }
             }
             rounds.push(right);
+            crate::job::phase("drilling", rounds.len() as u64);
             if best.is_none_or(|b| right > b) {
                 best = Some(right);
                 stale = 0;
             } else {
                 stale += 1;
             }
-            if right >= need || rounds.len() >= max_rounds || stale >= patience {
+            if right >= need || rounds.len() >= max_rounds || stale >= patience || crate::job::stopped() {
                 return Drill {
                     right,
                     of: n,
@@ -808,7 +850,8 @@ impl Chain {
                 ids.push(w);
             }
             history.push(right);
-            if right >= need || rounds >= max_rounds {
+            crate::job::phase("teaching", history.len() as u64);
+            if right >= need || rounds >= max_rounds || crate::job::stopped() {
                 return Teaching {
                     right,
                     of,

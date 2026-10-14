@@ -14,7 +14,7 @@ import { joinContinuation } from "./lm.js";
 export async function askModel(lm, message, { learn = false, maxTokens = 40, temperature = 0, guard = false } = {}) {
   let learned = null;
   if (learn) {
-    const r = await api.lmText(lm, message);
+    const r = await api.lmLearn(lm, message);
     learned = r ? r.trained : null;
   }
   const r = await api.lmGenerate(lm, {

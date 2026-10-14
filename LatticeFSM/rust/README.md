@@ -135,7 +135,9 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/converse` | `{model, opening, turns?, max_tokens?, temperature?}` | the model talking to itself |
 | `POST /api/chat/llm` | `{model, topic, turns?, pass_mark?, learn?, ollama_model?, url?}` | Ollama talks with the model and marks its replies; 502 without Ollama |
 | `POST /api/ollama/corpus` | `{prompt, lines?, ollama_model?, url?}` | sentences Ollama writes |
-| `GET /api/status` | | every model in brief, uploads, checkpoints |
+| `GET /api/status` | | every model in brief (`{"busy": true}` for one a job holds), uploads, checkpoints, the job |
+| `"job": true` on any `POST` | | run it in the background: `{job}` at once; its progress, result or error at `GET /api/job`; one at a time (409 for a second) |
+| `GET /api/job`, `POST /api/job/stop` | | the running or last job (`id, kind, model, state` running / done / stopped / failed, `elapsed`, `progress: {phase, label, sequences, tokens, round, tokens_per_second, stopping}`, `result`, `error`); ask it to stop at the next sequence (what it learned is kept) |
 | `GET /api/guard`, `POST /api/guard/{new,settings,blame,clear,judge,forget,reset,save,load}` | `{texts \| text, reason?, severity?, amount?, threshold?, min_coverage?, path?}` | the guard: blame failures with a reason, clear good text, judge text (reject / suspect / pass, risk, coverage, reasons, spans) |
 | `guard: true` on `/api/{chain,ngram}/generate`, `/feedback`, `/api/converse`, `/api/chat/llm`, `/api/network/talk` | `{over_sample?, teach_guard?}` | the guard in front: rejected samples vetoed (over-sampled), bad feedback and low marks blamed, replies judged |
 | `GET /api/network` | | the network the server holds beside the machine (`enc>dec` until another is made): architecture, layers, summary |
@@ -146,7 +148,8 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/network/save`, `/api/network/load` | `{path}` | write or read the network |
 
 Errors are `{"error": "..."}` with 400 (a bad request), 404 (no such route)
-or 405. `tests/server.rs` exercises every route over a real socket.
+or 405. 409 is a model in use by a job: `{error: "busy: ...", busy: true,
+job}`, answered at once instead of waiting. `tests/server.rs` exercises every route over a real socket.
 
 ## Files
 

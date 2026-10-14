@@ -240,6 +240,15 @@ pub fn corpus_sequences(paths: &[String], unit: &str, lower: bool) -> Result<Vec
     Ok(out)
 }
 
+/// Predicting while training: every token of the first this many since the last `reset_online`, then a thinning
+/// sample - every 2nd of the next as many, every 3rd of the next, ... - as `ngram.PREDICT_ALL`.
+pub const PREDICT_ALL: u64 = 50_000;
+
+/// Whether the `seen`-th position (from 0) since the last reset is predicted while training.
+pub fn predict_now(seen: u64) -> bool {
+    seen % (1 + seen / PREDICT_ALL) == 0
+}
+
 /// How much of the goal teaching until N of N stops at, by default: 95% of the tokens (of the most possible, when
 /// training), so it need not be exact.
 pub const THRESHOLD: f64 = 0.95;
@@ -269,7 +278,12 @@ pub fn train_corpus(
     let (mut total, mut kept) = (0usize, Vec::new());
     let (mut path, mut label): (Option<String>, Option<String>) = (None, None);
     let (mut count, mut n, mut index) = (0usize, 0usize, 0usize);
+    crate::job::phase("training", 0);
     corpus_stream(paths, unit, lower, &mut |p, lab, toks| {
+        if crate::job::stopped() {
+            return Err(crate::job::STOPPED.to_string());
+        }
+        crate::job::tick(lab, toks.len());
         if path.as_deref() != Some(p) {
             if let Some(old) = path.take() {
                 sources.push((old, count, n));
@@ -475,6 +489,8 @@ pub struct NGram {
     pub self_reward: bool,
     /// While predicting: [right first guesses, tokens predicted, sum of ln P(true token)].
     pub online: (u64, u64, f64),
+    /// Positions considered for predicting since the last `reset_online`.
+    pub seen: u64,
     tables: Option<Vec<Order>>,
     ranks: Option<BTreeMap<u64, BTreeSet<u32>>>,
 }
@@ -508,6 +524,7 @@ impl NGram {
             self_credit: 0.0,
             self_reward: true,
             online: (0, 0, 0.0),
+            seen: 0,
             tables: None,
             ranks: None,
         })
@@ -559,7 +576,11 @@ impl NGram {
         for i in k..ids.len() {
             let ctx = ids[i - k..i].to_vec();
             let w = ids[i];
+            let sample = self.predict && predict_now(self.seen);
             if self.predict {
+                self.seen += 1;
+            }
+            if sample {
                 let guess = self.top(&ctx);
                 let p = self.prob(&ctx, w);
                 self.online.0 += (guess == w) as u64;
@@ -593,6 +614,7 @@ impl NGram {
     pub fn reset_online(&mut self) -> (u64, Option<f64>, Option<f64>, Option<f64>) {
         let (right, n, logp) = self.online;
         self.online = (0, 0, 0.0);
+        self.seen = 0;
         if n == 0 {
             return (0, None, None, None);
         }
@@ -619,40 +641,98 @@ impl NGram {
             }
             self.ranks = Some(r);
         }
-        let mut cand: BTreeSet<u32> = BTreeSet::new();
+        let floor = 1.0 / (self.vocab.len() - 1) as f64;
+        let mut finalists: Vec<u32> = Vec::new();
         {
+            // the levels this context reaches, lowest order first, each with its row and the constants `kn` uses
+            struct Level<'a> {
+                row: &'a Row,
+                tot: f64,
+                d: f64,
+                lam: f64,
+            }
             let tables = self.tables.as_ref().expect("derived");
-            for (k, t) in tables.iter().enumerate().skip(2) {
-                if let Some(row) = t.rows.get(&ctx[ctx.len() - (k - 1)..]) {
-                    cand.extend(row.keys());
+            let mut levels: Vec<Level> = Vec::with_capacity(self.order);
+            for (k, t) in tables.iter().enumerate().skip(1) {
+                let h: &[u32] = if k > 1 { &ctx[ctx.len() - (k - 1)..] } else { &[] };
+                if let Some(row) = t.rows.get(h) {
+                    if !row.is_empty() {
+                        let tot = t.totals[h] as f64;
+                        let d = t.discount();
+                        levels.push(Level {
+                            row,
+                            tot,
+                            d,
+                            lam: d * t.distinct[h] as f64 / tot,
+                        });
+                    }
                 }
             }
+            // a token seen at level j (and none above it) ends as its Kneser-Ney value there times the same factor
+            // for every such token, so only the best of each level (and its near-ties) can win
+            let partial = |w: u32, upto: usize| -> f64 {
+                let mut p = floor;
+                for lv in &levels[..=upto] {
+                    let c = lv.row.get(&w).copied().unwrap_or(0) as f64;
+                    p = (c - lv.d).max(0.0) / lv.tot + lv.lam * p;
+                }
+                p
+            };
+            // credited words are weighed by their widths, so they are scored exactly below, never ranked here
+            let credited = if self.stimulation != 0.0 {
+                self.edges.get(ctx)
+            } else {
+                None
+            };
+            let mut scored: Vec<(u32, f64)> = Vec::new();
+            for j in (1..levels.len()).rev() {
+                scored.clear();
+                let mut best = f64::NEG_INFINITY;
+                for &w in levels[j].row.keys() {
+                    if w == 0
+                        || levels[j + 1..].iter().any(|l| l.row.contains_key(&w))
+                        || credited.is_some_and(|r| r.contains_key(&w))
+                    {
+                        continue;
+                    }
+                    let v = partial(w, j);
+                    if v > best {
+                        best = v;
+                    }
+                    scored.push((w, v));
+                }
+                let near = best - best.abs() * 1e-9;
+                finalists.extend(scored.iter().filter(|(_, v)| *v >= near).map(|(w, _)| *w));
+            }
+            // the best of the rest by the order-1 ranking: not in a row above it, nor credited (scored exactly below)
+            let in_rows = |w: u32| {
+                levels.iter().skip(1).any(|l| l.row.contains_key(&w)) || credited.is_some_and(|r| r.contains_key(&w))
+            };
+            let mut outside = None;
+            'search: for (_, bucket) in self.ranks.as_ref().expect("built").iter().rev() {
+                for &w in bucket {
+                    if w != 0 && !in_rows(w) {
+                        outside = Some(w);
+                        break 'search;
+                    }
+                }
+            }
+            if outside.is_none() {
+                let seen = tables[1].rows.get(&Vec::new());
+                outside =
+                    (1..self.vocab.len() as u32).find(|&w| !in_rows(w) && !seen.is_some_and(|r| r.contains_key(&w)));
+            }
+            finalists.extend(outside);
         }
         if self.stimulation != 0.0 {
             if let Some(recs) = self.edges.get(ctx) {
-                cand.extend(recs.keys());
+                finalists.extend(recs.keys().filter(|&&w| w != 0));
             }
         }
-        cand.remove(&0);
-        let mut outside = None;
-        'search: for (_, bucket) in self.ranks.as_ref().expect("built").iter().rev() {
-            for &w in bucket {
-                if w != 0 && !cand.contains(&w) {
-                    outside = Some(w);
-                    break 'search;
-                }
-            }
-        }
-        if outside.is_none() {
-            let seen = self.tables.as_ref().expect("derived")[1].rows.get(&Vec::new());
-            outside =
-                (1..self.vocab.len() as u32).find(|w| !cand.contains(w) && !seen.is_some_and(|r| r.contains_key(w)));
-        }
-        if let Some(w) = outside {
-            cand.insert(w);
-        }
+        finalists.sort_unstable();
+        finalists.dedup();
         let mut best = (0u32, f64::NEG_INFINITY);
-        for w in cand {
+        for w in finalists {
             let p = self.prob(ctx, w);
             if p > best.1 {
                 best = (w, p);
@@ -713,13 +793,14 @@ impl NGram {
                 }
             }
             rounds.push(right);
+            crate::job::phase("drilling", rounds.len() as u64);
             if best.is_none_or(|b| right > b) {
                 best = Some(right);
                 stale = 0;
             } else {
                 stale += 1;
             }
-            if right >= need || rounds.len() >= max_rounds || stale >= patience {
+            if right >= need || rounds.len() >= max_rounds || stale >= patience || crate::job::stopped() {
                 return Drill {
                     right,
                     of: n,
@@ -765,7 +846,11 @@ impl NGram {
         let (mut n, mut count) = (0, 0);
         for toks in seqs {
             if !toks.is_empty() {
+                if crate::job::stopped() {
+                    break;
+                }
                 n += self.train_tokens(toks);
+                crate::job::tick("", toks.len());
                 count += 1;
             }
         }
@@ -1156,7 +1241,8 @@ impl NGram {
             }
             let right = guesses.iter().filter(|(_, w, g)| w == g).count();
             history.push(right);
-            if right >= need || rounds >= max_rounds {
+            crate::job::phase("teaching", history.len() as u64);
+            if right >= need || rounds >= max_rounds || crate::job::stopped() {
                 return Teaching {
                     right,
                     of,

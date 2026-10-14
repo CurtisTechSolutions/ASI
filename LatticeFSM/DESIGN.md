@@ -802,6 +802,23 @@ does not help (word trigrams: perplexity 180.07, 178.45, 190.5 at R = 0,
 prediction itself is on by default: it costs little and changes nothing the
 model learns.
 
+A long run predicts a sample, so a big corpus is not slowed by it.
+`predict_now(seen) = seen % (1 + seen / PREDICT_ALL) == 0`, with
+`PREDICT_ALL = 50000`: every position of the first 50 000 since the last
+`reset_online`, then every 2nd, every 3rd, and so on. The positions are the
+same in both ports, so the measures still agree, and the first 50 000 are
+exact. In Rust, `top` scores the rows level by level, highest order first,
+and keeps every word within 1e-9 of that level's best. A word in a higher row,
+or credited, is left to the end. The best outsider comes from the order-1
+ranks, with the credited words left out. The exact `prob` of those few
+candidates then decides, so the guess is the full argmax with no
+distribution built. The chain's guess builds its distribution once, densely,
+and takes both the argmax and `P(w)` from it.
+
+Measured on 500 KB of text, training with prediction took 20.6 s for the
+N-gram model and 5.45 s for the chain; it now takes 1.47 s and 1.77 s.
+Training on a 10 MB file took 132 s and now takes 48.6 s.
+
 ### 15.6 Automatic training
 
 `autotrain` trains on `corpus_sequences(data)` (every `held_out`-th sequence
@@ -1031,6 +1048,26 @@ each turn with the next; `/api/chat/llm` has Ollama say a line, the model
 continue it, Ollama mark it out of 10 and the reply credited `(mark -
 pass) / 5`; `/api/status` summarises every model. The frontend's tabs are
 in README.md.
+
+**Jobs.** A `POST` with `"job": true` is answered at once with `{job}`. The
+same request, minus the flag, then runs through the router on a thread of
+its own. Its result, or its error, is kept on the job: `GET /api/job` returns
+the running job or the last one, and `POST /api/job/stop` asks it to stop.
+Only one job runs at a time, and a second gets 409. The model code reports
+progress through a thread-local handle (`job::tick`, `job::phase`,
+`job::stopped`, in `job.rs`). On a thread with no job (the command line, the
+tests) that handle is empty, so each call does nothing. Corpus training
+stops between sequences, and drilling stops between rounds. What was
+learned up to then is kept, and the job ends `stopped`. A panic ends the job
+`failed`, never leaving it `running`.
+
+**Never waiting behind a lock.** Outside a job, a request takes a model's
+lock only when it is free (`Service::take`, `try_lock`). If it is held, the
+request gets 409 at once, with `busy`, the message and the job. The job's
+own thread waits for its locks as before. `/api/status` takes every lock
+with `try_lock` and reports a held model as `{"busy": true}`. Before this,
+one long training request held the model's lock: every other request to it
+queued behind, the status bar's poll hung, and the page looked frozen.
 
 
 ## 21. The guard

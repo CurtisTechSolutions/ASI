@@ -1075,7 +1075,7 @@ class TestNGram(unittest.TestCase):
             self.assertEqual(held, [["four", "five"], ["eight"]])
 
     def test_predicting_every_token_while_learning_it(self):
-        from latticefsm.ngram import NGram, corpus_lines
+        from latticefsm.ngram import NGram, corpus_lines, predict_now
         lines = corpus_lines(["data/corpus/prose.txt"])[0][1]
         for unit, order in (("word", 3), ("word", 1), ("char", 5)):
             plain = NGram(order, unit)
@@ -1085,7 +1085,8 @@ class TestNGram(unittest.TestCase):
             # predicting first changes nothing that is learned
             self.assertEqual(learner.to_dict(), plain.to_dict(), unit)
             online = learner.reset_online()
-            self.assertEqual(online["predicted"], n)
+            # every token of the first PREDICT_ALL, a thinning sample after
+            self.assertEqual(online["predicted"], sum(predict_now(i) for i in range(n)))
             self.assertTrue(0 < online["accuracy"] < 1)
             self.assertAlmostEqual(online["bits"], math.log2(online["perplexity"]), places=9)
             self.assertEqual(learner.reset_online()["predicted"], 0)
@@ -1097,6 +1098,31 @@ class TestNGram(unittest.TestCase):
                     ctx = learner.context(toks[:i])
                     d = learner.distribution(ctx)
                     self.assertEqual(learner.top(ctx), max(range(1, len(d)), key=lambda w: (d[w], -w)))
+
+    def test_a_long_run_predicts_a_thinning_sample(self):
+        from latticefsm import ngram
+        from latticefsm.chain import Chain
+        from latticefsm.ngram import NGram, predict_now
+        all_ = ngram.PREDICT_ALL
+        self.assertTrue(all(predict_now(i) for i in range(all_)))
+        self.assertEqual([predict_now(all_ + i) for i in range(4)], [True, False, True, False])
+        self.assertEqual([predict_now(2 * all_ + i) for i in range(4)], [False, False, True, False])
+        lines = [f"the quick brown fox jumps over the lazy dog {i}" for i in range(400)]
+        ngram.PREDICT_ALL = 1000  # a small first stretch, so a short run samples
+        try:
+            for model in (NGram(3, "char"), Chain(6, "char")):
+                plain = type(model)(*((3, "char") if isinstance(model, NGram) else (6, "char")))
+                plain.train_lines(lines, predict=False)
+                n = model.train_lines(lines, predict=True)
+                self.assertGreater(n, 3 * ngram.PREDICT_ALL)
+                self.assertEqual(model.to_dict(), plain.to_dict())
+                online = model.reset_online()
+                self.assertEqual(online["predicted"], sum(predict_now(i) for i in range(n)))
+                self.assertLess(online["predicted"], n)
+                short = model.train_lines(["the cat sat"], predict=True)
+                self.assertEqual(model.reset_online()["predicted"], short)
+        finally:
+            ngram.PREDICT_ALL = all_
 
     def test_crediting_its_own_guesses(self):
         from latticefsm.ngram import NGram, corpus_lines

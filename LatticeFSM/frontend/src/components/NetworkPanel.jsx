@@ -5,6 +5,7 @@ import { goalShare, untilNote } from "../lm.js";
 import { fmtNum, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
+import JobProgress from "./JobProgress.jsx";
 import { GuardBadge } from "./Verdict.jsx";
 
 const PRESETS = [
@@ -106,6 +107,7 @@ export default function NetworkPanel({ onMoved }) {
   const [fit, setFit] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [job, setJob] = useState(null); // teaching and fitting run as background jobs
   const logRef = useRef(null);
 
   useEffect(() => {
@@ -122,9 +124,10 @@ export default function NetworkPanel({ onMoved }) {
       await fn();
       setError(null);
     } catch (err) {
-      setError(err.message);
+      setError(err.data && err.data.state === "stopped" ? "stopped; what was learned until then is kept" : err.message);
     } finally {
       setBusy(false);
+      setJob(null);
     }
   }
 
@@ -146,7 +149,7 @@ export default function NetworkPanel({ onMoved }) {
         until: true,
         max_rounds: Math.max(1, parseNumber(maxRounds, 200)),
         threshold: goalShare(goal),
-      });
+      }, setJob);
       const note = `taught "${reply}": ${untilNote(r)} - now: ${
         r.after.translator ? r.after.reply || "(silence)" : r.after.reply
       }`;
@@ -172,7 +175,7 @@ export default function NetworkPanel({ onMoved }) {
       const body = until
         ? { ...base, until: true, max_epochs: Math.max(1, parseNumber(maxEpochs, 200)), threshold: goalShare(goal) }
         : base;
-      const r = await api.networkFit(body);
+      const r = await api.networkFit(body, setJob);
       setFit(r);
       setInfo(r.network);
     });
@@ -240,6 +243,7 @@ export default function NetworkPanel({ onMoved }) {
             Load
           </button>
         </div>
+        <JobProgress job={job} />
         {fit && fit.reached !== undefined && (fit.exact || fit.taught) ? (
           <p className="note">
             {fit.reached

@@ -42,7 +42,7 @@ import random
 from collections.abc import Iterable, Iterator, Sequence
 
 __all__ = ["BOS", "EOS", "UNITS", "UNK", "NGram", "corpus_lines", "corpus_sequences", "corpus_stream", "detokenize",
-           "load_ngram", "train_corpus", "goal_of", "THRESHOLD",
+           "load_ngram", "train_corpus", "goal_of", "THRESHOLD", "PREDICT_ALL", "predict_now",
            "split_lines", "tokenize"]
 
 BOS, EOS, UNK = "<s>", "</s>", "<unk>"
@@ -173,6 +173,17 @@ def corpus_sequences(paths: Iterable[str], unit: str = "word", lower: bool = Tru
             out.append((label, []))
         out[-1][1].append(toks)
     return out
+
+
+PREDICT_ALL = 50000
+"""Predicting while training: every token of the first this many since the last :meth:`reset_online`, then a thinning
+sample - every 2nd of the next as many, every 3rd of the next, ... - so a long run is measured without being slowed by
+it (the measure of the first 50 000 is exact)."""
+
+
+def predict_now(seen: int) -> bool:
+    """Whether the ``seen``-th position (from 0) since the last reset is predicted while training."""
+    return seen % (1 + seen // PREDICT_ALL) == 0
 
 
 THRESHOLD = 0.95
@@ -327,7 +338,7 @@ class NGram:
         for i in range(k, len(ids)):
             ctx = tuple(ids[i - k:i])
             w = ids[i]
-            if predict:
+            if predict and self._sample():
                 guess = self.top(ctx)
                 p = self.prob(ctx, w)
                 self.online[0] += guess == w
@@ -378,11 +389,17 @@ class NGram:
             self._online = [0, 0, 0.0]
         return self._online
 
+    def _sample(self) -> bool:
+        seen = getattr(self, "_seen", 0)
+        self._seen = seen + 1
+        return predict_now(seen)
+
     def reset_online(self) -> dict:
         """What predicting while training measured since the last reset - ``accuracy`` (first guesses right),
         ``perplexity`` and ``bits`` (of the true tokens, each predicted before it was learned) - and a fresh start."""
         right, n, logp = self.online
         self._online = [0, 0, 0.0]
+        self._seen = 0
         if n == 0:
             return {"predicted": 0, "accuracy": None, "perplexity": None, "bits": None}
         return {"predicted": n, "accuracy": right / n, "perplexity": math.exp(-logp / n),

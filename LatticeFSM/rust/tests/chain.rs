@@ -3,7 +3,7 @@
 
 use latticefsm::chain::{load_chain, Chain};
 use latticefsm::json::Json;
-use latticefsm::ngram::{corpus_sequences, split_lines, Sequence};
+use latticefsm::ngram::{corpus_sequences, predict_now, split_lines, Sequence, PREDICT_ALL};
 use latticefsm::rng::Rng;
 
 fn corpus(unit: &str) -> (Vec<Sequence>, Vec<Sequence>) {
@@ -81,6 +81,30 @@ fn predicting_while_learning_changes_nothing_learned() {
     assert_eq!(online.predicted as usize, n);
     assert!(online.accuracy.unwrap() > 0.0 && online.depth.unwrap() > 0.0);
     assert_eq!(plain.reset_online().predicted, 0);
+}
+
+#[test]
+fn a_long_run_predicts_a_thinning_sample() {
+    // every position of the first PREDICT_ALL, then every 2nd of the next as many, every 3rd, ...
+    assert!((0..PREDICT_ALL).all(predict_now));
+    assert!(predict_now(PREDICT_ALL) && !predict_now(PREDICT_ALL + 1) && predict_now(PREDICT_ALL + 2));
+    assert!(predict_now(3 * PREDICT_ALL) && !predict_now(2 * PREDICT_ALL + 1) && predict_now(2 * PREDICT_ALL + 2));
+    let line = "the quick brown fox jumps over the lazy dog";
+    let text: Vec<String> = (0..3000).map(|i| format!("{line} {i}")).collect();
+    let mut plain = Chain::new(6, "char", true, 0.9).unwrap();
+    plain.predict = false;
+    plain.train_lines(&text, None);
+    let mut learner = Chain::new(6, "char", true, 0.9).unwrap();
+    let n = learner.train_lines(&text, None) as u64;
+    assert!(n > 2 * PREDICT_ALL);
+    // what is learned is the same, and the sample is exactly the positions predict_now picks
+    assert_eq!(plain.to_json().dump(), learner.to_json().dump());
+    let online = learner.reset_online();
+    assert_eq!(online.predicted, (0..n).filter(|&i| predict_now(i)).count() as u64);
+    assert!(online.predicted < n);
+    // a reset starts the count again: every position of a short run is predicted
+    let short = learner.train_lines(&lines(&["the cat sat"]), None) as u64;
+    assert_eq!(learner.reset_online().predicted, short);
 }
 
 #[test]
