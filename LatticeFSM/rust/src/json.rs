@@ -208,7 +208,8 @@ fn newline(out: &mut String, indent: Option<usize>, level: usize) {
     }
 }
 
-fn write_number(out: &mut String, n: f64) {
+/// A number as `dump` writes it: integers without a fraction, anything not finite as `null`.
+pub fn write_number(out: &mut String, n: f64) {
     if !n.is_finite() {
         out.push_str("null");
     } else if n.fract() == 0.0 && n.abs() < 1e15 {

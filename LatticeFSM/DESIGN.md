@@ -1069,6 +1069,14 @@ with `try_lock` and reports a held model as `{"busy": true}`. Before this,
 one long training request held the model's lock: every other request to it
 queued behind, the status bar's poll hung, and the page looked frozen.
 
+**Memory.** Most of the chain's contexts are followed by one to three
+inputs, so a node keeps its counts as a sorted list and switches to a map
+past 32 (`chain::Counts`). Saving writes the table's text straight out
+(`Chain::dump`, the same text as `to_json().dump()`) instead of first
+building a tree of JSON numbers. Measured on a 10 MB text file, training
+peaked at 641 MB instead of 769 MB, and saving a 2 MB one's chain at 293 MB
+instead of 838 MB. The rest is the tables of contexts themselves.
+
 
 ## 21. The guard
 

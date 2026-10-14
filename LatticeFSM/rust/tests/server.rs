@@ -664,10 +664,21 @@ fn training_runs_as_a_job_and_the_server_answers_meanwhile() {
     assert_eq!(status, 200);
     let id = started.get("job").unwrap().num("id", 0.0);
     assert_eq!(id, 2.0);
-    let (status, s) = get(&addr, "/api/status");
-    assert_eq!(status, 200);
+    // the job's thread takes the chain's lock a moment after it starts: wait for that (or for the job to end)
+    let mut s = Json::Null;
+    for _ in 0..500 {
+        let (status, now) = get(&addr, "/api/status");
+        assert_eq!(status, 200);
+        assert_eq!(now.get("job").unwrap().num("id", 0.0), id);
+        let held = now.get("chain").unwrap().get("busy") == Some(&Json::Bool(true));
+        let ended = now.get("job").unwrap().str_or("state", "") != "running";
+        s = now;
+        if held || ended {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(2));
+    }
     let running = s.get("job").unwrap();
-    assert_eq!(running.num("id", 0.0), id);
     if running.str_or("state", "") == "running" {
         assert_eq!(s.get("chain").unwrap().get("busy"), Some(&Json::Bool(true)));
         let (status, busy) = post(&addr, "/api/chain/predict", r#"{"text":"the","k":3}"#);

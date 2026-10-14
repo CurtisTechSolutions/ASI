@@ -14,7 +14,7 @@ use std::fs;
 use std::io::{Read, Write};
 
 use crate::gzip;
-use crate::json::{parse, Json};
+use crate::json::{parse, write_number, Json};
 use crate::ngram::{
     detokenize, goal_of, predict_now, tokenize, train_corpus, Drill, Sequence, Teaching, BOS, EOS, UNITS, UNK,
 };
@@ -25,10 +25,106 @@ const FORMAT: &str = "latticefsm-chain";
 pub const PRIOR: f64 = 2.0;
 pub const MAX_NODES: usize = 16;
 
+/// How many counts a node keeps as a sorted list before it takes a map.
+const FEW: usize = 32;
+
+/// What came next after one context, and how often. Most contexts are followed by one to three inputs, so up to
+/// `FEW` are a sorted list (16 bytes each); a node with more takes a map. A full map per node cost most of the
+/// chain's memory.
+#[derive(Clone, Debug)]
+pub enum Counts {
+    Few(Vec<(u32, u64)>),
+    Many(Box<HashMap<u32, u64>>),
+}
+
+impl Default for Counts {
+    fn default() -> Counts {
+        Counts::Few(Vec::new())
+    }
+}
+
+impl Counts {
+    pub fn len(&self) -> usize {
+        match self {
+            Counts::Few(v) => v.len(),
+            Counts::Many(m) => m.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, w: &u32) -> Option<&u64> {
+        match self {
+            Counts::Few(v) => v.binary_search_by_key(w, |&(k, _)| k).ok().map(|i| &v[i].1),
+            Counts::Many(m) => m.get(w),
+        }
+    }
+
+    pub fn contains_key(&self, w: &u32) -> bool {
+        self.get(w).is_some()
+    }
+
+    /// Every (input, count), in no promised order.
+    pub fn iter(&self) -> impl Iterator<Item = (&u32, &u64)> {
+        let (few, many) = match self {
+            Counts::Few(v) => (Some(v.iter().map(|(k, c)| (k, c))), None),
+            Counts::Many(m) => (None, Some(m.iter())),
+        };
+        few.into_iter().flatten().chain(many.into_iter().flatten())
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &u32> {
+        self.iter().map(|(k, _)| k)
+    }
+
+    /// `w`'s count, set to `c`.
+    pub fn insert(&mut self, w: u32, c: u64) {
+        *self.slot(w) = c;
+    }
+
+    /// `n` more `w`; its count now.
+    pub fn add(&mut self, w: u32, n: u64) -> u64 {
+        let c = self.slot(w);
+        *c += n;
+        *c
+    }
+
+    fn slot(&mut self, w: u32) -> &mut u64 {
+        if let Counts::Few(v) = self {
+            if v.len() >= FEW && v.binary_search_by_key(&w, |&(k, _)| k).is_err() {
+                *self = Counts::Many(Box::new(v.iter().copied().collect()));
+            }
+        }
+        match self {
+            Counts::Few(v) => {
+                let i = match v.binary_search_by_key(&w, |&(k, _)| k) {
+                    Ok(i) => i,
+                    Err(i) => {
+                        v.insert(i, (w, 0));
+                        i
+                    }
+                };
+                &mut v[i].1
+            }
+            Counts::Many(m) => m.entry(w).or_insert(0),
+        }
+    }
+}
+
+impl std::ops::Index<&u32> for Counts {
+    type Output = u64;
+
+    fn index(&self, w: &u32) -> &u64 {
+        self.get(w).expect("no count for this input")
+    }
+}
+
 /// An input node in one context: what came next, its guess, and its record.
 #[derive(Clone, Debug, Default)]
 pub struct Node {
-    pub counts: HashMap<u32, u64>,
+    pub counts: Counts,
     pub total: u64,
     pub best: Option<u32>,
     pub tested: u64,
@@ -44,9 +140,7 @@ impl Node {
 
     /// `n` more `w` after this context; the guess stays the most frequent (ties: the lower id).
     fn add(&mut self, w: u32, n: u64) {
-        let c = self.counts.entry(w).or_insert(0);
-        *c += n;
-        let c = *c;
+        let c = self.counts.add(w, n);
         self.total += n;
         self.best = Some(match self.best {
             None => w,
@@ -962,6 +1056,10 @@ impl Chain {
             }
         }
         rows.sort_by(|a, b| a.0.cmp(&b.0));
+        self.json_with_table(Json::Array(rows.into_iter().map(|(_, r)| r).collect()))
+    }
+
+    fn json_with_table(&self, table: Json) -> Json {
         Json::object()
             .with("format", FORMAT.into())
             .with("version", 1.0.into())
@@ -972,7 +1070,7 @@ impl Chain {
             .with("clock", (self.clock as f64).into())
             .with("sentences", (self.sentences as f64).into())
             .with("vocab", Json::strings(&self.vocab))
-            .with("table", Json::Array(rows.into_iter().map(|(_, r)| r).collect()))
+            .with("table", table)
             .with(
                 "sources",
                 Json::Array(
@@ -1068,8 +1166,55 @@ impl Chain {
         Ok(m)
     }
 
+    /// `to_json().dump()`, the same text, without the tree: the table - nearly all of it - is written straight out
+    /// (a tree of numbers took several times the memory of the chain itself).
+    pub fn dump(&self) -> String {
+        let mut rows: Vec<(u32, &Vec<u32>, &Node)> = Vec::new();
+        for (k, table) in self.tables.iter().enumerate() {
+            rows.extend(table.iter().map(|(ctx, nd)| (k as u32, ctx, nd)));
+        }
+        rows.sort_unstable_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
+        let mut table = String::from("[");
+        let mut ws: Vec<(u32, u64)> = Vec::new();
+        for (i, (k, ctx, nd)) in rows.into_iter().enumerate() {
+            if i > 0 {
+                table.push(',');
+            }
+            table.push('[');
+            write_number(&mut table, k as f64);
+            for &x in ctx {
+                table.push(',');
+                write_number(&mut table, x as f64);
+            }
+            for x in [nd.tested as f64, nd.right as f64, nd.rewarded, nd.punished] {
+                table.push(',');
+                write_number(&mut table, x);
+            }
+            ws.clear();
+            ws.extend(nd.counts.iter().map(|(&w, &c)| (w, c)));
+            ws.sort_unstable();
+            for &(w, c) in &ws {
+                table.push(',');
+                write_number(&mut table, w as f64);
+                table.push(',');
+                write_number(&mut table, c as f64);
+            }
+            table.push(']');
+        }
+        table.push(']');
+        // everything else is small: dumped as ever, the table spliced in where its key holds an empty one (the
+        // first `"table":[]` - a string holding it would have its quotes escaped)
+        let head = self.json_with_table(Json::Array(Vec::new())).dump();
+        let at = head.find("\"table\":[]").expect("the table's key") + "\"table\":".len();
+        let mut out = String::with_capacity(head.len() + table.len());
+        out.push_str(&head[..at]);
+        out.push_str(&table);
+        out.push_str(&head[at + 2..]);
+        out
+    }
+
     pub fn save(&self, path: &str) -> Result<(), String> {
-        let text = self.to_json().dump();
+        let text = self.dump();
         let bytes = if path.ends_with(".gz") {
             gzip::compress(text.as_bytes())
         } else {

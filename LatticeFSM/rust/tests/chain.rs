@@ -170,3 +170,20 @@ fn parallel_batches_preserve_chain_learning_and_measurements() {
     assert_eq!(got.depths, depths);
     assert_eq!(batched.to_json().dump(), before);
 }
+
+#[test]
+fn saving_writes_the_tree_without_building_it() {
+    // nodes with a few counts (a sorted list) and with many (a map), credited ones, and a source and history
+    let (train, test) = corpus("char");
+    let mut m = Chain::new(6, "char", true, 0.9).unwrap();
+    m.self_credit = 0.25;
+    m.train_sequences(&train, Some("prose"));
+    m.evaluate(&test, None);
+    m.credit_text("the brain", 0.5);
+    assert!(m.tables[0].values().any(|nd| nd.counts.len() > 32));
+    assert!(m.tables[5].values().any(|nd| nd.counts.len() == 1));
+    let text = m.dump();
+    assert_eq!(text, m.to_json().dump());
+    let back = Chain::from_json(&latticefsm::json::parse(&text).unwrap()).unwrap();
+    assert_eq!(back.dump(), text);
+}
