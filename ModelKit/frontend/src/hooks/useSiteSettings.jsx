@@ -72,6 +72,10 @@ function SiteSettingsValue({ children }) {
   const [topP, setTopP] = useStoredState("site.search.topP", SEARCH_DEFAULTS.topP);
   const [minP, setMinP] = useStoredState("site.search.minP", SEARCH_DEFAULTS.minP);
   const [diversity, setDiversity] = useStoredState("site.search.diversity", SEARCH_DEFAULTS.diversity);
+  const [autoTemperature, setAutoTemperature] = useStoredState(
+    "site.search.autoTemperature",
+    SEARCH_DEFAULTS.autoTemperature,
+  );
   const [order, setOrder] = useStoredState("site.train.order", TRAINING_DEFAULTS.order);
   const [curriculum, setCurriculum] = useStoredState("site.train.curriculum", TRAINING_DEFAULTS.curriculum);
   const [replay, setReplay] = useStoredState("site.train.replay", TRAINING_DEFAULTS.replay);
@@ -83,14 +87,14 @@ function SiteSettingsValue({ children }) {
   const search = useMemo(
     () =>
       group(
-        { topK, topP, minP, diversity },
-        { topK: setTopK, topP: setTopP, minP: setMinP, diversity: setDiversity },
+        { topK, topP, minP, diversity, autoTemperature },
+        { topK: setTopK, topP: setTopP, minP: setMinP, diversity: setDiversity, autoTemperature: setAutoTemperature },
         SEARCH_DEFAULTS,
         searchProblems,
         searchBody,
         searchActive,
       ),
-    [topK, topP, minP, diversity, setTopK, setTopP, setMinP, setDiversity],
+    [topK, topP, minP, diversity, autoTemperature, setTopK, setTopP, setMinP, setDiversity, setAutoTemperature],
   );
   const training = useMemo(
     () =>

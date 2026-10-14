@@ -24,7 +24,7 @@ import HearButton from "./HearButton.jsx";
 import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
-import { problemText, searchProblemsFor } from "../settings.js";
+import { climbLine, problemText, searchProblemsFor } from "../settings.js";
 import { readingOrder, reverseUnits } from "../backwards.js";
 import { spelledParts } from "../spelled.js";
 import { decodedParts } from "../decoded.js";
@@ -402,6 +402,7 @@ export default function PredictPanel({ status }) {
       <div className="card">
         <h2>Result</h2>
         <GuardNotice guard={result && result.guard} what="continuations" />
+        {result && result.auto_temperature ? <p className="muted">{climbLine(result.auto_temperature)}</p> : null}
         {!result ? (
           <p className="muted">Enter a prefix and press Predict. The highlighted part is the predicted continuation.</p>
         ) : (

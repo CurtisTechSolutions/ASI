@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
 import { agentReply, parseAgentConfig, validateAgentConfig } from "../agent-config.js";
+import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { climbBody } from "../settings.js";
 import { fmtInt, fmtNum, parseInteger, parseNumber, unitName } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField } from "./Fields.jsx";
@@ -62,6 +64,7 @@ function stopSays(message, units) {
 let nextId = 1;
 
 export default function TalkPanel({ status }) {
+  const { search } = useSiteSettings(); // the auto-temperature ceiling is site-wide (the Settings tab)
   const [draft, setDraft] = useStoredState("talk.draft", "");
   const [maxTokens, setMaxTokens] = useStoredState("talk.maxTokens", "60");
   const [context, setContext] = useStoredState("talk.context", "12");
@@ -167,6 +170,7 @@ export default function TalkPanel({ status }) {
       avoid_word_repeats: avoidWordRepeats,
       learn,
       guard,
+      ...(connection ? {} : climbBody(search.values)), // a reply with nothing to say walks again, hotter
     };
     setDraft("");
     setMessages((prev) => [

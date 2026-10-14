@@ -9,10 +9,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  AUTO_TEMPERATURE_SUGGESTED,
   ENCODING_PRESETS,
   ORDERS,
   SEARCH_DEFAULTS,
   TRAINING_DEFAULTS,
+  climbBody,
+  climbLine,
   describeEncoding,
   encodingSpec,
   soundUnit,
@@ -49,10 +52,47 @@ test("the filters go with a sampled walk and the diversity with a beam", () => {
   assert.deepEqual(searchBody(values, "beam"), { diversity: 2 });
   assert.deepEqual(searchBody(values, "dijkstra"), {}); // exact searches read neither
   assert.deepEqual(searchBody(values, "kbest"), {});
-  assert.deepEqual(searchSettingsFor("sample"), { filters: true, diversity: false });
-  assert.deepEqual(searchSettingsFor("beam"), { filters: false, diversity: true });
+  assert.deepEqual(searchSettingsFor("sample"), { filters: true, diversity: false, climb: true });
+  assert.deepEqual(searchSettingsFor("beam"), { filters: false, diversity: true, climb: true });
   assert.equal(searchActive(values), true);
   assert.equal(searchActive({ ...SEARCH_DEFAULTS, diversity: "0.5" }), true);
+});
+
+test("auto-temperature goes with every mode, and only when it is on", () => {
+  assert.equal(SEARCH_DEFAULTS.autoTemperature, "0");
+  assert.equal(AUTO_TEMPERATURE_SUGGESTED, 2);
+  for (const mode of ["sample", "beam", "dijkstra", "kbest"]) {
+    assert.deepEqual(searchBody({ autoTemperature: "2" }, mode), { auto_temperature: 2 }, mode);
+    assert.equal(searchSettingsFor(mode).climb, true);
+  }
+  assert.deepEqual(searchBody({ autoTemperature: "2", topK: "3" }, "sample"), { top_k: 3, auto_temperature: 2 });
+  assert.deepEqual(searchBody({ autoTemperature: "0" }, "sample"), {});
+  assert.deepEqual(climbBody({ autoTemperature: "1.5" }), { auto_temperature: 1.5 });
+  assert.deepEqual(climbBody(SEARCH_DEFAULTS), {});
+  assert.deepEqual(climbBody(undefined), {});
+  assert.equal(searchActive({ ...SEARCH_DEFAULTS, autoTemperature: "2" }), true);
+  // out of range: named, and never sent - by any mode
+  assert.ok(searchProblems({ autoTemperature: "-1" }).autoTemperature);
+  assert.ok(searchProblems({ autoTemperature: "hot" }).autoTemperature);
+  assert.ok(searchProblemsFor({ autoTemperature: "-1" }, "dijkstra").autoTemperature);
+  assert.deepEqual(searchBody({ autoTemperature: "-1" }, "beam"), {});
+  assert.deepEqual(climbBody({ autoTemperature: "-1" }), {});
+});
+
+test("what the ladder did, in one sentence", () => {
+  assert.equal(climbLine(null), null);
+  assert.equal(
+    climbLine({ ceiling: 2, climbed: false, found: true, temperature: null, tries: 1 }),
+    "Answered as asked: the temperature ladder (up to 2) was not needed.",
+  );
+  assert.equal(
+    climbLine({ ceiling: 2, climbed: true, found: true, temperature: 1, tries: 5 }),
+    "No answer as asked; found one at temperature 1 after 5 searches (ceiling 2).",
+  );
+  assert.equal(
+    climbLine({ ceiling: 1.5, climbed: true, found: false, temperature: null, tries: 7 }),
+    "No answer at any temperature up to 1.5 (7 searches); this is the search as asked.",
+  );
 });
 
 test("only what is not off is sent", () => {

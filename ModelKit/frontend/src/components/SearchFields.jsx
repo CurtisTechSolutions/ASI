@@ -1,12 +1,13 @@
 import { NumberField } from "./Fields.jsx";
 import Alert from "./Alert.jsx";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
-import { problemText, searchProblemsFor, searchSettingsFor } from "../settings.js";
+import { AUTO_TEMPERATURE_SUGGESTED, problemText, searchProblemsFor, searchSettingsFor } from "../settings.js";
 
 /**
- * The sampling filters and the beam's diversity (../../RadixCyclicNN/SPEC-SearchAndTraining.md
- * sections 1-2): what a sampled step may draw from, and how far apart the
- * beam's K are picked.
+ * The sampling filters, the beam's diversity and the auto-temperature ceiling
+ * (../../RadixCyclicNN/SPEC-SearchAndTraining.md sections 1, 2 and 10): what a
+ * sampled step may draw from, how far apart the beam's K are picked, and how
+ * hot a search that found no answer may walk again.
  *
  * The values are site-wide (`useSiteSettings`), so this is the same control
  * wherever it appears - the Settings tab and the Predict and Generate tabs.
@@ -18,8 +19,8 @@ import { problemText, searchProblemsFor, searchSettingsFor } from "../settings.j
 export default function SearchFields({ mode = null, compact = false, disabled = false }) {
   const { search } = useSiteSettings();
   const { values, problems, set } = search;
-  const reads = mode === null ? { filters: true, diversity: true } : searchSettingsFor(mode);
-  if (!reads.filters && !reads.diversity) return null;
+  const reads = mode === null ? { filters: true, diversity: true, climb: true } : searchSettingsFor(mode);
+  if (!reads.filters && !reads.diversity && !reads.climb) return null;
   const hint = (text) => (compact ? "shared with Settings" : text);
   const shown = mode === null ? problems : searchProblemsFor(values, mode);
 
@@ -71,6 +72,19 @@ export default function SearchFields({ mode = null, compact = false, disabled = 
           />
         </div>
       ) : null}
+      {reads.climb ? (
+        <div className="row">
+          <NumberField
+            label="Auto temperature"
+            hint={hint(`no answer? walk again, hotter, up to this; 0 = off, ${AUTO_TEMPERATURE_SUGGESTED} suggested`)}
+            value={values.autoTemperature}
+            onChange={(value) => set("autoTemperature", value)}
+            min={0}
+            step="any"
+            disabled={disabled}
+          />
+        </div>
+      ) : null}
       <Alert message={problemText(shown)} />
       {!compact ? (
         <>
@@ -95,6 +109,16 @@ export default function SearchFields({ mode = null, compact = false, disabled = 
             Dijkstra and k-best are exact searches and read neither. The filters are used by <b>sample</b> mode and
             the diversity by <b>beam</b> mode, on the <b>Predict</b> and <b>Generate</b> tabs, which show the same
             controls.
+          </p>
+          <p className="muted">
+            <b>Auto temperature</b> is for a search that finds no answer - nothing said, no end reached when one
+            was asked for, or everything vetoed by the negative network. It walks again up a ladder of
+            temperatures: the one asked for, then doubling up to this ceiling, three walks a rung, until one
+            answers; the answer says at what temperature it was found. Any mode climbs, the exact ones included -
+            for them the ladder is where sampling starts - and so do <b>Converse</b> and <b>Talk</b> when a reply
+            has nothing to say. Measured on a model of prose, warming a greedy walk to 1 takes the walks that
+            reach an end from 2% to 89%, but past {AUTO_TEMPERATURE_SUGGESTED} nothing more ends and empty
+            answers double, so {AUTO_TEMPERATURE_SUGGESTED} is the ceiling to start from. 0 is off.
           </p>
         </>
       ) : null}

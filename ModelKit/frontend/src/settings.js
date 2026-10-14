@@ -15,8 +15,14 @@ import { fmtInt } from "./util.js";
  * or a run with everything off is exactly the one it always was.
  */
 
-/** The sampling filters and the beam's diversity, as the form holds them. */
-export const SEARCH_DEFAULTS = Object.freeze({ topK: "0", topP: "1", minP: "0", diversity: "0" });
+/**
+ * The sampling filters, the beam's diversity and the auto-temperature ceiling
+ * (SPEC-SearchAndTraining.md section 10), as the form holds them.
+ */
+export const SEARCH_DEFAULTS = Object.freeze({ topK: "0", topP: "1", minP: "0", diversity: "0", autoTemperature: "0" });
+
+/** The auto-temperature ceiling worth starting from: past 2 a hotter walk ends no more often, and says nothing more often. */
+export const AUTO_TEMPERATURE_SUGGESTED = 2;
 
 /** How a training run walks its texts, as the form holds them; a blank replay size leaves the model's buffer alone. */
 export const TRAINING_DEFAULTS = Object.freeze({
@@ -66,6 +72,10 @@ export function searchProblems(values) {
   if (minP === null || !(minP >= 0 && minP < 1)) out.minP = "Min-p must lie in [0, 1) (0 = off).";
   const diversity = numberOf(v.diversity);
   if (diversity === null || diversity < 0) out.diversity = "Diversity must be a number, 0 or more (0 = off).";
+  const ceiling = numberOf(v.autoTemperature);
+  if (ceiling === null || ceiling < 0) {
+    out.autoTemperature = "The auto-temperature ceiling must be a number, 0 or more (0 = off; 2 is a good ceiling).";
+  }
   return out;
 }
 
@@ -95,16 +105,21 @@ export function problemText(problems) {
   return messages.length ? messages.join(" ") : null;
 }
 
-/** Which of the search settings a mode reads: the filters shape a sampled walk, diversity a beam. */
+/**
+ * Which of the search settings a mode reads: the filters shape a sampled walk, diversity a beam - and every
+ * mode climbs (auto-temperature), since a search of any kind that finds no answer walks again, hotter.
+ */
 export function searchSettingsFor(mode) {
-  return { filters: mode === "sample", diversity: mode === "beam" };
+  return { filters: mode === "sample", diversity: mode === "beam", climb: true };
 }
 
 /** The problems of only the settings `mode` reads - what stops that search from being sent. */
 export function searchProblemsFor(values, mode) {
   const reads = searchSettingsFor(mode);
   return Object.fromEntries(
-    Object.entries(searchProblems(values)).filter(([name]) => (name === "diversity" ? reads.diversity : reads.filters)),
+    Object.entries(searchProblems(values)).filter(([name]) =>
+      name === "diversity" ? reads.diversity : name === "autoTemperature" ? reads.climb : reads.filters,
+    ),
   );
 }
 
@@ -132,7 +147,38 @@ export function searchBody(values, mode) {
     const diversity = numberOf(v.diversity);
     if (!problems.diversity && diversity > 0) body.diversity = diversity;
   }
+  if (reads.climb) Object.assign(body, climbBody(v));
   return body;
+}
+
+/**
+ * `{auto_temperature}` when the ceiling is on and in range, else `{}`: what a conversation or a reply in
+ * today's format sends - every mode reads it, and a server that predates it never sees it while it is off.
+ */
+export function climbBody(values) {
+  const v = { ...SEARCH_DEFAULTS, ...(values || {}) };
+  const ceiling = numberOf(v.autoTemperature);
+  return ceiling !== null && ceiling > 0 ? { auto_temperature: ceiling } : {};
+}
+
+/** A temperature as the record carries it, without trailing zeros: 2, 0.5, 1.4. */
+function temperatureText(t) {
+  return String(Number(Number(t).toFixed(2)));
+}
+
+/**
+ * What the temperature ladder did, in one sentence, from the record a server returns beside an answer
+ * (`{ceiling, climbed, found, temperature, tries}`), or `null` for none.
+ */
+export function climbLine(record) {
+  if (!record || typeof record !== "object") return null;
+  const ceiling = temperatureText(record.ceiling);
+  const searches = `${record.tries} search${record.tries === 1 ? "" : "es"}`;
+  if (!record.climbed) return `Answered as asked: the temperature ladder (up to ${ceiling}) was not needed.`;
+  if (record.found) {
+    return `No answer as asked; found one at temperature ${temperatureText(record.temperature)} after ${searches} (ceiling ${ceiling}).`;
+  }
+  return `No answer at any temperature up to ${ceiling} (${searches}); this is the search as asked.`;
 }
 
 /** Whether any search setting is on - what a tab mentions beside its own fields. */

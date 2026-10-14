@@ -12,7 +12,7 @@ import RatingsCard, { RateButtons, useRatings } from "./RatingsCard.jsx";
 import SearchFields from "./SearchFields.jsx";
 import TraversalFields from "./TraversalFields.jsx";
 import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
-import { problemText, searchProblemsFor } from "../settings.js";
+import { climbLine, problemText, searchProblemsFor } from "../settings.js";
 import { reverseUnits } from "../backwards.js";
 import { spelledParts } from "../spelled.js";
 import { decodedParts } from "../decoded.js";
@@ -47,6 +47,7 @@ export default function GeneratePanel({ status }) {
   const [error, setError] = useState(null);
   const [samples, setSamples] = useState(null);
   const [guarded, setGuarded] = useState(null);
+  const [climbed, setClimbed] = useState(null); // what the temperature ladder did, when it was on
   const feedback = useJob("feedback");
   const { ratings, rate, ratingOf, setMark, remove, clear } = useRatings();
   // the resonant model's k-best search returns the exact K most likely texts, and far cheaper than a beam
@@ -83,6 +84,7 @@ export default function GeneratePanel({ status }) {
       setSent(tuning);
       setFlip(units);
       setGuarded((data && data.guard) || null);
+      setClimbed((data && data.auto_temperature) || null);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -171,6 +173,7 @@ export default function GeneratePanel({ status }) {
           phase). Press the same thumb again to remove the rating.
         </p>
         <GuardNotice guard={guarded} what="candidates" />
+        {climbed ? <p className="muted">{climbLine(climbed)}</p> : null}
         {sent.diversity && samples && samples.length > 1 ? (
           <p className="muted">
             Picked for diversity {fmtNum(sent.diversity, 2)}: the most likely text first, then each by its cost plus

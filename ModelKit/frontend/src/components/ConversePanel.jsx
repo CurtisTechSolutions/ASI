@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { useJob } from "../hooks/useJob.js";
+import { useSiteSettings } from "../hooks/useSiteSettings.jsx";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { climbBody } from "../settings.js";
 import { spelledParts } from "../spelled.js";
 import { applyEvent } from "../stream.js";
 import { THINK_DEPTH, thoughtNodes, thoughtsOf } from "../thinking.js";
@@ -86,6 +88,7 @@ function LiveTurn({ live, speakers }) {
 }
 
 export default function ConversePanel({ status }) {
+  const { search } = useSiteSettings(); // the auto-temperature ceiling is site-wide (the Settings tab)
   const [opening, setOpening] = useStoredState("converse.opening", "");
   const [turns, setTurns] = useStoredState("converse.turns", "6");
   const [mode, setMode] = useStoredState("converse.mode", "beam");
@@ -161,6 +164,7 @@ export default function ConversePanel({ status }) {
       learn,
       think,
       think_depth: Math.max(0, parseInteger(thinkDepth, THINK_DEPTH)),
+      ...climbBody(search.values), // a voice with nothing to say walks again, hotter (the Settings tab)
       ...(partner ? { partner } : {}),
       ...(history.length ? { history } : opening.trim() ? { opening } : {}),
     };
@@ -408,6 +412,9 @@ export default function ConversePanel({ status }) {
                 t.stutter ? "repeats itself" : null,
                 t.rethink && t.rethink.found ? "thought again" : null,
                 t.vetoed ? `${fmtInt(t.vetoed)} vetoed` : null,
+                t.auto_temperature && t.auto_temperature.climbed && t.auto_temperature.found
+                  ? `found at temperature ${t.auto_temperature.temperature}`
+                  : null,
               ].filter(Boolean);
               return (
                 <li key={`${t.index}-${position}`} className={`turn ${side}${rating ? ` rated ${rating}` : ""}`}>
