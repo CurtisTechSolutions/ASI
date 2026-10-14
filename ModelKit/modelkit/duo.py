@@ -42,6 +42,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from radixnet.autotemp import (
+    AUTO_DRAWS, AutoTemperature, check_auto_temperature, climb, first_answer, temperature_ladder, wrote,
+)
 from radixnet.beam import Prediction
 from radixnet.encoding import WINDOW
 from radixnet.model import GraphModel
@@ -51,7 +54,7 @@ from radixnet.search import PathResult
 from . import blame
 from .dialogue import converse
 
-__all__ = ["FilterConfig", "NegativeFilter"]
+__all__ = ["FilterConfig", "NegativeFilter", "guarded_predict"]
 
 _W = WINDOW  # the default n; a net's own is net.encoding.n
 
@@ -274,7 +277,68 @@ class NegativeFilter:
 
     # -- output --------------------------------------------------------------
 
-    def generate(
+    def generate(self, count: int = 1, *, auto_temperature: float = 0.0, **options: Any) -> dict:
+        """Generate through the pair (:meth:`_generate`), and - with ``auto_temperature`` - climb for what is missing.
+
+        Off (``0``), this is :meth:`_generate` exactly.  On, a generation that
+        brought back fewer than ``count`` texts saying something beyond the
+        prefix - the negative network vetoed the rest, or a walk ended where the
+        prefix did - asks again for the ones still missing, as sampled walks up
+        the temperature ladder (:mod:`radixnet.autotemp`): :data:`AUTO_DRAWS`
+        generations a rung, each over-sampled and filtered like the first, the
+        k-th retry seeded ``seed + k`` when a seed was given.  The texts that
+        survived - the first generation's in its order, then the ladder's - come
+        back together, every verdict on the way is in ``verdicts`` and
+        ``rejected``, ``candidates`` and ``asked`` add up every generation, and
+        ``auto_temperature`` is the climb's record.
+        """
+        check_auto_temperature(auto_temperature)
+        outcome = self._generate(count, **options)
+        if not auto_temperature or count <= 0:
+            return outcome
+        prefix = str(options.get("prefix", "") or "")
+        temperature = float(options.get("temperature", 1.0))
+        mode = str(options.get("mode") or "sample").lower()
+        seed = options.get("seed")
+        record = AutoTemperature(ceiling=float(auto_temperature), tries=1)
+        keep = [i for i, result in enumerate(outcome["results"]) if wrote(self.positive, result, prefix)]
+        outcome["texts"] = [outcome["texts"][i] for i in keep]
+        outcome["results"] = [outcome["results"][i] for i in keep]
+        if len(outcome["texts"]) >= count:
+            record.found = True
+            record.temperature = temperature if mode == "sample" else None
+        else:
+            record.climbed = True
+            for t in temperature_ladder(temperature, auto_temperature):
+                for _draw in range(1 if t == 0 else AUTO_DRAWS):
+                    retry = {**options, "mode": "sample", "temperature": t}
+                    if seed is not None:
+                        retry["seed"] = int(seed) + record.tries
+                    record.tries += 1
+                    more = self._generate(count - len(outcome["texts"]), **retry)
+                    for text, result in zip(more["texts"], more["results"]):
+                        if text not in outcome["texts"] and wrote(self.positive, result, prefix):
+                            outcome["texts"].append(text)
+                            outcome["results"].append(result)
+                    outcome["kept"] = outcome["kept"] + more["kept"]
+                    outcome["rejected"] = outcome["rejected"] + more["rejected"]
+                    outcome["verdicts"] = outcome["verdicts"] + more["verdicts"]
+                    outcome["candidates"] += more["candidates"]
+                    outcome["asked"] += more["asked"]
+                    if len(outcome["texts"]) >= count:
+                        record.found = True
+                        record.temperature = t
+                        break
+                if record.found:
+                    break
+            outcome["texts"] = outcome["texts"][:count]
+            outcome["results"] = outcome["results"][:count]
+            judged = outcome["candidates"]
+            outcome["rate"] = len(outcome["kept"]) / judged if judged else None
+        outcome["auto_temperature"] = record.to_dict()
+        return outcome
+
+    def _generate(
         self,
         count: int = 1,
         *,
@@ -464,3 +528,38 @@ class NegativeFilter:
 
     def __repr__(self) -> str:
         return f"NegativeFilter(positive={self.positive!r}, negative={self.negative!r}, config={self.config!r})"
+
+
+def guarded_predict(
+    model: GraphModel, prefix: str, *, pair: "NegativeFilter | None" = None, auto_temperature: float = 0.0,
+    **options: Any,
+) -> tuple[PathResult, list[dict], AutoTemperature | None]:
+    """``model.predict(prefix, **options)`` through the guard, climbing the temperature ladder when it finds no answer.
+
+    Returns ``(result, verdicts, record)``.  The guard, when there is one, re-ranks every search as
+    :meth:`NegativeFilter.rank` does and ``verdicts`` holds every judgement, the ladder's included.  With
+    ``auto_temperature`` off (``0``) this is one search and one ranking, exactly as before, and ``record`` is
+    ``None``; on, a search whose surviving continuations hold no answer (:func:`radixnet.autotemp.first_answer`:
+    none wrote anything, or none reached END when ``to_end`` asked for it) is followed by sampled walks up the
+    ladder, each judged in turn, and the first answer the guard lets through ends it
+    (:func:`radixnet.autotemp.climb`).
+    """
+    check_auto_temperature(auto_temperature)
+    verdicts: list[dict] = []
+
+    def search(t: float | None) -> PathResult:
+        # None: the search exactly as asked; a temperature: the same request as a sampled walk
+        found = model.predict(prefix, **(options if t is None else {**options, "mode": "sample", "temperature": t}))
+        if pair is not None:
+            found, judged = pair.rank(prefix, found)
+            verdicts.extend(judged)
+        return found
+
+    if not auto_temperature:
+        return search(None), verdicts, None
+    to_end = bool(options.get("to_end", False))
+    result, record = climb(
+        search, lambda found: first_answer(found, to_end), temperature=float(options.get("temperature", 1.0)),
+        ceiling=auto_temperature, sampled=str(options.get("mode", "")).lower() == "sample",
+    )
+    return result, verdicts, record

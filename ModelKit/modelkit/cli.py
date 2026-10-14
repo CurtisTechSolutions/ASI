@@ -28,7 +28,7 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import Any, NoReturn, TextIO, TypeVar
 
 from . import __version__
-from radixnet import diff
+from radixnet import autotemp, diff
 from .archive import zip_texts_from_file
 from .checkpoint import CheckpointManager
 from .gan import BLATANT_MODES, EvolveConfig, Evolver
@@ -941,12 +941,15 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         **search_options(args),
     )
     options.update(k=args.k, beam=args.beam)
-    result = model.predict(prefix, **options)
+    from .duo import guarded_predict
+
     pair = open_guard(args, console, model)
+    # the guard re-ranks what the search offered - the best continuation it does not veto - and with
+    # --auto-temperature a search that leaves no answer walks again up the temperature ladder
+    result, verdicts, climbed = guarded_predict(model, prefix, pair=pair, auto_temperature=args.auto_temperature,
+                                                **options)
     guard: dict | None = None
     if pair is not None:
-        # the guard re-ranks what the search already offered: the best continuation it does not veto
-        result, verdicts = pair.rank(prefix, result)
         guard = _guard_doc(pair, verdicts, candidates=len(verdicts),
                            kept=sum(v["decision"] != "reject" for v in verdicts))
     enc = model.encoding
@@ -975,6 +978,7 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
         ("expanded", result.expanded),
         ("mode", mode),
         ("traversal", args.traversal),
+        *([("auto temperature", _climb_line(climbed))] if climbed is not None else []),
     ])
     console.say()
     console.say("path:")
@@ -1035,7 +1039,19 @@ def cmd_predict(args: argparse.Namespace, console: Console) -> dict:
     written = _decode_to(args.decode_to, enc, [result.full_text], console)
     if written is not None:  # --decode-to FILE: the answer, as the bytes it holds
         doc["decoded_to"] = written
+    if climbed is not None:
+        doc["auto_temperature"] = climbed.to_dict()
     return doc
+
+
+def _climb_line(record: "autotemp.AutoTemperature | dict") -> str:
+    """One line for what the temperature ladder did (``--auto-temperature``)."""
+    r = record.to_dict() if hasattr(record, "to_dict") else record
+    if not r["climbed"]:
+        return f"answered as asked (ceiling {r['ceiling']:g})"
+    if r["found"]:
+        return f"answered at temperature {r['temperature']:g} after {r['tries']} searches (ceiling {r['ceiling']:g})"
+    return f"no answer at any temperature up to {r['ceiling']:g} ({r['tries']} searches)"
 
 
 def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
@@ -1049,12 +1065,15 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
         **search_options(args),
     )
     guard: dict | None = None
+    climbed: dict | None = None
     if pair is None:
-        results = model.generate(count=args.count, **options)
+        results, record = autotemp.generate(model, count=args.count, auto_temperature=args.auto_temperature, **options)
+        climbed = record.to_dict() if record is not None else None
     else:
         # the pair: the model over-samples, the negative network vetoes, the cleanest survivors come back
-        outcome = pair.generate(count=args.count, **options)
+        outcome = pair.generate(count=args.count, auto_temperature=args.auto_temperature, **options)
         results = outcome["results"]
+        climbed = outcome.get("auto_temperature")
         guard = _guard_doc(pair, outcome["verdicts"], candidates=outcome["candidates"], asked=outcome["asked"],
                            kept=len(outcome["kept"]), rate=outcome["rate"])
     rows = [[i + 1, r.cost, path_probability(r), r.reached_end, quote(clip(r.text, 100))] for i, r in enumerate(results)]
@@ -1089,6 +1108,9 @@ def cmd_generate(args: argparse.Namespace, console: Console) -> dict:
     written = _decode_to(args.decode_to, model.encoding, [r.full_text for r in results], console)
     if written is not None:  # --decode-to FILE: every sample, as the bytes it holds
         doc["decoded_to"] = written
+    if climbed is not None:
+        console.say(f"auto temperature: {_climb_line(climbed)}")
+        doc["auto_temperature"] = climbed
     return doc
 
 
@@ -1404,6 +1426,7 @@ def cmd_converse(args: argparse.Namespace, console: Console) -> dict | None:
         beam=args.beam, step_penalty=args.step_penalty, seed=args.seed, speakers=speakers, partner=partner,
         avoid_repeats=not args.allow_repeats, avoid_word_repeats=not args.allow_word_repeats,
         explore=args.explore, learn=not args.no_learn, think=not args.no_think, think_depth=args.think_depth,
+        auto_temperature=args.auto_temperature,
         stream=None if streaming is None else lambda event: streaming(
             {**event, "turn": spelled(event["turn"])} if event["event"] == "turn" else event
         ),
@@ -1479,6 +1502,8 @@ def _talk_body(args: argparse.Namespace, dialect: str, history: list[dict], said
         body["beam"] = args.beam
     if args.seed is not None:
         body["seed"] = args.seed
+    if args.auto_temperature:
+        body["auto_temperature"] = args.auto_temperature
     if dialect == ANTHROPIC:
         if args.system:
             body["system"] = args.system
@@ -2829,6 +2854,16 @@ def add_search_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--diversity", type=nonneg_float, default=0.0, metavar="X",
                         help="beam: pick the K continuations to spread out - a path pays X times its overlap with "
                              "one already picked, so they stop varying one ending (0 = off; costs are untouched)")
+    add_auto_temperature_flag(parser)
+
+
+def add_auto_temperature_flag(parser: argparse.ArgumentParser) -> None:
+    """``--auto-temperature T``: a search with no answer walks again up a ladder of temperatures to T (0 = off)."""
+    parser.add_argument("--auto-temperature", type=nonneg_float, default=0.0, metavar="T",
+                        help="when the search finds no answer - nothing said, no end reached with --to-end, or "
+                             "everything vetoed - walk again up a ladder of temperatures: the asked one, then "
+                             "doubling up to T, three walks a rung, until one answers (0 = off; 2 is a good "
+                             "ceiling: hotter walks end no more often and say nothing more often)")
 
 
 def search_options(args: argparse.Namespace) -> dict:
@@ -5157,6 +5192,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "what the voice does - the context it continues, the draft it caught itself on, where it "
                         "backed up to, what it found (with --json: one JSON object per line, the usual document "
                         "last, as {\"event\": \"done\", ...})")
+    add_auto_temperature_flag(p)
     add_guard_flags(p)
     p.set_defaults(handler=cmd_converse)
 
@@ -5226,6 +5262,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-learn", action="store_true", help="do not teach the graph where it goes round")
     p.add_argument("--save", action="store_true", help="write what it learned back to the model file")
     p.add_argument("--out", metavar="PATH", help="--save writes here instead of --model")
+    add_auto_temperature_flag(p)
     add_guard_flags(p)
     p.set_defaults(handler=cmd_talk)
 

@@ -14,7 +14,8 @@ five spellings of one sentence — and *more ways to train* — a curriculum, a
 rehearsal of what the model read before, and a run that stops when it stops
 learning. A later request added a third: *training on a file in reverse*, so
 the model learns what comes before a text, and asking it backwards from the
-frontend (§9).
+frontend (§9). A fourth asked for *auto-temperature*: a search that finds no
+answer raises the temperature and tries again (§10).
 
 This document is the contract, and it is precise on purpose. The three ports
 are held to the same graph, the same file and the same prediction by the
@@ -250,12 +251,14 @@ and 20).
 | `replay`, `replay_size` | `TrainConfig` | `TrainOptions` | `TrainOptions` | `/api/train` | `--replay`, `--replay-size` |
 | `patience`, `min_delta` | `TrainConfig` | `TrainOptions` | `TrainOptions` | `/api/train` | `--patience`, `--min-delta` |
 | `reverse` | `TrainConfig` | `TrainOptions.Plan.Reverse` | `Plan.reverse` (in `TrainOptions`, the sine model's `TrainConfig`) | `/api/train` | `--reverse` |
+| `auto_temperature` | `radixnet.autotemp` (`predict`, `generate`, `climb`); the kit's `guarded_predict`, `NegativeFilter.generate`, `dialogue.reply` / `converse`, `Ask` | the same, in the core and the kit | the same, in the core and the kit | `/api/predict`, `/api/generate`, `/api/converse` (and `/stream`), `/v1/messages`, `/v1/chat/completions` | `--auto-temperature` on `predict`, `generate`, `converse`, `talk` |
 
 A value out of range is an error with the same meaning everywhere: `top_k < 0`,
 `top_p` outside `(0, 1]`, `min_p` outside `[0, 1)`, `diversity < 0`, an
 unknown `order`, `curriculum` outside `(0, 1]`, `replay < 0`,
 `replay_size < 0`, `patience < 0` and `min_delta < 0` - and, over HTTP, a
-`reverse` that is not a boolean.
+`reverse` that is not a boolean, and an `auto_temperature` that is not a
+finite number `>= 0`.
 
 A streaming source (the Go and Rust readers of large files and archives) is
 read into memory first when a run asks for a non-corpus order, a curriculum or
@@ -269,8 +272,9 @@ offered - or `null` when the model keeps none.
 ## 8. What the frontend does with them
 
 The **Settings** tab keeps the search and training settings of this browser —
-the traversal, the sampling filters and the diversity, whether a query is asked
-backwards (§9), and how a run walks its texts — the defaults every tab starts
+the traversal, the sampling filters and the diversity, the auto-temperature
+ceiling (§10), whether a query is asked backwards (§9), and how a run walks its
+texts — the defaults every tab starts
 from, shared by Predict, Generate and Train the way the traversal already was
 (`../ModelKit/frontend/src/hooks/useSiteSettings.jsx`, the rules in
 `../ModelKit/frontend/src/settings.js`). A tab sends a setting only when its mode reads it
@@ -335,3 +339,126 @@ it the right way round. A thumbs up or down goes to the feedback routes as the
 model's own text, the backwards one, since that is the text feedback trains
 on. The Train tab sends `reverse` for every kind from its **Read every text
 backwards** box.
+
+## 10. Auto-temperature
+
+**`auto_temperature`** (a number `>= 0`, off at `0`) is a ceiling. A search
+that finds **no answer** is asked again up a *ladder* of temperatures, a few
+sampled walks at every rung, and the first answer ends it. Off, nothing
+changes: one search, no extra draw, no record (D-078).
+
+**Why the temperature, and how far.** A sampled step weighs its options
+`p ** (1 / temperature)` (§1), so the temperature is the one dial that trades
+how likely a walk is for how far it strays. Measured on a count model of 1,500
+lines of prose, sampling 300 continuations of 60 prefixes:
+
+| temperature | walks that reach END | walks that say nothing | nats per character |
+|---|---|---|---|
+| 0 (greedy) | 1.7% | 1.7% | 1.01 |
+| 0.5 | 35% | 4.0% | 1.13 |
+| 1 | 89% | 5.7% | 1.48 |
+| 2 | 93% | 7.0% | 1.62 |
+| 4 | 95% | 13% | 1.72 |
+
+A cold walk goes round the graph's cycles and never ends; warming it up to 1
+mends that. Past 2 it stops helping: END is reached no more often, an empty
+answer gets *likelier* (a flatter step takes END sooner), and every
+character is less likely. So the ceiling is the caller's choice, 2 is the
+recommended one, and every rung is three draws rather than one: an empty or
+vetoed walk is mended by another draw as often as by a hotter one.
+
+**What is not mended.** Dijkstra, the beam and the resonant model's k-best read
+no temperature, so for them the ladder is where *sampling* starts: the search
+found nothing among the cheapest paths, and walks at rising temperature look
+among the others. Where the graph has no way on at all, no temperature finds
+one, and the record says so. A sampled walk keeps its cap (`length`, or
+`max_length` when given), as it always has: a request for the end of a text
+needs room to reach it.
+
+### 10.1 The ladder
+
+`temperature_ladder(start, ceiling)`: with `ceiling <= 0`, no rungs. Otherwise
+the rungs are `start`, then `t <- min(max(2 * t, 0.5), ceiling)` while
+`t < ceiling` - doubling, from `AUTO_FLOOR = 0.5` when the start is greedy, the
+last rung the ceiling itself. A start at or above the ceiling is the one rung:
+the ladder never cools a walk.
+
+| `(start, ceiling)` | rungs |
+|---|---|
+| `(1, 2)` | `1, 2` |
+| `(1, 3)` | `1, 2, 3` |
+| `(0, 2)` | `0, 0.5, 1, 2` |
+| `(0.7, 2)` | `0.7, 1.4, 2` |
+| `(3, 2)` | `3` |
+
+Every rung is `AUTO_DRAWS = 3` sampled searches, except a rung at temperature
+0, which is one: a greedy walk is the same every time.
+
+### 10.2 An answer
+
+A search's result **answers** when its `text` holds more than whitespace and,
+when the caller asked for the end of a text (`to_end`), it reached END.
+
+A search that offered several continuations - a `Prediction`'s `top` - has
+found an answer when any of them answers: the first that does, in the order
+the search ranked them, becomes the prediction (`first_answer`). Its `text`,
+`labels`, `node_ids`, `cost`, `step_costs`, `reached_end`, `full_text` and
+`punish` replace the prediction's own; `expanded`, `top`, `bottom`, `k`,
+`beam`, `mode` and `traversal` stay as the search left them. (The beam can rank
+a path cut at the length cap above the ones that reached END - a walk round a
+cycle is cheap - so a request for the end may find its answer second: that is
+still the search's own, and nothing is walked.) The guard promotes the same
+way: it re-ranks first (`rank`), and `first_answer` then reads what survived.
+
+### 10.3 The climb
+
+1. **The search as asked** runs first, exactly as it would have: its mode, its
+   temperature, everything. When it answers, that is the whole of it.
+2. **Then the ladder**, from the temperature the request carries (`1` when it
+   carries none) to the ceiling: at every rung, its draws, each the same request
+   in `sample` mode at the rung's temperature. The first that answers is
+   returned.
+3. **Nothing anywhere**: the search as asked is returned, unchanged.
+
+The walks draw from the generator the request was already drawing from - the
+model's own, or a conversation's seeded one - one search after the other, so
+the climb is reproducible and the three ports draw alike. A **generation**
+re-seeds per call (`seed` gives each generation a generator of its own), so the
+`k`-th retry of a climb that was given a seed draws from `seed + k`: a retry at
+the same temperature is a new draw.
+
+**The record** of a climb is `{"ceiling", "climbed", "found", "temperature",
+"tries"}`: the ceiling; whether the search as asked had to be retried; whether
+an answer came back; the temperature of the walk that gave it (`null` when the
+answer is the deterministic search's own, or there is none - and the asked
+temperature when the search as asked was a sampled walk that answered); and how
+many searches ran, the one as asked included. It is reported as
+`auto_temperature` beside the answer whenever the ceiling is on, and never when
+it is off.
+
+### 10.4 Where it climbs
+
+| path | the search | "no answer" |
+|---|---|---|
+| **predict** (CLI `predict`, `POST /api/predict`) | `model.predict`, through the guard when it is on (`guarded_predict`): every search is ranked, and its verdicts are added to the guard's report | `first_answer` of what survived finds none |
+| **generate**, unguarded (`autotemp.generate`) | `model.generate` | fewer than `count` texts say anything beyond the prefix (the whole text is longer than the prefix, in the model's units). The ladder asks for as many as are still missing; what comes back is the texts that said something - the first generation's in its order, then the ladder's - possibly fewer than `count` |
+| **generate**, guarded (`NegativeFilter.generate`) | the pair's over-sampled, filtered generation | fewer than `count` survivors say anything beyond the prefix. Each retry asks for the missing ones; a survivor whose text is already kept is skipped; `kept`, `rejected` and `verdicts` are concatenated, `candidates` and `asked` summed, `rate = len(kept) / candidates` |
+| **a reply** (`dialogue.reply`: `converse`, today's format, chat, voice) | the whole reply - every context, the fresh start, the rethinks | the reply has nothing to say (`None`): every candidate empty or vetoed. A retry is the same reply in `sample` mode at the rung's temperature, so each one draws `k` walks from every context it tries. The turn carries the record (`Turn.auto_temperature`, in its `to_dict` only when set); `trace` hears `{"kind": "climb", "temperature", "draws"}` at the first retry of every rung |
+
+**Today's format** reads `auto_temperature` from either dialect's body, beside
+the dialogue's other dials (`Ask.auto_temperature`, in `Ask.to_dict` only when
+it is not 0), and narrates the climb in the thinking:
+
+```
+nothing to say yet; trying again at temperature 1.00 (at most 3 replies)
+found something to say at temperature 1.00, on try 2
+```
+
+- the first line for every `climb` event (`{t:.2f}`; `1 reply` when the rung
+has one draw), the second when a climbed turn is spoken.
+
+**The CLI** takes `--auto-temperature T` on `predict`, `generate`, `converse`
+and `talk` (which sends it in the request body), and prints one line for the
+climb; under `--json` the record is the document's `auto_temperature`, and a
+conversation's turns carry their own.
+

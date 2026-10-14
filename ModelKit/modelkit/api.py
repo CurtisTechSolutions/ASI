@@ -66,6 +66,7 @@ from .agent import (
     write_criteria,
 )
 from .archive import extract_texts, is_zip
+from radixnet import autotemp
 from radixnet.backend import describe_backends
 from .checkpoint import CheckpointManager
 from .chatgpt import (
@@ -102,7 +103,7 @@ from .assistant import (
 )
 from .dialogue import DEFAULT_SPEAKERS, EXPLORE, Heard, converse, repeats as dialogue_repeats, reply as dialogue_reply
 from .thinking import THINK_DEPTH, THINK_LENGTH, THINK_QUESTIONS, think, think_on
-from .duo import FilterConfig, NegativeFilter
+from .duo import FilterConfig, NegativeFilter, guarded_predict
 from radixnet.model import (
     GraphModel,
     RadixNet,
@@ -833,7 +834,8 @@ class ModelService:
         }
 
     def predict(
-        self, prefix: str, *, guard: bool = True, provenance: bool | None = None, symbols: bool = False, **options: Any
+        self, prefix: str, *, guard: bool = True, provenance: bool | None = None, symbols: bool = False,
+        auto_temperature: float = 0.0, **options: Any
     ) -> dict:
         """The active model's prediction; the count model adds ``top`` / ``bottom`` (K continuations each).
 
@@ -846,15 +848,20 @@ class ModelService:
         A model of base64 symbols is asked the symbols the prefix's bytes fix and says what its answer holds
         (``prefix_symbols``, ``decoded``, ...); ``symbols`` says the prefix is written in them already
         (:func:`_prefix_asked`).
+
+        ``auto_temperature`` (``../RadixCyclicNN/SPEC-SearchAndTraining.md`` §10): a search that leaves no answer
+        - nothing written, no END with ``to_end``, every continuation vetoed - walks again up a ladder of
+        temperatures to that ceiling, and the answer carries the climb's record (``auto_temperature``).
         """
         with self.session() as model:
             enc = model.encoding
             asked, content = _prefix_asked(enc, prefix, symbols)
-            result = model.predict(asked, **options)
             pair = self.guard(model, provenance) if guard else None
+            # the survivors, best first - and, with a ceiling, the ladder when none of them answers
+            result, verdicts, climbed = guarded_predict(model, asked, pair=pair, auto_temperature=auto_temperature,
+                                                        **options)
             report = None
             if pair is not None:
-                result, verdicts = pair.rank(asked, result)  # the survivors, best first
                 report = self._guard_report(pair, verdicts, candidates=len(verdicts),
                                             kept=len(verdicts) - sum(v["decision"] == "reject" for v in verdicts))
             # a model of sounds: the words its answer spells, spelled under the lock like any read of the tokenizer
@@ -883,10 +890,13 @@ class ModelService:
         }
         if isinstance(result, Prediction):
             payload.update(mode=result.mode, k=result.k, beam=result.beam, traversal=result.traversal, **ranked)
+        if climbed is not None:
+            payload["auto_temperature"] = climbed.to_dict()
         return payload
 
     def generate(
-        self, guard: bool = True, provenance: bool | None = None, symbols: bool = False, **options: Any
+        self, guard: bool = True, provenance: bool | None = None, symbols: bool = False,
+        auto_temperature: float = 0.0, **options: Any
     ) -> dict:
         """Whole texts from the prediction search (``beam``: the K most likely), sampling, or the cheapest path.
 
@@ -903,12 +913,16 @@ class ModelService:
             options["prefix"], content = _prefix_asked(enc, options.get("prefix") or "", symbols)
             asked = _base64_doc(enc, options["prefix"])
             pair = self.guard(model, provenance) if guard else None
-            if pair is None:
-                samples = [_sample_dict(r, enc, content) for r in model.generate(**options)]
-                return {"samples": samples, **asked, "guard": None}
             count = options.pop("count", 1)
-            outcome = pair.generate(count=count, **options)
+            if pair is None:
+                # with a ceiling, every sample that said nothing is drawn again up the temperature ladder
+                results, record = autotemp.generate(model, count=count, auto_temperature=auto_temperature, **options)
+                samples = [_sample_dict(r, enc, content) for r in results]
+                climbed = {"auto_temperature": record.to_dict()} if record is not None else {}
+                return {"samples": samples, **asked, "guard": None, **climbed}
+            outcome = pair.generate(count=count, auto_temperature=auto_temperature, **options)
             samples = [_sample_dict(r, enc, content) for r in outcome["results"]]
+        climbed = {"auto_temperature": outcome["auto_temperature"]} if "auto_temperature" in outcome else {}
         return {
             "samples": samples,
             **asked,
@@ -916,6 +930,7 @@ class ModelService:
                 pair, outcome["verdicts"], candidates=outcome["candidates"], kept=len(outcome["kept"]),
                 asked=outcome["asked"], rate=outcome["rate"],
             ),
+            **climbed,
         }
 
     def think(self, **options: Any) -> dict:
@@ -3089,6 +3104,7 @@ def _r_predict(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         guard=f.flag("guard", True),
         provenance=f.flag("provenance", None),
         symbols=f.flag("symbols", False),
+        auto_temperature=f.number("auto_temperature", 0.0, minimum=0.0),
         length=f.integer("length", 20, minimum=0),
         mode=f.text("mode", "dijkstra"),
         step_penalty=f.number("step_penalty", 0.0, minimum=0.0),
@@ -3107,6 +3123,7 @@ def _r_generate(svc: ModelService, f: Fields, q: dict) -> tuple[int, Any]:
         guard=f.flag("guard", True),
         provenance=f.flag("provenance", None),
         symbols=f.flag("symbols", False),
+        auto_temperature=f.number("auto_temperature", 0.0, minimum=0.0),
         count=f.integer("count", 1, minimum=0),
         max_length=f.integer("max_length", 60, minimum=0),
         mode=f.text("mode", "sample"),
@@ -3145,6 +3162,7 @@ def _converse_fields(f: Fields) -> dict:
         learn=f.flag("learn", True),
         think=f.flag("think", True),
         think_depth=f.integer("think_depth", THINK_DEPTH, minimum=0),
+        auto_temperature=f.number("auto_temperature", 0.0, minimum=0.0),
     )
 
 

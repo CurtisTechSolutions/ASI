@@ -45,6 +45,7 @@ and in ``rust/src/assistant.rs``, held to this one by the parity suites.
 from __future__ import annotations
 
 import json
+import math
 import queue
 import re
 import threading
@@ -158,6 +159,8 @@ class Ask:
     learn: bool = True
     guard: bool = True
     seed: int | None = None
+    auto_temperature: float = 0.0
+    """A reply with nothing to say tries again up a ladder of temperatures to this ceiling (0, the default: off)."""
 
     def validate(self) -> None:
         """Raise :class:`AskError` when the request cannot be answered."""
@@ -184,6 +187,8 @@ class Ask:
             raise AskError("step_penalty must be >= 0", "step_penalty")
         if self.explore < 0:
             raise AskError("explore must be >= 0", "explore")
+        if not (math.isfinite(self.auto_temperature) and self.auto_temperature >= 0):
+            raise AskError("auto_temperature must be a finite number >= 0 (0 is off)", "auto_temperature")
         for i, seq in enumerate(self.stop):
             if not isinstance(seq, str) or not seq:
                 raise AskError(f"stop[{i}] must be a non-empty string", "stop")
@@ -212,10 +217,11 @@ class Ask:
             "mode": self.mode, "max_length": self.max_tokens, "context": self.context, "temperature": self.temperature,
             "k": self.k, "beam": self.beam, "step_penalty": self.step_penalty, "avoid_repeats": self.avoid_repeats,
             "avoid_word_repeats": self.avoid_word_repeats, "explore": self.explore, "learn": self.learn,
+            "auto_temperature": self.auto_temperature,
         }
 
     def to_dict(self) -> dict:
-        return {
+        doc = {
             "messages": [m.to_dict() for m in self.messages], "system": self.system, "model": self.model,
             "max_tokens": self.max_tokens, "temperature": self.temperature, "stop": list(self.stop), "n": self.n,
             "stream": self.stream, "tools": [t["name"] for t in self.tools], "thinking": self.thinking, "mode": self.mode,
@@ -223,6 +229,9 @@ class Ask:
             "explore": self.explore, "avoid_repeats": self.avoid_repeats, "avoid_word_repeats": self.avoid_word_repeats,
             "learn": self.learn, "guard": self.guard, "seed": self.seed,
         }
+        if self.auto_temperature:
+            doc["auto_temperature"] = self.auto_temperature
+        return doc
 
 
 def _json_type(value: Any) -> str:
@@ -295,6 +304,7 @@ def _dials(body: dict, ask: Ask) -> None:
     ask.learn = _field_bool(body, "learn", True)
     ask.guard = _field_bool(body, "guard", True)
     ask.seed = _field_int(body, "seed", None)
+    ask.auto_temperature = _field_num(body, "auto_temperature", 0.0, 0.0)
 
 
 def _text_parts(content: Any, where: str, dialect: str) -> str:
@@ -702,6 +712,10 @@ class _Narrator:
             self.line(text)
         elif kind == "fresh":
             self.line("nothing new follows the line; changing the subject with a fresh text")
+        elif kind == "climb":
+            draws = event["draws"]
+            self.line(f"nothing to say yet; trying again at temperature {event['temperature']:.2f} "
+                      f"(at most {draws} {'reply' if draws == 1 else 'replies'})")
 
 
 def deltas(encoding: Encoding, labels: Sequence[str], node_ids: Sequence[int], text: str) -> list[str]:
@@ -894,6 +908,10 @@ def respond(
                 narrator.line("nothing to say: the graph has no way on from here")
                 choice.stop_reason = END_TURN
         else:
+            climbed = turn.auto_temperature
+            if climbed is not None and climbed["climbed"]:
+                narrator.line(f"found something to say at temperature {climbed['temperature']:.2f}, "
+                              f"on try {climbed['tries']}")
             ending = "reached the end of a text" if turn.reached_end else f"cut at {ask.max_tokens} {enc.units_name}"
             said = f"saying {_q(turn.text)}: cost {turn.cost:.4f}, probability {turn.probability:.4f}, {ending}"
             if turn.repeat:

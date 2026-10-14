@@ -51,6 +51,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Sequence
 
+from radixnet.autotemp import AUTO_DRAWS, check_auto_temperature, climb
 from radixnet.beam import path_probability
 from radixnet.graph import FIRST, START
 from radixnet.search import PathResult
@@ -162,9 +163,10 @@ class Turn:
     labels: list[str] = field(default_factory=list)
     node_ids: list[int] = field(default_factory=list)
     step_costs: list[float] = field(default_factory=list)
+    auto_temperature: dict | None = None  # the climb that found this turn (``auto_temperature`` on), else None
 
     def to_dict(self) -> dict:
-        return {
+        doc = {
             "index": self.index,
             "speaker": self.speaker,
             "text": self.text,
@@ -185,6 +187,9 @@ class Turn:
             "node_ids": list(self.node_ids),
             "step_costs": list(self.step_costs),
         }
+        if self.auto_temperature is not None:
+            doc["auto_temperature"] = dict(self.auto_temperature)
+        return doc
 
 
 def tail_context(text: str, chars: int) -> str:
@@ -657,6 +662,7 @@ def converse(
     stream: StreamFn | None = None,
     think: bool = True,
     think_depth: int = THINK_DEPTH,
+    auto_temperature: float = 0.0,
 ) -> list[Turn]:
     """``model`` talks to itself (or to ``partner``) for ``turns`` new turns.
 
@@ -690,6 +696,8 @@ def converse(
     * ``stream`` - where the conversation is streamed as it happens (:data:`StreamFn`): a ``turn`` event for
       every turn spoken, the opening included, and between them what each voice does before it commits.  The
       turns returned are exactly the ones streamed.
+    * ``auto_temperature`` - a voice with nothing to say tries again as sampled walks up a ladder of temperatures
+      to this ceiling before the conversation stops (:func:`reply`; 0, the default, is off).
 
     Every generated turn records the context it picked up, its cost and probability, whether it started fresh
     from START (nothing followed the previous line), and whether it had to repeat something already said
@@ -708,6 +716,7 @@ def converse(
         raise ValueError(f"unknown mode {mode!r}; expected 'beam' or 'sample'")
     speakers = tuple(speakers)
     _check(turns, max_length, context, k, beam, temperature, step_penalty, speakers)
+    check_auto_temperature(auto_temperature)
     rng = random.Random(seed) if seed is not None else None
     voices = (model, partner or model)
 
@@ -734,7 +743,7 @@ def converse(
             speaker=speakers[index % len(speakers)], mode=mode, max_length=max_length, context=context,
             temperature=temperature, k=k, beam=beam, step_penalty=step_penalty, rng=rng,
             avoid_repeats=avoid_repeats, avoid_word_repeats=avoid_word_repeats, explore=explore, learn=learn,
-            veto=veto, think=think, think_depth=think_depth, stream=stream,
+            veto=veto, think=think, think_depth=think_depth, stream=stream, auto_temperature=auto_temperature,
         )
         if turn is None:
             break
@@ -780,6 +789,7 @@ def reply(
     think: bool = True,
     think_depth: int = THINK_DEPTH,
     trace: Trace | None = None,
+    auto_temperature: float = 0.0,
 ) -> Turn | None:
     """What ``voice`` says next after ``previous`` - one turn, or ``None`` when it has nothing to say.
 
@@ -814,7 +824,67 @@ def reply(
     may still be refused for repeating a duplicate already repeated.
     ``trace`` hears every step as it is taken (:data:`Trace`); it is how the
     assistant format streams the thinking.
+
+    ``auto_temperature`` (``../RadixCyclicNN/SPEC-SearchAndTraining.md`` §10) is
+    for the reply that finds nothing at all to say - every candidate, from
+    every context and from a fresh start, empty or vetoed: the same reply is
+    asked again as sampled walks up a ladder of temperatures to that ceiling,
+    three replies a rung (:data:`radixnet.autotemp.AUTO_DRAWS`), and the first
+    that says something is the turn, carrying the climb's record
+    (``Turn.auto_temperature``).  ``trace`` hears a ``climb`` for every rung.
+    Off (``0``, the default) the reply is the one it always was.
     """
+    check_auto_temperature(auto_temperature)
+    asked = dict(
+        heard=heard, index=index, speaker=speaker, mode=mode, max_length=max_length, context=context,
+        temperature=temperature, k=k, beam=beam, step_penalty=step_penalty, rng=rng, avoid_repeats=avoid_repeats,
+        avoid_word_repeats=avoid_word_repeats, explore=explore, learn=learn, veto=veto, stream=stream, think=think,
+        think_depth=think_depth, trace=trace,
+    )
+    if not auto_temperature:
+        return _reply(voice, previous, **asked)
+    rung: list[float | None] = [None]
+
+    def search(t: float | None) -> Turn | None:
+        if t is not None and t != rung[0]:
+            rung[0] = t
+            if trace is not None:
+                trace({"kind": "climb", "temperature": t, "draws": 1 if t == 0 else AUTO_DRAWS})
+        return _reply(voice, previous, **(asked if t is None else {**asked, "mode": "sample", "temperature": t}))
+
+    turn, record = climb(search, lambda found: found, temperature=temperature, ceiling=auto_temperature,
+                         sampled=mode == "sample")
+    if turn is not None:
+        turn.auto_temperature = record.to_dict()
+    return turn
+
+
+def _reply(
+    voice: "GraphModel",
+    previous: str,
+    *,
+    heard: Heard | None = None,
+    index: int = 0,
+    speaker: str = "B",
+    mode: str = "beam",
+    max_length: int = 60,
+    context: int = 12,
+    temperature: float = 1.0,
+    k: int = 5,
+    beam: int | None = None,
+    step_penalty: float = 0.0,
+    rng: random.Random | None = None,
+    avoid_repeats: bool = True,
+    avoid_word_repeats: bool = True,
+    explore: int = EXPLORE,
+    learn: bool = True,
+    veto: Veto | None = None,
+    stream: StreamFn | None = None,
+    think: bool = True,
+    think_depth: int = THINK_DEPTH,
+    trace: Trace | None = None,
+) -> Turn | None:
+    """One reply exactly as asked - :func:`reply` without the temperature ladder."""
     mode = "beam" if mode in ("", "dijkstra") else mode
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected 'beam' or 'sample'")
