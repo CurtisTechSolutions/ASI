@@ -38,6 +38,8 @@ type talkFlags struct {
 	allowWord   bool
 	noLearn     bool
 	seeded      bool
+	// autoTemperature is the ceiling a reply with nothing to say climbs to, sent in the body (0 = off: not sent)
+	autoTemperature float64
 }
 
 func (f *talkFlags) body(dialect string, history []map[string]any, said string) map[string]any {
@@ -53,6 +55,9 @@ func (f *talkFlags) body(dialect string, history []map[string]any, said string) 
 	}
 	if f.seeded {
 		body["seed"] = seedFlag
+	}
+	if f.autoTemperature != 0 {
+		body["auto_temperature"] = f.autoTemperature
 	}
 	if dialect == kit.FormatAnthropic {
 		if f.system != "" {
@@ -145,9 +150,11 @@ func cmdTalk(args []string) {
 	fs.BoolVar(&f.noLearn, "no-learn", false, "do not teach the graph where it goes round")
 	fs.BoolVar(&f.seeded, "seeded", false, "sample with a private RNG seeded by --seed")
 	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
+	fs.Float64Var(&f.autoTemperature, "auto-temperature", 0, autoTemperatureUsage)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
 	f.stops, f.tools = stops, tools
+	checkedAutoTemperature(f.autoTemperature)
 	dialect := strings.ToLower(strings.TrimSpace(*format))
 	if dialect != kit.FormatOpenAI && dialect != kit.FormatAnthropic {
 		fail("--format must be openai or anthropic, got %q", *format)

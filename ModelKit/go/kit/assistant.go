@@ -122,6 +122,9 @@ type Ask struct {
 	Learn            bool
 	Guard            bool
 	Seed             *int64
+	// AutoTemperature is a ceiling: a reply with nothing to say tries again up
+	// a ladder of temperatures to it (0, the default: off; Reply).
+	AutoTemperature float64
 }
 
 // DefaultAsk mirrors the Python defaults.
@@ -166,6 +169,9 @@ func (a *Ask) Validate() error {
 	}
 	if a.Explore < 0 {
 		return askErrorf("explore", "explore must be >= 0")
+	}
+	if math.IsNaN(a.AutoTemperature) || math.IsInf(a.AutoTemperature, 0) || a.AutoTemperature < 0 {
+		return askErrorf("auto_temperature", "auto_temperature must be a finite number >= 0 (0 is off)")
 	}
 	for i, seq := range a.Stop {
 		if seq == "" {
@@ -353,10 +359,49 @@ func dials(body map[string]any, ask *Ask) error {
 		s := int64(*seed)
 		ask.Seed = &s
 	}
+	if ask.AutoTemperature, err = fieldNum(body, "auto_temperature", 0, floatp(0)); err != nil {
+		return err
+	}
 	return nil
 }
 
 func floatp(v float64) *float64 { return &v }
+
+// ToDict is the request as Python's Ask.to_dict writes it: the conversation,
+// every dial, and auto_temperature only when it is not 0 (off), so an ask
+// without it is the record it always was.
+func (a *Ask) ToDict() map[string]any {
+	messages := make([]map[string]any, 0, len(a.Messages))
+	for _, m := range a.Messages {
+		messages = append(messages, map[string]any{"role": m.Role, "content": m.Text})
+	}
+	stop := append([]string{}, a.Stop...)
+	tools := make([]string, 0, len(a.Tools))
+	for _, tool := range a.Tools {
+		tools = append(tools, tool.Name)
+	}
+	var beam, seed any // unset: null, as Python's None
+	if a.Beam > 0 {
+		beam = a.Beam
+	}
+	if a.Seed != nil {
+		seed = *a.Seed
+	}
+	doc := map[string]any{
+		"messages": messages, "system": a.System, "model": a.Model, "max_tokens": a.MaxTokens,
+		"temperature": a.Temperature, "stop": stop, "n": a.N, "stream": a.Stream, "tools": tools,
+		"thinking": a.Thinking, "mode": a.Mode, "context": a.Context, "k": a.K, "beam": beam,
+		"step_penalty": a.StepPenalty, "explore": a.Explore, "avoid_repeats": a.AvoidRepeats,
+		"avoid_word_repeats": a.AvoidWordRepeats, "learn": a.Learn, "guard": a.Guard, "seed": seed,
+	}
+	if a.AutoTemperature != 0 {
+		doc["auto_temperature"] = a.AutoTemperature
+	}
+	return doc
+}
+
+// MarshalJSON writes the request as ToDict does.
+func (a Ask) MarshalJSON() ([]byte, error) { return json.Marshal(a.ToDict()) }
 
 // textParts is the text of a message's content: a string, or a list of typed parts joined by newlines.
 func textParts(content any, where, dialect string) (string, error) {
@@ -936,6 +981,15 @@ func (n *narrator) trace(event map[string]any) {
 		n.line(text)
 	case "fresh":
 		n.line("nothing new follows the line; changing the subject with a fresh text")
+	case "climb":
+		// a reply with nothing to say, asked again hotter (Reply's AutoTemperature)
+		temperature, _ := event["temperature"].(float64)
+		draws := asInt(event["draws"])
+		replies := "replies"
+		if draws == 1 {
+			replies = "reply"
+		}
+		n.line(fmt.Sprintf("nothing to say yet; trying again at temperature %.2f (at most %d %s)", temperature, draws, replies))
 	}
 }
 
@@ -1169,6 +1223,7 @@ func Respond(m *radixnet.Model, pair *Filter, ask *Ask, name string, emit func(m
 			Context: ask.Context, Temperature: ask.Temperature, K: ask.K, Beam: ask.Beam, StepPenalty: ask.StepPenalty,
 			RNG: rng, AvoidRepeats: ask.AvoidRepeats, AvoidWordRepeats: ask.AvoidWordRepeats, Explore: ask.Explore,
 			Learn: ask.Learn, Think: true, ThinkDepth: ThinkDepth, Veto: veto, Trace: n.trace,
+			AutoTemperature: ask.AutoTemperature,
 		})
 		if err != nil {
 			return nil, err
@@ -1211,6 +1266,9 @@ func Respond(m *radixnet.Model, pair *Filter, ask *Ask, name string, emit func(m
 				n.line("nothing to say: the graph has no way on from here")
 			}
 		} else {
+			if climbed := turn.AutoTemperature; climbed != nil && climbed.Climbed && climbed.Temperature != nil {
+				n.line(fmt.Sprintf("found something to say at temperature %.2f, on try %d", *climbed.Temperature, climbed.Tries))
+			}
 			ending := fmt.Sprintf("cut at %d %s", ask.MaxTokens, enc.UnitsName())
 			if turn.ReachedEnd {
 				ending = "reached the end of a text"

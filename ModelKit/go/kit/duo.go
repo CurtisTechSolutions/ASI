@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"github.com/CurtisTechSolutions/ASI/RadixCyclicNN/go/radixnet"
 )
@@ -283,6 +284,9 @@ type FilterOutcome struct {
 	Candidates int                    `json:"candidates"`
 	Asked      int                    `json:"asked"`
 	Rate       *float64               `json:"rate"`
+	// AutoTemperature is the climb's record when the generation was asked with
+	// a ceiling (AutoGenerate), and nil - absent - otherwise.
+	AutoTemperature *radixnet.AutoTemperature `json:"auto_temperature,omitempty"`
 }
 
 // Filter judges every text; with Config.Learn the rejected ones are blamed as
@@ -389,6 +393,91 @@ func (f *Filter) Generate(count int, o radixnet.GenerateOptions) (*FilterOutcome
 	return outcome, nil
 }
 
+// AutoGenerate is Generate through the pair, and - with a ceiling - a climb
+// for what is missing (../../../RadixCyclicNN/SPEC-SearchAndTraining.md §10).
+//
+// Off (ceiling 0), this is Generate exactly.  On, a generation that brought
+// back fewer than count texts saying something beyond the prefix
+// (radixnet.Wrote) - the negative network vetoed the rest, or a walk ended
+// where the prefix did - asks again for the ones still missing, as sampled
+// walks up the temperature ladder: radixnet.AutoDraws generations a rung, each
+// over-sampled and filtered like the first, the k-th retry seeded Seed + k
+// when a seed was given.  The texts that survived - the first generation's in
+// its order, then the ladder's, a survivor whose text is already kept skipped
+// - come back together; every verdict on the way is in Verdicts and Rejected,
+// Kept, Candidates and Asked add up every generation, Rate is Kept over
+// Candidates, and AutoTemperature is the climb's record.  A count of 0 asks for
+// nothing, so nothing is climbed and there is no record.
+func (f *Filter) AutoGenerate(count int, o radixnet.GenerateOptions, ceiling float64) (*FilterOutcome, error) {
+	if err := radixnet.CheckAutoTemperature(ceiling); err != nil {
+		return nil, err
+	}
+	outcome, err := f.Generate(count, o)
+	if err != nil || ceiling == 0 {
+		return outcome, err
+	}
+	record := &radixnet.AutoTemperature{Ceiling: ceiling, Tries: 1}
+	texts, walks := []string{}, []*radixnet.PathResult{}
+	for i, result := range outcome.Results {
+		if radixnet.Wrote(f.Positive, result, o.Prefix) {
+			texts, walks = append(texts, outcome.Texts[i]), append(walks, result)
+		}
+	}
+	outcome.Texts, outcome.Results, outcome.AutoTemperature = texts, walks, record
+	if len(outcome.Texts) >= count {
+		record.Found = true
+		if mode := strings.ToLower(o.Mode); mode == "" || mode == "sample" {
+			asked := o.Temperature
+			record.Temperature = &asked
+		}
+		return outcome, nil
+	}
+	record.Climbed = true
+	said := map[string]bool{}
+	for _, text := range outcome.Texts {
+		said[text] = true
+	}
+climbing:
+	for _, t := range radixnet.TemperatureLadder(o.Temperature, ceiling) {
+		for draw := 0; draw < radixnet.DrawsAt(t); draw++ {
+			retry := o
+			retry.Mode, retry.Temperature = "sample", t
+			if o.Seed != nil {
+				seed := *o.Seed + int64(record.Tries) // the k-th retry draws from seed + k
+				retry.Seed = &seed
+			}
+			record.Tries++
+			more, err := f.Generate(count-len(outcome.Texts), retry)
+			if err != nil {
+				return nil, err
+			}
+			for i, text := range more.Texts {
+				if !said[text] && radixnet.Wrote(f.Positive, more.Results[i], o.Prefix) {
+					said[text] = true
+					outcome.Texts, outcome.Results = append(outcome.Texts, text), append(outcome.Results, more.Results[i])
+				}
+			}
+			outcome.Kept = append(outcome.Kept, more.Kept...)
+			outcome.Rejected = append(outcome.Rejected, more.Rejected...)
+			outcome.Verdicts = append(outcome.Verdicts, more.Verdicts...)
+			outcome.Candidates += more.Candidates
+			outcome.Asked += more.Asked
+			if len(outcome.Texts) >= count {
+				record.Found = true
+				rung := t
+				record.Temperature = &rung
+				break climbing
+			}
+		}
+	}
+	outcome.Rate = nil
+	if outcome.Candidates > 0 {
+		rate := float64(len(outcome.Kept)) / float64(outcome.Candidates)
+		outcome.Rate = &rate
+	}
+	return outcome, nil
+}
+
 // Rank is a finished prediction with the vetoed continuations taken out of
 // it, and a verdict on each.
 //
@@ -423,6 +512,55 @@ func (f *Filter) Rank(prefix string, result *radixnet.Prediction) (*radixnet.Pre
 	ranked.Expanded = expanded
 	ranked.Top = kept
 	return &ranked, f.Report(verdicts)
+}
+
+// GuardedPredict is m.Predict(prefix, o) through the guard, climbing the
+// temperature ladder to ceiling when it finds no answer (Python's
+// guarded_predict, ../../../RadixCyclicNN/SPEC-SearchAndTraining.md §10).
+//
+// The guard, when there is one (pair non-nil), re-ranks every search as Rank
+// does, and the verdicts hold every judgement, the ladder's included.  With
+// the ceiling off (0) this is one search and one ranking, exactly as before,
+// and the record is nil; on, a search whose surviving continuations hold no
+// answer (radixnet.FirstAnswer: none wrote anything, or none reached End when
+// ToEnd asked for it) is followed by sampled walks up the ladder, each judged
+// in turn, and the first answer the guard lets through ends it
+// (radixnet.Climb) - so the guard's veto counts as no answer.
+func GuardedPredict(m *radixnet.Model, prefix string, pair *Filter, o radixnet.PredictOptions, ceiling float64) (*radixnet.Prediction, []*FilterVerdict, *radixnet.AutoTemperature, error) {
+	if err := radixnet.CheckAutoTemperature(ceiling); err != nil {
+		return nil, nil, nil, err
+	}
+	verdicts := []*FilterVerdict{}
+	search := func(rung *float64) (*radixnet.Prediction, error) {
+		// nil: the search exactly as asked; a rung: the same request as a sampled walk at its temperature
+		asked := o
+		if rung != nil {
+			asked.Mode, asked.Temperature = "sample", *rung
+		}
+		found, err := m.Predict(prefix, asked)
+		if err != nil || pair == nil {
+			return found, err
+		}
+		ranked, judged := pair.Rank(prefix, found)
+		verdicts = append(verdicts, judged...)
+		return ranked, nil
+	}
+	if ceiling == 0 {
+		found, err := search(nil)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return found, verdicts, nil, nil
+	}
+	pick := func(p *radixnet.Prediction) (*radixnet.Prediction, bool) {
+		answer := radixnet.FirstAnswer(p, o.ToEnd)
+		return answer, answer != nil
+	}
+	found, record, err := radixnet.Climb(search, pick, o.Temperature, ceiling, strings.ToLower(o.Mode) == "sample")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return found, verdicts, record, nil
 }
 
 // ConverseOutcome is a conversation held through the pair.

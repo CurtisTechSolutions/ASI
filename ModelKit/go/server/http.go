@@ -914,7 +914,12 @@ func rPredict(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	p, report, asked, err := rq.svc.Predict(prefix, symbols, o, guard, provenance)
+	// a search that leaves no answer walks again up a ladder of temperatures to this ceiling (0 = off)
+	autoTemperature, _, err := f.number("auto_temperature", 0, floatp(0))
+	if err != nil {
+		return 0, nil, err
+	}
+	p, report, climbed, asked, err := rq.svc.Predict(prefix, symbols, o, guard, provenance, autoTemperature)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -943,6 +948,9 @@ func rPredict(rq *request) (int, any, error) {
 		for k, v := range more {
 			doc[k] = v
 		}
+	}
+	if climbed != nil { // the climb's record, beside the answer - only when the ceiling is on
+		doc["auto_temperature"] = climbed
 	}
 	return 200, doc, nil
 }
@@ -1018,7 +1026,12 @@ func rGenerate(rq *request) (int, any, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	results, report, asked, err := rq.svc.Generate(o, symbols, guard, provenance)
+	// every sample that said nothing is drawn again up a ladder of temperatures to this ceiling (0 = off)
+	autoTemperature, _, err := f.number("auto_temperature", 0, floatp(0))
+	if err != nil {
+		return 0, nil, err
+	}
+	results, report, climbed, asked, err := rq.svc.Generate(o, symbols, guard, provenance, autoTemperature)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1029,6 +1042,9 @@ func rGenerate(rq *request) (int, any, error) {
 	doc := map[string]any{"samples": samples, "guard": report}
 	for k, v := range symbolsDoc(asked.enc, "prefix_symbols", asked.asked) { // what a model of base64 symbols started from
 		doc[k] = v
+	}
+	if climbed != nil { // the climb's record, beside the samples - only when the ceiling is on
+		doc["auto_temperature"] = climbed
 	}
 	return 200, doc, nil
 }
@@ -1106,6 +1122,10 @@ func converseRequest(rq *request) (opening string, o kit.ConverseOptions, guard 
 		return "", o, false, err
 	}
 	if o.ThinkDepth, _, err = f.integer("think_depth", kit.ThinkDepth, intp(0)); err != nil {
+		return "", o, false, err
+	}
+	// a voice with nothing to say tries again up a ladder of temperatures to this ceiling (0 = off)
+	if o.AutoTemperature, _, err = f.number("auto_temperature", 0, floatp(0)); err != nil {
 		return "", o, false, err
 	}
 	if guard, err = f.flag("guard", true); err != nil {

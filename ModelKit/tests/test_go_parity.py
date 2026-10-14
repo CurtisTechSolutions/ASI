@@ -2937,3 +2937,333 @@ class TestGoBase64Parity(unittest.TestCase):
         self.same_graph(*self.saved_graphs(sides, "liked.json"))
         a, b = self.both(sides, "POST", "/api/score", {"text": "the dog ate the bone"})
         self.assertEqual((a["unknown_transitions"], b["unknown_transitions"]), (0, 0))
+
+
+# auto-temperature (SPEC-SearchAndTraining.md §10): a strong cycle - a greedy walk goes round "ab " for ever and never
+# reaches the end; a text that ends as often as it goes on, so a walk from its end says nothing half the time; and
+# three lines a guard can be taught to refuse
+_LOOP = ["ab " * 20 + "end"] * 3 + ["ab end"]
+_ENDS = ["the cat sat on the mat", "the cat sat on the mat and slept"]
+_LINES = ["the cat sat on the mat", "the dog sat on the log", "a bird flew over the hill"]
+# what the guard of the servers is taught, one blame at a time: with these a reply to "the cat" has nothing to say as
+# asked - every context and the fresh start offer one path (k = 1), each a failure - and climbs past the first rung
+_REFUSED = ["the cat on the mat", "the cat sat on the mat", "the log", "the cat sat on the dog sat on the cat on the hill"]
+
+
+class TestGoAutoTemperatureParity(unittest.TestCase):
+    """Auto-temperature (``SPEC-SearchAndTraining.md`` §10) on both sides: a search that finds no answer walks again up
+    the same ladder, draws the same walks and leaves the same record - from the CLI and from the servers, the guard's
+    veto counting as no answer - and today's format narrates the climb word for word.  Off, nothing changes: the same
+    answer, no extra draw and no ``auto_temperature`` key."""
+
+    FLOATS = TestGoAssistantParity.FLOATS
+    strip = staticmethod(TestGoAssistantParity.strip)
+    assert_same_reply = TestGoAssistantParity.assert_same_reply
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="radixnet-go-autotemp-")
+        cls.models = {}
+        for name, lines, epochs in (("loop", _LOOP, 2), ("ends", _ENDS, 2), ("lines", _LINES, 3)):
+            data = cls.path(f"{name}.txt")
+            with open(data, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            pm, gm = cls.path(f"{name}-py.count.json"), cls.path(f"{name}-go.count.json")
+            py("--kind", "count", "--seed", 1, "train", "--data", data, "--epochs", epochs, model=pm)
+            go("--seed", 1, "train", "--data", data, "--epochs", epochs, model=gm)
+            cls.models[name] = (pm, gm)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @classmethod
+    def path(cls, name):
+        return os.path.join(cls.tmp.name, name)
+
+    def copies(self, name, tag, blamed=()):
+        """A copy of each side's model, guarded - when ``blamed`` names any - by a negative network each side's own
+        CLI has taught those texts, one blame at a time."""
+        pm, gm = self.models[name]
+        out = []
+        for source, runner in ((pm, py), (gm, go)):
+            copy = source.replace(".count.json", f".{tag}.count.json")
+            shutil.copy(source, copy)
+            for text in blamed:
+                runner("negative", "blame", "--text", text, "--reason", "gibberish", model=copy)
+            out.append(copy)
+        return out
+
+    def same_answer(self, a, b):
+        for key in ("continuation", "full_text", "reached_end", "node_ids", "path"):
+            self.assertEqual(a[key], b[key], key)
+        self.assertLessEqual(abs(a["cost"] - b["cost"]), 1e-9)
+        self.assertEqual([t["full_text"] for t in a["top"]], [t["full_text"] for t in b["top"]])
+
+    def same_guard(self, a, b):
+        if a is None or b is None:
+            self.assertEqual(a, b)
+            return
+        for key in ("candidates", "kept", "vetoed", "asked", "rate"):
+            self.assertEqual(a.get(key), b.get(key), key)
+        self.assertEqual([(v["text"], v["decision"], v["rule"]) for v in a["verdicts"]],
+                         [(v["text"], v["decision"], v["rule"]) for v in b["verdicts"]])
+
+    @staticmethod
+    def samples(doc):
+        return [(s["text"], round(s["cost"], 9), s["reached_end"]) for s in doc["samples"]]
+
+    # -- the command line ------------------------------------------------------------------------------------------
+
+    def test_predict_climbs_out_of_a_greedy_loop(self):
+        pm, gm = self.models["loop"]
+        asked = ("predict", "--prefix", "ab", "--mode", "sample", "--temperature", 0, "--length", 20, "--max-length", 30,
+                 "--to-end")
+        a = py(*asked, "--auto-temperature", 2, model=pm)
+        b = go(*asked, "--auto-temperature", 2, model=gm)
+        self.same_answer(a, b)
+        self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+        record = b["auto_temperature"]
+        self.assertTrue(b["reached_end"] and record["climbed"] and record["found"], b)
+        self.assertGreater(record["temperature"], 0)
+        self.assertEqual(record["ceiling"], 2)
+        # a deterministic search falls back to walks - held to its cap, so an end no path reaches inside it is not
+        # reached by walking either: every rung of (1, 2), and the beam's own answer back
+        capped = ("predict", "--prefix", "ab", "--mode", "beam", "--length", 2, "--max-length", 3, "--to-end",
+                  "--auto-temperature", 2)
+        a, b = py(*capped, model=pm), go(*capped, model=gm)
+        self.same_answer(a, b)
+        self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+        self.assertEqual(b["auto_temperature"], {"ceiling": 2, "climbed": True, "found": False, "temperature": None,
+                                                 "tries": 7})
+        # with room to end, the first continuation of the beam's that ends is the answer: promoted alike, nothing walked
+        roomy = ("predict", "--prefix", "ab", "--mode", "beam", "--length", 2, "--max-length", 30, "--to-end")
+        plain = go(*roomy, model=gm)
+        a, b = py(*roomy, "--auto-temperature", 2, model=pm), go(*roomy, "--auto-temperature", 2, model=gm)
+        self.same_answer(a, b)
+        self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+        self.assertEqual(b["auto_temperature"], {"ceiling": 2, "climbed": False, "found": True, "temperature": None,
+                                                 "tries": 1})
+        self.assertFalse(plain["reached_end"])
+        self.assertTrue(b["reached_end"])
+        self.assertEqual([t["full_text"] for t in b["top"]], [t["full_text"] for t in plain["top"]])
+
+    def test_predict_with_it_off_is_unchanged(self):
+        pm, gm = self.models["loop"]
+        asked = ("predict", "--prefix", "ab", "--mode", "sample", "--temperature", 0, "--length", 20, "--max-length", 30,
+                 "--to-end")
+        for off in ((), ("--auto-temperature", 0)):
+            with self.subTest(off=off):
+                a, b = py(*asked, *off, model=pm), go(*asked, *off, model=gm)
+                self.same_answer(a, b)
+                self.assertFalse(b["reached_end"], "greedy goes round and never ends")
+                self.assertNotIn("auto_temperature", a)
+                self.assertNotIn("auto_temperature", b)
+
+    def test_generate_draws_again_for_what_said_nothing(self):
+        pm, gm = self.models["ends"]
+        args = ("generate", "--count", 6, "--mode", "sample", "--prefix", "the cat sat on the mat", "--max-length", 60,
+                "--no-guard")
+        plain_py, plain_go = py("--seed", 3, *args, model=pm), go("--seed", 3, *args, "--seeded", model=gm)
+        self.assertEqual(self.samples(plain_py), self.samples(plain_go))
+        self.assertNotIn("auto_temperature", plain_go)
+        said = [s["text"] for s in plain_go["samples"] if len(s["text"]) > len("the cat sat on the mat")]
+        self.assertTrue(0 < len(said) < 6, "some walks end where the prefix does")
+        a = py("--seed", 3, *args, "--auto-temperature", 2, model=pm)
+        b = go("--seed", 3, *args, "--seeded", "--auto-temperature", 2, model=gm)
+        self.assertEqual(self.samples(a), self.samples(b))
+        self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+        self.assertTrue(b["auto_temperature"]["climbed"] and b["auto_temperature"]["found"])
+        self.assertEqual(len(b["samples"]), 6)
+        self.assertEqual([s["text"] for s in b["samples"][:len(said)]], said, "the first generation's come first")
+
+    def test_a_guarded_generation_draws_again_for_what_it_vetoed(self):
+        pm, gm = self.models["lines"]
+        beam = py("generate", "--count", 3, "--mode", "beam", "--max-length", 40, "--no-guard", model=pm)
+        pm, gm = self.copies("lines", "vetoed-beam", [s["text"] for s in beam["samples"][:2]])
+        args = ("generate", "--count", 3, "--mode", "beam", "--max-length", 40, "--over-sample", 1)
+        for ceiling in (0, 2):
+            with self.subTest(ceiling=ceiling):
+                a = py("--seed", 3, *args, "--auto-temperature", ceiling, model=pm)
+                b = go("--seed", 3, *args, "--seeded", "--auto-temperature", ceiling, model=gm)
+                self.assertEqual(self.samples(a), self.samples(b))
+                self.same_guard(a["guard"], b["guard"])
+                self.assertEqual(a.get("auto_temperature"), b.get("auto_temperature"))
+        self.assertTrue(b["auto_temperature"]["climbed"])
+        self.assertGreater(b["guard"]["candidates"], 3)
+
+    def test_a_vetoed_prediction_climbs_to_the_same_answer(self):
+        pm, gm = self.copies("lines", "vetoed", ["the cat sat on the mat"])
+        asked = ("predict", "--prefix", "the cat", "--mode", "beam", "--k", 1, "--length", 30, "--to-end")
+        a, b = py(*asked, model=pm), go(*asked, model=gm)
+        self.same_answer(a, b)
+        self.same_guard(a["guard"], b["guard"])
+        self.assertEqual(b["continuation"], "", "the guard vetoed the only continuation")
+        self.assertNotIn("auto_temperature", b)
+        a, b = py(*asked, "--auto-temperature", 2, model=pm), go(*asked, "--auto-temperature", 2, model=gm)
+        self.same_answer(a, b)
+        self.same_guard(a["guard"], b["guard"])
+        self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+        record = b["auto_temperature"]
+        self.assertTrue(b["continuation"].strip() and b["reached_end"] and record["climbed"] and record["found"])
+        self.assertEqual(b["guard"]["candidates"], record["tries"], "every search was judged")
+        self.assertEqual(b["guard"]["verdicts"][0]["decision"], "reject")
+
+    def test_converse_and_talk_climb_alike(self):
+        pm, gm = self.copies("lines", "talked", _REFUSED[:1])
+        args = ("converse", "--opening", "the cat", "--turns", 2, "--no-learn", "--auto-temperature", 2)
+        a, b = py(*args, model=pm), go(*args, model=gm)
+        self.assertEqual(a["transcript"], b["transcript"])
+        self.assertEqual([t.get("auto_temperature") for t in a["turns"]], [t.get("auto_temperature") for t in b["turns"]])
+        self.assertTrue(all(t.get("auto_temperature") for t in b["turns"][1:]))
+        talk = ("talk", "--format", "anthropic", "--message", "the cat", "--k", 1, "--no-learn", "--max-tokens", 30,
+                "--auto-temperature", 2)
+        a, b = py("--seed", 3, *talk, model=pm), go("--seed", 3, *talk, "--seeded", model=gm)
+        self.assert_same_reply(a, b)
+        self.assertTrue(b["radixnet"]["choices"][0]["turn"]["auto_temperature"]["climbed"])
+
+    def test_both_refuse_a_negative_ceiling(self):
+        pm, gm = self.models["loop"]
+        for command in (["predict", "--prefix", "ab"], ["generate"], ["converse"], ["talk", "--message", "ab"]):
+            for bad in (-1, "inf"):
+                with self.subTest(command=command[0], bad=bad):
+                    go(*command, "--auto-temperature", bad, model=gm, expect=1)
+                    self.assertNotEqual(subprocess.run([sys.executable, "-m", "radixnet", "--model", pm, *command,
+                                                        "--auto-temperature", str(bad)], cwd=ROOT,
+                                                       capture_output=True).returncode, 0)
+
+    # -- the servers -----------------------------------------------------------------------------------------------
+
+    def servers(self, pm):
+        """A Go server and a Python one, each on its own copy of ``pm`` and of the negative network beside it."""
+        import socket
+        import time
+        from tests.test_api import Client, start_server
+
+        sides = {}
+        for side in ("py", "go"):
+            folder = tempfile.mkdtemp(dir=self.tmp.name)
+            model = os.path.join(folder, "m.count.json")
+            shutil.copy(pm, model)
+            shutil.copy(pm.replace(".count.json", ".count.negative.json"), os.path.join(folder, "m.count.negative.json"))
+            sides[side] = model
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        proc = subprocess.Popen(
+            [BINARY, "--model", sides["go"], "--exact", "serve", "--host", "127.0.0.1", "--port", str(port), "--quiet"],
+            cwd=GO_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+        def stop():
+            proc.kill()
+            proc.wait()
+
+        self.addCleanup(stop)
+        go_client = Client(f"http://127.0.0.1:{port}")
+        for _ in range(300):
+            try:
+                if go_client.get("/api/health")[0] == 200:
+                    break
+            except Exception:  # noqa: BLE001 - the server is still starting
+                pass
+            if proc.poll() is not None:
+                raise AssertionError("the Go server exited early")
+            time.sleep(0.05)
+        else:
+            raise AssertionError("the Go server did not start")
+        py_client, _, _ = start_server(self.addCleanup, model_path=sides["py"])
+        return {"py": py_client, "go": go_client}
+
+    def both(self, sides, path, body, expect=200):
+        out = {}
+        for side, client in sides.items():
+            status, doc, _ = client.post(path, body)
+            self.assertEqual(status, expect, (side, path, body, doc))
+            out[side] = doc
+        return out["py"], out["go"]
+
+    def test_the_servers_climb_alike(self):
+        pm, _ = self.copies("lines", "served", _REFUSED)
+        sides = self.servers(pm)
+        # predict: off, the guard vetoes the beam's only continuation; on, both walk up to the same answer
+        asked = {"prefix": "the cat", "mode": "beam", "k": 1, "length": 30, "to_end": True}
+        a, b = self.both(sides, "/api/predict", asked)
+        self.same_answer(a, b)
+        self.same_guard(a["guard"], b["guard"])
+        self.assertNotIn("auto_temperature", a)
+        self.assertNotIn("auto_temperature", b)
+        a, b = self.both(sides, "/api/predict", {**asked, "auto_temperature": 2})
+        self.same_answer(a, b)
+        self.same_guard(a["guard"], b["guard"])
+        self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+        self.assertTrue(b["auto_temperature"]["climbed"])
+        # generate, guarded and not
+        for body in ({"count": 3, "mode": "beam", "max_length": 40, "seed": 2, "auto_temperature": 2},
+                     {"count": 4, "mode": "sample", "max_length": 40, "seed": 5, "auto_temperature": 2},
+                     {"count": 4, "mode": "sample", "max_length": 40, "seed": 5, "auto_temperature": 2, "guard": False},
+                     {"count": 4, "mode": "sample", "max_length": 40, "seed": 5}):
+            with self.subTest(body=body):
+                a, b = self.both(sides, "/api/generate", body)
+                self.assertEqual(self.samples(a), self.samples(b))
+                self.same_guard(a["guard"], b["guard"])
+                self.assertEqual(a.get("auto_temperature"), b.get("auto_temperature"))
+                self.assertEqual("auto_temperature" in b, "auto_temperature" in body)
+        # converse, whole and streamed: every reply carries its climb
+        talk = {"opening": "the cat", "turns": 3, "learn": False, "seed": 4, "auto_temperature": 2}
+        a, b = self.both(sides, "/api/converse", talk)
+        self.assertEqual([t["text"] for t in a["turns"]], [t["text"] for t in b["turns"]])
+        self.assertEqual([t.get("auto_temperature") for t in a["turns"]], [t.get("auto_temperature") for t in b["turns"]])
+        self.assertTrue(b["turns"][1]["auto_temperature"])
+        a, b = self.both(sides, "/api/converse/stream", talk)
+        done = [json.loads(line) for line in a.decode("utf-8").splitlines()][-1], \
+            [json.loads(line) for line in b.decode("utf-8").splitlines()][-1]
+        self.assertEqual([t.get("auto_temperature") for t in done[0]["turns"]],
+                         [t.get("auto_temperature") for t in done[1]["turns"]])
+        # today's format: as asked the reply has nothing to say - the guard vetoed everything it could - and with a
+        # ceiling it climbs, narrated line for line the same in both dialects
+        body = {"messages": [{"role": "user", "content": "the cat"}], "max_tokens": 30, "k": 1, "learn": False, "seed": 3}
+        a, b = self.both(sides, "/v1/messages", body)
+        self.assert_same_reply(a, b)
+        self.assertEqual(b["stop_reason"], "refusal")
+        for path in ("/v1/messages", "/v1/chat/completions"):
+            with self.subTest(path=path):
+                a, b = self.both(sides, path, {**body, "auto_temperature": 2})
+                self.assert_same_reply(a, b)
+        thinking = b["choices"][0]["message"]["reasoning_content"].split("\n")
+        record = b["radixnet"]["choices"][0]["turn"]["auto_temperature"]
+        self.assertTrue(record["climbed"] and record["found"])
+        self.assertEqual([line for line in thinking if line.startswith("nothing to say yet")], [
+            "nothing to say yet; trying again at temperature 1.00 (at most 3 replies)",
+            "nothing to say yet; trying again at temperature 2.00 (at most 3 replies)",
+        ])
+        self.assertIn(f"found something to say at temperature {record['temperature']:.2f}, on try {record['tries']}",
+                      thinking)
+        # and when even the ceiling finds nothing, both climb every rung, say so, and refuse alike
+        for client in sides.values():
+            status, doc, _ = client.post("/api/negative/blame", {"texts": [b["choices"][0]["message"]["content"]],
+                                                                  "reason": "gibberish"})
+            self.assertEqual(status, 200, doc)
+        a, b = self.both(sides, "/v1/messages", {**body, "auto_temperature": 2})
+        self.assert_same_reply(a, b)
+        self.assertEqual(b["stop_reason"], "refusal")
+        thinking = b["content"][0]["thinking"].split("\n")
+        self.assertEqual([line for line in thinking if line.startswith("nothing to say yet")], [
+            "nothing to say yet; trying again at temperature 1.00 (at most 3 replies)",
+            "nothing to say yet; trying again at temperature 2.00 (at most 3 replies)",
+        ])
+        self.assertEqual(thinking[-1], "nothing to say: the guard vetoed everything it could say")
+
+    def test_the_servers_refuse_a_bad_ceiling(self):
+        pm, _ = self.copies("lines", "refusing", _REFUSED[:1])
+        sides = self.servers(pm)
+        messages = [{"role": "user", "content": "the cat"}]
+        for path, body in (("/api/predict", {"prefix": "the"}), ("/api/generate", {}), ("/api/converse", {}),
+                           ("/api/converse/stream", {}), ("/v1/messages", {"messages": messages}),
+                           ("/v1/chat/completions", {"messages": messages})):
+            for bad in (-1, "hot", True, float("inf")):
+                with self.subTest(path=path, bad=bad):
+                    self.both(sides, path, {**body, "auto_temperature": bad}, expect=400)
+        a, b = self.both(sides, "/v1/chat/completions", {"messages": messages, "auto_temperature": -1}, expect=400)
+        self.assertEqual(a["error"]["param"], b["error"]["param"])
+        self.assertEqual(b["error"]["param"], "auto_temperature")

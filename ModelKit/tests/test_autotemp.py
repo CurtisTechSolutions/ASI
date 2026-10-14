@@ -103,6 +103,12 @@ class TestTheGuard(unittest.TestCase):
         self.assertGreater(out["candidates"], plain["candidates"])
         self.assertEqual(record["found"], len(out["texts"]) == 3)
 
+    def test_nothing_asked_for_is_found_as_asked(self):
+        """A generation of no texts has nothing missing: the ceiling is on, so the record says so, guarded or not."""
+        duo = pair()
+        self.assertEqual(duo.generate(count=0, auto_temperature=2.0)["auto_temperature"],
+                         {"ceiling": 2.0, "climbed": False, "found": True, "temperature": 1.0, "tries": 1})
+
     def test_everything_vetoed_is_no_answer_at_any_temperature(self):
         duo = pair(blamed=CORPUS)
         out = duo.generate(count=2, mode="sample", max_length=40, seed=3, auto_temperature=1.0)

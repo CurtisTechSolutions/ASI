@@ -96,6 +96,10 @@ type Turn struct {
 	Labels     []string  `json:"labels"`
 	NodeIDs    []int     `json:"node_ids"`
 	StepCosts  []float64 `json:"step_costs"`
+	// AutoTemperature is the climb that found this turn when the reply was
+	// asked with a ceiling (ReplyOptions.AutoTemperature), and nil - absent
+	// from the record - otherwise.
+	AutoTemperature *radixnet.AutoTemperature `json:"auto_temperature,omitempty"`
 }
 
 // TailContext is the last chars characters of text, cut forward to a word
@@ -323,6 +327,10 @@ type ConverseOptions struct {
 	// each voice does before it commits (see Stream).  The turns returned are
 	// exactly the ones streamed.
 	Stream Stream
+	// AutoTemperature is a ceiling: a voice with nothing to say tries again as
+	// sampled walks up a ladder of temperatures to it before the conversation
+	// stops (Reply; 0, the default, is off).
+	AutoTemperature float64
 }
 
 // DefaultConverseOptions mirror the Python defaults.
@@ -681,6 +689,9 @@ func Converse(m *radixnet.Model, opening string, opts ConverseOptions) ([]*Turn,
 			return nil, fmt.Errorf("speakers must be non-empty names")
 		}
 	}
+	if err := radixnet.CheckAutoTemperature(opts.AutoTemperature); err != nil {
+		return nil, err
+	}
 	var rng *radixnet.MT19937
 	if opts.Seed != nil {
 		rng = radixnet.NewMT19937(*opts.Seed)
@@ -716,6 +727,7 @@ func Converse(m *radixnet.Model, opening string, opts ConverseOptions) ([]*Turn,
 			Beam: opts.Beam, StepPenalty: opts.StepPenalty, RNG: rng, AvoidRepeats: opts.AvoidRepeats,
 			AvoidWordRepeats: opts.AvoidWordRepeats, Explore: opts.Explore, Learn: opts.Learn,
 			Think: opts.Think, ThinkDepth: opts.ThinkDepth, Veto: opts.Veto, Stream: opts.Stream,
+			AutoTemperature: opts.AutoTemperature,
 		})
 		if err != nil {
 			return nil, err
@@ -780,6 +792,9 @@ type ReplyOptions struct {
 	// it.  The turn itself is not this function's event: it is the caller's to speak (Converse streams it
 	// as "turn"), since a reply may still be refused for repeating a duplicate already repeated.
 	Stream Stream
+	// AutoTemperature is a ceiling for the reply that finds nothing at all to say (see Reply; 0, the
+	// default, is off).
+	AutoTemperature float64
 }
 
 // DefaultReplyOptions mirror the Python defaults.
@@ -799,7 +814,51 @@ func DefaultReplyOptions() ReplyOptions {
 // It is exported because the other voice need not be a model at all: the chat
 // loop (chat.go) has an LLM speak every other line and calls this for the
 // model's own.
+//
+// o.AutoTemperature (../../../RadixCyclicNN/SPEC-SearchAndTraining.md §10) is
+// for the reply that finds nothing at all to say - every candidate, from every
+// context and from a fresh start, empty or vetoed: the same reply is asked
+// again as sampled walks up a ladder of temperatures to that ceiling, three
+// replies a rung (radixnet.AutoDraws), each drawing K walks from every context
+// it tries, and the first that says something is the turn, carrying the
+// climb's record (Turn.AutoTemperature).  o.Trace hears a "climb" event
+// (temperature, draws) at the first retry of every rung.  Off (0, the default)
+// the reply is the one it always was.
 func Reply(m *radixnet.Model, previous string, o ReplyOptions) (*Turn, error) {
+	if err := radixnet.CheckAutoTemperature(o.AutoTemperature); err != nil {
+		return nil, err
+	}
+	if o.AutoTemperature == 0 {
+		return replyAsAsked(m, previous, o)
+	}
+	retried, rung := false, 0.0 // whether a retry ran yet, and its temperature: a new one is a new rung
+	search := func(t *float64) (*Turn, error) {
+		if t == nil {
+			return replyAsAsked(m, previous, o)
+		}
+		if !retried || *t != rung {
+			retried, rung = true, *t
+			if o.Trace != nil {
+				o.Trace(map[string]any{"kind": "climb", "temperature": *t, "draws": radixnet.DrawsAt(*t)})
+			}
+		}
+		asked := o
+		asked.Mode, asked.Temperature = "sample", *t
+		return replyAsAsked(m, previous, asked)
+	}
+	said := func(t *Turn) (*Turn, bool) { return t, t != nil }
+	turn, record, err := radixnet.Climb(search, said, o.Temperature, o.AutoTemperature, o.Mode == "sample")
+	if err != nil {
+		return nil, err
+	}
+	if turn != nil {
+		turn.AutoTemperature = record
+	}
+	return turn, nil
+}
+
+// replyAsAsked is one reply exactly as asked - Reply without the temperature ladder.
+func replyAsAsked(m *radixnet.Model, previous string, o ReplyOptions) (*Turn, error) {
 	mode := o.Mode
 	if mode == "" || mode == "dijkstra" {
 		mode = "beam"

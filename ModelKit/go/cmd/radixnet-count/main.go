@@ -798,6 +798,37 @@ func searchFlags(fs *flag.FlagSet) (*int, *float64, *float64, *float64) {
 	return topK, topP, minP, diversity
 }
 
+// autoTemperatureUsage is the help of --auto-temperature T, on predict,
+// generate, converse and talk: a search with no answer walks again up a
+// ladder of temperatures to T (../../../RadixCyclicNN/SPEC-SearchAndTraining.md §10).
+const autoTemperatureUsage = "when the search finds no answer - nothing said, no end reached with --to-end, or " +
+	"everything vetoed - walk again up a ladder of temperatures: the asked one, then doubling up to T, three walks a " +
+	"rung, until one answers (0 = off; 2 is a good ceiling: hotter walks end no more often and say nothing more often)"
+
+// autoTemperatureFlag adds --auto-temperature T, off at 0.
+func autoTemperatureFlag(fs *flag.FlagSet) *float64 {
+	return fs.Float64("auto-temperature", 0, autoTemperatureUsage)
+}
+
+// checkedAutoTemperature is the flag's ceiling, or the error that ends the command.
+func checkedAutoTemperature(ceiling float64) float64 {
+	if err := radixnet.CheckAutoTemperature(ceiling); err != nil {
+		fail("--auto-temperature must be a finite number >= 0 (0 is off), got %v", ceiling)
+	}
+	return ceiling
+}
+
+// climbLine is one line for what the temperature ladder did (--auto-temperature), as the Python CLI prints it.
+func climbLine(r *radixnet.AutoTemperature) string {
+	switch {
+	case !r.Climbed:
+		return fmt.Sprintf("answered as asked (ceiling %g)", r.Ceiling)
+	case r.Found && r.Temperature != nil:
+		return fmt.Sprintf("answered at temperature %g after %d searches (ceiling %g)", *r.Temperature, r.Tries, r.Ceiling)
+	}
+	return fmt.Sprintf("no answer at any temperature up to %g (%d searches)", r.Ceiling, r.Tries)
+}
+
 // checkedFilter is the flags' sampling filter, or the error that ends the command.
 func checkedFilter(topK int, topP, minP float64) radixnet.SamplingFilter {
 	if !(topP > 0 && topP <= 1) {
@@ -855,6 +886,7 @@ func cmdPredict(args []string) {
 	temperature := fs.Float64("temperature", 1.0, "sample: softmax temperature (0 = greedy)")
 	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	topK, topP, minP, diversity := searchFlags(fs)
+	autoTemperature := autoTemperatureFlag(fs)
 	addGuardFlags(fs)
 	speak := fs.String("speak", "", "also hear the answer: the full text spoken through the model's voice, written as a WAV (the output decoder; say has the voice's dials)")
 	decodeFile := fs.String("decode-to", "", "write the answer as the bytes it holds: a model of base64 symbols decodes its full text "+
@@ -868,6 +900,7 @@ func cmdPredict(args []string) {
 		fail("predict needs --prefix TEXT or --prefix-file FILE")
 	}
 	filter := checkedFilter(*topK, *topP, *minP)
+	ceiling := checkedAutoTemperature(*autoTemperature)
 	m := openModel(true)
 	enc := m.Encoding()
 	// what the model is asked, and the content it stands for: a model of base64 symbols is asked the symbols the
@@ -876,16 +909,16 @@ func cmdPredict(args []string) {
 	opts := radixnet.PredictOptions{Length: *length, Mode: *mode, K: *k, Beam: *beam, StepPenalty: *stepPenalty, Temperature: *temperature, ToEnd: *toEnd, MaxLength: *maxLength,
 		Traversal: *traversal, PenaltyScale: *penaltyScale, MeritScale: *meritScale,
 		TopK: filter.TopK, TopP: filter.TopP, MinP: filter.MinP, Diversity: *diversity}
-	p, err := m.Predict(asked, opts)
+	pair := openGuard(m)
+	// the guard re-ranks what the search offered - the best continuation it does not veto - and with
+	// --auto-temperature a search that leaves no answer walks again up the temperature ladder
+	p, verdicts, climbed, err := kit.GuardedPredict(m, asked, pair, opts, ceiling)
 	if err != nil {
 		fail("%v", err)
 	}
 	var guard map[string]any
-	var verdicts []*kit.FilterVerdict
-	if pair := openGuard(m); pair != nil {
-		// the guard re-ranks what the search already offered: the best continuation it does not veto
+	if pair != nil {
 		kept := 0
-		p, verdicts = pair.Rank(asked, p)
 		for _, verdict := range verdicts {
 			if verdict.Decision != "reject" {
 				kept++
@@ -908,6 +941,9 @@ func cmdPredict(args []string) {
 		}
 		if written := decodeTo(*decodeFile, enc, []string{p.FullText}); written != nil {
 			doc["decoded_to"] = written
+		}
+		if climbed != nil { // the climb's record, beside the answer - only with --auto-temperature
+			doc["auto_temperature"] = climbed
 		}
 		emit(doc)
 		return
@@ -932,6 +968,9 @@ func cmdPredict(args []string) {
 		fmt.Printf("decoded bytes %d\n", decoded["decoded_bytes"])
 	}
 	fmt.Printf("cost %.4f  p %.4g  path %s\n", p.Cost, p.Probability(), strings.Join(p.Labels, " -> "))
+	if climbed != nil {
+		fmt.Printf("auto temperature  %s\n", climbLine(climbed))
+	}
 	if *speak != "" {
 		speakOutputs(m, []string{p.FullText}, *speak)
 	}
@@ -1059,6 +1098,7 @@ func cmdGenerate(args []string) {
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed (reproducible)")
 	traversal, penaltyScale, meritScale := traversalFlags(fs)
 	topK, topP, minP, diversity := searchFlags(fs)
+	autoTemperature := autoTemperatureFlag(fs)
 	addGuardFlags(fs)
 	speak := fs.String("speak", "", "also hear the texts: every sample spoken through the model's voice, one utterance each, written as a WAV (the output decoder; say has the voice's dials)")
 	decodeFile := fs.String("decode-to", "", "write every sample as the bytes it holds (FILE for one, FILE numbered before its "+
@@ -1069,6 +1109,7 @@ func cmdGenerate(args []string) {
 		fail("--prefix and --prefix-file cannot be given together: start from a text or a file")
 	}
 	filter := checkedFilter(*topK, *topP, *minP)
+	ceiling := checkedAutoTemperature(*autoTemperature)
 	m := openModel(true)
 	enc := m.Encoding()
 	// every text starts from the prefix as the model is asked it: a model of base64 symbols from the symbols its
@@ -1084,18 +1125,21 @@ func cmdGenerate(args []string) {
 	var results []*radixnet.PathResult
 	var guard map[string]any
 	var verdicts []*kit.FilterVerdict
+	var climbed *radixnet.AutoTemperature
 	var err error
 	if pair := openGuard(m); pair == nil {
-		if results, err = m.Generate(opts); err != nil {
+		// with --auto-temperature, every sample that said nothing is drawn again up the temperature ladder
+		if results, climbed, err = radixnet.AutoGenerate(m, opts, ceiling); err != nil {
 			fail("%v", err)
 		}
 	} else {
-		// the pair: the model over-samples, the negative network vetoes, the cleanest survivors come back
-		outcome, err := pair.Generate(*count, opts)
+		// the pair: the model over-samples, the negative network vetoes, the cleanest survivors come back - and,
+		// with --auto-temperature, the ladder draws again for what it vetoed
+		outcome, err := pair.AutoGenerate(*count, opts, ceiling)
 		if err != nil {
 			fail("%v", err)
 		}
-		results, verdicts = outcome.Results, outcome.Verdicts
+		results, verdicts, climbed = outcome.Results, outcome.Verdicts, outcome.AutoTemperature
 		guard = guardDoc(pair, verdicts, map[string]any{"candidates": outcome.Candidates, "asked": outcome.Asked,
 			"kept": len(outcome.Kept), "rate": outcome.Rate})
 	}
@@ -1127,6 +1171,9 @@ func cmdGenerate(args []string) {
 		if written := decodeTo(*decodeFile, enc, fullTexts(results)); written != nil {
 			doc["decoded_to"] = written
 		}
+		if climbed != nil { // the climb's record, beside the samples - only with --auto-temperature
+			doc["auto_temperature"] = climbed
+		}
 		emit(doc)
 		return
 	}
@@ -1155,6 +1202,9 @@ func cmdGenerate(args []string) {
 		speakOutputs(m, sampleTexts(results), *speak)
 	}
 	decodeTo(*decodeFile, enc, fullTexts(results)) // --decode-to FILE: every sample, as the bytes it holds
+	if climbed != nil {
+		fmt.Printf("auto temperature: %s\n", climbLine(climbed))
+	}
 }
 
 func sampleTexts(results []*radixnet.PathResult) []string {
@@ -2174,14 +2224,17 @@ func cmdConverse(args []string) {
 	saveLearned := fs.Bool("save", false, "write what it learned back to the model file")
 	seeded := fs.Bool("seeded", false, "sample with a private RNG seeded by --seed")
 	stream := fs.Bool("stream", false, "print the conversation as it happens: each turn the moment it is spoken, and before it what the voice does - the context it continues, the draft it caught itself on, where it backed up to, what it found (with --json: one JSON object per line, the usual document last, as {\"event\": \"done\", ...})")
+	autoTemperature := autoTemperatureFlag(fs)
 	addGuardFlags(fs)
 	_ = fs.Parse(args)
+	ceiling := checkedAutoTemperature(*autoTemperature)
 	m := openModel(true)
 	opts := kit.DefaultConverseOptions()
 	opts.Turns, opts.Mode, opts.MaxLength, opts.Context, opts.K, opts.Beam = *turns, *mode, *maxLength, *context, *k, *beam
 	opts.Temperature, opts.StepPenalty, opts.AvoidRepeats = *temperature, *stepPenalty, !*allowRepeats
 	opts.AvoidWordRepeats, opts.Explore, opts.Learn = !*allowWordRepeats, *explore, !*noLearn
 	opts.Think, opts.ThinkDepth = !*noThink, *thinkDepth
+	opts.AutoTemperature = ceiling // a voice with nothing to say tries again hotter before the conversation stops
 	// who says a turn: the voice of its index, as the dialogue picks it - a turn of a model of sounds is
 	// written out with the words it spells
 	voice := func(t *kit.Turn) radixnet.Encoding {

@@ -1389,17 +1389,30 @@ func guardReport(pair *kit.Filter, verdicts []*kit.FilterVerdict, extra map[stri
 // (promptOf; symbols: the prefix is written in them already), and the guard
 // ranks what it was asked; the prompt comes back with the answer, so the
 // answer can say what it holds.
-func (s *Service) Predict(prefix string, symbols bool, o radixnet.PredictOptions, guard bool, provenance *bool) (*radixnet.Prediction, map[string]any, prompt, error) {
+//
+// autoTemperature (../../../RadixCyclicNN/SPEC-SearchAndTraining.md §10): a
+// search that leaves no answer - nothing written, no End with ToEnd, every
+// continuation vetoed - walks again up a ladder of temperatures to that
+// ceiling (kit.GuardedPredict), every search ranked by the guard and its
+// verdicts in the report, and the climb's record comes back beside the answer
+// (nil when the ceiling is off).
+func (s *Service) Predict(prefix string, symbols bool, o radixnet.PredictOptions, guard bool, provenance *bool, autoTemperature float64) (*radixnet.Prediction, map[string]any, *radixnet.AutoTemperature, prompt, error) {
 	var report map[string]any
+	var climbed *radixnet.AutoTemperature
 	var asked prompt
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		asked = promptOf(m.Encoding(), prefix, symbols)
-		found, err := m.Predict(asked.asked, o)
-		if err != nil || !guard {
-			return found, err
+		pair := (*kit.Filter)(nil)
+		if guard {
+			pair = s.guard(provenance)
 		}
-		if pair := s.guard(provenance); pair != nil {
-			ranked, verdicts := pair.Rank(asked.asked, found) // the survivors, best first
+		// the survivors, best first - and, with a ceiling, the ladder when none of them answers
+		found, verdicts, record, err := kit.GuardedPredict(m, asked.asked, pair, o, autoTemperature)
+		if err != nil {
+			return nil, err
+		}
+		climbed = record
+		if pair != nil {
 			kept := 0
 			for _, verdict := range verdicts {
 				if verdict.Decision != "reject" {
@@ -1407,23 +1420,26 @@ func (s *Service) Predict(prefix string, symbols bool, o radixnet.PredictOptions
 				}
 			}
 			report = guardReport(pair, verdicts, map[string]any{"candidates": len(verdicts), "kept": kept})
-			return ranked, nil
 		}
 		return found, nil
 	})
 	if err != nil {
-		return nil, nil, asked, badRequest("%v", err)
+		return nil, nil, nil, asked, badRequest("%v", err)
 	}
-	return out.(*radixnet.Prediction), report, asked, nil
+	return out.(*radixnet.Prediction), report, climbed, asked, nil
 }
 
 // Generate writes whole texts; with guard the model over-samples and the
 // negative network vetoes what it recognises as failure (provenance as in
 // Predict).  Every text starts from o.Prefix as the model is asked it - a
 // model of base64 symbols from the symbols its bytes fix, as in Predict - and
-// that prompt comes back with them.
-func (s *Service) Generate(o radixnet.GenerateOptions, symbols bool, guard bool, provenance *bool) ([]*radixnet.PathResult, map[string]any, prompt, error) {
+// that prompt comes back with them.  With autoTemperature every sample that
+// said nothing - or was vetoed - is drawn again up the temperature ladder
+// (radixnet.AutoGenerate, kit.Filter.AutoGenerate), and the climb's record
+// comes back with the texts (nil when the ceiling is off).
+func (s *Service) Generate(o radixnet.GenerateOptions, symbols bool, guard bool, provenance *bool, autoTemperature float64) ([]*radixnet.PathResult, map[string]any, *radixnet.AutoTemperature, prompt, error) {
 	var report map[string]any
+	var climbed *radixnet.AutoTemperature
 	var asked prompt
 	out, err := s.read(func(m *radixnet.Model) (any, error) {
 		asked = promptOf(m.Encoding(), o.Prefix, symbols)
@@ -1433,22 +1449,28 @@ func (s *Service) Generate(o radixnet.GenerateOptions, symbols bool, guard bool,
 			pair = s.guard(provenance)
 		}
 		if pair == nil {
-			return m.Generate(o)
+			results, record, err := radixnet.AutoGenerate(m, o, autoTemperature)
+			if err != nil {
+				return nil, err
+			}
+			climbed = record
+			return results, nil
 		}
 		count := o.Count
-		outcome, err := pair.Generate(count, o)
+		outcome, err := pair.AutoGenerate(count, o, autoTemperature)
 		if err != nil {
 			return nil, err
 		}
+		climbed = outcome.AutoTemperature
 		report = guardReport(pair, outcome.Verdicts, map[string]any{
 			"candidates": outcome.Candidates, "kept": len(outcome.Kept), "asked": outcome.Asked, "rate": outcome.Rate,
 		})
 		return outcome.Results, nil
 	})
 	if err != nil {
-		return nil, nil, asked, badRequest("%v", err)
+		return nil, nil, nil, asked, badRequest("%v", err)
 	}
-	return out.([]*radixnet.PathResult), report, asked, nil
+	return out.([]*radixnet.PathResult), report, climbed, asked, nil
 }
 
 // Score is the log-probability of a text.  A model of base64 symbols scores

@@ -294,7 +294,7 @@ class NegativeFilter:
         """
         check_auto_temperature(auto_temperature)
         outcome = self._generate(count, **options)
-        if not auto_temperature or count <= 0:
+        if not auto_temperature:
             return outcome
         prefix = str(options.get("prefix", "") or "")
         temperature = float(options.get("temperature", 1.0))
