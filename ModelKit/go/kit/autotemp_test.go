@@ -181,6 +181,42 @@ func TestAGuardedGenerationDrawsAgainForWhatItVetoed(t *testing.T) {
 	}
 }
 
+// Dijkstra's generation is one text however many are asked for: when the
+// guard lets it through, that is the whole answer and nothing is walked; when
+// it vetoes it, one walk is drawn again in its place.
+func TestAGuardedDijkstraGenerationIsOneText(t *testing.T) {
+	o := radixnet.DefaultGenerateOptions()
+	o.Mode, o.MaxLength = "dijkstra", 40
+	pair := climbPair(t, DefaultFilterConfig(), "nothing like the corpus at all")
+	plain, err := pair.Generate(3, o)
+	if err != nil || len(plain.Texts) != 1 {
+		t.Fatalf("one text: %v %v", err, plain)
+	}
+	out, err := pair.AutoGenerate(3, o, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(out.Texts, plain.Texts) {
+		t.Fatalf("the one text is the answer: %v / %v", out.Texts, plain.Texts)
+	}
+	if r := out.AutoTemperature; r == nil || !r.Found || r.Climbed || r.Tries != 1 || r.Temperature != nil {
+		t.Fatalf("found as asked, by a search that reads no temperature: %+v", r)
+	}
+	seed := int64(3)
+	o.Seed = &seed
+	out, err = climbPair(t, DefaultFilterConfig(), plain.Texts...).AutoGenerate(3, o, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.AutoTemperature
+	if r == nil || !r.Climbed || len(out.Texts) > 1 || r.Found != (len(out.Texts) == 1) {
+		t.Fatalf("vetoed, it is walked again - for one: %v %+v", out.Texts, r)
+	}
+	if len(out.Texts) == 1 && out.Texts[0] == plain.Texts[0] {
+		t.Fatalf("not the vetoed text: %v", out.Texts)
+	}
+}
+
 func TestEverythingVetoedIsNoAnswerAtAnyTemperature(t *testing.T) {
 	pair := climbPair(t, DefaultFilterConfig(), climbCorpus...)
 	seed := int64(3)

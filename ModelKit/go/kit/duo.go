@@ -397,9 +397,10 @@ func (f *Filter) Generate(count int, o radixnet.GenerateOptions) (*FilterOutcome
 // for what is missing (../../../RadixCyclicNN/SPEC-SearchAndTraining.md §10).
 //
 // Off (ceiling 0), this is Generate exactly.  On, a generation that brought
-// back fewer than count texts saying something beyond the prefix
-// (radixnet.Wrote) - the negative network vetoed the rest, or a walk ended
-// where the prefix did - asks again for the ones still missing, as sampled
+// back fewer texts saying something beyond the prefix (radixnet.Wrote) than it
+// gives at most (radixnet.Wanted: count, and one for Dijkstra, whose
+// generation is a single text) - the negative network vetoed the rest, or a
+// walk ended where the prefix did - asks again for the ones still missing, as sampled
 // walks up the temperature ladder: radixnet.AutoDraws generations a rung, each
 // over-sampled and filtered like the first, the k-th retry seeded Seed + k
 // when a seed was given.  The texts that survived - the first generation's in
@@ -407,7 +408,7 @@ func (f *Filter) Generate(count int, o radixnet.GenerateOptions) (*FilterOutcome
 // - come back together; every verdict on the way is in Verdicts and Rejected,
 // Kept, Candidates and Asked add up every generation, Rate is Kept over
 // Candidates, and AutoTemperature is the climb's record.  A count of 0 asks for
-// nothing, so nothing is climbed and there is no record.
+// nothing, so nothing is missing: it is found as asked, and the record says so.
 func (f *Filter) AutoGenerate(count int, o radixnet.GenerateOptions, ceiling float64) (*FilterOutcome, error) {
 	if err := radixnet.CheckAutoTemperature(ceiling); err != nil {
 		return nil, err
@@ -417,6 +418,7 @@ func (f *Filter) AutoGenerate(count int, o radixnet.GenerateOptions, ceiling flo
 		return outcome, err
 	}
 	record := &radixnet.AutoTemperature{Ceiling: ceiling, Tries: 1}
+	want := radixnet.Wanted(count, o.Mode)
 	texts, walks := []string{}, []*radixnet.PathResult{}
 	for i, result := range outcome.Results {
 		if radixnet.Wrote(f.Positive, result, o.Prefix) {
@@ -424,7 +426,7 @@ func (f *Filter) AutoGenerate(count int, o radixnet.GenerateOptions, ceiling flo
 		}
 	}
 	outcome.Texts, outcome.Results, outcome.AutoTemperature = texts, walks, record
-	if len(outcome.Texts) >= count {
+	if len(outcome.Texts) >= want {
 		record.Found = true
 		if mode := strings.ToLower(o.Mode); mode == "" || mode == "sample" {
 			asked := o.Temperature
@@ -447,7 +449,7 @@ climbing:
 				retry.Seed = &seed
 			}
 			record.Tries++
-			more, err := f.Generate(count-len(outcome.Texts), retry)
+			more, err := f.Generate(want-len(outcome.Texts), retry)
 			if err != nil {
 				return nil, err
 			}
@@ -462,7 +464,7 @@ climbing:
 			outcome.Verdicts = append(outcome.Verdicts, more.Verdicts...)
 			outcome.Candidates += more.Candidates
 			outcome.Asked += more.Asked
-			if len(outcome.Texts) >= count {
+			if len(outcome.Texts) >= want {
 				record.Found = true
 				rung := t
 				record.Temperature = &rung

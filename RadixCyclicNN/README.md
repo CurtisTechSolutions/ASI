@@ -1576,8 +1576,13 @@ rung, and the first answer ends it. The answer carries the climb's record -
 hotter, less likely walk said it. Every mode climbs: Dijkstra and the beam read
 no temperature, so for them the ladder is where sampling starts; and a beam
 that already holds an answer lower in its top K answers with that, without a
-walk. A reply in `converse` or `talk` with nothing to say climbs the same way,
-and the thinking says so. Off (`0`), nothing changes.
+walk. A generation climbs only for what it would have given: Dijkstra's is one
+text however many are asked for, so it is walked again only when that text
+says nothing; and the texts of the beam, the k-best and the guard are distinct,
+so a walk that fills one of them repeats none already kept (sampled walks may
+repeat each other, as they always may). A reply in `converse` or `talk` with
+nothing to say climbs the same way, and the thinking says so. Off (`0`),
+nothing changes.
 
 Is the temperature the right dial? For one failure, yes: a cold walk goes round
 the graph's cycles and never ends, and warming it mends that. Measured on a

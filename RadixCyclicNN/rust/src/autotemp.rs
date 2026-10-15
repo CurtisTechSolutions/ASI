@@ -38,6 +38,8 @@
 //! the three ports draw alike.  Off by default (a ceiling of 0): no extra
 //! search, no draw, the answer exactly the one the search gave.
 
+use std::collections::HashSet;
+
 use crate::beam::Prediction;
 use crate::encoding::Encoding;
 use crate::json::{py_repr, Json};
@@ -297,13 +299,29 @@ pub fn wrote(enc: &Encoding, result: &PathResult, prefix: &str) -> bool {
     !result.text.chars().all(is_python_space) && enc.len(&result.text) > enc.len(prefix)
 }
 
+/// Whether the generation `o` asks for is sampled walks: its mode is
+/// `sample`, or none, as [`Model::generate`] reads it.
+fn samples(o: &GenerateOptions) -> bool {
+    o.mode.is_empty() || o.mode.to_lowercase() == "sample"
+}
+
 /// The temperature of an answer the generation as asked gave: the asked one
-/// when it sampled - its mode, `sample` when it names none, as
-/// [`Model::generate`] reads it - and `None` for the beam and Dijkstra, which
-/// read no temperature.
+/// when it sampled ([`samples`]), and `None` for the beam, Dijkstra and the
+/// k-best, which read no temperature.
 pub fn asked_temperature(o: &GenerateOptions) -> Option<f64> {
-    let sampled = o.mode.is_empty() || o.mode.to_lowercase() == "sample";
-    sampled.then_some(o.temperature)
+    samples(o).then_some(o.temperature)
+}
+
+/// How many texts a generation of `count` gives when every one of them says
+/// something: `count` - and one for `dijkstra`, whose generation is the single
+/// cheapest text however many are asked for, so that one text is the whole of
+/// its answer.
+pub fn wanted(count: usize, mode: &str) -> usize {
+    if mode.to_lowercase() == "dijkstra" {
+        count.min(1)
+    } else {
+        count
+    }
 }
 
 /// The generation the `k`-th retry of a climb asks for: `need` sampled walks
@@ -325,13 +343,17 @@ pub fn retry_generation(o: &GenerateOptions, need: usize, t: f64, k: usize) -> G
 ///
 /// Returns `(results, record)`; the record is `None` when `auto_temperature`
 /// is 0 (off), and the generation is then exactly [`Model::generate`]'s.  The
-/// generation as asked runs first; when fewer than `o.count` of its texts say
-/// anything beyond the prefix ([`wrote`]), the missing ones are drawn as
-/// sampled walks up the ladder, [`draws_at`] generations a rung, each asking
-/// for as many as are still missing ([`retry_generation`]).  What comes back
-/// is then the texts that said something - those of the generation as asked,
-/// in its order, then the ones the ladder found - and fewer than `o.count` only
-/// when even the ceiling found too few.
+/// generation as asked runs first; when fewer of its texts say anything beyond
+/// the prefix ([`wrote`]) than it gives at most ([`wanted`]: `o.count`, and one
+/// for Dijkstra, whose generation is a single text), the missing ones are
+/// drawn as sampled walks up the ladder, [`draws_at`] generations a rung, each
+/// asking for as many as are still missing ([`retry_generation`]).  A walk
+/// keeps to the generation it fills: the texts of the beam and the k-best are
+/// distinct (and Dijkstra's is one), so a walk that repeats one already kept
+/// is not kept again, while sampled walks may repeat each other, as they
+/// always may.  What comes back is then the texts that said something - those
+/// of the generation as asked, in its order, then the ones the ladder found -
+/// and fewer only when even the ceiling found too few.
 pub fn generate(
     model: &mut Model,
     auto_temperature: f64,
@@ -342,23 +364,35 @@ pub fn generate(
         return Ok((model.generate(o)?, None));
     }
     let enc = model.encoding();
+    let want = wanted(o.count, &o.mode);
     let results = model.generate(o)?;
     let mut record = AutoTemperature::new(auto_temperature);
     let mut kept: Vec<PathResult> = results.iter().filter(|r| wrote(&enc, r, &o.prefix)).cloned().collect();
-    if kept.len() >= o.count {
+    if kept.len() >= want {
         record.found = true;
         record.temperature = asked_temperature(o);
         return Ok((results, Some(record)));
     }
     record.climbed = true;
+    // what a walk filling distinct texts may not repeat
+    let mut said: Option<HashSet<String>> = (!samples(o)).then(|| kept.iter().map(|r| r.text.clone()).collect());
     for t in temperature_ladder(o.temperature, auto_temperature) {
         for _ in 0..draws_at(t) {
-            let need = o.count - kept.len();
+            let need = want - kept.len();
             let retry = retry_generation(o, need, t, record.tries);
             record.tries += 1;
-            let drawn = model.generate(&retry)?;
-            kept.extend(drawn.into_iter().filter(|r| wrote(&enc, r, &o.prefix)).take(need));
-            if kept.len() >= o.count {
+            for r in model.generate(&retry)? {
+                if kept.len() >= want || !wrote(&enc, &r, &o.prefix) {
+                    continue;
+                }
+                if let Some(said) = said.as_mut() {
+                    if !said.insert(r.text.clone()) {
+                        continue;
+                    }
+                }
+                kept.push(r);
+            }
+            if kept.len() >= want {
                 record.found = true;
                 record.temperature = Some(t);
                 return Ok((kept, Some(record)));
@@ -814,6 +848,80 @@ mod tests {
             record.unwrap().to_json().render(0),
             "{\"ceiling\":2.0,\"climbed\":false,\"found\":true,\"temperature\":1.0,\"tries\":1}"
         );
+    }
+
+    #[test]
+    fn what_a_generation_gives_at_most() {
+        assert_eq!([0, 1, 3].map(|n| wanted(n, "dijkstra")), [0, 1, 1]);
+        assert_eq!(
+            ["beam", "kbest", "sample", "", "DIJKSTRA"].map(|mode| wanted(3, mode)),
+            [3, 3, 3, 3, 1]
+        );
+    }
+
+    fn texts(results: &[PathResult]) -> Vec<String> {
+        results.iter().map(|r| r.text.clone()).collect()
+    }
+
+    /// Dijkstra's generation is the single cheapest text, so that one text is
+    /// the whole of its answer: it is walked again only when it says nothing,
+    /// and then for one.
+    #[test]
+    fn dijkstra_is_one_text_however_many_are_asked_for() {
+        let mut model = count_model(&ends(), 2);
+        let mut o = GenerateOptions {
+            count: 3,
+            mode: "dijkstra".to_string(),
+            max_length: 40,
+            ..Default::default()
+        };
+        let plain = model.generate(&o).unwrap();
+        assert_eq!(plain.len(), 1);
+        let (results, record) = generate(&mut model, 2.0, &o).unwrap();
+        assert_eq!(texts(&results), texts(&plain));
+        assert_eq!(
+            record.unwrap().to_json().render(0),
+            "{\"ceiling\":2.0,\"climbed\":false,\"found\":true,\"temperature\":null,\"tries\":1}"
+        );
+        // from the end of a text the cheapest is to say nothing more
+        o.prefix = MAT.to_string();
+        o.seed = Some(3);
+        assert_eq!(texts(&model.generate(&o).unwrap()), vec![MAT.to_string()]);
+        let (results, record) = generate(&mut model, 2.0, &o).unwrap();
+        let record = record.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(wrote(&model.encoding(), &results[0], MAT));
+        assert!(record.climbed && record.found);
+    }
+
+    /// The beam's texts are distinct, so a walk filling one that said nothing
+    /// repeats none of them.
+    #[test]
+    fn a_beams_texts_stay_distinct() {
+        let mut model = count_model(&ends(), 2);
+        let mut o = GenerateOptions {
+            count: 3,
+            mode: "beam".to_string(),
+            prefix: MAT.to_string(),
+            max_length: 40,
+            ..Default::default()
+        };
+        let beam = texts(&model.generate(&o).unwrap());
+        assert_eq!(beam[0], MAT, "the cheapest whole text says nothing more");
+        let mut found = 0;
+        for seed in 0..12 {
+            o.seed = Some(seed);
+            let (results, record) = generate(&mut model, 2.0, &o).unwrap();
+            let record = record.unwrap();
+            let got = texts(&results);
+            let unique: HashSet<&String> = got.iter().collect();
+            assert_eq!(unique.len(), got.len(), "seed {seed}: {got:?}");
+            assert_eq!(&got[..2], &beam[1..], "seed {seed}: the beam's own come first");
+            assert!(record.climbed);
+            assert_eq!(record.found, got.len() == 3, "seed {seed}");
+            found += usize::from(record.found);
+        }
+        assert!(found > 0, "a hotter walk finds a third");
     }
 
     #[test]

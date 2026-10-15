@@ -103,6 +103,24 @@ class TestTheGuard(unittest.TestCase):
         self.assertGreater(out["candidates"], plain["candidates"])
         self.assertEqual(record["found"], len(out["texts"]) == 3)
 
+    def test_a_guarded_dijkstra_generation_is_one_text(self):
+        """Dijkstra's generation is one text however many are asked for: when the guard lets it through, that is
+        the whole answer and nothing is walked; when it vetoes it, one walk is drawn again in its place."""
+        duo = pair(blamed=["nothing like the corpus at all"])
+        plain = duo.generate(count=3, mode="dijkstra", max_length=40)
+        self.assertEqual(len(plain["texts"]), 1)
+        out = duo.generate(count=3, mode="dijkstra", max_length=40, auto_temperature=2.0)
+        self.assertEqual(out["texts"], plain["texts"])
+        self.assertEqual(out["auto_temperature"], {"ceiling": 2.0, "climbed": False, "found": True,
+                                                   "temperature": None, "tries": 1})
+        duo = pair(blamed=plain["texts"])
+        out = duo.generate(count=3, mode="dijkstra", max_length=40, seed=3, auto_temperature=2.0)
+        record = out["auto_temperature"]
+        self.assertTrue(record["climbed"])
+        self.assertLessEqual(len(out["texts"]), 1)
+        self.assertNotIn(plain["texts"][0], out["texts"])
+        self.assertEqual(record["found"], len(out["texts"]) == 1)
+
     def test_nothing_asked_for_is_found_as_asked(self):
         """A generation of no texts has nothing missing: the ceiling is on, so the record says so, guarded or not."""
         duo = pair()

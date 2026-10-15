@@ -402,6 +402,91 @@ func TestSamplesThatSaidNothingAreDrawnAgain(t *testing.T) {
 	}
 }
 
+func TestWhatAGenerationGivesAtMost(t *testing.T) {
+	for _, c := range []struct {
+		count int
+		mode  string
+		want  int
+	}{{0, "dijkstra", 0}, {1, "dijkstra", 1}, {3, "dijkstra", 1}, {3, "DIJKSTRA", 1}, {3, "beam", 3},
+		{3, "sample", 3}, {3, "", 3}} {
+		if got := Wanted(c.count, c.mode); got != c.want {
+			t.Fatalf("Wanted(%d, %q) = %d, want %d", c.count, c.mode, got, c.want)
+		}
+	}
+}
+
+// Dijkstra's generation is the single cheapest text, so that one text is the
+// whole of its answer: it is walked again only when it says nothing, and then
+// for one.
+func TestDijkstraIsOneTextHoweverManyAreAskedFor(t *testing.T) {
+	m := trainedOn(t, endsCorpus, 2)
+	o := DefaultGenerateOptions()
+	o.Count, o.Mode, o.MaxLength = 3, "dijkstra", 40
+	plain, err := m.Generate(o)
+	if err != nil || len(plain) != 1 {
+		t.Fatalf("one text: %v %v", err, texts(plain))
+	}
+	results, record, err := AutoGenerate(m, o, 2)
+	if err != nil || !reflect.DeepEqual(texts(results), texts(plain)) {
+		t.Fatalf("the one text is the answer: %v %v", err, texts(results))
+	}
+	if !record.Found || record.Climbed || record.Tries != 1 || record.Temperature != nil {
+		t.Fatalf("found as asked: %+v", record)
+	}
+	// from the end of a text the cheapest is to say nothing more
+	mat := "the cat sat on the mat"
+	seed := int64(3)
+	o.Prefix, o.Seed = mat, &seed
+	if silent, err := m.Generate(o); err != nil || !reflect.DeepEqual(texts(silent), []string{mat}) {
+		t.Fatalf("says nothing more: %v %v", err, texts(silent))
+	}
+	results, record, err = AutoGenerate(m, o, 2)
+	if err != nil || len(results) != 1 || !Wrote(m, results[0], mat) || !record.Climbed || !record.Found {
+		t.Fatalf("walked again, for one: %v %v %+v", err, texts(results), record)
+	}
+}
+
+// The beam's texts are distinct, so a walk filling one that said nothing
+// repeats none of them.
+func TestABeamsTextsStayDistinct(t *testing.T) {
+	m := trainedOn(t, endsCorpus, 2)
+	mat := "the cat sat on the mat"
+	o := DefaultGenerateOptions()
+	o.Count, o.Mode, o.Prefix, o.MaxLength = 3, "beam", mat, 40
+	beam, err := m.Generate(o)
+	if err != nil || len(beam) != 3 || beam[0].Text != mat {
+		t.Fatalf("the cheapest whole text says nothing more: %v %v", err, texts(beam))
+	}
+	found := 0
+	for s := int64(0); s < 12; s++ {
+		seed := s
+		o.Seed = &seed
+		results, record, err := AutoGenerate(m, o, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, r := range results {
+			if seen[r.Text] {
+				t.Fatalf("seed %d: a text twice: %v", s, texts(results))
+			}
+			seen[r.Text] = true
+		}
+		if len(results) < 2 || !reflect.DeepEqual(texts(results[:2]), texts(beam[1:])) {
+			t.Fatalf("seed %d: the beam's own come first: %v", s, texts(results))
+		}
+		if !record.Climbed || record.Found != (len(results) == 3) {
+			t.Fatalf("seed %d: %+v %v", s, record, texts(results))
+		}
+		if record.Found {
+			found++
+		}
+	}
+	if found == 0 {
+		t.Fatal("a hotter walk finds a third")
+	}
+}
+
 func TestTooFewAtTheCeilingIsWhatThereIs(t *testing.T) {
 	m := trainedOn(t, []string{"the cat sat"}, 1)
 	o := DefaultGenerateOptions()

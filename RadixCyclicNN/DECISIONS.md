@@ -3451,6 +3451,11 @@ and every character is less likely. So:
 * Where the graph has no way on, no temperature finds one: the search as asked comes back, with `found: false`.
 * The extra searches draw from the generator the request was drawing from, so a seeded run reproduces and the
   ports draw alike. A generation re-seeds per call, so its k-th retry draws from `seed + k`.
+* A generation climbs only for what it would have given (`autotemp.wanted`). Dijkstra's generation is one text
+  however many are asked for, so it climbs only when that text says nothing, and then for one. A walk keeps to the
+  generation it fills: the texts of the beam, the k-best and the guard are distinct, so a walk repeating one
+  already kept is skipped, while sampled walks may repeat each other. Without this, a Dijkstra generation of three
+  always "climbed", and a beam's filled slot often repeated a text the beam had already given.
 * Off, it is the search it always was, draw for draw, and no record gains a key.
 
 **Lives in**

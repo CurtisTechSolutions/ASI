@@ -558,10 +558,12 @@ impl<'a> Filter<'a> {
     /// Off (`0`), this is [`Filter::generate`] exactly.  On, the outcome always
     /// carries the record - a generation of no texts has nothing missing, and
     /// is found as asked, as an unguarded one is ([`autotemp::generate`]) -
-    /// and a generation that brought back fewer than `count` texts saying
-    /// something beyond the prefix - the negative network vetoed the rest, or a walk ended where the
-    /// prefix did ([`autotemp::wrote`]) - asks again for the ones still
-    /// missing, as sampled walks up the temperature ladder:
+    /// and a generation that brought back fewer texts saying something beyond
+    /// the prefix ([`autotemp::wrote`]) than it gives at most
+    /// ([`autotemp::wanted`]: `count`, and one for Dijkstra, whose generation
+    /// is a single text) - the negative network vetoed the rest, or a walk
+    /// ended where the prefix did - asks again for the ones still missing, as
+    /// sampled walks up the temperature ladder:
     /// [`autotemp::draws_at`] generations a rung, each over-sampled and
     /// filtered like the first, the k-th retry seeded `seed + k` when a seed
     /// was given.  The texts that survived - the first generation's in its
@@ -582,6 +584,7 @@ impl<'a> Filter<'a> {
             return Ok(outcome);
         }
         let enc = self.positive.encoding();
+        let want = autotemp::wanted(count, &o.mode);
         let mut record = AutoTemperature::new(auto_temperature);
         // a survivor that said nothing beyond the prefix is no answer either
         let survivors = std::mem::take(&mut outcome.texts)
@@ -590,14 +593,14 @@ impl<'a> Filter<'a> {
         (outcome.texts, outcome.results) = survivors
             .filter(|(_, result)| autotemp::wrote(&enc, result, &o.prefix))
             .unzip();
-        if outcome.texts.len() >= count {
+        if outcome.texts.len() >= want {
             record.found = true;
             record.temperature = autotemp::asked_temperature(o);
         } else {
             record.climbed = true;
             'ladder: for t in autotemp::temperature_ladder(o.temperature, auto_temperature) {
                 for _ in 0..autotemp::draws_at(t) {
-                    let need = count - outcome.texts.len();
+                    let need = want - outcome.texts.len();
                     let retry = autotemp::retry_generation(o, need, t, record.tries);
                     record.tries += 1;
                     let more = self.generate(need, &retry)?;
@@ -612,15 +615,15 @@ impl<'a> Filter<'a> {
                     outcome.verdicts.extend(more.verdicts);
                     outcome.candidates += more.candidates;
                     outcome.asked += more.asked;
-                    if outcome.texts.len() >= count {
+                    if outcome.texts.len() >= want {
                         record.found = true;
                         record.temperature = Some(t);
                         break 'ladder;
                     }
                 }
             }
-            outcome.texts.truncate(count);
-            outcome.results.truncate(count);
+            outcome.texts.truncate(want);
+            outcome.results.truncate(want);
             outcome.rate = (outcome.candidates > 0).then(|| outcome.kept.len() as f64 / outcome.candidates as f64);
         }
         outcome.auto_temperature = Some(record);
@@ -1729,6 +1732,37 @@ mod tests {
         assert_eq!(record.found, out.texts.len() == 3);
         assert_eq!(out.to_json().at("auto_temperature"), &record.to_json());
         assert_eq!(out.rate, Some(out.kept.len() as f64 / out.candidates as f64));
+    }
+
+    /// Dijkstra's generation is one text however many are asked for: when the
+    /// guard lets it through, that is the whole answer and nothing is walked;
+    /// when it vetoes it, one walk is drawn again in its place.
+    #[test]
+    fn a_guarded_dijkstra_generation_is_one_text() {
+        let dijkstra = |seed: Option<i64>| GenerateOptions {
+            mode: "dijkstra".to_string(),
+            max_length: 40,
+            seed,
+            ..Default::default()
+        };
+        let (mut positive, mut negative) = climbing_pair(&["nothing like the corpus at all".to_string()]);
+        let mut pair = Filter::new(&mut positive, &mut negative, FilterConfig::default()).unwrap();
+        let plain = pair.generate(3, &dijkstra(None)).unwrap();
+        assert_eq!(plain.texts.len(), 1);
+        let out = pair.generate_climbing(3, 2.0, &dijkstra(None)).unwrap();
+        assert_eq!(out.texts, plain.texts);
+        assert_eq!(
+            out.auto_temperature.unwrap().to_json().render(0),
+            "{\"ceiling\":2.0,\"climbed\":false,\"found\":true,\"temperature\":null,\"tries\":1}"
+        );
+        let (mut positive, mut negative) = climbing_pair(&plain.texts);
+        let mut pair = Filter::new(&mut positive, &mut negative, FilterConfig::default()).unwrap();
+        let out = pair.generate_climbing(3, 2.0, &dijkstra(Some(3))).unwrap();
+        let record = out.auto_temperature.clone().unwrap();
+        assert!(record.climbed);
+        assert!(out.texts.len() <= 1, "{:?}", out.texts);
+        assert!(!out.texts.contains(&plain.texts[0]), "not the vetoed text");
+        assert_eq!(record.found, out.texts.len() == 1);
     }
 
     #[test]

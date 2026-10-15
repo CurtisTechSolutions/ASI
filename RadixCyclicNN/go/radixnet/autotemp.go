@@ -238,16 +238,31 @@ func Wrote(m *Model, r *PathResult, prefix string) bool {
 	return r != nil && strings.TrimSpace(r.Text) != "" && enc.Len(r.Text) > enc.Len(prefix)
 }
 
+// Wanted is how many texts a generation of count gives when every one of them
+// says something: count - and one for "dijkstra", whose generation is the
+// single cheapest text however many are asked for, so that one text is the
+// whole of its answer.
+func Wanted(count int, mode string) int {
+	if strings.ToLower(mode) == "dijkstra" && count > 1 {
+		return 1
+	}
+	return count
+}
+
 // AutoGenerate is m.Generate(o), with every sample that said nothing walked
 // again up the ladder to ceiling.
 //
 // The record is nil when ceiling is 0 (off), and the generation is then
 // exactly the one Generate runs.  On, the generation as asked runs first; when
-// fewer than o.Count of its texts say anything beyond the prefix (Wrote), the
-// missing ones are drawn as sampled walks up the ladder, AutoDraws generations
-// a rung, each asking for as many as are still missing.  What comes back is
-// then the texts that said something - those of the generation as asked, in
-// its order, then the ones the ladder found - and fewer than o.Count only when
+// fewer of its texts say anything beyond the prefix (Wrote) than it gives at
+// most (Wanted: o.Count, and one for Dijkstra, whose generation is a single
+// text), the missing ones are drawn as sampled walks up the ladder, AutoDraws
+// generations a rung, each asking for as many as are still missing.  A walk
+// keeps to the generation it fills: the beam's texts are distinct (and
+// Dijkstra's is one), so a walk that repeats one already kept is not kept
+// again, while sampled walks may repeat each other, as they always may.  What
+// comes back is then the texts that said something - those of the generation
+// as asked, in its order, then the ones the ladder found - and fewer only when
 // even the ceiling found too few.  A Seed makes every generation draw from a
 // generator of its own: the k-th retry draws from Seed + k, so a retry at the
 // same temperature is a new draw and the whole climb is reproducible.
@@ -263,6 +278,9 @@ func AutoGenerate(m *Model, o GenerateOptions, ceiling float64) ([]*PathResult, 
 	if err != nil {
 		return nil, nil, err
 	}
+	mode := strings.ToLower(o.Mode)
+	sampled := mode == "" || mode == "sample"
+	want := Wanted(o.Count, mode)
 	record := &AutoTemperature{Ceiling: ceiling, Tries: 1}
 	kept := []*PathResult{}
 	for _, r := range results {
@@ -270,18 +288,25 @@ func AutoGenerate(m *Model, o GenerateOptions, ceiling float64) ([]*PathResult, 
 			kept = append(kept, r)
 		}
 	}
-	if len(kept) >= o.Count {
+	if len(kept) >= want {
 		record.Found = true
-		if mode := strings.ToLower(o.Mode); mode == "" || mode == "sample" {
+		if sampled {
 			asked := o.Temperature
 			record.Temperature = &asked
 		}
 		return results, record, nil
 	}
 	record.Climbed = true
+	var said map[string]bool // what a walk filling distinct texts may not repeat
+	if !sampled {
+		said = map[string]bool{}
+		for _, r := range kept {
+			said[r.Text] = true
+		}
+	}
 	for _, t := range TemperatureLadder(o.Temperature, ceiling) {
 		for draw := 0; draw < DrawsAt(t); draw++ {
-			need := o.Count - len(kept)
+			need := want - len(kept)
 			retry := o
 			retry.Mode, retry.Temperature, retry.Count = "sample", t, need
 			if o.Seed != nil {
@@ -293,14 +318,15 @@ func AutoGenerate(m *Model, o GenerateOptions, ceiling float64) ([]*PathResult, 
 			if err != nil {
 				return nil, nil, err
 			}
-			added := 0
 			for _, r := range more {
-				if added < need && Wrote(m, r, o.Prefix) {
+				if len(kept) < want && Wrote(m, r, o.Prefix) && !said[r.Text] {
 					kept = append(kept, r)
-					added++
+					if said != nil {
+						said[r.Text] = true
+					}
 				}
 			}
-			if len(kept) >= o.Count {
+			if len(kept) >= want {
 				record.Found = true
 				rung := t
 				record.Temperature = &rung

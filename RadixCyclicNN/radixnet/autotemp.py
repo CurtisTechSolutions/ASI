@@ -36,6 +36,7 @@ the one the search gave (D-078).
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -47,7 +48,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 __all__ = [
     "AUTO_DRAWS", "AUTO_FLOOR", "AutoTemperature", "answered", "check_auto_temperature", "climb", "first_answer",
-    "generate", "predict", "temperature_ladder",
+    "generate", "generation_mode", "predict", "temperature_ladder", "wanted", "wrote",
 ]
 
 AUTO_DRAWS = 3
@@ -212,41 +213,66 @@ def wrote(model: "GraphModel", result: "PathResult", prefix: str) -> bool:
     return bool(result.text.strip()) and enc.length(result.text) > enc.length(prefix)
 
 
+def wanted(count: int, mode: str | None = "sample") -> int:
+    """How many texts a generation of ``count`` gives when every one of them says something: ``count`` - and one
+    for ``"dijkstra"``, whose generation is the single cheapest text however many are asked for, so that one text
+    is the whole of its answer."""
+    return min(count, 1) if str(mode or "sample").lower() == "dijkstra" else count
+
+
+def generation_mode(model: "GraphModel", mode: str | None = None) -> str:
+    """The mode a generation runs in: the one it names, else the model's own default - ``"sample"``, and the
+    resonant model's ``"kbest"``."""
+    if not mode:
+        asked = inspect.signature(model.generate).parameters.get("mode")
+        mode = asked.default if asked is not None and isinstance(asked.default, str) else "sample"
+    return str(mode).lower()
+
+
 def generate(model: "GraphModel", count: int = 1, auto_temperature: float = 0.0, **options: Any):
     """``model.generate(count=count, **options)``, with every sample that said nothing walked again up the ladder.
 
     Returns ``(results, record)``; the record is ``None`` when ``auto_temperature`` is 0 (off).  The generation
-    as asked runs first; when fewer than ``count`` of its texts say anything beyond the prefix, the missing ones
-    are drawn as sampled walks up the ladder, :data:`AUTO_DRAWS` generations a rung, each asking for as many as
-    are still missing.  What comes back is then the texts that said something - those of the generation as asked,
-    in its order, then the ones the ladder found - and fewer than ``count`` only when even the ceiling found too
-    few.  A ``seed`` makes every generation draw from its own generator: the k-th retry draws from ``seed + k``,
-    so a retry at the same temperature is a new draw and the whole climb is reproducible.
+    as asked runs first; when fewer of its texts say anything beyond the prefix than it gives at most
+    (:func:`wanted`: ``count``, and one for Dijkstra, whose generation is a single text), the missing ones are
+    drawn as sampled walks up the ladder, :data:`AUTO_DRAWS` generations a rung, each asking for as many as are
+    still missing.  A walk keeps to the generation it fills: the texts of the beam and the k-best are distinct
+    (and Dijkstra's is one), so a walk that repeats one already kept is not kept again, while sampled walks may
+    repeat each other, as they always may.  What comes back is then the texts that said something - those of the
+    generation as asked, in its order, then the ones the ladder found - and fewer only when even the ceiling found
+    too few.  A ``seed`` makes every generation draw from its own generator: the k-th retry draws from
+    ``seed + k``, so a retry at the same temperature is a new draw and the whole climb is reproducible.
     """
     check_auto_temperature(auto_temperature)
     if not auto_temperature:
         return model.generate(count=count, **options), None
     prefix = str(options.get("prefix", "") or "")
-    mode = str(options.get("mode") or "sample").lower()
+    mode = generation_mode(model, options.get("mode"))
     temperature = float(options.get("temperature", 1.0))
     seed = options.get("seed")
+    want = wanted(count, mode)
     results = model.generate(count=count, **options)
     record = AutoTemperature(ceiling=float(auto_temperature), tries=1)
     kept = [r for r in results if wrote(model, r, prefix)]
-    if len(kept) >= count:
+    if len(kept) >= want:
         record.found = True
         record.temperature = temperature if mode == "sample" else None
         return results, record
     record.climbed = True
+    said = None if mode == "sample" else {r.text for r in kept}  # what a walk filling distinct texts may not repeat
     for t in temperature_ladder(temperature, auto_temperature):
         for _draw in range(1 if t == 0 else AUTO_DRAWS):
-            need = count - len(kept)
+            need = want - len(kept)
             retry = {**options, "mode": "sample", "temperature": t}
             if seed is not None:
                 retry["seed"] = int(seed) + record.tries
             record.tries += 1
-            kept.extend([r for r in model.generate(count=need, **retry) if wrote(model, r, prefix)][:need])
-            if len(kept) >= count:
+            for r in model.generate(count=need, **retry):
+                if len(kept) < want and wrote(model, r, prefix) and (said is None or r.text not in said):
+                    kept.append(r)
+                    if said is not None:
+                        said.add(r.text)
+            if len(kept) >= want:
                 record.found = True
                 record.temperature = t
                 return kept, record

@@ -211,6 +211,25 @@ class TestRustAutoTemperatureCli(unittest.TestCase):
                 same_samples(self, a["samples"], b["samples"])
                 self.assertEqual(a["auto_temperature"], b["auto_temperature"])
 
+    def test_a_generation_climbs_only_for_what_it_would_have_given(self):
+        """Dijkstra's generation is one text however many are asked for, and the beam's texts are distinct: the
+        ladder fills only what is missing of that - Dijkstra's one text when it says nothing, a beam's text that
+        says nothing with one the beam did not already give - and both ports fill it alike."""
+        cases = (("--mode", "dijkstra"), ("--mode", "dijkstra", "--prefix", MAT), ("--mode", "beam", "--prefix", MAT))
+        for seed in (0, 9):
+            for case in cases:
+                with self.subTest(seed=seed, case=case):
+                    args = ("generate", "--count", 3, *case, "--max-length", 40, "--auto-temperature", 2)
+                    a = py("--seed", seed, *args, model=copy(self.ends, "wp"))
+                    b = rust("--seed", seed, *args, "--seeded", model=copy(self.ends, "wr"))
+                    same_samples(self, a["samples"], b["samples"])
+                    self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+                    texts = [s["text"] for s in b["samples"]]
+                    self.assertEqual(len(set(texts)), len(texts), "no text twice")
+                    if case[1] == "dijkstra":
+                        self.assertEqual(len(texts), 1)
+                        self.assertEqual(b["auto_temperature"]["climbed"], MAT in case, "only when it said nothing")
+
     def test_nothing_asked_for_is_found_as_asked(self):
         """A generation of no texts has nothing missing: with the ceiling on, the record says so, guarded or not."""
         found = {"ceiling": 2.0, "climbed": False, "found": True, "temperature": 1.0, "tries": 1}

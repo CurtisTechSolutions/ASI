@@ -43,7 +43,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from radixnet.autotemp import (
-    AUTO_DRAWS, AutoTemperature, check_auto_temperature, climb, first_answer, temperature_ladder, wrote,
+    AUTO_DRAWS, AutoTemperature, check_auto_temperature, climb, first_answer, generation_mode, temperature_ladder,
+    wanted, wrote,
 )
 from radixnet.beam import Prediction
 from radixnet.encoding import WINDOW
@@ -281,16 +282,18 @@ class NegativeFilter:
         """Generate through the pair (:meth:`_generate`), and - with ``auto_temperature`` - climb for what is missing.
 
         Off (``0``), this is :meth:`_generate` exactly.  On, a generation that
-        brought back fewer than ``count`` texts saying something beyond the
-        prefix - the negative network vetoed the rest, or a walk ended where the
-        prefix did - asks again for the ones still missing, as sampled walks up
-        the temperature ladder (:mod:`radixnet.autotemp`): :data:`AUTO_DRAWS`
-        generations a rung, each over-sampled and filtered like the first, the
-        k-th retry seeded ``seed + k`` when a seed was given.  The texts that
-        survived - the first generation's in its order, then the ladder's - come
-        back together, every verdict on the way is in ``verdicts`` and
-        ``rejected``, ``candidates`` and ``asked`` add up every generation, and
-        ``auto_temperature`` is the climb's record.
+        brought back fewer texts saying something beyond the prefix than it gives
+        at most (:func:`~radixnet.autotemp.wanted`: ``count``, and one for
+        Dijkstra, whose generation is a single text) - the negative network
+        vetoed the rest, or a walk ended where the prefix did - asks again for
+        the ones still missing, as sampled walks up the temperature ladder
+        (:mod:`radixnet.autotemp`): :data:`AUTO_DRAWS` generations a rung, each
+        over-sampled and filtered like the first, the k-th retry seeded
+        ``seed + k`` when a seed was given.  The texts that survived - the first
+        generation's in its order, then the ladder's, a text already kept never
+        twice - come back together, every verdict on the way is in ``verdicts``
+        and ``rejected``, ``candidates`` and ``asked`` add up every generation,
+        and ``auto_temperature`` is the climb's record.
         """
         check_auto_temperature(auto_temperature)
         outcome = self._generate(count, **options)
@@ -298,13 +301,14 @@ class NegativeFilter:
             return outcome
         prefix = str(options.get("prefix", "") or "")
         temperature = float(options.get("temperature", 1.0))
-        mode = str(options.get("mode") or "sample").lower()
+        mode = generation_mode(self.positive, options.get("mode", "sample"))  # what _generate asks the model for
         seed = options.get("seed")
+        want = wanted(count, mode)
         record = AutoTemperature(ceiling=float(auto_temperature), tries=1)
         keep = [i for i, result in enumerate(outcome["results"]) if wrote(self.positive, result, prefix)]
         outcome["texts"] = [outcome["texts"][i] for i in keep]
         outcome["results"] = [outcome["results"][i] for i in keep]
-        if len(outcome["texts"]) >= count:
+        if len(outcome["texts"]) >= want:
             record.found = True
             record.temperature = temperature if mode == "sample" else None
         else:
@@ -315,7 +319,7 @@ class NegativeFilter:
                     if seed is not None:
                         retry["seed"] = int(seed) + record.tries
                     record.tries += 1
-                    more = self._generate(count - len(outcome["texts"]), **retry)
+                    more = self._generate(want - len(outcome["texts"]), **retry)
                     for text, result in zip(more["texts"], more["results"]):
                         if text not in outcome["texts"] and wrote(self.positive, result, prefix):
                             outcome["texts"].append(text)
@@ -325,14 +329,14 @@ class NegativeFilter:
                     outcome["verdicts"] = outcome["verdicts"] + more["verdicts"]
                     outcome["candidates"] += more["candidates"]
                     outcome["asked"] += more["asked"]
-                    if len(outcome["texts"]) >= count:
+                    if len(outcome["texts"]) >= want:
                         record.found = True
                         record.temperature = t
                         break
                 if record.found:
                     break
-            outcome["texts"] = outcome["texts"][:count]
-            outcome["results"] = outcome["results"][:count]
+            outcome["texts"] = outcome["texts"][:want]
+            outcome["results"] = outcome["results"][:want]
             judged = outcome["candidates"]
             outcome["rate"] = len(outcome["kept"]) / judged if judged else None
         outcome["auto_temperature"] = record.to_dict()

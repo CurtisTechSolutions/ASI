@@ -20,6 +20,7 @@ from radixnet.autotemp import (  # noqa: E402
     AUTO_DRAWS, AUTO_FLOOR, AutoTemperature, answered, check_auto_temperature, climb, first_answer,
     temperature_ladder,
 )
+from radixnet.encoding import Encoding  # noqa: E402
 from radixnet.model import new_model  # noqa: E402
 from radixnet.search import PathResult  # noqa: E402
 
@@ -27,6 +28,22 @@ from radixnet.search import PathResult  # noqa: E402
 LOOP = ["ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab end"] * 3 + ["ab end"]
 # a text that ends as often as it goes on, so a walk from its end says nothing half the time
 ENDS = ["the cat sat on the mat", "the cat sat on the mat and slept"]
+MAT = "the cat sat on the mat"
+
+
+class Scripted:
+    """A model whose generations are scripted: every call hands back the next list of texts (at most the ``count``
+    asked for), and what it was asked is kept in ``asked``."""
+
+    def __init__(self, *calls: list[str]):
+        self.calls = [list(texts) for texts in calls]
+        self.asked: list[dict] = []
+        self.encoding = Encoding()
+
+    def generate(self, count=1, **options):
+        self.asked.append({"count": count, **options})
+        texts = self.calls.pop(0) if self.calls else []
+        return [PathResult(text=text, full_text=text) for text in texts][:count]
 
 
 class TestTheLadder(unittest.TestCase):
@@ -235,6 +252,65 @@ class TestGenerate(unittest.TestCase):
         self.assertEqual(results, [])
         self.assertFalse(record.found)
         self.assertTrue(math.isclose(record.ceiling, 1.0))
+
+    def test_what_a_generation_gives_at_most(self):
+        self.assertEqual([autotemp.wanted(n, "dijkstra") for n in (0, 1, 3)], [0, 1, 1])
+        self.assertEqual([autotemp.wanted(3, mode) for mode in ("beam", "kbest", "sample", None, "DIJKSTRA")],
+                         [3, 3, 3, 3, 1])
+        self.assertEqual(autotemp.generation_mode(new_model("count", seed=1)), "sample")
+        self.assertEqual(autotemp.generation_mode(new_model("resonant", seed=1)), "kbest", "the k-best, exactly")
+        self.assertEqual(autotemp.generation_mode(new_model("resonant", seed=1), "Beam"), "beam")
+
+    def test_dijkstra_is_one_text_however_many_are_asked_for(self):
+        """Dijkstra's generation is the single cheapest text, so that one text is the whole of its answer: it is
+        walked again only when it says nothing, and then for one."""
+        model = new_model("count", seed=1)
+        model.train(ENDS, epochs=2)
+        plain = model.generate(count=3, mode="dijkstra", max_length=40)
+        self.assertEqual(len(plain), 1)
+        results, record = autotemp.generate(model, count=3, mode="dijkstra", max_length=40, auto_temperature=2.0)
+        self.assertEqual([r.text for r in results], [r.text for r in plain])
+        self.assertEqual(record.to_dict(), {"ceiling": 2.0, "climbed": False, "found": True, "temperature": None,
+                                            "tries": 1})
+        # from the end of a text the cheapest is to say nothing more
+        self.assertEqual([r.text for r in model.generate(count=3, mode="dijkstra", prefix=MAT, max_length=40)], [MAT])
+        results, record = autotemp.generate(model, count=3, mode="dijkstra", prefix=MAT, max_length=40, seed=3,
+                                            auto_temperature=2.0)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(autotemp.wrote(model, results[0], MAT))
+        self.assertTrue(record.climbed and record.found)
+
+    def test_a_walk_keeps_to_the_generation_it_fills(self):
+        """The beam's texts are distinct, so a walk that repeats one already kept is not kept again; sampled walks
+        may repeat each other, as they always may."""
+        script = (["ab", "ab cd", "ab ef"], ["ab cd"], ["ab gh"])  # the beam's first says nothing beyond "ab"
+        beam = Scripted(*script)
+        results, record = autotemp.generate(beam, count=3, mode="beam", prefix="ab", auto_temperature=2.0)
+        self.assertEqual([r.text for r in results], ["ab cd", "ab ef", "ab gh"])
+        self.assertEqual((record.climbed, record.found, record.temperature, record.tries), (True, True, 1.0, 3))
+        self.assertEqual([(a["count"], a["mode"]) for a in beam.asked], [(3, "beam"), (1, "sample"), (1, "sample")])
+        sampled = Scripted(*script)
+        results, record = autotemp.generate(sampled, count=3, mode="sample", prefix="ab", auto_temperature=2.0)
+        self.assertEqual([r.text for r in results], ["ab cd", "ab ef", "ab cd"])
+        self.assertEqual((record.found, record.temperature, record.tries), (True, 1.0, 2))
+
+    def test_a_beams_texts_stay_distinct(self):
+        model = new_model("count", seed=1)
+        model.train(ENDS, epochs=2)
+        beam = [r.text for r in model.generate(count=3, mode="beam", prefix=MAT, max_length=40)]
+        self.assertEqual(beam[0], MAT, "the cheapest whole text says nothing more")
+        found = 0
+        for seed in range(12):
+            with self.subTest(seed=seed):
+                results, record = autotemp.generate(model, count=3, mode="beam", prefix=MAT, max_length=40,
+                                                    seed=seed, auto_temperature=2.0)
+                texts = [r.text for r in results]
+                self.assertEqual(len(set(texts)), len(texts))
+                self.assertEqual(texts[:2], beam[1:], "the beam's own come first")
+                self.assertTrue(record.climbed)
+                self.assertEqual(record.found, len(texts) == 3)
+                found += record.found
+        self.assertGreater(found, 0, "a hotter walk finds a third")
 
 
 if __name__ == "__main__":  # pragma: no cover

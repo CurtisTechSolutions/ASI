@@ -3077,6 +3077,27 @@ class TestGoAutoTemperatureParity(unittest.TestCase):
         self.assertEqual(len(b["samples"]), 6)
         self.assertEqual([s["text"] for s in b["samples"][:len(said)]], said, "the first generation's come first")
 
+    def test_a_generation_climbs_only_for_what_it_would_have_given(self):
+        """Dijkstra's generation is one text however many are asked for, and the beam's texts are distinct: the
+        ladder fills only what is missing of that - Dijkstra's one text when it says nothing, a beam's text that
+        says nothing with one the beam did not already give - and both ports fill it alike."""
+        pm, gm = self.models["ends"]
+        mat = "the cat sat on the mat"
+        cases = (("--mode", "dijkstra"), ("--mode", "dijkstra", "--prefix", mat), ("--mode", "beam", "--prefix", mat))
+        for seed in (0, 9):
+            for case in cases:
+                with self.subTest(seed=seed, case=case):
+                    args = ("generate", "--count", 3, *case, "--max-length", 40, "--no-guard", "--auto-temperature", 2)
+                    a = py("--seed", seed, *args, model=pm)
+                    b = go("--seed", seed, *args, "--seeded", model=gm)
+                    self.assertEqual(self.samples(a), self.samples(b))
+                    self.assertEqual(a["auto_temperature"], b["auto_temperature"])
+                    texts = [s["text"] for s in b["samples"]]
+                    self.assertEqual(len(set(texts)), len(texts), "no text twice")
+                    if case[1] == "dijkstra":
+                        self.assertEqual(len(texts), 1)
+                        self.assertEqual(b["auto_temperature"]["climbed"], mat in case, "only when it said nothing")
+
     def test_a_guarded_generation_draws_again_for_what_it_vetoed(self):
         pm, gm = self.models["lines"]
         beam = py("generate", "--count", 3, "--mode", "beam", "--max-length", 40, "--no-guard", model=pm)
