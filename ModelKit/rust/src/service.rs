@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::http::{accepted, Answer, ApiError, Request, Server};
+use radixnet::autotemp::{self, AutoTemperature};
 use radixnet::clock::utc_now;
 use radixnet::encoding::{
     base64_bytes, base64_file_texts, decoded_prediction, parse_encoding, Encoding, Unit, BACK_LABEL, END_LABEL,
@@ -1196,12 +1197,16 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     // continuation is empty and `guard` says why (`guard: false` turns it off;
     // `provenance: false` keeps the vetoes' reasons out of the answer)
     let provenance = crate::duo::maybe_flag(r, "provenance")?;
+    // a search that leaves no answer - nothing written, no END with `to_end`, every continuation vetoed -
+    // walks again up a ladder of temperatures to this ceiling (`../../../RadixCyclicNN/SPEC-SearchAndTraining.md`
+    // section 10), and the answer carries the climb's record
+    let ceiling = crate::llm::fields::Fields::of(r).number_or("auto_temperature", 0.0, Some(0.0))?;
     let guarded = if r.flag("guard", true) {
         svc.guard(
             provenance,
-            |pair| -> Result<(radixnet::beam::Prediction, Json), String> {
-                let found = pair.positive.predict(&asked, &opts)?;
-                let (ranked, verdicts) = pair.rank(&asked, &found);
+            |pair| -> Result<(radixnet::beam::Prediction, Json, Option<AutoTemperature>), String> {
+                // the survivors of every search, best first: every verdict is in the report
+                let (ranked, verdicts, climbed) = crate::duo::guarded_predict(pair, &asked, ceiling, &opts)?;
                 let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
                 let report = crate::duo::guard_report(
                     pair,
@@ -1211,18 +1216,18 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
                         ("kept", Json::Int(kept as i64)),
                     ],
                 );
-                Ok((ranked, report))
+                Ok((ranked, report, climbed))
             },
         )?
     } else {
         None
     };
-    let (found, guard) = match guarded {
-        Some(outcome) => {
-            let (found, report) = outcome?;
-            (found, report)
+    let (found, guard, climbed) = match guarded {
+        Some(outcome) => outcome?,
+        None => {
+            let (found, climbed) = svc.with_model(|m| autotemp::predict(m, &asked, ceiling, &opts))?;
+            (found, Json::Null, climbed)
         }
-        None => (svc.with_model(|m| m.predict(&asked, &opts))?, Json::Null),
     };
     // a model of sounds: the words each answer spells, and the part of them the continuation
     // wrote; a model of base64 symbols: what each answer holds
@@ -1265,6 +1270,9 @@ fn predict(svc: &Arc<Service>, r: &Request) -> Answer {
     // a model of base64 symbols: the symbols it was asked, and what its answer holds
     doc.extend(base64_doc(enc, &asked, "prefix_symbols"));
     doc.extend(decoded_prediction(enc, &found.best.full_text, &content));
+    if let Some(record) = climbed {
+        doc.push(("auto_temperature".to_string(), record.to_json()));
+    }
     Ok(Json::Obj(doc))
 }
 
@@ -1298,11 +1306,14 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     // failure never reaches the answer (fewer come back when it vetoed a lot;
     // `provenance: false` reports how many were vetoed, not which or why)
     let provenance = crate::duo::maybe_flag(r, "provenance")?;
+    // with a ceiling, every sample that said nothing - vetoed, or ended where the prefix did - is drawn
+    // again up the temperature ladder
+    let ceiling = crate::llm::fields::Fields::of(r).number_or("auto_temperature", 0.0, Some(0.0))?;
     let guarded = if r.flag("guard", true) {
         svc.guard(
             provenance,
-            |pair| -> Result<(Vec<radixnet::search::PathResult>, Json), String> {
-                let outcome = pair.generate(opts.count, &opts)?;
+            |pair| -> Result<(Vec<radixnet::search::PathResult>, Json, Option<AutoTemperature>), String> {
+                let outcome = pair.generate_climbing(opts.count, ceiling, &opts)?;
                 let report = crate::duo::guard_report(
                     pair,
                     &outcome.verdicts,
@@ -1313,15 +1324,18 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
                         ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
                     ],
                 );
-                Ok((outcome.results, report))
+                Ok((outcome.results, report, outcome.auto_temperature))
             },
         )?
     } else {
         None
     };
-    let (samples, guard) = match guarded {
+    let (samples, guard, climbed) = match guarded {
         Some(outcome) => outcome?,
-        None => (svc.with_model(|m| m.generate(&opts))?, Json::Null),
+        None => {
+            let (samples, climbed) = svc.with_model(|m| autotemp::generate(m, ceiling, &opts))?;
+            (samples, Json::Null, climbed)
+        }
     };
     // a model of sounds: the words each text spells; a model of base64 symbols: what each holds
     let extra = |r: &PathResult| -> Vec<(String, Json)> {
@@ -1338,6 +1352,9 @@ fn generate(svc: &Arc<Service>, r: &Request) -> Answer {
     )];
     doc.extend(base64_doc(enc, &asked, "prefix_symbols"));
     doc.push(("guard".to_string(), guard));
+    if let Some(record) = climbed {
+        doc.push(("auto_temperature".to_string(), record.to_json()));
+    }
     Ok(Json::Obj(doc))
 }
 

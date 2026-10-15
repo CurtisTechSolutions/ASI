@@ -36,7 +36,7 @@ use modelkit::cli::{
     decode_to, dispatch, negative_stats, parse_args, path_json, prefix_doc, prefix_of, read_named_as, read_texts,
     read_texts_as, verdict_json, Ctx, COMMANDS,
 };
-use modelkit::duo::{guard_report, Filter, FilterConfig};
+use modelkit::duo::{guard_report, guarded_predict, Filter, FilterConfig};
 use modelkit::service::Service;
 use modelkit::voice::{decoder_name, say, speak_texts, speak_walks, SayOptions, SpeakOptions, Utterance};
 use radixnet::encoding::{decoded_prediction, parse_encoding, Unit};
@@ -84,7 +84,13 @@ const USAGE: &str = "usage: radixnet [--model PATH] [--kind KIND] [--encoding SP
      TEXT, and\n\
      --decode-to FILE writes the answer as the bytes it holds (a model of base64 symbols decodes them; several \
      samples are\n\
-     numbered before the extension).  train: --order corpus | shortest-first | longest-first | \
+     numbered before the extension).  predict / generate / converse / talk: --auto-temperature T - when the \
+     search finds no\n\
+     answer (nothing said, no end reached with --to-end, or everything vetoed), walk again up a ladder of \
+     temperatures: the\n\
+     asked one, then doubling up to T, three walks a rung, until one answers (0 = off; 2 is a good ceiling: \
+     hotter walks end\n\
+     no more often and say nothing more often).  train: --order corpus | shortest-first | longest-first | \
      shuffle, --curriculum C (the\n\
      first epoch walks the first C of the ordered texts, the last all of them; 1 = off), --replay R (every epoch \
      rehearses R times as\n\
@@ -299,24 +305,30 @@ fn run() -> Result<(), String> {
                 diversity: tuning.diversity,
                 origin: radixnet::START,
             };
-            let mut found = model.predict(&prefix, &opts)?;
-            // the guard re-ranks what the search already offered: the best
-            // continuation the negative network does not veto
-            let mut guard = Json::Null;
-            if let Some((mut negative, config)) = ctx.open_guard()? {
-                let mut pair = Filter::new(&mut model, &mut negative, config)?;
-                let (ranked, verdicts) = pair.rank(&prefix, &found);
-                let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
-                guard = guard_report(
-                    &pair,
-                    &verdicts,
-                    vec![
-                        ("candidates", Json::Int(verdicts.len() as i64)),
-                        ("kept", Json::Int(kept as i64)),
-                    ],
-                );
-                found = ranked;
-            }
+            let ceiling = modelkit::cli::auto_temperature(&args)?;
+            // the guard re-ranks what the search offered - the best continuation
+            // the negative network does not veto - and with --auto-temperature a
+            // search that leaves no answer walks again up the temperature ladder
+            let (found, guard, climbed) = match ctx.open_guard()? {
+                Some((mut negative, config)) => {
+                    let mut pair = Filter::new(&mut model, &mut negative, config)?;
+                    let (found, verdicts, climbed) = guarded_predict(&mut pair, &prefix, ceiling, &opts)?;
+                    let kept = verdicts.iter().filter(|v| v.decision != "reject").count();
+                    let report = guard_report(
+                        &pair,
+                        &verdicts,
+                        vec![
+                            ("candidates", Json::Int(verdicts.len() as i64)),
+                            ("kept", Json::Int(kept as i64)),
+                        ],
+                    );
+                    (found, report, climbed)
+                }
+                None => {
+                    let (found, climbed) = radixnet::autotemp::predict(&mut model, &prefix, ceiling, &opts)?;
+                    (found, Json::Null, climbed)
+                }
+            };
             // a model of sounds: the words each answer spells, and the part of them the continuation
             // wrote; a model of base64 symbols: what each answer holds
             let ranked = |paths: &[radixnet::search::PathResult]| -> Json {
@@ -351,7 +363,8 @@ fn run() -> Result<(), String> {
                 ),
                 ("expanded".to_string(), Json::Int(found.expanded as i64)),
                 ("reached_end".to_string(), Json::Bool(found.best.reached_end)),
-                ("mode".to_string(), Json::str(found.mode.clone())),
+                // the mode asked for, as Python's document says it: a climb's sampled walk does not relabel it
+                ("mode".to_string(), Json::str(opts.mode.clone())),
                 ("k".to_string(), Json::Int(found.k as i64)),
                 ("beam".to_string(), Json::Int(found.beam as i64)),
                 ("top".to_string(), ranked(&found.top)),
@@ -366,15 +379,20 @@ fn run() -> Result<(), String> {
                 // --speak FILE: the answer, heard
                 doc.push((
                     "speech".to_string(),
-                    speak_outputs(&model, &[found.best.full_text.clone()], path)?,
+                    speak_outputs(&model, std::slice::from_ref(&found.best.full_text), path)?,
                 ));
             }
             if let Some(path) = args.get("decode-to").filter(|p| !p.is_empty()) {
                 // --decode-to FILE: the answer, as the bytes it holds
                 doc.push((
                     "decoded_to".to_string(),
-                    decode_to(path, enc, &[found.best.full_text.clone()])?,
+                    decode_to(path, enc, std::slice::from_ref(&found.best.full_text))?,
                 ));
+            }
+            if let Some(record) = climbed {
+                // --auto-temperature: what the ladder did, beside the answer
+                radixnet::log_info!("model", "auto temperature: {}", climb_line(&record));
+                doc.push(("auto_temperature".to_string(), record.to_json()));
             }
             emit(Json::Obj(doc));
         }
@@ -403,11 +421,13 @@ fn run() -> Result<(), String> {
                 diversity: tuning.diversity,
             };
             // the pair: the model over-samples, the negative network vetoes,
-            // the cleanest survivors come back
-            let (samples, guard) = match ctx.open_guard()? {
+            // the cleanest survivors come back - and with --auto-temperature
+            // every sample that said nothing is drawn again up the ladder
+            let ceiling = modelkit::cli::auto_temperature(&args)?;
+            let (samples, guard, climbed) = match ctx.open_guard()? {
                 Some((mut negative, config)) => {
                     let mut pair = Filter::new(&mut model, &mut negative, config)?;
-                    let outcome = pair.generate(opts.count, &opts)?;
+                    let outcome = pair.generate_climbing(opts.count, ceiling, &opts)?;
                     let report = guard_report(
                         &pair,
                         &outcome.verdicts,
@@ -418,9 +438,12 @@ fn run() -> Result<(), String> {
                             ("rate", outcome.rate.map(Json::Num).unwrap_or(Json::Null)),
                         ],
                     );
-                    (outcome.results, report)
+                    (outcome.results, report, outcome.auto_temperature)
                 }
-                None => (model.generate(&opts)?, Json::Null),
+                None => {
+                    let (samples, climbed) = radixnet::autotemp::generate(&mut model, ceiling, &opts)?;
+                    (samples, Json::Null, climbed)
+                }
             };
             // a model of sounds: the words each text spells; a model of base64 symbols: what each holds
             let sample = |r: &radixnet::search::PathResult| -> Json {
@@ -463,6 +486,11 @@ fn run() -> Result<(), String> {
                     // --decode-to FILE: every sample, as the bytes it holds
                     let texts: Vec<String> = samples.iter().map(|r| r.full_text.clone()).collect();
                     pairs.push(("decoded_to".to_string(), decode_to(path, enc, &texts)?));
+                }
+                if let Some(record) = climbed {
+                    // --auto-temperature: what the ladder did, beside the samples
+                    radixnet::log_info!("model", "auto temperature: {}", climb_line(&record));
+                    pairs.push(("auto_temperature".to_string(), record.to_json()));
                 }
             }
             emit(doc);
@@ -1269,6 +1297,29 @@ fn search_tuning(args: &modelkit::cli::Args) -> Result<SearchTuning, String> {
     };
     tuning.check()?;
     Ok(tuning)
+}
+
+/// One line for what the temperature ladder did (`--auto-temperature`,
+/// Python's `_climb_line`): answered as asked, answered at a temperature after
+/// so many searches, or nothing at any temperature up to the ceiling.
+fn climb_line(record: &radixnet::autotemp::AutoTemperature) -> String {
+    let g = modelkit::toolbox::sandbox::format_g;
+    if !record.climbed {
+        return format!("answered as asked (ceiling {})", g(record.ceiling));
+    }
+    match record.temperature.filter(|_| record.found) {
+        Some(t) => format!(
+            "answered at temperature {} after {} searches (ceiling {})",
+            g(t),
+            record.tries,
+            g(record.ceiling)
+        ),
+        None => format!(
+            "no answer at any temperature up to {} ({} searches)",
+            g(record.ceiling),
+            record.tries
+        ),
+    }
 }
 
 /// How a training run walks its texts (`--order`, `--curriculum`,

@@ -1554,3 +1554,104 @@ fn the_voice_turn_streams_and_refuses() {
         .contains("cannot reach Ollama"));
     assert_eq!(doc.at("trained").at("texts").as_i64(), Some(1));
 }
+
+/// A strong cycle - "ab " comes round again far more often than it ends - so a
+/// greedy walk goes round for ever and a warmer one ends
+/// (`../../../RadixCyclicNN/SPEC-SearchAndTraining.md` section 10).
+fn looping() -> Model {
+    let long = format!("{}end", "ab ".repeat(20));
+    let texts = vec![long.clone(), long.clone(), long, "ab end".to_string()];
+    let mut model = Model::new(1, GraphOptions::default()).expect("a model");
+    model
+        .train(
+            &texts,
+            &TrainOptions {
+                epochs: 2,
+                ..Default::default()
+            },
+        )
+        .expect("a trained model");
+    model
+}
+
+#[test]
+fn auto_temperature_climbs_on_every_route_and_refuses_a_bad_ceiling() {
+    let port = serve(looping(), &format!("{}/model.count.json", temp_dir("autotemp")));
+    // predict: a greedy walk that goes round climbs to a warmer one that ends; off, nothing changes
+    let greedy = r#""prefix": "ab", "mode": "sample", "temperature": 0, "max_length": 30, "to_end": true"#;
+    let (status, plain) = post(port, "/api/predict", &format!("{{{greedy}}}"));
+    assert_eq!(status, 200, "{plain:?}");
+    assert_eq!(plain.at("reached_end").as_bool(), Some(false));
+    assert!(plain.get("auto_temperature").is_none(), "off: no record");
+    let (status, doc) = post(port, "/api/predict", &format!("{{{greedy}, \"auto_temperature\": 2}}"));
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("reached_end").as_bool(), Some(true));
+    let record = doc.at("auto_temperature");
+    assert_eq!(record.at("ceiling").as_f64(), Some(2.0));
+    assert!(record.at("climbed").as_bool() == Some(true) && record.at("found").as_bool() == Some(true));
+    assert!(record.at("temperature").as_f64().unwrap() > 0.0);
+    // generate and converse carry their records
+    let (status, doc) = post(
+        port,
+        "/api/generate",
+        r#"{"count": 2, "mode": "sample", "max_length": 40, "seed": 2, "auto_temperature": 2}"#,
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    assert_eq!(doc.at("auto_temperature").at("ceiling").as_f64(), Some(2.0));
+    let (status, doc) = post(
+        port,
+        "/api/converse",
+        r#"{"opening": "ab", "turns": 2, "auto_temperature": 2}"#,
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    let turns = doc.at("turns").as_array();
+    assert!(turns.len() > 1, "{doc:?}");
+    assert!(
+        turns[0].get("auto_temperature").is_none(),
+        "the opening is given, not found"
+    );
+    for turn in &turns[1..] {
+        assert_eq!(
+            turn.at("auto_temperature").at("ceiling").as_f64(),
+            Some(2.0),
+            "{turn:?}"
+        );
+    }
+    // today's format reads it from the body
+    let (status, doc) = post(
+        port,
+        "/v1/messages",
+        r#"{"messages": [{"role": "user", "content": "ab"}], "max_tokens": 20, "auto_temperature": 2}"#,
+    );
+    assert_eq!(status, 200, "{doc:?}");
+    assert!(doc.get("content").is_some());
+    // a negative, non-finite or non-number ceiling is a 400 everywhere
+    for path in ["/api/predict", "/api/generate", "/api/converse", "/api/converse/stream"] {
+        for bad in ["-1", "\"hot\"", "Infinity", "NaN", "true"] {
+            let (status, err) = post(
+                port,
+                path,
+                &format!("{{\"prefix\": \"ab\", \"auto_temperature\": {bad}}}"),
+            );
+            assert_eq!(status, 400, "{path} {bad}: {err:?}");
+            assert!(
+                err.at("error").as_str().unwrap_or("").contains("'auto_temperature'"),
+                "{err:?}"
+            );
+        }
+    }
+    let (_, err) = post(port, "/api/predict", r#"{"auto_temperature": -1}"#);
+    assert_eq!(
+        err.at("error").as_str(),
+        Some("'auto_temperature' must be >= 0.0 (got -1)")
+    );
+    for (path, bad) in [
+        ("/v1/messages", "-1"),
+        ("/v1/chat/completions", "\"hot\""),
+        ("/v1/messages", "Infinity"),
+    ] {
+        let body = format!(r#"{{"messages": [{{"role": "user", "content": "ab"}}], "auto_temperature": {bad}}}"#);
+        let (status, err) = post(port, path, &body);
+        assert_eq!(status, 400, "{path} {bad}: {err:?}");
+    }
+}

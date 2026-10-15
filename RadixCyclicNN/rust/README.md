@@ -47,6 +47,7 @@ is TLS: an `https://` request goes through the system's `curl`
 | `src/search.rs` | the traversals, what a node offers a walk, the stochastic walk and the sampling filters it draws through (top-K, top-p, min-p) |
 | `src/penalty.rs` | the punishment traversal: the merit / penalty split, and the cost function it prices a step with |
 | `src/beam.rs` | the two beams - the k best paths and the k worst - and the diverse pick of the k best |
+| `src/autotemp.rs` | auto-temperature: a search with no answer walks again up a ladder of temperatures, three draws a rung, and the record of the climb (`../SPEC-SearchAndTraining.md` section 10); the guard, the replies, `--auto-temperature` and the routes climb through it |
 | `src/training.rs` | how a run walks its texts: the order, the curriculum, the replay buffer and early stopping (`../SPEC-SearchAndTraining.md`), keyed by SplitMix64 so no random number is drawn |
 | `src/model.rs` | train, predict, generate, score, reward / punish / 2NRL, the count model's `invert_paths`, and the epoch hook checkpoints are written through |
 | `src/kinds.rs` | the model kinds - `count` (this port's default), `radix`, `resonant`, `negative` - and training, 2NRL, reward, punish and `invert_paths` dispatched to each |

@@ -38,6 +38,7 @@ use std::sync::Arc;
 use crate::cli::verdict_json;
 use crate::http::{Answer, ApiError, Request, Server};
 use crate::service::Service;
+use radixnet::autotemp::{self, AutoTemperature};
 use radixnet::beam::Prediction;
 use radixnet::json::Json;
 use radixnet::model::{GenerateOptions, Model, PredictOptions};
@@ -265,6 +266,9 @@ pub struct FilterOutcome {
     /// Whether the verdicts are reported whole or terse
     /// ([`FilterConfig::provenance`]).
     pub provenance: bool,
+    /// What the temperature ladder did for a generation asked to climb
+    /// ([`Filter::generate_climbing`]); `None` when it was not.
+    pub auto_temperature: Option<AutoTemperature>,
 }
 
 impl Default for FilterOutcome {
@@ -278,6 +282,7 @@ impl Default for FilterOutcome {
             asked: 0,
             rate: None,
             provenance: true,
+            auto_temperature: None,
         }
     }
 }
@@ -289,10 +294,11 @@ impl FilterOutcome {
     }
 
     /// `{"texts", "kept", "rejected", "verdicts", "candidates", "asked",
-    /// "rate"}`, as the filter route answers; the verdicts (and the rejected
-    /// ones among them) are terse when `provenance` is off.
+    /// "rate"}`, as the filter route answers - and `auto_temperature` after
+    /// them when the generation climbed; the verdicts (and the rejected ones
+    /// among them) are terse when `provenance` is off.
     pub fn to_json(&self) -> Json {
-        Json::obj([
+        let mut doc = Json::obj([
             ("texts", Json::strs(self.texts.clone())),
             ("kept", Json::strs(self.kept.clone())),
             (
@@ -306,7 +312,11 @@ impl FilterOutcome {
             ("candidates", Json::Int(self.candidates as i64)),
             ("asked", Json::Int(self.asked as i64)),
             ("rate", self.rate.map(Json::Num).unwrap_or(Json::Null)),
-        ])
+        ]);
+        if let (Json::Obj(pairs), Some(record)) = (&mut doc, &self.auto_temperature) {
+            pairs.push(("auto_temperature".to_string(), record.to_json()));
+        }
+        doc
     }
 }
 
@@ -477,6 +487,7 @@ impl<'a> Filter<'a> {
             candidates: texts.len(),
             asked: texts.len(),
             provenance: self.config.provenance,
+            auto_temperature: None,
         })
     }
 
@@ -536,6 +547,83 @@ impl<'a> Filter<'a> {
             .filter_map(|t| candidates.iter().position(|c| c == t).map(|i| walks[i].clone()))
             .collect();
         outcome.texts = survivors;
+        Ok(outcome)
+    }
+
+    /// Generates through the pair ([`Filter::generate`]), and - with
+    /// `auto_temperature` - climbs for what is missing (Python's
+    /// `NegativeFilter.generate`, `../../../RadixCyclicNN/SPEC-SearchAndTraining.md`
+    /// section 10).
+    ///
+    /// Off (`0`), this is [`Filter::generate`] exactly.  On, the outcome always
+    /// carries the record - a generation of no texts has nothing missing, and
+    /// is found as asked, as an unguarded one is ([`autotemp::generate`]) -
+    /// and a generation that brought back fewer than `count` texts saying
+    /// something beyond the prefix - the negative network vetoed the rest, or a walk ended where the
+    /// prefix did ([`autotemp::wrote`]) - asks again for the ones still
+    /// missing, as sampled walks up the temperature ladder:
+    /// [`autotemp::draws_at`] generations a rung, each over-sampled and
+    /// filtered like the first, the k-th retry seeded `seed + k` when a seed
+    /// was given.  The texts that survived - the first generation's in its
+    /// order, then the ladder's, a text already kept never twice - come back
+    /// together; every verdict on the way is in `verdicts`, `kept`,
+    /// `candidates` and `asked` add up every generation, `rate` is what was
+    /// kept of every candidate judged, and `auto_temperature` is the climb's
+    /// record.
+    pub fn generate_climbing(
+        &mut self,
+        count: usize,
+        auto_temperature: f64,
+        o: &GenerateOptions,
+    ) -> Result<FilterOutcome, String> {
+        autotemp::check_auto_temperature(auto_temperature)?;
+        let mut outcome = self.generate(count, o)?;
+        if auto_temperature == 0.0 {
+            return Ok(outcome);
+        }
+        let enc = self.positive.encoding();
+        let mut record = AutoTemperature::new(auto_temperature);
+        // a survivor that said nothing beyond the prefix is no answer either
+        let survivors = std::mem::take(&mut outcome.texts)
+            .into_iter()
+            .zip(std::mem::take(&mut outcome.results));
+        (outcome.texts, outcome.results) = survivors
+            .filter(|(_, result)| autotemp::wrote(&enc, result, &o.prefix))
+            .unzip();
+        if outcome.texts.len() >= count {
+            record.found = true;
+            record.temperature = autotemp::asked_temperature(o);
+        } else {
+            record.climbed = true;
+            'ladder: for t in autotemp::temperature_ladder(o.temperature, auto_temperature) {
+                for _ in 0..autotemp::draws_at(t) {
+                    let need = count - outcome.texts.len();
+                    let retry = autotemp::retry_generation(o, need, t, record.tries);
+                    record.tries += 1;
+                    let more = self.generate(need, &retry)?;
+                    for (text, result) in more.texts.into_iter().zip(more.results) {
+                        if !outcome.texts.contains(&text) && autotemp::wrote(&enc, &result, &o.prefix) {
+                            outcome.texts.push(text);
+                            outcome.results.push(result);
+                        }
+                    }
+                    outcome.kept.extend(more.kept);
+                    // the rejected are the verdicts that rejected, so they add up with them
+                    outcome.verdicts.extend(more.verdicts);
+                    outcome.candidates += more.candidates;
+                    outcome.asked += more.asked;
+                    if outcome.texts.len() >= count {
+                        record.found = true;
+                        record.temperature = Some(t);
+                        break 'ladder;
+                    }
+                }
+            }
+            outcome.texts.truncate(count);
+            outcome.results.truncate(count);
+            outcome.rate = (outcome.candidates > 0).then(|| outcome.kept.len() as f64 / outcome.candidates as f64);
+        }
+        outcome.auto_temperature = Some(record);
         Ok(outcome)
     }
 
@@ -619,6 +707,49 @@ impl<'a> Filter<'a> {
     pub fn describe(&self) -> Json {
         describe(self.positive, self.negative, &self.config)
     }
+}
+
+/// `pair.positive.predict(prefix, o)` through the guard, climbing the
+/// temperature ladder when it finds no answer (Python's `guarded_predict`,
+/// `../../../RadixCyclicNN/SPEC-SearchAndTraining.md` section 10).
+///
+/// Returns `(prediction, verdicts, record)`.  The guard re-ranks every search
+/// as [`Filter::rank`] does and `verdicts` holds every judgement, the
+/// ladder's included, so the guard's report counts them all.  With
+/// `auto_temperature` off (`0`) this is one search and one ranking, exactly as
+/// before, and `record` is `None`; on, a search whose surviving continuations
+/// hold no answer ([`autotemp::first_answer`]: none wrote anything, or none
+/// reached END when `o.to_end` asked for it) is followed by sampled walks up
+/// the ladder, each judged in turn, and the first answer the guard lets
+/// through ends it ([`autotemp::climb`]).  Without a guard the same climb is
+/// [`autotemp::predict`].
+pub fn guarded_predict(
+    pair: &mut Filter,
+    prefix: &str,
+    auto_temperature: f64,
+    o: &PredictOptions,
+) -> Result<(Prediction, Vec<FilterVerdict>, Option<AutoTemperature>), String> {
+    autotemp::check_auto_temperature(auto_temperature)?;
+    let mut verdicts: Vec<FilterVerdict> = Vec::new();
+    // `None`: the search exactly as asked; a temperature: the same request as a sampled walk
+    let mut search = |t: Option<f64>| -> Result<Prediction, String> {
+        let found = pair.positive.predict(prefix, &autotemp::at_temperature(o, t))?;
+        let (ranked, judged) = pair.rank(prefix, &found);
+        verdicts.extend(judged);
+        Ok(ranked)
+    };
+    if auto_temperature == 0.0 {
+        let found = search(None)?;
+        return Ok((found, verdicts, None));
+    }
+    let (found, record) = autotemp::climb(
+        &mut search,
+        |found| autotemp::first_answer(found, o.to_end),
+        o.temperature,
+        auto_temperature,
+        o.mode.to_lowercase() == "sample",
+    )?;
+    Ok((found, verdicts, Some(record)))
 }
 
 /// Whether a negative network has anything to veto with.
@@ -1467,6 +1598,184 @@ mod tests {
         };
         assert_eq!(maybe_flag(&request, "provenance").unwrap_err().status, 400);
         assert_eq!(maybe_flag(&request, "other").unwrap(), None);
+    }
+
+    // -- auto-temperature: the guard's veto counts as no answer --------------------------------------
+
+    const CORPUS: [&str; 3] = [
+        "the cat sat on the mat",
+        "the dog sat on the log",
+        "a bird flew over the hill",
+    ];
+    const FAILURE: &str = "the cat sat on the mat";
+
+    /// Python's `tests/test_autotemp.py` pair: a count model of three lines
+    /// and a negative network that has been taught `blamed` are gibberish.
+    fn climbing_pair(blamed: &[String]) -> (Model, Model) {
+        let mut positive = Model::new(1, GraphOptions::default()).unwrap();
+        let texts: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
+        positive
+            .train(
+                &texts,
+                &TrainOptions {
+                    epochs: 3,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut negative = Model::new_negative(2, &NegativeOptions::default()).unwrap();
+        negative
+            .blame(
+                blamed,
+                &BlameOptions {
+                    reason: "gibberish".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (positive, negative)
+    }
+
+    /// The beam's one best continuation, to the end of a text.
+    fn one_to_the_end() -> PredictOptions {
+        PredictOptions {
+            mode: "beam".to_string(),
+            k: 1,
+            length: 30,
+            to_end: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_vetoed_prediction_climbs_to_one_the_guard_lets_through() {
+        let (mut positive, mut negative) = climbing_pair(&[FAILURE.to_string()]);
+        let mut pair = Filter::new(&mut positive, &mut negative, FilterConfig::default()).unwrap();
+        let (found, verdicts, record) = guarded_predict(&mut pair, "the cat", 0.0, &one_to_the_end()).unwrap();
+        assert!(record.is_none());
+        assert_eq!(
+            found.best.text, "",
+            "off: the guard vetoed the only continuation, and nothing is said"
+        );
+        assert_eq!(
+            verdicts.iter().map(|v| v.decision.as_str()).collect::<Vec<_>>(),
+            vec!["reject"]
+        );
+        let (found, verdicts, record) = guarded_predict(&mut pair, "the cat", 2.0, &one_to_the_end()).unwrap();
+        let record = record.unwrap();
+        assert!(!found.best.text.trim().is_empty() && found.best.reached_end);
+        assert_ne!(found.best.full_text, FAILURE);
+        assert!(record.climbed && record.found);
+        assert!(record.tries > 1);
+        assert_eq!(verdicts.len(), record.tries, "every search was judged");
+        assert_eq!(verdicts[0].decision, "reject");
+        let refused = guarded_predict(&mut pair, "the cat", -1.0, &one_to_the_end());
+        assert!(refused.is_err());
+    }
+
+    #[test]
+    fn an_answer_the_guard_lets_through_is_not_walked_past() {
+        let (mut positive, mut negative) = climbing_pair(&["nothing like the corpus at all".to_string()]);
+        let mut pair = Filter::new(&mut positive, &mut negative, FilterConfig::default()).unwrap();
+        let (plain, _, _) = guarded_predict(&mut pair, "the cat", 0.0, &one_to_the_end()).unwrap();
+        let (found, _, record) = guarded_predict(&mut pair, "the cat", 2.0, &one_to_the_end()).unwrap();
+        let record = record.unwrap();
+        assert_eq!(found.best.full_text, plain.best.full_text);
+        assert_eq!((record.climbed, record.found, record.tries), (false, true, 1));
+    }
+
+    /// Whole texts by the beam, `seed` handed down to the retries.
+    fn beam_of(seed: Option<i64>) -> GenerateOptions {
+        GenerateOptions {
+            mode: "beam".to_string(),
+            max_length: 40,
+            seed,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_guarded_generation_draws_again_for_what_it_vetoed() {
+        // no over-sampling, so the beam offers just the three it is asked for
+        let config = FilterConfig {
+            over_sample: 1,
+            ..Default::default()
+        };
+        let (mut positive, mut negative) = climbing_pair(&["nothing like the corpus at all".to_string()]);
+        let beam = Filter::new(&mut positive, &mut negative, config.clone())
+            .unwrap()
+            .generate(3, &beam_of(None))
+            .unwrap();
+        // the beam's own two best texts are failures now
+        let (mut positive, mut negative) = climbing_pair(&beam.texts[..2]);
+        let mut pair = Filter::new(&mut positive, &mut negative, config).unwrap();
+        let plain = pair.generate_climbing(3, 0.0, &beam_of(Some(3))).unwrap();
+        assert!(plain.texts.len() < 3, "the beam's own texts were vetoed");
+        assert!(plain.auto_temperature.is_none());
+        assert!(plain.to_json().get("auto_temperature").is_none());
+        let out = pair.generate_climbing(3, 2.0, &beam_of(Some(3))).unwrap();
+        let record = out.auto_temperature.clone().unwrap();
+        assert!(record.climbed);
+        assert_eq!(out.texts.len(), out.results.len());
+        assert!(out.texts.len() >= plain.texts.len());
+        assert_eq!(
+            &out.texts[..plain.texts.len()],
+            &plain.texts[..],
+            "the first generation's come first"
+        );
+        let unique: std::collections::HashSet<&String> = out.texts.iter().collect();
+        assert_eq!(unique.len(), out.texts.len());
+        assert!(out.candidates > plain.candidates);
+        assert_eq!(record.found, out.texts.len() == 3);
+        assert_eq!(out.to_json().at("auto_temperature"), &record.to_json());
+        assert_eq!(out.rate, Some(out.kept.len() as f64 / out.candidates as f64));
+    }
+
+    #[test]
+    fn nothing_asked_for_is_found_as_asked() {
+        // a generation of no texts has nothing missing: the ceiling is on, so the record says so, guarded or not
+        let (mut positive, mut negative) = climbing_pair(&[FAILURE.to_string()]);
+        let mut pair = Filter::new(&mut positive, &mut negative, FilterConfig::default()).unwrap();
+        let out = pair.generate_climbing(0, 2.0, &GenerateOptions::default()).unwrap();
+        assert!(out.texts.is_empty() && out.results.is_empty());
+        assert_eq!(
+            out.to_json().at("auto_temperature").render(0),
+            "{\"ceiling\":2.0,\"climbed\":false,\"found\":true,\"temperature\":1.0,\"tries\":1}"
+        );
+        let beam = pair.generate_climbing(0, 2.0, &beam_of(None)).unwrap();
+        assert_eq!(
+            beam.auto_temperature.unwrap().temperature,
+            None,
+            "the beam reads no temperature"
+        );
+        assert!(pair
+            .generate_climbing(0, 0.0, &GenerateOptions::default())
+            .unwrap()
+            .auto_temperature
+            .is_none());
+    }
+
+    #[test]
+    fn everything_vetoed_is_no_answer_at_any_temperature() {
+        let blamed: Vec<String> = CORPUS.iter().map(|s| s.to_string()).collect();
+        let (mut positive, mut negative) = climbing_pair(&blamed);
+        let mut pair = Filter::new(&mut positive, &mut negative, FilterConfig::default()).unwrap();
+        let sampled = GenerateOptions {
+            max_length: 40,
+            seed: Some(3),
+            ..Default::default()
+        };
+        let out = pair.generate_climbing(2, 1.0, &sampled).unwrap();
+        let record = out.auto_temperature.unwrap();
+        assert!(record.climbed);
+        if !record.found {
+            assert!(out.texts.len() < 2);
+            assert_eq!(
+                record.tries,
+                1 + radixnet::autotemp::AUTO_DRAWS,
+                "the ladder (1, 1): one rung"
+            );
+        }
     }
 
     #[test]

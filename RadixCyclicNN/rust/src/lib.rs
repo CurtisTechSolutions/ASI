@@ -58,6 +58,8 @@
 //! ```
 
 pub mod attention;
+// a search that finds no answer walks again, hotter (`../SPEC-SearchAndTraining.md` section 10)
+pub mod autotemp;
 pub mod beam;
 pub mod clock;
 pub mod correct;

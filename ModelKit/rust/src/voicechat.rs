@@ -623,6 +623,8 @@ fn reply_options<'a, 'v: 'a>(
         think_depth: THINK_DEPTH,
         stream: None,
         trace: None,
+        // a voice turn never climbs: Python's voice asks its replies with the ceiling off
+        auto_temperature: 0.0,
     }
 }
 

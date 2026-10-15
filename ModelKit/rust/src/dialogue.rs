@@ -38,6 +38,7 @@ use crate::duo::{guard_report, Filter, FilterVerdict};
 use crate::http::{Answer, ApiError, Request, Server, Sink};
 use crate::service::Service;
 use crate::thinking::{think, ThinkOptions, Thought, THINK_DEPTH, THINK_QUESTIONS};
+use radixnet::autotemp::{self, AutoTemperature};
 use radixnet::encoding::Encoding;
 use radixnet::graph::{FIRST, START};
 use radixnet::json::Json;
@@ -174,12 +175,16 @@ pub struct Turn {
     pub labels: Vec<String>,
     pub node_ids: Vec<usize>,
     pub step_costs: Vec<f64>,
+    /// The climb that found this turn (`auto_temperature` on, [`reply`]),
+    /// else `None`.
+    pub auto_temperature: Option<AutoTemperature>,
 }
 
 impl Turn {
-    /// The turn as Python's `Turn.to_dict` writes it.
+    /// The turn as Python's `Turn.to_dict` writes it: `auto_temperature` last,
+    /// and only on a turn a climb found.
     pub fn to_json(&self) -> Json {
-        Json::obj([
+        let mut doc = Json::obj([
             ("index", Json::Int(self.index as i64)),
             ("speaker", Json::str(self.speaker.clone())),
             ("text", Json::str(self.text.clone())),
@@ -202,7 +207,11 @@ impl Turn {
             ("labels", Json::strs(self.labels.clone())),
             ("node_ids", Json::ints(self.node_ids.iter().map(|&n| n as i64))),
             ("step_costs", Json::nums(self.step_costs.clone())),
-        ])
+        ]);
+        if let (Json::Obj(pairs), Some(record)) = (&mut doc, &self.auto_temperature) {
+            pairs.push(("auto_temperature".to_string(), record.to_json()));
+        }
+        doc
     }
 }
 
@@ -430,6 +439,10 @@ pub struct ConverseOptions {
     pub think: bool,
     /// How deep such a thought may question itself.
     pub think_depth: usize,
+    /// A voice with nothing to say tries again as sampled walks up a ladder of
+    /// temperatures to this ceiling before the conversation stops ([`reply`];
+    /// 0, the default, is off).
+    pub auto_temperature: f64,
 }
 
 impl Default for ConverseOptions {
@@ -452,6 +465,7 @@ impl Default for ConverseOptions {
             learn: true,
             think: true,
             think_depth: THINK_DEPTH,
+            auto_temperature: 0.0,
         }
     }
 }
@@ -950,12 +964,111 @@ pub struct ReplyOptions<'a, 'v, 's> {
     pub stream: Option<&'a mut Stream<'s>>,
     /// Hears every step as it is taken (see [`Trace`]).
     pub trace: Option<&'a mut Trace<'v>>,
+    /// The ceiling a reply with nothing to say climbs to (0: off; see
+    /// [`reply`]).
+    pub auto_temperature: f64,
 }
 
 /// What `voice` says next after `previous` - one turn, or `None` when it has
 /// nothing to say.  `scorer` is the model the veto judges with when it is not
 /// the speaker (a partner speaking in a guarded conversation).
+///
+/// `o.auto_temperature` (`../../../RadixCyclicNN/SPEC-SearchAndTraining.md`
+/// section 10) is for the reply that finds nothing at all to say - every
+/// candidate, from every context and from a fresh start, empty or vetoed: the
+/// same reply is asked again as sampled walks up a ladder of temperatures to
+/// that ceiling, three replies a rung ([`autotemp::AUTO_DRAWS`]), each drawing
+/// from `rng` as the reply as asked did, and the first that says something is
+/// the turn, carrying the climb's record ([`Turn::auto_temperature`]).  The
+/// trace hears `{"kind": "climb", "temperature", "draws"}` at the first retry
+/// of every rung.  Off (`0`) the reply is the one it always was.
 pub fn reply(
+    voice: &mut Model,
+    scorer: Option<&mut Model>,
+    previous: &str,
+    o: ReplyOptions,
+    rng: &mut Option<Mt19937>,
+) -> Result<Option<Turn>, String> {
+    autotemp::check_auto_temperature(o.auto_temperature)?;
+    if o.auto_temperature == 0.0 {
+        return reply_as_asked(voice, scorer, previous, o, rng);
+    }
+    let ReplyOptions {
+        heard,
+        index,
+        speaker,
+        mode,
+        max_length,
+        context,
+        temperature,
+        k,
+        beam,
+        step_penalty,
+        avoid_repeats,
+        avoid_word_repeats,
+        explore,
+        learn,
+        mut veto,
+        think,
+        think_depth,
+        mut stream,
+        mut trace,
+        auto_temperature,
+    } = o;
+    let mut scorer = scorer;
+    let mut rung: Option<f64> = None;
+    let search = |t: Option<f64>| -> Result<Option<Turn>, String> {
+        if let Some(t) = t.filter(|&t| rung != Some(t)) {
+            rung = Some(t);
+            notice(
+                &mut trace,
+                "climb",
+                vec![
+                    ("temperature", Json::Num(t)),
+                    ("draws", Json::Int(autotemp::draws_at(t) as i64)),
+                ],
+            );
+        }
+        // the reply as asked, or the same reply as sampled walks at the rung's temperature
+        let asked = ReplyOptions {
+            heard,
+            index,
+            speaker,
+            mode: if t.is_some() { "sample" } else { mode },
+            max_length,
+            context,
+            temperature: t.unwrap_or(temperature),
+            k,
+            beam,
+            step_penalty,
+            avoid_repeats,
+            avoid_word_repeats,
+            explore,
+            learn,
+            veto: veto.as_deref_mut(),
+            think,
+            think_depth,
+            stream: stream.as_deref_mut(),
+            trace: trace.as_deref_mut(),
+            auto_temperature: 0.0,
+        };
+        reply_as_asked(voice, scorer.as_deref_mut(), previous, asked, rng)
+    };
+    let (turn, record) = autotemp::climb(
+        search,
+        |found: &Option<Turn>| found.clone().map(Some),
+        temperature,
+        auto_temperature,
+        mode == "sample",
+    )?;
+    Ok(turn.map(|turn| Turn {
+        auto_temperature: Some(record),
+        ..turn
+    }))
+}
+
+/// One reply exactly as asked - [`reply`] without the temperature ladder.
+fn reply_as_asked(
     voice: &mut Model,
     scorer: Option<&mut Model>,
     previous: &str,
@@ -1212,6 +1325,7 @@ pub fn reply(
         labels: spoken.labels.clone(),
         node_ids: spoken.node_ids.clone(),
         step_costs: spoken.step_costs.clone(),
+        auto_temperature: None,
     }))
 }
 
@@ -1232,6 +1346,7 @@ pub fn converse(
     if o.k < 1 || o.temperature < 0.0 || o.step_penalty < 0.0 {
         return Err("invalid converse options".to_string());
     }
+    autotemp::check_auto_temperature(o.auto_temperature)?;
     let speakers: Vec<String> = if o.speakers.is_empty() {
         DEFAULT_SPEAKERS.iter().map(|s| s.to_string()).collect()
     } else {
@@ -1295,6 +1410,7 @@ pub fn converse(
             think_depth: o.think_depth,
             trace: None,
             stream: stream.as_deref_mut(),
+            auto_temperature: o.auto_temperature,
         };
         let said_next = match (index % 2, partner.as_deref_mut()) {
             (1, Some(other)) => reply(other, Some(&mut *model), &previous, options, &mut rng)?,
@@ -1641,6 +1757,7 @@ impl Turn {
                 .iter()
                 .filter_map(|v| v.as_f64())
                 .collect(),
+            auto_temperature: AutoTemperature::from_json(doc.at("auto_temperature")),
         })
     }
 }
@@ -1688,6 +1805,8 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         learn: !args.on("no-learn"),
         think: !args.on("no-think"),
         think_depth: args.usize("think-depth", THINK_DEPTH)?,
+        // a voice with nothing to say tries again, hotter, before the conversation stops
+        auto_temperature: crate::cli::auto_temperature(args)?,
     };
     // --stream: the conversation is printed as it happens - each turn the moment it is spoken, and
     // before it what the voice does: the context it continues, a draft it catches itself on, where it
@@ -1841,6 +1960,7 @@ fn converse_request(svc: &Arc<Service>, r: &Request) -> Result<ConverseRequest, 
         learn: r.flag("learn", true),
         think: r.flag("think", true),
         think_depth: r.usize("think_depth", THINK_DEPTH)?,
+        auto_temperature: crate::llm::fields::Fields::of(r).number_or("auto_temperature", 0.0, Some(0.0))?,
     };
     Ok(ConverseRequest {
         opening: r.text("opening", ""),
@@ -2319,5 +2439,195 @@ mod tests {
         if record.taught >= 0 {
             assert!(m.g.num_edges() > before, "a BACK edge was taught");
         }
+    }
+
+    // -- auto-temperature (`../../../RadixCyclicNN/SPEC-SearchAndTraining.md` section 10) -----------
+
+    /// Python's `tests/test_autotemp.py` voice: three lines, three epochs.
+    fn voice() -> Model {
+        let mut m = Model::new(1, GraphOptions::default()).unwrap();
+        let texts: Vec<String> = [
+            "the cat sat on the mat",
+            "the dog sat on the log",
+            "a bird flew over the hill",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        m.train(
+            &texts,
+            &TrainOptions {
+                epochs: 3,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        m
+    }
+
+    /// Every text the beam offers from the start: a reply as asked, vetoed
+    /// all of them, has nothing it may say.
+    fn beams_texts() -> HashSet<String> {
+        let found = voice()
+            .predict(
+                "",
+                &PredictOptions {
+                    length: 0,
+                    mode: "beam".to_string(),
+                    k: 3,
+                    to_end: true,
+                    max_length: Some(60),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        found.top.iter().map(|r| r.full_text.clone()).collect()
+    }
+
+    /// The beam's three best, nothing heard but `previous`, climbing to `auto_temperature`.
+    fn asked<'a, 'v>(
+        heard: &'a Heard,
+        veto: Option<&'a mut Veto<'v>>,
+        trace: Option<&'a mut Trace<'v>>,
+        auto_temperature: f64,
+    ) -> ReplyOptions<'a, 'v, 'static> {
+        ReplyOptions {
+            heard,
+            index: 1,
+            speaker: "B",
+            mode: "beam",
+            max_length: 60,
+            context: 12,
+            temperature: 1.0,
+            k: 3,
+            beam: 0,
+            step_penalty: 0.0,
+            avoid_repeats: true,
+            avoid_word_repeats: true,
+            explore: EXPLORE,
+            learn: true,
+            veto,
+            think: true,
+            think_depth: THINK_DEPTH,
+            stream: None,
+            trace,
+            auto_temperature,
+        }
+    }
+
+    #[test]
+    fn a_reply_with_nothing_to_say_tries_again_hotter() {
+        // every text the beam can offer is vetoed, but a warmer walk says something else, and that is the turn
+        let vetoed = beams_texts();
+        let heard = Heard::new(&[String::new()]);
+        let mut veto = |_: &mut Model, text: &str| vetoed.contains(text);
+        let off = reply(
+            &mut voice(),
+            None,
+            "",
+            asked(&heard, Some(&mut veto), None, 0.0),
+            &mut Some(Mt19937::new(1)),
+        )
+        .unwrap();
+        assert!(off.is_none(), "{off:?}");
+        let mut events: Vec<Json> = Vec::new();
+        let mut trace = |event: &Json| events.push(event.clone());
+        let turn = reply(
+            &mut voice(),
+            None,
+            "",
+            asked(&heard, Some(&mut veto), Some(&mut trace), 2.0),
+            &mut Some(Mt19937::new(1)),
+        )
+        .unwrap()
+        .expect("a turn");
+        assert!(!vetoed.contains(&turn.text));
+        let record = turn.auto_temperature.clone().expect("the climb's record");
+        assert!(record.climbed && record.found);
+        assert_eq!(turn.to_json().at("auto_temperature"), &record.to_json());
+        assert_eq!(
+            Turn::from_json(&turn.to_json()).unwrap().auto_temperature,
+            Some(record.clone())
+        );
+        let climbs: Vec<&Json> = events
+            .iter()
+            .filter(|e| e.at("kind").as_str() == Some("climb"))
+            .collect();
+        assert_eq!(
+            climbs[0].render(0),
+            format!(
+                "{{\"kind\":\"climb\",\"temperature\":1.0,\"draws\":{}}}",
+                autotemp::AUTO_DRAWS
+            )
+        );
+        assert_eq!(record.temperature, climbs.last().unwrap().at("temperature").as_f64());
+    }
+
+    #[test]
+    fn a_reply_that_answers_is_left_alone() {
+        let heard = Heard::new(&["the cat".to_string()]);
+        let turn = reply(
+            &mut voice(),
+            None,
+            "the cat",
+            asked(&heard, None, None, 2.0),
+            &mut Some(Mt19937::new(1)),
+        )
+        .unwrap()
+        .unwrap();
+        let plain = reply(
+            &mut voice(),
+            None,
+            "the cat",
+            asked(&heard, None, None, 0.0),
+            &mut Some(Mt19937::new(1)),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(turn.text, plain.text);
+        assert_eq!(
+            turn.auto_temperature.unwrap().to_json().render(0),
+            "{\"ceiling\":2.0,\"climbed\":false,\"found\":true,\"temperature\":null,\"tries\":1}"
+        );
+        assert!(plain.to_json().get("auto_temperature").is_none());
+    }
+
+    #[test]
+    fn a_conversation_goes_on_where_it_would_have_stopped() {
+        let vetoed = beams_texts();
+        let mut veto = |_: &mut Model, text: &str| vetoed.contains(text);
+        let o = ConverseOptions {
+            turns: 2,
+            k: 3,
+            seed: Some(4),
+            ..Default::default()
+        };
+        let stopped = converse(&mut voice(), None, "", &o, Some(&mut veto), None).unwrap();
+        assert!(stopped.is_empty(), "{stopped:?}");
+        let climbing = ConverseOptions {
+            auto_temperature: 2.0,
+            ..o
+        };
+        let going = converse(&mut voice(), None, "", &climbing, Some(&mut veto), None).unwrap();
+        assert!(!going.is_empty());
+        assert!(going.iter().all(|t| t.auto_temperature.is_some()), "{going:?}");
+    }
+
+    #[test]
+    fn the_ceiling_is_checked() {
+        let heard = Heard::new(&["the cat".to_string()]);
+        let refused = reply(
+            &mut voice(),
+            None,
+            "the cat",
+            asked(&heard, None, None, -1.0),
+            &mut None,
+        );
+        assert!(refused.is_err());
+        let o = ConverseOptions {
+            auto_temperature: f64::NAN,
+            ..Default::default()
+        };
+        assert!(converse(&mut voice(), None, "the cat", &o, None, None).is_err());
     }
 }

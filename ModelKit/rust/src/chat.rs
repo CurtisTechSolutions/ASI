@@ -435,6 +435,8 @@ impl<'a> Chat<'a> {
                     think_depth: crate::thinking::THINK_DEPTH,
                     trace: None,
                     stream: None,
+                    // the chat's replies never climb: Python's chat asks them with the ceiling off
+                    auto_temperature: 0.0,
                 };
                 reply(model, None, &line, options, &mut rng)
             })??;

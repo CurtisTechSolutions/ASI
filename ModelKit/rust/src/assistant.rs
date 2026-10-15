@@ -136,6 +136,9 @@ pub struct Ask {
     pub learn: bool,
     pub guard: bool,
     pub seed: Option<i64>,
+    /// A reply with nothing to say tries again up a ladder of temperatures to
+    /// this ceiling (0, the default: off; [`crate::dialogue::reply`]).
+    pub auto_temperature: f64,
 }
 
 impl Default for Ask {
@@ -163,6 +166,7 @@ impl Default for Ask {
             learn: true,
             guard: true,
             seed: None,
+            auto_temperature: 0.0,
         }
     }
 }
@@ -216,6 +220,12 @@ impl Ask {
         if self.step_penalty < 0.0 {
             return Err(AskError::new("step_penalty must be >= 0", Some("step_penalty")));
         }
+        if !(self.auto_temperature.is_finite() && self.auto_temperature >= 0.0) {
+            return Err(AskError::new(
+                "auto_temperature must be a finite number >= 0 (0 is off)",
+                Some("auto_temperature"),
+            ));
+        }
         for (i, seq) in self.stop.iter().enumerate() {
             if seq.is_empty() {
                 return Err(AskError::new(
@@ -252,6 +262,63 @@ impl Ask {
     /// continues it and returns only what it adds.
     pub fn prefill(&self) -> bool {
         self.messages.last().is_some_and(|m| m.role == "assistant")
+    }
+
+    /// The request as Python's `Ask.to_dict` writes it: the messages, the
+    /// dialect's settings and the dialogue's dials - `auto_temperature` last,
+    /// and only when it is on.
+    pub fn to_json(&self) -> Json {
+        let mut pairs: Vec<(String, Json)> = [
+            (
+                "messages",
+                Json::Arr(
+                    self.messages
+                        .iter()
+                        .map(|m| {
+                            Json::obj([
+                                ("role", Json::str(m.role.clone())),
+                                ("content", Json::str(m.text.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            ("system", Json::str(self.system.clone())),
+            ("model", Json::str(self.model.clone())),
+            ("max_tokens", Json::Int(self.max_tokens as i64)),
+            ("temperature", Json::Num(self.temperature)),
+            ("stop", Json::strs(self.stop.clone())),
+            ("n", Json::Int(self.n as i64)),
+            ("stream", Json::Bool(self.stream)),
+            ("tools", Json::strs(self.tools.iter().map(|t| t.name.clone()))),
+            ("thinking", Json::Bool(self.thinking)),
+            ("mode", Json::str(self.mode.clone())),
+            ("context", Json::Int(self.context as i64)),
+            ("k", Json::Int(self.k as i64)),
+            // 0 is the search's own width: Python's `None`
+            (
+                "beam",
+                if self.beam == 0 {
+                    Json::Null
+                } else {
+                    Json::Int(self.beam as i64)
+                },
+            ),
+            ("step_penalty", Json::Num(self.step_penalty)),
+            ("explore", Json::Int(self.explore as i64)),
+            ("avoid_repeats", Json::Bool(self.avoid_repeats)),
+            ("avoid_word_repeats", Json::Bool(self.avoid_word_repeats)),
+            ("learn", Json::Bool(self.learn)),
+            ("guard", Json::Bool(self.guard)),
+            ("seed", self.seed.map(Json::Int).unwrap_or(Json::Null)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        if self.auto_temperature != 0.0 {
+            pairs.push(("auto_temperature".to_string(), Json::Num(self.auto_temperature)));
+        }
+        Json::Obj(pairs)
     }
 }
 
@@ -314,22 +381,18 @@ fn field_num(body: &Json, name: &str, default: f64, minimum: Option<f64>) -> Res
     };
     if let Some(minimum) = minimum {
         if number < minimum {
+            // Python's words: the minimum is a float (`0.0`), the value as the body gave it (`-1`, `-inf`)
             return Err(AskError::new(
-                format!("{name} must be >= {} (got {})", py_num(minimum), py_num(number)),
+                format!(
+                    "{name} must be >= {} (got {})",
+                    radixnet::json::py_repr(minimum),
+                    crate::llm::fields::py_repr_of(value)
+                ),
                 Some(name),
             ));
         }
     }
     Ok(number)
-}
-
-/// A number as Python prints it in a message: `-1`, `0.5`.
-fn py_num(value: f64) -> String {
-    if value.fract() == 0.0 && value.abs() < 1e15 {
-        format!("{}", value as i64)
-    } else {
-        radixnet::json::py_repr(value)
-    }
 }
 
 fn field_bool(body: &Json, name: &str, default: bool) -> Result<bool, AskError> {
@@ -372,6 +435,7 @@ fn dials(body: &Json, ask: &mut Ask) -> Result<(), AskError> {
     ask.learn = field_bool(body, "learn", true)?;
     ask.guard = field_bool(body, "guard", true)?;
     ask.seed = field_int(body, "seed", None, None)?;
+    ask.auto_temperature = field_num(body, "auto_temperature", 0.0, Some(0.0))?;
     Ok(())
 }
 
@@ -961,6 +1025,15 @@ impl<'e> Narrator<'e> {
                 self.line(text);
             }
             "fresh" => self.line("nothing new follows the line; changing the subject with a fresh text".to_string()),
+            "climb" => {
+                // a reply with nothing to say, asked again hotter (`dialogue::reply`)
+                let draws = event.at("draws").as_i64().unwrap_or(0);
+                self.line(format!(
+                    "nothing to say yet; trying again at temperature {:.2} (at most {draws} {})",
+                    event.at("temperature").as_f64().unwrap_or(0.0),
+                    if draws == 1 { "reply" } else { "replies" }
+                ));
+            }
             _ => {}
         }
     }
@@ -1224,6 +1297,7 @@ pub fn respond(
                 },
                 stream: None,
                 trace: Some(&mut trace as &mut crate::dialogue::Trace),
+                auto_temperature: ask.auto_temperature,
             };
             reply_or_err(model, &previous, options, &mut rng)?
         };
@@ -1270,6 +1344,13 @@ pub fn respond(
                 }
             }
             Some(turn) => {
+                if let Some(climbed) = turn.auto_temperature.as_ref().filter(|r| r.climbed) {
+                    n.line(format!(
+                        "found something to say at temperature {:.2}, on try {}",
+                        climbed.temperature.unwrap_or(0.0),
+                        climbed.tries
+                    ));
+                }
                 let ending = if turn.reached_end {
                     "reached the end of a text".to_string()
                 } else {
@@ -2190,6 +2271,11 @@ fn talk_body(ctx: &Ctx, dialect: &str, history: &[Json], said: &str) -> Result<J
     if args.get("seed").is_some() {
         body.push(("seed".to_string(), Json::Int(ctx.seed)));
     }
+    // --auto-temperature: a reply with nothing to say climbs, sent only when it is on
+    let ceiling = crate::cli::auto_temperature(args)?;
+    if ceiling != 0.0 {
+        body.push(("auto_temperature".to_string(), Json::Num(ceiling)));
+    }
     let stops = args.all("stop");
     let tools = args.all("tool");
     let no_thinking = args.on("no-thinking");
@@ -2291,6 +2377,8 @@ pub fn cli(ctx: &Ctx) -> Result<(), String> {
         "anthropic" => ANTHROPIC,
         other => return Err(format!("--format must be openai or anthropic, got {other:?}")),
     };
+    // a ceiling out of range is refused before anything is said, as Python's flags refuse it
+    crate::cli::auto_temperature(args)?;
     let mut model = ctx.open(true)?;
     let guard = ctx.open_guard()?;
     let (mut negative, config) = match guard {
@@ -2591,6 +2679,135 @@ mod tests {
         assert_eq!(
             doc.at("content").as_array()[1].at("text").as_str(),
             Some(choice.text.as_str())
+        );
+    }
+
+    #[test]
+    fn either_dialect_carries_the_ceiling() {
+        for read in [parse_anthropic, parse_openai] {
+            let ask = read(&user("the cat", r#", "max_tokens": 20, "auto_temperature": 2"#)).unwrap();
+            assert_eq!(ask.auto_temperature, 2.0);
+            assert_eq!(ask.to_json().at("auto_temperature"), &Json::Num(2.0));
+            let off = read(&user("the cat", "")).unwrap();
+            assert_eq!(off.auto_temperature, 0.0);
+            assert!(
+                off.to_json().get("auto_temperature").is_none(),
+                "off, the request is the one it was"
+            );
+            // refused in Python's words
+            for (extra, why) in [
+                (
+                    r#", "auto_temperature": -1"#,
+                    "auto_temperature must be >= 0.0 (got -1)",
+                ),
+                (
+                    r#", "auto_temperature": -0.5"#,
+                    "auto_temperature must be >= 0.0 (got -0.5)",
+                ),
+                (
+                    r#", "auto_temperature": "hot""#,
+                    "auto_temperature must be a number (got string)",
+                ),
+                (
+                    r#", "auto_temperature": Infinity"#,
+                    "auto_temperature must be a finite number >= 0 (0 is off)",
+                ),
+            ] {
+                let bad = read(&user("the cat", extra)).unwrap_err();
+                assert_eq!(
+                    (bad.message.as_str(), bad.param.as_deref()),
+                    (why, Some("auto_temperature"))
+                );
+            }
+        }
+        let doc = Ask::default().to_json();
+        let keys: Vec<&str> = match &doc {
+            Json::Obj(pairs) => pairs.iter().map(|(k, _)| k.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(keys.last(), Some(&"seed"));
+        assert!(doc.at("beam").is_null(), "the search's own width is Python's None");
+    }
+
+    #[test]
+    fn the_thinking_says_what_the_climb_does() {
+        let mut deltas: Vec<Json> = Vec::new();
+        let mut emit = |event: &Json| deltas.push(event.clone());
+        let mut narrator = Narrator {
+            index: 0,
+            lines: Vec::new(),
+            emit: &mut emit,
+        };
+        narrator.trace(&parse(r#"{"kind": "climb", "temperature": 1.0, "draws": 3}"#).unwrap());
+        narrator.trace(&parse(r#"{"kind": "climb", "temperature": 0.0, "draws": 1}"#).unwrap());
+        assert_eq!(
+            narrator.lines,
+            vec![
+                "nothing to say yet; trying again at temperature 1.00 (at most 3 replies)",
+                "nothing to say yet; trying again at temperature 0.00 (at most 1 reply)",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reply_with_nothing_to_say_as_asked_says_where_it_found_something() {
+        // the guard vetoes every text the beam can start a reply with; a warmer walk says something else
+        let fresh = trained()
+            .predict(
+                "",
+                &radixnet::model::PredictOptions {
+                    length: 0,
+                    mode: "beam".to_string(),
+                    k: 5,
+                    to_end: true,
+                    max_length: Some(DEFAULT_MAX_TOKENS),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let failures: Vec<String> = fresh.top.iter().map(|r| r.full_text.clone()).collect();
+        let answer = |extra: &str| {
+            let mut negative = Model::new_negative(2, &radixnet::negative::NegativeOptions::default()).unwrap();
+            negative
+                .blame(
+                    &failures,
+                    &radixnet::negative::BlameOptions {
+                        reason: "gibberish".to_string(),
+                        severity: 5.0,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let ask = parse_openai(&user("zzq", &format!(r#", "learn": false, "seed": 3{extra}"#))).unwrap();
+            let config = FilterConfig::default();
+            respond(&mut trained(), Some(&mut negative), &config, &ask, None, &mut |_| ()).unwrap()
+        };
+        let plain = answer("");
+        assert!(plain.choices[0].turn.is_none(), "as asked, there is nothing it may say");
+        assert_eq!(plain.choices[0].stop_reason, REFUSAL);
+        let reply = answer(r#", "auto_temperature": 2"#);
+        let choice = &reply.choices[0];
+        let turn = choice.turn.as_ref().expect("a warmer walk said something");
+        let record = turn.auto_temperature.as_ref().unwrap();
+        assert!(record.climbed && record.found);
+        let lines: Vec<&str> = choice.thinking.split('\n').collect();
+        let climbed = lines
+            .iter()
+            .position(|l| l.starts_with("nothing to say yet; trying again at temperature 1.00"));
+        let found = format!(
+            "found something to say at temperature {:.2}, on try {}",
+            record.temperature.unwrap(),
+            record.tries
+        );
+        let spoken = lines
+            .iter()
+            .position(|l| *l == found)
+            .expect("the line that says where it found it");
+        assert!(climbed.unwrap() < spoken);
+        assert!(lines[spoken + 1].starts_with("saying "));
+        assert_eq!(
+            choice.turn.as_ref().unwrap().to_json().at("auto_temperature"),
+            &record.to_json()
         );
     }
 

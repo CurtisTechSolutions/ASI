@@ -91,6 +91,32 @@ impl Args {
     }
 }
 
+/// `--auto-temperature T` on `predict`, `generate`, `converse` and `talk`: the
+/// ceiling a search with no answer climbs to - nothing said, no end reached
+/// with `--to-end`, or everything vetoed - walking again up a ladder of
+/// temperatures, the asked one and then doubling up to T, three walks a rung,
+/// until one answers (`../../../RadixCyclicNN/SPEC-SearchAndTraining.md`
+/// section 10).  0, the default, is off; 2 is a good ceiling: hotter walks end no more
+/// often and say nothing more often.  Refused, in Python's words, unless it is
+/// a finite number `>= 0`.
+pub fn auto_temperature(args: &Args) -> Result<f64, String> {
+    let Some(text) = args.get("auto-temperature") else {
+        return Ok(0.0);
+    };
+    let value: f64 = text.trim().parse().map_err(|_| {
+        format!(
+            "argument --auto-temperature: expected a number, got {}",
+            radixnet::negative::python_repr(text)
+        )
+    })?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!(
+            "argument --auto-temperature: must be a finite number >= 0, got {text}"
+        ));
+    }
+    Ok(value)
+}
+
 /// Flags that take no value - every boolean flag of the Python CLI and the Go
 /// one, so a command line written for either parses here.
 pub const SWITCHES: &[&str] = &[
@@ -756,6 +782,26 @@ mod tests {
 
     fn argv(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_ceiling_is_a_finite_number_no_smaller_than_zero() {
+        let ceiling = |flags: &[&str]| {
+            let (_, args) = parse_args(&argv(flags)).unwrap();
+            auto_temperature(&args)
+        };
+        assert_eq!(ceiling(&["predict"]), Ok(0.0), "off unless asked");
+        assert_eq!(ceiling(&["predict", "--auto-temperature", "2"]), Ok(2.0));
+        assert_eq!(ceiling(&["converse", "--auto-temperature=0.5"]), Ok(0.5));
+        assert_eq!(
+            ceiling(&["talk", "--auto-temperature", "-1"]),
+            Err("argument --auto-temperature: must be a finite number >= 0, got -1".to_string())
+        );
+        assert_eq!(
+            ceiling(&["generate", "--auto-temperature", "hot"]),
+            Err("argument --auto-temperature: expected a number, got 'hot'".to_string())
+        );
+        assert!(ceiling(&["predict", "--auto-temperature", "inf"]).is_err());
     }
 
     #[test]
