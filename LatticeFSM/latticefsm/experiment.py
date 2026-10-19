@@ -74,10 +74,30 @@ def _settings(**kw) -> dict:
     return {k: v for k, v in kw.items()}
 
 
+def oracle_amounts(machine: Machine, lang, s: str, run, reward: float = 1.0, punish: bool = True) -> list[float]:
+    """What the oracle says of every step of ``run`` over ``s``: ``+reward`` where the state it landed in is
+    accepting exactly when the prefix read so far is in the language, else ``-reward`` (or nothing, without
+    ``punish``)."""
+    states: list[int] = []
+    for t in run.transitions:
+        if t.skipped is not None:
+            states.append(t.skipped)
+        states.append(t.target)
+    out = []
+    for i, st in enumerate(states):
+        if machine.lattice.states[st].accepting == lang.member(s[:i + 1]):
+            out.append(reward)
+        else:
+            out.append(-reward if punish else 0.0)
+    return out
+
+
 def teach_language(machine: Machine, name: str, episodes: int, rng: random.Random, max_length: int = 6,
                    quiet: bool = False, reward: float = 1.0, test: Sequence[tuple[str, bool]] | None = None,
-                   every: int = 0) -> list[tuple[int, float]]:
-    """Run ``episodes`` random strings through ``machine`` and credit each by whether it was classified right.
+                   every: int = 0, oracle: bool = False, punish: bool = True) -> list[tuple[int, float]]:
+    """Run ``episodes`` random strings through ``machine`` and credit each by whether it was classified right - or,
+    ``oracle``, every step by its own: whether the state it lands in classifies the prefix read so far rightly.
+    Without ``punish`` only what is right is rewarded, and what is wrong gets nothing.
 
     Returns ``(episode, accuracy on test)`` every ``every`` episodes, when
     ``test`` and ``every`` are given.  Quiet, the runs traverse nothing and
@@ -88,9 +108,12 @@ def teach_language(machine: Machine, name: str, episodes: int, rng: random.Rando
     for ep in range(1, episodes + 1):
         s = "".join(rng.choice(ALPHABET) for _ in range(rng.randint(0, max_length)))
         result = machine.run(s, quiet=quiet)
-        if result.accepted == lang.member(s):
+        if oracle:
+            if not quiet and s:
+                machine.credit_steps(oracle_amounts(machine, lang, s, result, reward, punish))
+        elif result.accepted == lang.member(s):
             machine.reward(reward)
-        else:
+        elif punish:
             machine.punish(reward)
         if test is not None and every and ep % every == 0:
             curve.append((ep, machine.accuracy(test)))

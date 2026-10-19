@@ -187,3 +187,32 @@ fn saving_writes_the_tree_without_building_it() {
     let back = Chain::from_json(&latticefsm::json::parse(&text).unwrap()).unwrap();
     assert_eq!(back.dump(), text);
 }
+
+#[test]
+fn an_oracle_answer_credits_every_guess_alone() {
+    let mut m = Chain::new(4, "word", true, 0.9).unwrap();
+    m.train_lines(&lines(&["a b c", "a b d", "a b d"]), None);
+    let toks = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
+    // b right, d guessed where c is the answer, </s> right
+    assert_eq!(m.credit_answer(&toks("a"), &toks("b c"), 0.0, 0.0), (2, 3));
+    let credited = |m: &Chain| -> (f64, f64) {
+        m.tables
+            .iter()
+            .flat_map(|t| t.values())
+            .fold((0.0, 0.0), |(r, p), n| (r + n.rewarded, p + n.punished))
+    };
+    let before = m.to_json().dump();
+    m.credit_answer(&toks("a"), &toks("b c"), 1.0, 0.0);
+    let (r, p) = credited(&m);
+    assert!(r > 0.0 && p == 0.0, "rewards only: {r} {p}");
+    m.credit_answer(&toks("a"), &toks("b c"), 0.0, 1.0);
+    assert!(credited(&m).1 > 0.0);
+    // credit moves the nodes' records, never their counts
+    let after = Chain::from_json(&m.to_json()).unwrap();
+    assert_eq!(
+        after.clock,
+        Chain::from_json(&latticefsm::json::parse(&before).unwrap())
+            .unwrap()
+            .clock
+    );
+}

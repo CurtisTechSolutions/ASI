@@ -30,7 +30,7 @@ use latticefsm::autotrain::{self, Ollama};
 use latticefsm::b64;
 use latticefsm::chain::{load_chain, Chain};
 use latticefsm::compress::{compress, expansion, fidelity, load_core, Core, Precision};
-use latticefsm::experiment::{self, teach_language};
+use latticefsm::experiment::{self, teach_language, teach_language_by, Lesson};
 use latticefsm::json::Json;
 use latticefsm::languages::{all_strings, examples, language, LANGUAGES};
 use latticefsm::machine::{load_machine, Machine, Mode, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
@@ -110,6 +110,9 @@ usage: latticefsm <command> [options]
 commands
   demo        learn a language, be stimulated, let time pass: the model in one screen
   train       teach --language over --episodes random strings; --save the machine
+              every step is credited by the oracle - is the state it lands in accepting exactly when the prefix read
+              so far is in the language? - rewarded when right, punished when wrong; --whole-run: the whole run by its
+              final answer instead; --no-punish: rewards only, nothing for what is wrong
   run TEXT    read TEXT from the start state and traverse it (--quiet: ask only); --credit R rewards (R<0 punishes);
               --from-middle starts from the middle state, the central node's
   compress    fold the matrix into its central node; --precision exact|float32|float16 or --budget BYTES;
@@ -154,6 +157,8 @@ commands
                          words or a loop drawn again, 0.2 hotter each rung, until it is an answer
               evaluate --data ...       perplexity and next-token accuracy on held-out lines
               stats | credit TEXT --amount R | ollama (is it there, which models)
+              oracle TEXT ANSWER [--rounds 3] [--amount 1] [--no-punish]: every token of the right ANSWER to TEXT as a
+                         prediction, credited alone - the guess rewarded when right, punished when wrong (rewards only)
   chain ACTION     one input to a node (\"abc\": a in node 1, b in node 2, c in node 3), the output node predicts the
                    next, walking back only until it has gathered --confidence (latticefsm/chain.py, number for number):
               train      --data ... --nodes 8 --unit char|word|sound|base64 --confidence 0.9 --held-out 10 --save F
@@ -164,6 +169,7 @@ commands
               evaluate | sweep [--thresholds 0,0.5,0.9,1]   accuracy and depth on held-out lines
               stats | credit TEXT --amount R   (without --load the data is learned first; --set-confidence T)
               teach TEXT REPLY [--max-rounds 100] [--threshold 0.95]; train --until [--max-rounds 20] [--threshold]
+              oracle TEXT ANSWER [--rounds 3] [--amount 1] [--no-punish]   as for ngram
   guard ACTION [TEXT...] --load F --save F   the negative network: blame TEXT --reason R --severity S | clear TEXT |
               judge TEXT (reject / suspect / pass, why) | forget --reason R | reset | stats
   corpus PATH... [--unit text|base64] [--show N]   what a corpus is read as: every document (zip, tar, tar.gz,
@@ -357,14 +363,19 @@ fn train(a: &Args) -> Result<(), String> {
     let test = examples(&lang, a.num("tests", 300.0) as usize, &mut rng, max_length);
     let episodes = a.num("episodes", 4000.0) as usize;
     let before = m.accuracy(&test, 0.0);
-    let curve = teach_language(
+    let lesson = Lesson {
+        quiet: a.has("quiet"),
+        reward: 1.0,
+        oracle: !a.has("whole-run"),
+        punish: !a.has("no-punish"),
+    };
+    let curve = teach_language_by(
         &mut m,
         &lang,
         episodes,
         &mut rng,
         max_length,
-        a.has("quiet"),
-        1.0,
+        lesson,
         Some(&test),
         (episodes / 8).max(1),
     );
@@ -1479,13 +1490,31 @@ fn ngram_cmd(a: &Args) -> Result<(), String> {
             let now = m.complete(text, 2 * t.of + 10, 0.0, &mut Rng::new(1));
             print_teaching(text, reply, &t, threshold, now);
         }
+        "oracle" => {
+            if texts.len() != 2 {
+                return Err("oracle TEXT ANSWER: the text and the right answer to it".to_string());
+            }
+            let (text, answer) = (&texts[0], &texts[1]);
+            let reward = a.num("amount", 1.0).abs();
+            let punish = if a.has("no-punish") { 0.0 } else { reward };
+            let (prompt, want) = (m.prompt_tokens(text), m.tokens(answer));
+            for round in 1..=(a.num("rounds", 3.0) as usize).max(1) {
+                let (right, of) = m.credit_answer(&prompt, &want, reward, punish);
+                println!("round {round}: {right} of {of} tokens of the answer predicted right");
+            }
+            let (right, of) = m.credit_answer(&prompt, &want, 0.0, 0.0);
+            println!(
+                "now {right} of {of}: {}",
+                m.complete(text, want.len() + 5, 0.0, &mut Rng::new(1))
+            );
+        }
         other => {
             return Err(format!(
-                "ngram {other:?}: train, autotrain, predict, generate, evaluate, stats, credit, teach or ollama"
+                "ngram {other:?}: train, autotrain, predict, generate, evaluate, stats, credit, teach, oracle or ollama"
             ))
         }
     }
-    if matches!(action, "train" | "credit" | "teach") {
+    if matches!(action, "train" | "credit" | "teach" | "oracle") {
         if let Some(path) = a.get("save") {
             m.save(path)?;
             eprintln!("saved {path}");
@@ -2055,10 +2084,28 @@ fn chain_cmd(a: &Args) -> Result<(), String> {
             let now = m.complete(text, 2 * t.of + 10, 0.0, &mut Rng::new(1));
             print_teaching(text, reply, &t, threshold, now);
         }
+        "oracle" => {
+            if texts.len() != 2 {
+                return Err("oracle TEXT ANSWER: the text and the right answer to it".to_string());
+            }
+            let (text, answer) = (&texts[0], &texts[1]);
+            let reward = a.num("amount", 1.0).abs();
+            let punish = if a.has("no-punish") { 0.0 } else { reward };
+            let (prompt, want) = (m.prompt_tokens(text), m.tokens(answer));
+            for round in 1..=(a.num("rounds", 3.0) as usize).max(1) {
+                let (right, of) = m.credit_answer(&prompt, &want, reward, punish);
+                println!("round {round}: {right} of {of} tokens of the answer predicted right");
+            }
+            let (right, of) = m.credit_answer(&prompt, &want, 0.0, 0.0);
+            println!(
+                "now {right} of {of}: {}",
+                m.complete(text, want.len() + 5, 0.0, &mut Rng::new(1))
+            );
+        }
         other => return Err(format!("unknown chain action {other:?}")),
     }
     if let Some(path) = a.get("save") {
-        if matches!(action, "train" | "credit" | "teach") {
+        if matches!(action, "train" | "credit" | "teach" | "oracle") {
             m.save(path)?;
             eprintln!("saved {path}");
         }

@@ -6,7 +6,7 @@ import { asArray, fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { AutoBadge, AutoTempFields } from "./AutoTemperature.jsx";
 import HearButton from "./HearButton.jsx";
-import { CheckField, NumberField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 import LineChart from "./LineChart.jsx";
 import { GuardBadge } from "./Verdict.jsx";
 
@@ -37,6 +37,9 @@ export default function ChatPanel({ lm, onMoved }) {
   const [autoTop, setAutoTop] = useStoredState("chat.autoTop", String(MAX_TEMPERATURE));
   const [pass, setPass] = useStoredState("chat.pass", "5");
   const [learn, setLearn] = useStoredState("chat.learn", true);
+  const [teacher, setTeacher] = useStoredState("chat.teacher", "marks");
+  const [punish, setPunish] = useStoredState("chat.punish", true);
+  const [learnAnswer, setLearnAnswer] = useStoredState("chat.learnAnswer", false);
   const [guard, setGuard] = useStoredState("chat.guard", false);
   const [teachGuard, setTeachGuard] = useStoredState("chat.teachGuard", true);
   const [ollamaModel, setOllamaModel] = useStoredState("chat.ollamaModel", "");
@@ -59,6 +62,7 @@ export default function ChatPanel({ lm, onMoved }) {
         temperature: parseNumber(temperature, 0.7),
         pass_mark: passMark,
         learn,
+        ...(teacher === "answers" ? { teacher, punish, learn_answer: learnAnswer } : {}),
         ...(guard ? { guard: true, teach_guard: teachGuard } : {}),
         ...autoBody(auto, parseNumber(autoTop, MAX_TEMPERATURE)),
         ...(ollamaModel.trim() ? { ollama_model: ollamaModel.trim() } : {}),
@@ -83,9 +87,13 @@ export default function ChatPanel({ lm, onMoved }) {
       <form className="card" onSubmit={run}>
         <h2>Chat with Ollama</h2>
         <p className="muted">
-          Ollama says a line on the topic, the {lmLabel(lm)} model replies by continuing it, and Ollama marks the
-          reply out of 10. With learn on, each reply is credited (mark - pass mark) / 5. Ollama has to be running
-          (check on the Ollama tab).
+          Ollama says a line on the topic and the {lmLabel(lm)} model replies by continuing it. As a judge, Ollama
+          marks the reply out of 10, and with learn on the whole reply is credited (mark - pass mark) / 5. As a
+          teacher, Ollama answers its own line - the oracle - and every token of that answer is a prediction the
+          model is judged on alone: its guess there, given the line and the answer so far, is rewarded when it is
+          the answer's token and punished when it is not (nothing, with rewards only). Credit only re-ranks what the
+          model already predicts; "learn the answer" also trains it on the answer, so it can come to predict words
+          it has never seen. Ollama has to be running (check on the Ollama tab).
         </p>
         <TextField label="Topic" value={topic} onChange={setTopic} />
         <div className="row">
@@ -100,7 +108,32 @@ export default function ChatPanel({ lm, onMoved }) {
           <TextField label="Ollama URL" value={url} onChange={setUrl} hint="blank: the server's default" />
         </div>
         <div className="row">
-          <CheckField label="Learn" checked={learn} onChange={setLearn} hint="credit every reply by its mark" />
+          <SelectField
+            label="Ollama is"
+            value={teacher}
+            onChange={setTeacher}
+            options={[
+              ["marks", "a judge - marks each reply out of 10"],
+              ["answers", "a teacher - answers each line; every token judged by it"],
+            ]}
+          />
+          <CheckField
+            label="Punish wrong tokens"
+            checked={punish}
+            disabled={teacher !== "answers"}
+            onChange={setPunish}
+            hint="off: rewards only"
+          />
+          <CheckField
+            label="Learn the answer"
+            checked={learnAnswer}
+            disabled={teacher !== "answers"}
+            onChange={setLearnAnswer}
+            hint="also train on the teacher's answer (imitation, not reward)"
+          />
+        </div>
+        <div className="row">
+          <CheckField label="Learn" checked={learn} onChange={setLearn} hint={teacher === "answers" ? "credit every token by the teacher's answer" : "credit every reply by its mark"} />
           <CheckField label="Guard" checked={guard} onChange={setGuard} hint="the guard judges every reply, and vetoes a rejected one" />
           <CheckField
             label="Teach the guard"
@@ -125,7 +158,9 @@ export default function ChatPanel({ lm, onMoved }) {
         ) : (
           <>
             <p className="note">
+              {result.teacher === "answers" ? "the teacher's answers: " : ""}
               {result.marks.length} mark{result.marks.length === 1 ? "" : "s"}, mean <b>{fmtNum(result.mean ?? mean(result.marks), 2)}</b> / 10
+              {result.teacher === "answers" ? " (10 × the share of each answer's tokens predicted right)" : ""}
               {overall !== null && history.length > result.marks.length ? ` · ${fmtNum(overall, 2)} over every chat this visit` : ""}
             </p>
             <ol className="dialogue">
@@ -151,6 +186,13 @@ export default function ChatPanel({ lm, onMoved }) {
                       ) : null}
                     </div>
                     <p className="bubble">{t.text || <span className="muted">(nothing)</span>}</p>
+                    {t.answer !== undefined ? (
+                      <p className="note">
+                        the teacher's answer: <b>{t.answer || "(nothing)"}</b> · {t.right} of {t.of} of its tokens predicted
+                        right
+                        {t.learned ? ` · learned ${t.learned} tokens of it` : ""}
+                      </p>
+                    ) : null}
                     {!llm ? (
                       <div className="meta">
                         <HearButton text={t.text} label={`reply ${i + 1}`} />

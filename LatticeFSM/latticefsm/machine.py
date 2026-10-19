@@ -580,6 +580,24 @@ class Machine:
     def reward(self, amount: float = 1.0) -> int:
         return self.credit(abs(amount))
 
+    def credit_steps(self, amounts: Sequence[float]) -> int:
+        """Credit every edge of the current run by its own verdict: ``amounts[i]`` - reward positive, punishment
+        negative, zero nothing - lands on the edge that read the ``i``-th symbol, in full, and on no other.  An
+        oracle that knows each step's right answer credits each step for that step alone.  Returns how many edges
+        were credited."""
+        if not self.path or all(a == 0.0 for a in amounts):
+            return 0
+        self.credits += 1
+        if self._last_focus is not None and amounts:
+            # the focus picked where the run started: it learns from how the run came out
+            self.focus_learner.learn(amounts[-1], *self._last_focus)
+        n = 0
+        for edge, amount in zip(self.path, amounts):
+            if amount != 0.0:
+                edge.credit(amount, self.clock, self.life, widen=self.reward_widening, narrow=self.punish_narrowing)
+                n += 1
+        return n
+
     def punish(self, amount: float = 1.0) -> int:
         return self.credit(-abs(amount))
 

@@ -1336,6 +1336,33 @@ impl NGram {
         }
     }
 
+    /// Every token of `answer` after `prompt` - an oracle's answer, a teacher's, `</s>` at its end - as a
+    /// prediction: the model's first guess there, given the prompt and the answer so far, rewarded by `reward` when it
+    /// is the answer's token and punished by `punish` when it is not (0: rewards only).  Each guess is credited for
+    /// itself alone, and nothing is counted.  Returns (right, of).
+    pub fn credit_answer(&mut self, prompt: &[String], answer: &[String], reward: f64, punish: f64) -> (usize, usize) {
+        let mut hist = prompt.to_vec();
+        let (mut right, mut of) = (0, 0);
+        for j in 0..=answer.len() {
+            let w = if j == answer.len() { 1 } else { self.lookup(&answer[j]) };
+            let ctx = self.context(&hist);
+            let guess = self.top(&ctx);
+            of += 1;
+            if guess == w {
+                right += 1;
+                if reward != 0.0 {
+                    self.credit(&ctx, w, reward);
+                }
+            } else if punish != 0.0 {
+                self.credit(&ctx, guess, -punish);
+            }
+            if j < answer.len() {
+                hist.push(answer[j].clone());
+            }
+        }
+        (right, of)
+    }
+
     pub fn credit_text(&mut self, text: &str, amount: f64) -> usize {
         let mut toks = self.tokens(text);
         toks.push(EOS.to_string());

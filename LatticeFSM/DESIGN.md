@@ -1218,3 +1218,45 @@ amount is discounted as before.
   modes (own 0.894 → 0.860, explore 0.944 → 0.858 over 36 runs). The edges
   near a run's start are shared by most strings, and with a full reward they
   gain as much as the edge that decided the answer.
+
+## 24. Credit by an oracle
+
+Every prediction is credited for itself, by the right answer for it:
+
+* **The machine.** `Machine::credit_steps(amounts)` puts `amounts[i]` on
+  the edge that read symbol `i`, in full, with no discount. `experiment::
+  oracle_amounts` asks the language about every prefix. A skip's two edges
+  each get their own verdict: the node skipped is judged against the first
+  symbol's prefix. `teach_language_by` with `Lesson { oracle, punish }`
+  credits a run either way. `train`, `/api/train` and the Teach tab use the
+  oracle by default. The deterministic experiments keep crediting whole
+  runs, so their recorded numbers still hold.
+* **The language models.** `credit_answer(prompt, answer, reward, punish)`
+  walks an oracle's answer, the model's own guess at every position. A right
+  guess is credited `+reward` and a wrong one `-punish`, on the guessed
+  token's edge for the N-gram model and on the nodes that guessed it for
+  the chain. Nothing is counted. Both ports agree to the number
+  (`TestRustOracleParity`).
+* **The Ollama teacher.** `chat_llm` with `teacher: "answers"` asks Ollama
+  to answer its own line, and credits the model's tokens against that
+  answer.
+
+### 24.1 Decisions
+
+* **The oracle, not the whole run.** A run's final answer says only that
+  something went wrong somewhere. Spreading it back with a discount blames
+  early steps that were right, and rewards early steps of a lucky run that
+  were wrong. Per-step verdicts measured as good or better (own 0.894 →
+  0.924, explore 0.944 → 0.944) and learned much sooner (explore 0.866 →
+  0.934 after 500 episodes).
+* **Punishment stays on.** Rewards only measured worse in every arm (own
+  0.719 and 0.839, explore 0.761 and 0.901, whole run and oracle). A wrong
+  choice that is never told so keeps its weight. And for the language
+  models, a token never guessed right is never rewarded, so a teacher's
+  answer cannot be learned from rewards alone.
+* **Credit re-ranks; it does not add words.** The N-gram model's credit
+  scales an edge's probability by its width, and the chain's changes how
+  deep its walks go. Neither can make the model predict a token it gives no
+  weight to. `learn_answer` is the honest way to add the teacher's words:
+  it is imitation, and it is labelled as such.
+

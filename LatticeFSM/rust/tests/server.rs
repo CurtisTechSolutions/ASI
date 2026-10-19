@@ -800,3 +800,92 @@ fn the_traversal_mode_and_equal_reward() {
     assert_eq!(m.str_or("mode", ""), "explore");
     assert_eq!(m.get("equal_reward"), Some(&Json::Bool(true)));
 }
+
+/// A stand-in Ollama that says one line, answers it one way, and marks anything 5.
+fn teacher(requests: usize) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    thread::spawn(move || {
+        for stream in listener.incoming().take(requests) {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut first = String::new();
+            reader.read_line(&mut first).unwrap();
+            let mut length = 0;
+            loop {
+                let mut h = String::new();
+                reader.read_line(&mut h).unwrap();
+                if h == "\r\n" {
+                    break;
+                }
+                if let Some(v) = h.to_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let prompt = parse(&String::from_utf8(body).unwrap())
+                .unwrap()
+                .str_or("prompt", "")
+                .to_string();
+            let text = if prompt.contains("Reply to this line") {
+                "the dog sat on the log"
+            } else if prompt.contains("chatting with a small language model") {
+                "the cat sat on the mat"
+            } else {
+                "5"
+            };
+            let data = Json::object()
+                .with("response", text.into())
+                .with("done", true.into())
+                .dump();
+            let out = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{data}",
+                data.len()
+            );
+            stream.write_all(out.as_bytes()).unwrap();
+        }
+    });
+    addr
+}
+
+#[test]
+fn an_ollama_teacher_judges_every_token_by_its_answer() {
+    let addr = serve(20);
+    let ollama = teacher(8);
+    post(&addr, "/api/ngram/new", r#"{"order":3,"unit":"word"}"#);
+    post(
+        &addr,
+        "/api/ngram/text",
+        r#"{"text":"the cat sat on the mat\nthe dog ran to the park"}"#,
+    );
+    let body = format!(r#"{{"model":"ngram","url":"{ollama}","turns":2,"teacher":"answers","max_tokens":10}}"#);
+    let (status, r) = post(&addr, "/api/chat/llm", &body);
+    assert_eq!(status, 200, "{r:?}");
+    assert_eq!(r.str_or("teacher", ""), "answers");
+    let turns = r.get("transcript").unwrap().as_array().unwrap();
+    let model: Vec<&Json> = turns.iter().filter(|t| t.str_or("speaker", "") == "model").collect();
+    assert_eq!(model.len(), 2);
+    let first = model[0];
+    assert_eq!(first.str_or("answer", ""), "the dog sat on the log");
+    // six words and the end, each a prediction of its own
+    assert_eq!(first.num("of", 0.0), 7.0);
+    assert!(first.num("right", -1.0) >= 0.0 && first.num("right", 0.0) <= 7.0);
+    assert!(first.get("mark").is_none());
+    // learning the answer too: the model comes to predict more of it
+    let body = format!(
+        r#"{{"model":"ngram","url":"{ollama}","turns":2,"teacher":"answers","learn_answer":true,"max_tokens":10}}"#
+    );
+    let (_, r2) = post(&addr, "/api/chat/llm", &body);
+    let model2: Vec<&Json> = r2
+        .get("transcript")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t.str_or("speaker", "") == "model")
+        .collect();
+    assert!(model2[0].num("learned", 0.0) > 0.0);
+    assert!(model2[1].num("right", 0.0) > first.num("right", 0.0), "{r2:?}");
+}

@@ -115,7 +115,7 @@ root answers a JSON 404 that says so and the API still works:
 | `POST /api/run` | `{text, stimulation?, temperature?, quiet?, from_middle?, focus?, skip?, mode?}` | the run, traversed unless quiet, from where the machine starts (or the middle, or the node `focus` picks), with skips as asked, weighed by `mode` (own / explore) for this run; a skip shows as one transition with `skipped` |
 | `POST /api/credit` | `{amount}` | reward (positive) or punish (negative) the last run |
 | `POST /api/teach` | `{source, symbol, target, amount}` | one edge, traversed and credited |
-| `POST /api/train` | `{language, episodes? (4000), max_length?}` | accuracy before and after, the curve, the table |
+| `POST /api/train` | `{language, episodes? (4000), max_length?, whole_run?, punish? (true)}` | every step credited by the oracle (the state it lands in accepting exactly when the prefix is in the language) unless `whole_run`; rewards only with `punish: false`; accuracy before and after, the curve, the table |
 | `POST /api/tick` | `{ticks}` | time passes |
 | `POST /api/stimulate` | `{amount}` or `{level}` | raise the stimulation, or set it |
 | `POST /api/new` | `{states?, alphabet?, accepting?, life?, baseline?, mode?, explore?, equal_reward?, …}` | a fresh machine in place of the old; 13 × 13 × 13 without `states` and `alphabet` |
@@ -158,7 +158,7 @@ root answers a JSON 404 that says so and the API still works:
 | `GET /api/uploads`, `POST /api/uploads`, `POST /api/uploads/delete` | `{name, content_base64 \| content, append?}`, `{name}` | the uploads (any file; big ones in pieces), written under `data/uploads` or `$LATTICEFSM_UPLOADS` |
 | `GET /api/checkpoints`, `POST /api/checkpoints/{save,restore,delete,upload}`, `GET /api/checkpoints/download?name=` | `{model, tag?}`, `{name}`, `{name, content_base64, append?}` | checkpoints of any model in `checkpoints/` or `$LATTICEFSM_CHECKPOINTS` |
 | `POST /api/converse` | `{model, opening, turns?, max_tokens?, temperature?}` | the model talking to itself |
-| `POST /api/chat/llm` | `{model, topic, turns?, pass_mark?, learn?, ollama_model?, url?}` | Ollama talks with the model and marks its replies; 502 without Ollama |
+| `POST /api/chat/llm` | `{model, topic, turns?, pass_mark?, learn?, ollama_model?, url?, teacher? (marks / answers), reward?, punish?, learn_answer?}` | Ollama talks with the model and marks its replies - or, `teacher: "answers"`, answers its own lines, every token of the answer a prediction the model is credited on alone (`answer`, `right`, `of` on each turn); 502 without Ollama |
 | `POST /api/ollama/corpus` | `{prompt, lines?, ollama_model?, url?}` | sentences Ollama writes |
 | `GET /api/status` | | every model in brief (`{"busy": true}` for one a job holds), uploads, checkpoints, the job |
 | `"job": true` on any `POST` | | run it in the background: `{job}` at once; its progress, result or error at `GET /api/job`; one at a time (409 for a second) |

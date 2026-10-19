@@ -46,6 +46,9 @@ pub trait Lm {
         rng: &mut Rng,
     ) -> (Vec<String>, Option<Vec<usize>>);
     fn credit_text(&mut self, text: &str, amount: f64) -> usize;
+    /// Every token of an oracle's `answer` to `text` as a prediction, credited for itself alone: the model's guess
+    /// there rewarded when it is the answer's, punished (by `punish`; 0: rewards only) when not.  (right, of).
+    fn credit_answer(&mut self, text: &str, answer: &str, reward: f64, punish: f64) -> (usize, usize);
     /// Every token of a text (and `</s>`) with the probability given it, and (for the chain) the depth of its walk.
     fn score(&mut self, text: &str) -> Vec<(String, f64, Option<usize>)>;
     fn teach(&mut self, text: &[String], reply: &[String], max_rounds: usize, threshold: f64) -> Teaching;
@@ -142,6 +145,10 @@ impl Lm for NGram {
     }
     fn credit_text(&mut self, text: &str, amount: f64) -> usize {
         NGram::credit_text(self, text, amount)
+    }
+    fn credit_answer(&mut self, text: &str, answer: &str, reward: f64, punish: f64) -> (usize, usize) {
+        let (prompt, answer) = (self.prompt_tokens(text), self.tokens(answer));
+        NGram::credit_answer(self, &prompt, &answer, reward, punish)
     }
     fn score(&mut self, text: &str) -> Vec<(String, f64, Option<usize>)> {
         self.score_tokens(&NGram::tokens(self, text))
@@ -245,6 +252,10 @@ impl Lm for Chain {
     }
     fn credit_text(&mut self, text: &str, amount: f64) -> usize {
         Chain::credit_text(self, text, amount)
+    }
+    fn credit_answer(&mut self, text: &str, answer: &str, reward: f64, punish: f64) -> (usize, usize) {
+        let (prompt, answer) = (self.prompt_tokens(text), self.tokens(answer));
+        Chain::credit_answer(self, &prompt, &answer, reward, punish)
     }
     fn score(&mut self, text: &str) -> Vec<(String, f64, Option<usize>)> {
         self.score_tokens(&Chain::tokens(self, text))
@@ -935,6 +946,13 @@ fn mark_of(text: &str) -> Option<f64> {
 /// the reply out of 10, and with `learn` the reply is credited `(mark - pass_mark) / 5`.  With a guard the replies
 /// are guarded, and (`teach_guard`, the default) a reply marked under the pass mark is blamed in it - "marked 3/10",
 /// severity `(pass_mark - mark) / 5` - and one marked at or above it cleared.
+///
+/// With `teacher: "answers"` the LLM is an oracle instead of a judge: it answers each of its lines itself, and every
+/// token of that answer is a prediction the model is judged on alone (`Lm::credit_answer`) - its guess there, given
+/// the line and the answer so far, rewarded `reward` when right and punished as much when wrong (nothing, with
+/// `punish: false`).  Each turn carries the answer and how many of its tokens the model got right; the marks are
+/// `10 × right / of`.  Credit only re-ranks what the model already predicts, so `learn_answer` also trains it on the
+/// line and the answer.
 pub fn chat_llm(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Result<Json, String> {
     let client = Ollama::new(
         b.get("url").and_then(Json::as_str),
@@ -946,6 +964,11 @@ pub fn chat_llm(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Resu
     let (t, seed) = (b.num("temperature", 0.0), b.num("seed", 1.0) as u64);
     let pass = b.num("pass_mark", 5.0);
     let learn = b.bool_or("learn", true);
+    // `teacher: "answers"`: the teacher answers every line itself, and the model is judged token by token against
+    // that answer (rewarded `reward` when right, punished as much unless `punish` is false); else it marks the reply
+    let answers = b.str_or("teacher", "marks") == "answers";
+    let reward = b.num("reward", 1.0).abs();
+    let punish = if b.bool_or("punish", true) { reward } else { 0.0 };
     let mut transcript: Vec<Json> = Vec::new();
     let mut said: Vec<String> = Vec::new();
     let mut marks = Vec::new();
@@ -997,6 +1020,51 @@ pub fn chat_llm(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Resu
             "A small language model was told: \"{line}\"\nIt replied: \"{reply}\"\nMark the reply from 0 (nonsense or \
              nothing) to 10 (a fluent, fitting reply). Answer with the number only."
         );
+        if answers {
+            // the teacher answers the line itself: its answer is the oracle every token of the model's is judged by
+            let ask = format!(
+                "Reply to this line as a fluent speaker would, in one short, natural sentence (at most 20 words). Reply \
+                 with the sentence only.\n\nThe line: \"{line}\"\nYour reply:"
+            );
+            let answer = parse_lines(&client.generate(&ask, 0.0, Some(60), Some(seed + i as u64))?, Some(1))
+                .into_iter()
+                .next()
+                .unwrap_or_default();
+            let mut turn = Json::object()
+                .with("speaker", "model".into())
+                .with("text", reply.as_str().into())
+                .with("answer", answer.as_str().into());
+            if let Some(a) = g.get("auto") {
+                turn = turn.with("auto", a.clone());
+            }
+            if let (Some(v), Some(sm)) = (g.get("guard"), summary) {
+                turn = turn
+                    .with("guard", v.clone())
+                    .with("vetoed", sm.get("vetoed").cloned().unwrap_or(Json::Null));
+            }
+            // how well the model predicts the teacher's answer, token by token - credited, when learning, token by
+            // token: each guess rewarded when right, punished (unless rewards only) when wrong
+            let (right, of) = if learn {
+                m.credit_answer(&line, &answer, reward, punish)
+            } else {
+                m.credit_answer(&line, &answer, 0.0, 0.0)
+            };
+            let share = if of > 0 { right as f64 / of as f64 } else { 0.0 };
+            marks.push(10.0 * share);
+            // credit only re-ranks what the model already predicts; `learn_answer` also counts the answer - imitation,
+            // not reward - so a word it has never seen can come to be predicted at all
+            if b.bool_or("learn_answer", false) && !answer.is_empty() {
+                let learned = m.train_lines(&[joined(m, &line, &answer)]);
+                turn = turn.with("learned", learned.into());
+            }
+            turn = turn
+                .with("right", right.into())
+                .with("of", of.into())
+                .with("share", share.into());
+            said.push(format!("You (the right reply): {answer}"));
+            transcript.push(turn);
+            continue;
+        }
         let mark = mark_of(&client.generate(&judge, 0.0, Some(8), Some(seed + i as u64))?).unwrap_or(0.0);
         marks.push(mark);
         let mut turn = Json::object()
@@ -1038,6 +1106,7 @@ pub fn chat_llm(m: &mut dyn Lm, b: &Json, mut guard: Option<&mut Guard>) -> Resu
         marks.iter().sum::<f64>() / marks.len() as f64
     };
     Ok(Json::object()
+        .with("teacher", if answers { "answers" } else { "marks" }.into())
         .with("transcript", Json::Array(transcript))
         .with("marks", Json::numbers(&marks))
         .with("mean", mean.into())

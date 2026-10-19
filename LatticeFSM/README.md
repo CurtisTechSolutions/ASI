@@ -224,7 +224,7 @@ busy.
 | **Talk** | a chat whose replies are the model's **predictions**: what you say, continued; each token tinted by how deep the chain walked for it; 👍 / 👎; **teach this reply** - the reply it should have given, taught round after round until N of N; **auto temperature** (on by default, as in Voice, Converse and Chat): a reply that is no answer is drawn again hotter, marked 🌡 |
 | **Network** | the network of machines (a translator, `enc>dec`, or a classifier): reinforce or correct a reply - taught until N of N - and fit a task until every pair is right |
 | **Converse** | the model talking to itself, turn after turn |
-| **Chat** | a local LLM (Ollama) talking with the model and marking every reply out of 10, the marks credited |
+| **Chat** | a local LLM (Ollama) talking with the model: as a **judge** marking every reply out of 10, the marks credited; or as a **teacher** answering its own lines, every token of the model's judged by that answer alone (rewards only, or also learning the answer, if asked) |
 | **Score** | how likely the model finds a text, token by token |
 | **Nodes** | the chain's most-seen node contexts, their guesses and confidence, and each depth's accuracy |
 | **Feedback** | good and bad texts, rewarded and punished in one go (and, ticked, taught to the guard) |
@@ -237,7 +237,7 @@ busy.
 | **3D** | the whole matrix as a cube of cells - source top to bottom, symbol into the page, target across - drawn on a canvas by hand: drag to turn, scroll to zoom, hover to read, click for the edge's record; colour by probability, seen, width or net; only the inner shells, the touched edges or one symbol; the central node, the central vertical vector and the focus node outlined |
 | **Run** | read a string at a stimulation of your choosing, traversing it or asking quietly; reward or punish the last run |
 | **Walk** | **how it traverses**: each edge by its own weighting, or **explore** (least traversed and most rewarded first) and its bonus; **reward the whole path equally**; the focus: a slider over the central vertical vector, none, or learned from the input (and what the learner reads off a string); skips and their margin; the nodes rearranging themselves (one pass, until settled, every N transitions) or two of them swapped |
-| **Teach** | teach the machine a language for some episodes, with the accuracy curve and the greedy table it ends in |
+| **Teach** | teach the machine a language for some episodes, every step credited by the oracle (or the whole run by its answer; rewards only, if asked), with the accuracy curve and the greedy table it ends in |
 | **Time** | let ticks pass; raise or set the stimulation |
 | **Compress** | fold the matrix into its central node at a precision or a budget; the code's size, its loss in state and behaviour, and its rebuild shell by shell from the centre outward; rebuild the machine to any shell; walk straight from the code, from the start or the middle; save and load codes |
 | **Machine** | a fresh machine of any shape; compress every N transitions (precision, rebuild); save and load; teach one edge deliberately |
@@ -873,6 +873,66 @@ decided the answer, and in explore mode they lock in sooner.
 ```bash
 latticefsm train --language even-b --states 13 --alphabet ab --mode explore
 latticefsm train --language even-b --states 13 --alphabet ab --mode explore --equal-reward
+```
+
+## Credit by an oracle: every step for itself
+
+Rewards and punishments come from an **oracle**, which knows the right
+answer, and each prediction is credited only for whether *it* was right:
+
+* **The machine learning a language** (`train`, `/api/train`, the Teach
+  tab). The language knows, after every symbol, whether the prefix read so
+  far is in it. So the edge that read each symbol is rewarded when the state
+  it lands in is accepting exactly when the prefix is a member, and punished
+  when not. Nothing is passed back to earlier steps. This is now the
+  default; `--whole-run` (`whole_run: true`) credits the run by its final
+  answer as before, the last edge in full and each earlier one 0.8 times
+  the next.
+* **The language models.** Predicting while training was already per
+  token: each guess at the next token is checked against the token that
+  actually comes (`--self-credit`).
+* **An Ollama teacher** (`teacher: "answers"` on `/api/chat/llm`, the Chat
+  tab). Ollama answers each of its own lines, and that answer is the oracle.
+  Every token of it is a prediction the model is judged on alone: its guess
+  there, given the line and the answer so far, is rewarded when it is the
+  answer's token and punished when it is not. `latticefsm {ngram,chain}
+  oracle TEXT ANSWER` does the same from the command line, round by round,
+  and both ports print the same thing.
+* **The translator's decoder** was already taught this way, sound by sound.
+
+`--no-punish` (`punish: false`) gives **rewards only**: what is right is
+rewarded, and what is wrong gets nothing.
+
+Measured on the machine, teaching 4 languages to machines of 4, 6 and 13
+states with seeds 1–3, 4000 episodes (mean accuracy, and in brackets after
+500 episodes):
+
+| | whole run | whole run, rewards only | oracle | oracle, rewards only |
+|---|---|---|---|---|
+| own weighting | 0.894 (0.798) | 0.719 | **0.924** (0.879) | 0.839 |
+| explore | 0.944 (0.866) | 0.761 | **0.944** (0.934) | 0.901 |
+
+* **The oracle** is as good as or better than crediting the whole run, and
+  much faster to learn: explore reaches 0.934 by episode 500.
+* **Removing punishment hurts every time.** With rewards only, a wrong
+  choice is never told so: it keeps its weight, level with an untried edge,
+  and the machine cannot tell a mistake from the unknown. The oracle softens
+  the loss, because the right steps of a wrong run are still rewarded.
+
+**With a teacher's answer**, rewards only cannot teach a word the model never
+guesses: no guess is right, so nothing is rewarded. On a word trigram model
+trained on `data/corpus`, given "how are you" with the answer "i am fine
+thank you", 20 rounds got 2 of its 6 tokens right with punishment and 0 with
+rewards only. For the chain, credit changes how far back each walk looks,
+not what it predicts, so its 7 of 20 never moved. Credit only re-ranks what a
+model already predicts. **Learn the answer** (`learn_answer: true`) also
+trains the model on it. That is imitation rather than reward, but it is what
+lets a model come to say a word at all.
+
+```bash
+latticefsm train --language even-b --states 13 --alphabet ab --mode explore       # every step by the oracle
+latticefsm train --language even-b --states 13 --alphabet ab --whole-run --no-punish
+latticefsm ngram oracle "how are you" "i am fine thank you" --load ngram.json --rounds 20
 ```
 
 ## Networks of machines

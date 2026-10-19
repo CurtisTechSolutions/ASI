@@ -710,6 +710,29 @@ class NGram:
             rec[0] = max(WIDTH_MIN, rec[0] / (1.0 + self.punish_narrowing * -amount))
             rec[2] -= amount
 
+    def credit_answer(self, prompt: Sequence[str], answer: Sequence[str], reward: float = 1.0,
+                      punish: float = 1.0) -> tuple[int, int]:
+        """Every token of ``answer`` after ``prompt`` - an oracle's answer, a teacher's, ``</s>`` at its end - as a
+        prediction: the model's first guess there, given the prompt and the answer so far, rewarded by ``reward`` when
+        it is the answer's token and punished by ``punish`` when it is not (0: rewards only).  Each guess is credited
+        for itself alone, and nothing is counted.  Returns (right, of)."""
+        hist, answer = list(prompt), list(answer)
+        right = of = 0
+        for j in range(len(answer) + 1):
+            w = 1 if j == len(answer) else self._id(answer[j], False)
+            ctx = self.context(hist)
+            guess = self.top(ctx)
+            of += 1
+            if guess == w:
+                right += 1
+                if reward:
+                    self.credit(ctx, w, reward)
+            elif punish:
+                self.credit(ctx, guess, -punish)
+            if j < len(answer):
+                hist.append(answer[j])
+        return right, of
+
     def credit_text(self, text: str | Sequence[str], amount: float) -> int:
         """Every edge a text takes, ``</s>`` included, credited ``amount``.  Returns how many."""
         toks = self.tokens(text) if isinstance(text, str) else list(text)

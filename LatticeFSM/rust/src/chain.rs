@@ -894,6 +894,40 @@ impl Chain {
         self.credit_tokens(&toks, amount)
     }
 
+    /// Every input of `answer` after `prompt` - an oracle's answer, a teacher's, `</s>` at its end - as a
+    /// prediction: the chain's guess there, given the prompt and the answer so far, rewarded by `reward` on the walk
+    /// to it when it is the answer's input and punished by `punish` when it is not (0: rewards only).  Each guess is
+    /// credited for itself alone, and nothing is counted.  Returns (right, of).
+    pub fn credit_answer(&mut self, prompt: &[String], answer: &[String], reward: f64, punish: f64) -> (usize, usize) {
+        let mut all = prompt.to_vec();
+        all.extend(answer.iter().cloned());
+        let mut ids = self.history_ids(&all);
+        ids.push(1);
+        let (mut right, mut of) = (0, 0);
+        for i in 1 + prompt.len()..ids.len() {
+            let (hist, w) = (&ids[..i], ids[i]);
+            let d = self.walk(hist, None);
+            let guess = {
+                let path = self.path(hist, d);
+                if path.is_empty() {
+                    1
+                } else {
+                    self.guess(&path)
+                }
+            };
+            of += 1;
+            if guess == w {
+                right += 1;
+                if reward != 0.0 && d.is_some() {
+                    self.credit_walk(hist, d, guess, reward);
+                }
+            } else if punish != 0.0 && d.is_some() {
+                self.credit_walk(hist, d, guess, -punish);
+            }
+        }
+        (right, of)
+    }
+
     pub fn credit_tokens(&mut self, toks: &[String], amount: f64) -> usize {
         let mut ids = self.history_ids(toks);
         ids.push(1);

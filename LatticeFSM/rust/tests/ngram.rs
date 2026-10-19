@@ -291,3 +291,29 @@ fn parallel_training_and_evaluation_preserve_online_state_and_rank_limit() {
     assert_eq!(got.top5, Some(five as f64 / limit as f64));
     assert_eq!(batched.to_json().dump(), before);
 }
+
+#[test]
+fn an_oracle_answer_credits_every_guess_alone() {
+    let lines: Vec<String> = ["a b c", "a b d", "a b d"].iter().map(|s| s.to_string()).collect();
+    let toks = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
+    for punish in [1.0, 0.0] {
+        let mut m = NGram::new(3, "word", true, 1.0).unwrap();
+        m.train_lines(&lines, None);
+        // after "a": b is right; after "a b" it guesses d where the oracle says c; after "a b c", </s> is right
+        assert_eq!(m.credit_answer(&toks("a"), &toks("b c"), 0.0, 0.0), (2, 3));
+        let before = m.n_grams();
+        let mut last = (0, 0);
+        for _ in 0..30 {
+            last = m.credit_answer(&toks("a"), &toks("b c"), 1.0, punish);
+        }
+        // credit counts nothing
+        assert_eq!(m.n_grams(), before);
+        if punish > 0.0 {
+            // the wrong guess punished alone until the right one takes its place
+            assert_eq!(m.credit_answer(&toks("a"), &toks("b c"), 0.0, 0.0), (3, 3), "{last:?}");
+        } else {
+            // rewards only: a guess that is never right is never told so, and stays
+            assert_eq!(m.credit_answer(&toks("a"), &toks("b c"), 0.0, 0.0), (2, 3));
+        }
+    }
+}

@@ -1652,6 +1652,87 @@ class TestExploreMode(unittest.TestCase):
         self.assertGreaterEqual(m.accuracy(test), 0.95)
 
 
+class TestOracleCredit(unittest.TestCase):
+    """Credit by an oracle: every step, token or piece judged by the right answer for it alone, rewarded when right
+    and - unless only rewards are given - punished when wrong."""
+
+    def test_each_step_gets_its_own_credit(self):
+        m = Machine(3, "ab", accepting=[0], temperature=0)
+        m.run("aba")
+        path = list(m.path)
+        self.assertEqual(m.credit_steps([1.0, -1.0, 0.0]), 2)
+        self.assertEqual([(e.rewarded, e.punished) for e in path], [(1.0, 0.0), (0.0, 1.0), (0.0, 0.0)])
+
+    def test_the_oracle_judges_every_prefix(self):
+        from latticefsm.experiment import oracle_amounts
+        from latticefsm.languages import language
+        lang = language("even-b")
+        right = Machine(2, "ab", accepting=list(lang.accepting), temperature=0)
+        for s, a, t in ((0, "a", 0), (1, "a", 1), (0, "b", 1), (1, "b", 0)):
+            right.teach(s, a, t, 5.0)
+        self.assertEqual(oracle_amounts(right, lang, "abba", right.run("abba", quiet=True)), [1.0] * 4)
+        wrong = Machine(2, "ab", accepting=list(lang.accepting), temperature=0)
+        for s, a in ((0, "a"), (1, "a"), (0, "b"), (1, "b")):
+            wrong.teach(s, a, 1, 5.0)
+        run = wrong.run("abba", quiet=True)
+        self.assertEqual(oracle_amounts(wrong, lang, "abba", run), [-1.0, 1.0, -1.0, -1.0])
+        self.assertEqual(oracle_amounts(wrong, lang, "abba", run, punish=False), [0.0, 1.0, 0.0, 0.0])
+
+    def test_it_learns_a_language_by_the_oracle(self):
+        from latticefsm.experiment import teach_language
+        from latticefsm.languages import examples, language
+        lang = language("even-b")
+        test = examples(lang, 300, random.Random(7), 6)
+        m = Machine(6, "ab", accepting=lang.accepting, seed=1)
+        teach_language(m, "even-b", 4000, random.Random(1), oracle=True)
+        self.assertGreaterEqual(m.accuracy(test), 0.95)
+
+    def test_an_oracle_answer_credits_every_guess_alone(self):
+        from latticefsm.chain import Chain
+        from latticefsm.ngram import NGram
+        lines = ["a b c", "a b d", "a b d"]
+        for punish in (1.0, 0.0):
+            m = NGram(3, "word")
+            m.train_lines(lines, predict=False)
+            # after "a": b is right; after "a b" it guesses d where the oracle says c; after "a b c", </s> is right
+            self.assertEqual(m.credit_answer(["a"], ["b", "c"], 0.0, 0.0), (2, 3))
+            grams = m.stats()["ngrams"]
+            for _ in range(30):
+                m.credit_answer(["a"], ["b", "c"], 1.0, punish)
+            self.assertEqual(m.stats()["ngrams"], grams)  # credit counts nothing
+            # punished alone, the wrong guess gives way; rewards only, it is never told and stays
+            self.assertEqual(m.credit_answer(["a"], ["b", "c"], 0.0, 0.0), (3, 3) if punish else (2, 3))
+        c = Chain(4, "word")
+        c.train_lines(lines, predict=False)
+        self.assertEqual(c.credit_answer(["a"], ["b", "c"], 0.0, 0.0), (2, 3))
+        c.credit_answer(["a"], ["b", "c"], 1.0, 0.0)
+        nodes = [n for t in c.tables for n in t.values()]
+        self.assertGreater(sum(n.rewarded for n in nodes), 0)
+        self.assertEqual(sum(n.punished for n in nodes), 0)
+
+
+@unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+class TestRustOracleParity(unittest.TestCase):
+    """Credit by an oracle's answer is deterministic: both ports judge and credit every token the same, round by
+    round, rewards only or not."""
+
+    def cli(self, port, *args):
+        cmd = [sys.executable, "-m", "latticefsm"] if port == "py" else [RUST]
+        return subprocess.run([*cmd, *args], cwd=ROOT, check=True, capture_output=True, text=True).stdout
+
+    def test_oracle_rounds_match(self):
+        with tempfile.TemporaryDirectory() as d:
+            for model, train in (("ngram", ("--order", "3")), ("chain", ("--nodes", "6"))):
+                path = os.path.join(d, f"{model}.json")
+                self.cli("rs", model, "train", *train, "--data", "data/corpus", "--save", path)
+                for extra in ((), ("--no-punish",)):
+                    args = (model, "oracle", "the brain is", "a directed graph", "--load", path, "--rounds", "6",
+                            *extra)
+                    py, rs = self.cli("py", *args), self.cli("rs", *args)
+                    self.assertEqual(py, rs, (model, extra))
+                    self.assertIn("round 6:", rs)
+
+
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
 class TestRustExploreParity(unittest.TestCase):
     """A machine trained in the explore mode by one port reads in the other with its mode, and walks the same greedy

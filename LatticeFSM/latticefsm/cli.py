@@ -130,7 +130,8 @@ def cmd_train(args) -> int:
           f"{', quietly' if args.quiet else ''}")
     print(f"  accuracy before {m.accuracy(test):.3f}")
     for ep, acc in experiment.teach_language(m, lang.name, args.episodes, rng, args.max_length, quiet=args.quiet,
-                                             test=test, every=max(1, args.episodes // 8)):
+                                             test=test, every=max(1, args.episodes // 8),
+                                             oracle=not args.whole_run, punish=not args.no_punish):
         print(f"  after {ep:>6}: {acc:.3f}")
     _table(m)
     _save(m, args)
@@ -602,7 +603,19 @@ def cmd_ngram(args) -> int:
             raise SystemExit("teach TEXT REPLY: the text and the reply that should follow it")
         _print_teaching(m, args.text[0], args.text[1],
                         m.teach(args.text[0], args.text[1], args.max_rounds, args.threshold), args.threshold)
-    if args.save and args.action in ("train", "credit", "teach"):
+    elif args.action == "oracle":
+        if len(args.text) != 2:
+            raise SystemExit("oracle TEXT ANSWER: the text and the right answer to it")
+        import random as _random
+        reward = abs(args.amount)
+        punish = 0.0 if args.no_punish else reward
+        prompt, want = m.prompt_tokens(args.text[0]), m.tokens(args.text[1])
+        for k in range(1, max(1, args.rounds) + 1):
+            right, of = m.credit_answer(prompt, want, reward, punish)
+            print(f"round {k}: {right} of {of} tokens of the answer predicted right")
+        right, of = m.credit_answer(prompt, want, 0.0, 0.0)
+        print(f"now {right} of {of}: {m.complete(args.text[0], len(want) + 5, 0.0, _random.Random(1))}")
+    if args.save and args.action in ("train", "credit", "teach", "oracle"):
         m.save(args.save)
         print(f"saved {args.save}", file=sys.stderr)
     return 0
@@ -722,7 +735,19 @@ def cmd_chain(args) -> int:
             raise SystemExit("teach TEXT REPLY: the text and the reply that should follow it")
         _print_teaching(m, args.text[0], args.text[1],
                         m.teach(args.text[0], args.text[1], args.max_rounds, args.threshold), args.threshold)
-    if args.save and args.action in ("train", "credit", "teach"):
+    elif args.action == "oracle":
+        if len(args.text) != 2:
+            raise SystemExit("oracle TEXT ANSWER: the text and the right answer to it")
+        import random as _random
+        reward = abs(args.amount)
+        punish = 0.0 if args.no_punish else reward
+        prompt, want = m.prompt_tokens(args.text[0]), m.tokens(args.text[1])
+        for k in range(1, max(1, args.rounds) + 1):
+            right, of = m.credit_answer(prompt, want, reward, punish)
+            print(f"round {k}: {right} of {of} tokens of the answer predicted right")
+        right, of = m.credit_answer(prompt, want, 0.0, 0.0)
+        print(f"now {right} of {of}: {m.complete(args.text[0], len(want) + 5, 0.0, _random.Random(1))}")
+    if args.save and args.action in ("train", "credit", "teach", "oracle"):
         m.save(args.save)
         print(f"saved {args.save}", file=sys.stderr)
     return 0
@@ -905,6 +930,10 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--max-length", type=int, default=6)
     q.add_argument("--tests", type=int, default=300)
     q.add_argument("--quiet", action="store_true", help="run the strings without traversing: the control")
+    q.add_argument("--whole-run", action="store_true",
+                   help="credit the whole run by its final answer, instead of every step by the oracle (is the state "
+                        "it lands in accepting exactly when the prefix read so far is in the language?)")
+    q.add_argument("--no-punish", action="store_true", help="rewards only: nothing for what is wrong")
     q = add("run", cmd_run, "read a string from the start state")
     q.add_argument("text")
     q.add_argument("--stimulation", type=float, default=None, help="run at this level instead of the machine's")
@@ -992,7 +1021,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = add("ngram", cmd_ngram, "predict the next thing: an N-gram model trained on a corpus or with Ollama",
             machine=False, load=False)
     q.add_argument("action", choices=("train", "autotrain", "predict", "generate", "evaluate", "stats", "credit",
-                                      "teach", "ollama"))
+                                      "teach", "ollama", "oracle"))
     q.add_argument("text", nargs="*", help="predict / generate / credit: the texts")
     q.add_argument("--data", nargs="+", default=None, help="text files or directories (default data/corpus)")
     q.add_argument("--load", default=None, help="a saved model (train / autotrain continue it when it exists)")
@@ -1022,6 +1051,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--tries", type=int, default=None, help="--auto-temperature: draws at each rung above 0 (3)")
     q.add_argument("--seed", type=int, default=1)
     q.add_argument("--amount", type=float, default=1.0, help="credit: positive rewards, negative punishes")
+    q.add_argument("--no-punish", action="store_true", help="oracle: rewards only, nothing for a wrong guess")
     q.add_argument("--ollama", action="store_true", help="autotrain: use Ollama (else the corpus only)")
     q.add_argument("--url", default=None, help="Ollama's address (default $OLLAMA_HOST or http://127.0.0.1:11434)")
     q.add_argument("--model", default=None, help="the Ollama model (default $LATTICEFSM_OLLAMA_MODEL or llama3.2)")
@@ -1037,7 +1067,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--prefix-bytes", type=int, default=64)
     q = add("chain", cmd_chain, "one input to a node, the output node predicts the next: walks only as deep as "
             "confidence needs", machine=False, load=False)
-    q.add_argument("action", choices=("train", "predict", "generate", "evaluate", "sweep", "stats", "credit", "teach"))
+    q.add_argument("action", choices=("train", "predict", "generate", "evaluate", "sweep", "stats", "credit", "teach",
+                                      "oracle"))
     q.add_argument("text", nargs="*", help="predict / generate / credit: the texts")
     q.add_argument("--data", nargs="+", default=None, help="files or directories (default data/corpus)")
     q.add_argument("--load", default=None, help="a saved chain (without one, the data is learned first)")
@@ -1071,6 +1102,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--tries", type=int, default=None, help="--auto-temperature: draws at each rung above 0 (3)")
     q.add_argument("--seed", type=int, default=1)
     q.add_argument("--amount", type=float, default=1.0, help="credit: positive rewards, negative punishes")
+    q.add_argument("--rounds", type=int, default=3, help="oracle: how many passes over the answer")
+    q.add_argument("--no-punish", action="store_true", help="oracle: rewards only, nothing for a wrong guess")
     q = add("base64", cmd_base64, "encode anything (a file or a text) as base64, or decode it back", machine=False,
             load=False)
     q.add_argument("action", choices=("encode", "decode"))

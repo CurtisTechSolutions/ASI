@@ -80,7 +80,7 @@ use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use crate::autotrain::Ollama;
 use crate::chain::{load_chain, Chain};
 use crate::compress::{compress, expansion, fidelity, load_core, Precision};
-use crate::experiment::teach_language;
+use crate::experiment::{teach_language_by, Lesson};
 use crate::guard::{load_guard, Guard};
 use crate::http::{self, Handler, Request, Response};
 use crate::job::Job;
@@ -1147,13 +1147,21 @@ fn train(m: &mut Machine, body: &Json) -> Result<Json, String> {
     let test = examples(&lang, 200, &mut rng, max_length);
     let before = m.accuracy(&test, 0.0);
     let every = (episodes / 10).max(1);
-    let curve = teach_language(m, &lang, episodes, &mut rng, max_length, false, 1.0, Some(&test), every);
+    // every step credited by the oracle unless `whole_run`; punished when wrong unless `punish` is false
+    let lesson = Lesson {
+        oracle: !body.bool_or("whole_run", false),
+        punish: body.bool_or("punish", true),
+        ..Lesson::default()
+    };
+    let curve = teach_language_by(m, &lang, episodes, &mut rng, max_length, lesson, Some(&test), every);
     let after = m.accuracy(&test, 0.0);
     Ok(Json::object()
         .with("language", lang.name.into())
         .with("episodes", episodes.into())
         .with("before", before.into())
         .with("after", after.into())
+        .with("credit", if lesson.oracle { "oracle" } else { "whole run" }.into())
+        .with("punish", lesson.punish.into())
         .with(
             "curve",
             Json::Array(

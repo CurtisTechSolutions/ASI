@@ -77,15 +77,99 @@ pub fn teach_language(
     test: Option<&[(String, bool)]>,
     every: usize,
 ) -> Vec<(usize, f64)> {
+    let lesson = Lesson {
+        quiet,
+        reward,
+        ..Lesson::default()
+    };
+    teach_language_by(machine, lang, episodes, rng, max_length, lesson, test, every)
+}
+
+/// How a lesson is credited.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lesson {
+    /// Run the strings without traversing: the control.
+    pub quiet: bool,
+    pub reward: f64,
+    /// Credit every step by the oracle - whether the state it lands in classifies the prefix read so far
+    /// rightly - instead of the whole run by its final answer.
+    pub oracle: bool,
+    /// Punish what is wrong; without it a wrong step (or run) gets nothing, and only what is right is rewarded.
+    pub punish: bool,
+}
+
+impl Default for Lesson {
+    fn default() -> Lesson {
+        Lesson {
+            quiet: false,
+            reward: 1.0,
+            oracle: false,
+            punish: true,
+        }
+    }
+}
+
+/// What the oracle says of every step of `run` over `s`: `+reward` where the state it landed in is accepting exactly
+/// when the prefix read so far is in the language, else `-reward` (or nothing, without `punish`).
+pub fn oracle_amounts(
+    machine: &Machine,
+    lang: &Language,
+    s: &str,
+    run: &crate::machine::Run,
+    lesson: &Lesson,
+) -> Vec<f64> {
+    let mut states = Vec::with_capacity(s.len());
+    for t in &run.transitions {
+        if let Some(mid) = t.skipped {
+            states.push(mid);
+        }
+        states.push(t.target);
+    }
+    let chars: Vec<char> = s.chars().collect();
+    states
+        .iter()
+        .enumerate()
+        .map(|(i, st)| {
+            let prefix: String = chars[..=i.min(chars.len() - 1)].iter().collect();
+            if machine.lattice.states[*st].accepting == (lang.member)(&prefix) {
+                lesson.reward
+            } else if lesson.punish {
+                -lesson.reward
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// `episodes` random strings run through `machine` and credited as `lesson` says: the whole run by its final answer
+/// (rewarded when right, punished when wrong), or - `oracle` - every step by its own.  Returns `(episode, accuracy
+/// on test)` every `every` episodes, when `test` and `every` are given.
+#[allow(clippy::too_many_arguments)]
+pub fn teach_language_by(
+    machine: &mut Machine,
+    lang: &Language,
+    episodes: usize,
+    rng: &mut Rng,
+    max_length: usize,
+    lesson: Lesson,
+    test: Option<&[(String, bool)]>,
+    every: usize,
+) -> Vec<(usize, f64)> {
     let mut curve = Vec::new();
     for ep in 1..=episodes {
         let s = random_string(rng, max_length);
         let symbols = machine.tokenize(&s).expect("over the alphabet");
-        let result = machine.run(&symbols, None, None, quiet);
-        if result.accepted == (lang.member)(&s) {
-            machine.reward(reward);
-        } else {
-            machine.punish(reward);
+        let result = machine.run(&symbols, None, None, lesson.quiet);
+        if lesson.oracle {
+            if !lesson.quiet && !s.is_empty() {
+                let amounts = oracle_amounts(machine, lang, &s, &result, &lesson);
+                machine.credit_steps(&amounts);
+            }
+        } else if result.accepted == (lang.member)(&s) {
+            machine.reward(lesson.reward);
+        } else if lesson.punish {
+            machine.punish(lesson.reward);
         }
         if let Some(test) = test {
             if every > 0 && ep % every == 0 {

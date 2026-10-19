@@ -1039,6 +1039,29 @@ impl Machine {
         self.credit(amount.abs())
     }
 
+    /// Credit every edge of the current run by its own verdict: `amounts[i]` - reward positive, punishment negative,
+    /// zero nothing - lands on the edge that read the `i`-th symbol, in full, and on no other.  An oracle that knows
+    /// each step's right answer credits each step for that step alone.  Returns how many edges were credited.
+    pub fn credit_steps(&mut self, amounts: &[f64]) -> usize {
+        if self.path.is_empty() || amounts.iter().all(|&a| a == 0.0) {
+            return 0;
+        }
+        self.credits += 1;
+        if let (Some(draw), Some(&last)) = (self.last_focus_draw.clone(), amounts.last()) {
+            // the focus picked where the run started: it learns from how the run came out
+            self.focus_learner.learn(last, &draw);
+        }
+        let (clock, life, widen, narrow) = (self.clock, self.life, self.reward_widening, self.punish_narrowing);
+        let mut n = 0;
+        for (&i, &amount) in self.path.iter().zip(amounts) {
+            if amount != 0.0 {
+                self.lattice.edges[i].credit(amount, clock, life, widen, narrow);
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn punish(&mut self, amount: f64) -> usize {
         self.credit(-amount.abs())
     }

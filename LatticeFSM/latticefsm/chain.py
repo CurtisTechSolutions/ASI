@@ -482,6 +482,27 @@ class Chain:
                 n += 1
         return n
 
+    def credit_answer(self, prompt: Sequence[str], answer: Sequence[str], reward: float = 1.0,
+                      punish: float = 1.0) -> tuple[int, int]:
+        """Every input of ``answer`` after ``prompt`` - an oracle's answer, a teacher's, ``</s>`` at its end - as a
+        prediction: the chain's guess there, given the prompt and the answer so far, rewarded by ``reward`` on the walk
+        to it when it is the answer's input and punished by ``punish`` when it is not (0: rewards only).  Each guess is
+        credited for itself alone, and nothing is counted.  Returns (right, of)."""
+        prompt, answer = list(prompt), list(answer)
+        ids = self.history_ids(prompt + answer) + [1]
+        right = of = 0
+        for i in range(1 + len(prompt), len(ids)):
+            path = self.walk(ids[:i])
+            guess, w = self._guess(path), ids[i]
+            of += 1
+            if guess == w:
+                right += 1
+                if reward and path:
+                    self._credit_path(path, guess, reward)
+            elif punish and path:
+                self._credit_path(path, guess, -punish)
+        return right, of
+
     def credit_text(self, text: str | Sequence[str], amount: float) -> int:
         """Every input of a text, ``</s>`` included, as a prediction: the nodes on the walk to it that guessed it
         rewarded (``amount > 0``) or punished.  Returns how many nodes were credited."""
