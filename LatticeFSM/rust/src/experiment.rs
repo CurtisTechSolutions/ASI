@@ -205,24 +205,12 @@ impl Default for LearningOptions {
 }
 
 /// One arm of the learning experiment across the seeds: credited, or the quiet control.
+#[derive(Default)]
 struct Arm {
-    name: &'static str,
     records: Vec<Json>,
     before: Vec<f64>,
     after: Vec<f64>,
     touched: Vec<usize>,
-}
-
-impl Arm {
-    fn new(name: &'static str) -> Arm {
-        Arm {
-            name,
-            records: Vec::new(),
-            before: Vec::new(),
-            after: Vec::new(),
-            touched: Vec::new(),
-        }
-    }
 }
 
 fn curve_json(curve: &[(usize, f64)]) -> Json {
@@ -237,45 +225,60 @@ fn curve_json(curve: &[(usize, f64)]) -> Json {
 pub fn learning(o: &LearningOptions) -> Json {
     let mut rows = Vec::new();
     let n = o.seeds.len() as f64;
+    // every run is independent (its own machine and generator): all of them side by side, gathered back in order
+    let mut jobs = Vec::new();
     for lang in LANGUAGES.iter() {
         for &states in &o.sizes {
-            let mut arms = [Arm::new("credited"), Arm::new("quiet")];
             for &seed in &o.seeds {
+                for quiet in [false, true] {
+                    jobs.push((lang, states, seed, quiet));
+                }
+            }
+        }
+    }
+    let mut done = crate::parallel::parallel_map(&jobs, 0, |&(lang, states, seed, quiet)| {
+        let mut rng = Rng::new(seed);
+        let test = examples(lang, o.tests, &mut rng, o.max_length);
+        let settings = Settings {
+            life: o.life,
+            discount: o.discount,
+            seed,
+            ..Settings::default()
+        };
+        let mut m = Machine::new(states, &alphabet(), lang.accepting, settings).expect("a machine");
+        let before = m.accuracy(&test, 0.0);
+        let every = (o.episodes / 8).max(1);
+        let curve = teach_language(
+            &mut m,
+            lang,
+            o.episodes,
+            &mut rng,
+            o.max_length,
+            quiet,
+            1.0,
+            Some(&test),
+            every,
+        );
+        let after = m.accuracy(&test, 0.0);
+        let touched = m.stats().num("touched", 0.0) as usize;
+        let record = Json::object()
+            .with("seed", (seed as f64).into())
+            .with("before", before.into())
+            .with("after", after.into())
+            .with("curve", curve_json(&curve))
+            .with("touched", touched.into())
+            .with("clock", m.clock.into());
+        (record, before, after, touched)
+    })
+    .into_iter();
+    for lang in LANGUAGES.iter() {
+        for &states in &o.sizes {
+            // the credited arm, then the quiet one
+            let mut arms = [Arm::default(), Arm::default()];
+            for _ in &o.seeds {
                 for arm in arms.iter_mut() {
-                    let quiet = arm.name == "quiet";
-                    let mut rng = Rng::new(seed);
-                    let test = examples(lang, o.tests, &mut rng, o.max_length);
-                    let settings = Settings {
-                        life: o.life,
-                        discount: o.discount,
-                        seed,
-                        ..Settings::default()
-                    };
-                    let mut m = Machine::new(states, &alphabet(), lang.accepting, settings).expect("a machine");
-                    let before = m.accuracy(&test, 0.0);
-                    let every = (o.episodes / 8).max(1);
-                    let curve = teach_language(
-                        &mut m,
-                        lang,
-                        o.episodes,
-                        &mut rng,
-                        o.max_length,
-                        quiet,
-                        1.0,
-                        Some(&test),
-                        every,
-                    );
-                    let after = m.accuracy(&test, 0.0);
-                    let touched = m.stats().num("touched", 0.0) as usize;
-                    arm.records.push(
-                        Json::object()
-                            .with("seed", (seed as f64).into())
-                            .with("before", before.into())
-                            .with("after", after.into())
-                            .with("curve", curve_json(&curve))
-                            .with("touched", touched.into())
-                            .with("clock", m.clock.into()),
-                    );
+                    let (record, before, after, touched) = done.next().expect("a run for every job");
+                    arm.records.push(record);
                     arm.before.push(before);
                     arm.after.push(after);
                     arm.touched.push(touched);
@@ -657,22 +660,36 @@ pub fn walk(episodes: usize, seeds: &[u64], life: f64, tests: usize) -> Result<J
         ),
     ];
     let mut rows = Vec::new();
+    // every (language, arm, seed) run on its own core, gathered back in order
+    let mut jobs = Vec::new();
     for lang in LANGUAGES.iter() {
-        let test = examples(lang, tests, &mut Rng::new(1000), 6);
-        for (label, base) in arms.iter() {
-            let (mut accs, mut skips, mut swaps, mut moves) = (Vec::new(), 0u64, 0u64, 0i64);
+        for a in 0..arms.len() {
             for &seed in seeds {
-                let settings = Settings {
-                    life,
-                    seed,
-                    ..base.clone()
-                };
-                let mut m = Machine::default_shape(lang.accepting, settings)?;
-                teach_language(&mut m, lang, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
-                accs.push(m.accuracy(&test, 0.0));
-                skips += m.skips;
-                swaps += m.swaps;
-                moves += m.clock;
+                jobs.push((lang, a, seed));
+            }
+        }
+    }
+    let mut done = crate::parallel::parallel_map(&jobs, 0, |&(lang, a, seed)| -> Result<_, String> {
+        let test = examples(lang, tests, &mut Rng::new(1000), 6);
+        let settings = Settings {
+            life,
+            seed,
+            ..arms[a].1.clone()
+        };
+        let mut m = Machine::default_shape(lang.accepting, settings)?;
+        teach_language(&mut m, lang, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
+        Ok((m.accuracy(&test, 0.0), m.skips, m.swaps, m.clock))
+    })
+    .into_iter();
+    for lang in LANGUAGES.iter() {
+        for (label, _) in arms.iter() {
+            let (mut accs, mut skips, mut swaps, mut moves) = (Vec::new(), 0u64, 0u64, 0i64);
+            for _ in seeds {
+                let (acc, sk, sw, clock) = done.next().expect("a run for every job")?;
+                accs.push(acc);
+                skips += sk;
+                swaps += sw;
+                moves += clock;
             }
             rows.push(
                 Json::object()
@@ -900,19 +917,33 @@ pub fn network(episodes: usize, seeds: &[u64], life: f64, tests: usize, epochs: 
         ..Settings::default()
     };
     let mut rows = Vec::new();
+    // every (language, network, seed) run on its own core, gathered back in order
+    let mut jobs = Vec::new();
+    for lang in LANGUAGES.iter() {
+        for (arch, credit) in NETWORKS {
+            for &seed in seeds {
+                jobs.push((lang, arch, credit, seed));
+            }
+        }
+    }
+    let mut done = crate::parallel::parallel_map(&jobs, 0, |&(lang, arch, credit, seed)| -> Result<_, String> {
+        let mut rng = Rng::new(seed);
+        let test = examples(lang, tests, &mut rng, 6);
+        let mut net = Network::from_architecture(arch, &alphabet(), seed, Merge::Concat, Vote::Majority, &settings)?;
+        net.compile(Some(lang.accepting), LAYER_DISCOUNT, 1.0, 1.0, Credit::parse(credit)?)?;
+        teach_network(&mut net, lang, episodes, &mut rng, 6);
+        let touched: usize = net.layers().iter().map(|l| l.machine.lattice.touched().count()).sum();
+        Ok((net.evaluate(&test)?, net.layers().len(), touched))
+    })
+    .into_iter();
     for lang in LANGUAGES.iter() {
         for (arch, credit) in NETWORKS {
             let (mut accs, mut touched, mut layers) = (Vec::new(), 0usize, 0usize);
-            for &seed in seeds {
-                let mut rng = Rng::new(seed);
-                let test = examples(lang, tests, &mut rng, 6);
-                let mut net =
-                    Network::from_architecture(arch, &alphabet(), seed, Merge::Concat, Vote::Majority, &settings)?;
-                net.compile(Some(lang.accepting), LAYER_DISCOUNT, 1.0, 1.0, Credit::parse(credit)?)?;
-                teach_network(&mut net, lang, episodes, &mut rng, 6);
-                accs.push(net.evaluate(&test)?);
-                layers = net.layers().len();
-                touched = touched.max(net.layers().iter().map(|l| l.machine.lattice.touched().count()).sum());
+            for _ in seeds {
+                let (acc, n, t) = done.next().expect("a run for every job")?;
+                accs.push(acc);
+                layers = n;
+                touched = touched.max(t);
             }
             let mean = accs.iter().sum::<f64>() / accs.len() as f64;
             rows.push(

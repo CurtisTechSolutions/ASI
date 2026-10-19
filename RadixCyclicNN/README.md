@@ -146,7 +146,8 @@ line, e.g. `make train EPOCHS=20 LR=0.8 MODEL=big.json.gz`.
 | `make rust-train` / `rust-predict` / `rust-serve` / ... | the Rust CLI, one target per subcommand (`make help` lists them; `RUST_KIND=count\|word`, `MODEL_RUST` is its file) |
 | `make bench-compare` | the Go port and the Rust port over one corpus, checked against each other, into `bench/RESULTS.md` (`BENCH_CHARS`, `BENCH_EPOCHS`, `BENCH_REPEAT`, `PUNISH_EVERY`) |
 | `make go-build` / `go-test` / `go-parity` / `go-negative` / `go-serve PORT=8001` | build the Go count / reward model CLI, run its tests, the cross-language parity tests, or serve the frontend from the Go model, blame a garbage file into the Go negative network and judge a text through it |
-| `make serve PORT=8000` | API + prebuilt frontend |
+| `make serve PORT=8000` | API + prebuilt frontend from the **Rust** server (built first): the same API and the same model file (`MODEL`, a radix model when new) as the Python one |
+| `make py-serve PORT=8000` | the same from the Python server - the one for the torch backend (`BACKEND=torch`, a GPU), Stable Diffusion and local Whisper, which the Rust port does not have |
 | `make ollama-models` / `ollama-corpus PROMPT="..."` / `ollama-garbage` / `ollama-review` / `ollama-2nrl` | Ollama: list models, prompt -> corpus (+ train), prompt -> garbage file, adversarial review of the model's samples, review + 2NRL |
 | `make tutor TOPIC="..." ROUNDS=5` / `tutor-dry` / `tutor-focus FOCUS="past tense"` / `tutor-plan PLAN=3` | automated English lessons taught by `TUTOR=ollama\|chatgpt` (`TUTOR_MODEL`, `TUTOR_URL`); `tutor-plan` ends with the next lessons planned from the report card, and the brief that teaches them (`BRIEF="..."` runs a batch to one) |
 | `make codegen PROBLEMS=data/sample_problems.jsonl PHASE=both` / `codegen-teacher` / `codegen-model` | code generation with the sandbox, the Ollama judge (`CODEGEN_MODEL=gemma4`) and 2NRL rewards |
@@ -501,7 +502,7 @@ the 2NRL (bad / good files) and Evolve (corpus files) panels.
 
 ```bash
 make frontend-install && make frontend-build   # rebuild dist
-make serve                                     # then make frontend-dev in another shell for hot reload
+make serve                                     # the Rust server (make py-serve: the Python one); then make frontend-dev in another shell for hot reload
 make frontend-test                             # unit tests of the settings store and the site-wide settings (node --test, no install needed)
 ```
 

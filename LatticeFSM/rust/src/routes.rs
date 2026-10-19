@@ -840,7 +840,7 @@ pub fn chain_route(m: &mut Chain, method: &str, action: &str, req: &Request) -> 
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(40usize)
                 .clamp(1, 1000);
-            let mut all: Vec<(u64, usize, &Vec<u32>, &crate::chain::Node)> = Vec::new();
+            let mut all: Vec<(u64, usize, &crate::fastmap::Ctx, &crate::chain::Node)> = Vec::new();
             for (k, t) in m.tables.iter().enumerate().skip(1) {
                 for (ctx, nd) in t {
                     all.push((nd.total, k, ctx, nd));

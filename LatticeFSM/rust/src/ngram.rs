@@ -9,6 +9,8 @@
 //! ports give the same probabilities, the same greedy texts and the same measurements, and share their files.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use crate::fastmap::{Ctx, FastMap};
 use std::fs;
 use std::io::{Read, Write};
 
@@ -358,22 +360,22 @@ pub fn split_lines<T: Clone>(lines: &[T], every: usize) -> (Vec<T>, Vec<T>) {
 
 // ---- the model ---------------------------------------------------------------------------------------------------
 
-type Row = HashMap<u32, u64>;
+type Row = FastMap<u32, u64>;
 
 /// One order's Kneser-Ney table, kept current a count at a time: counts by context, their totals, how many distinct
 /// tokens each context has, and the count-of-counts the discount is read from.
 struct Order {
-    rows: HashMap<Vec<u32>, Row>,
-    totals: HashMap<Vec<u32>, u64>,
-    distinct: HashMap<Vec<u32>, u64>,
+    rows: FastMap<Ctx, Row>,
+    totals: FastMap<Ctx, u64>,
+    distinct: FastMap<Ctx, u64>,
     n1: u64,
     n2: u64,
 }
 
 impl Order {
-    fn new(rows: HashMap<Vec<u32>, Row>) -> Order {
-        let totals = rows.iter().map(|(h, r)| (h.clone(), r.values().sum())).collect();
-        let distinct = rows.iter().map(|(h, r)| (h.clone(), r.len() as u64)).collect();
+    fn new(rows: FastMap<Ctx, Row>) -> Order {
+        let totals = rows.iter().map(|(h, r)| (*h, r.values().sum())).collect();
+        let distinct = rows.iter().map(|(h, r)| (*h, r.len() as u64)).collect();
         let (mut n1, mut n2) = (0u64, 0u64);
         for r in rows.values() {
             for &c in r.values() {
@@ -409,12 +411,13 @@ impl Order {
 /// order-1 buckets (count -> ids) follow when they exist.
 fn add_to(tables: &mut [Order], ranks: &mut Option<BTreeMap<u64, BTreeSet<u32>>>, k: usize, h: &[u32], w: u32) {
     let t = &mut tables[k];
-    let row = t.rows.entry(h.to_vec()).or_default();
-    let old = *row.get(&w).unwrap_or(&0);
-    row.insert(w, old + 1);
-    *t.totals.entry(h.to_vec()).or_insert(0) += 1;
+    let key = Ctx::new(h);
+    let c = t.rows.entry(key).or_default().entry(w).or_insert(0);
+    let old = *c;
+    *c += 1;
+    *t.totals.entry(key).or_insert(0) += 1;
     if old == 0 {
-        *t.distinct.entry(h.to_vec()).or_insert(0) += 1;
+        *t.distinct.entry(key).or_insert(0) += 1;
     }
     t.n1 = t.n1 + (old + 1 == 1) as u64 - (old == 1) as u64;
     t.n2 = t.n2 + (old + 1 == 2) as u64 - (old == 2) as u64;
@@ -495,11 +498,11 @@ pub struct NGram {
     pub reward_widening: f64,
     pub punish_narrowing: f64,
     pub vocab: Vec<String>,
-    index: HashMap<String, u32>,
+    index: FastMap<String, u32>,
     /// The highest order's counts: context (`order - 1` ids) -> next id -> how many times.
-    pub grams: HashMap<Vec<u32>, Row>,
+    pub grams: FastMap<Ctx, Row>,
     /// Edges with a record beyond their count: context -> id -> [width, rewarded, punished, last].
-    pub edges: HashMap<Vec<u32>, BTreeMap<u32, [f64; 4]>>,
+    pub edges: FastMap<Ctx, BTreeMap<u32, [f64; 4]>>,
     pub clock: u64,
     pub sentences: u64,
     pub sources: Vec<(String, usize, usize)>,
@@ -537,8 +540,8 @@ impl NGram {
             punish_narrowing: 0.2,
             vocab,
             index,
-            grams: HashMap::new(),
-            edges: HashMap::new(),
+            grams: FastMap::default(),
+            edges: FastMap::default(),
             clock: 0,
             sentences: 0,
             sources: Vec::new(),
@@ -597,7 +600,7 @@ impl NGram {
         }
         ids.push(1);
         for i in k..ids.len() {
-            let ctx = ids[i - k..i].to_vec();
+            let ctx = Ctx::new(&ids[i - k..i]);
             let w = ids[i];
             let sample = self.predict && predict_now(self.seen);
             if self.predict {
@@ -618,13 +621,13 @@ impl NGram {
                     }
                 }
             }
-            *self.grams.entry(ctx.clone()).or_default().entry(w).or_insert(0) += 1;
+            *self.grams.entry(ctx).or_default().entry(w).or_insert(0) += 1;
             if let Some(tables) = self.tables.as_mut() {
                 let n = self.order;
                 add_to(tables, &mut self.ranks, n, &ctx, w);
             }
             self.clock += 1;
-            if let Some(rec) = self.edges.get_mut(&ctx).and_then(|r| r.get_mut(&w)) {
+            if let Some(rec) = self.edges.get_mut(ctx.as_slice()).and_then(|r| r.get_mut(&w)) {
                 rec[3] = self.clock as f64;
             }
         }
@@ -657,7 +660,7 @@ impl NGram {
         self.derive();
         if self.ranks.is_none() {
             let mut r: BTreeMap<u64, BTreeSet<u32>> = BTreeMap::new();
-            if let Some(row) = self.tables.as_ref().expect("derived")[1].rows.get(&Vec::new()) {
+            if let Some(row) = self.tables.as_ref().expect("derived")[1].rows.get(&[][..]) {
                 for (&w, &c) in row {
                     r.entry(c).or_default().insert(w);
                 }
@@ -741,7 +744,7 @@ impl NGram {
                 }
             }
             if outside.is_none() {
-                let seen = tables[1].rows.get(&Vec::new());
+                let seen = tables[1].rows.get(&[][..]);
                 outside =
                     (1..self.vocab.len() as u32).find(|&w| !in_rows(w) && !seen.is_some_and(|r| r.contains_key(&w)));
             }
@@ -923,9 +926,9 @@ impl NGram {
         let mut table = self.grams.clone();
         for k in (1..=self.order).rev() {
             let lower = (k > 1).then(|| {
-                let mut lower: HashMap<Vec<u32>, Row> = HashMap::new();
+                let mut lower: FastMap<Ctx, Row> = FastMap::default();
                 for (h, r) in &table {
-                    let dst = lower.entry(h[1..].to_vec()).or_default();
+                    let dst = lower.entry(Ctx::new(&h[1..])).or_default();
                     for &w in r.keys() {
                         *dst.entry(w).or_insert(0) += 1;
                     }
@@ -939,7 +942,7 @@ impl NGram {
         self.tables = Some(
             tables
                 .into_iter()
-                .map(|t| t.unwrap_or_else(|| Order::new(HashMap::new())))
+                .map(|t| t.unwrap_or_else(|| Order::new(FastMap::default())))
                 .collect(),
         );
         self.ranks = None;
@@ -1255,7 +1258,7 @@ impl NGram {
         let (rw, pn) = (self.reward_widening, self.punish_narrowing);
         let rec = self
             .edges
-            .entry(ctx.to_vec())
+            .entry(Ctx::new(ctx))
             .or_default()
             .entry(w)
             .or_insert([1.0, 0.0, 0.0, clock]);
@@ -1522,7 +1525,10 @@ impl NGram {
                 return Err("a gram row of the wrong length".to_string());
             }
             let ctx: Vec<u32> = r[..k].iter().map(|&x| x as u32).collect();
-            m.grams.entry(ctx).or_default().insert(r[k] as u32, r[k + 1] as u64);
+            m.grams
+                .entry(Ctx::from(ctx))
+                .or_default()
+                .insert(r[k] as u32, r[k + 1] as u64);
         }
         for row in v
             .get("edges")
@@ -1536,7 +1542,7 @@ impl NGram {
             }
             let ctx: Vec<u32> = r[..k].iter().map(|&x| x as u32).collect();
             m.edges
-                .entry(ctx)
+                .entry(Ctx::from(ctx))
                 .or_default()
                 .insert(r[k] as u32, [r[k + 1], r[k + 2], r[k + 3], r[k + 4]]);
         }

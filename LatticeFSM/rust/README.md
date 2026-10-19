@@ -30,6 +30,10 @@ Rust uses the logical CPU count available to the process by default. Set
 LATTICEFSM_WORKERS=8 rust/target/release/latticefsm ngram train --unit word --data data/corpus --save ngram.json.gz
 ```
 
+A chain learns its batches with every depth's table on a thread of its own, and the experiments run their
+independent runs side by side, in Rust and (as processes) in Python. The results are the same with any number of
+workers, and `LATTICEFSM_WORKERS=1` runs everything serially (`DESIGN.md` §20, Speed).
+
 Corpus tokenization, N-gram and chain evaluation, chain threshold sweeps, and
 independent network branches can run concurrently. Streamed text is tokenized
 in batches of at most 256 lines or approximately 1 MiB, then learned in corpus

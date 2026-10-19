@@ -216,3 +216,38 @@ fn an_oracle_answer_credits_every_guess_alone() {
             .clock
     );
 }
+
+#[test]
+fn learning_in_parallel_batches_is_learning_one_by_one() {
+    // every unit and setting the batch learns in parallel - or, for self-credit and big vocabularies, one by one
+    let (train, _) = corpus("char");
+    let (words, _) = corpus("word");
+    for (seqs, nodes, unit, predict, credit) in [
+        (&train, 8, "char", true, 0.0),
+        (&train, 8, "char", false, 0.0),
+        (&train, 16, "char", true, 0.0),
+        (&train, 2, "char", true, 0.0),
+        (&words, 4, "word", true, 0.0),
+        (&train, 6, "char", true, 0.3),
+    ] {
+        let make = || {
+            let mut m = Chain::new(nodes, unit, true, 0.9).unwrap();
+            m.predict = predict;
+            m.self_credit = credit;
+            m
+        };
+        let mut one = make();
+        let n1: usize = seqs.iter().filter(|s| !s.is_empty()).map(|s| one.train_tokens(s)).sum();
+        let mut batched = make();
+        let n2 = batched.train_sequences(seqs, None);
+        let what = format!("{nodes} {unit} predict {predict} credit {credit}");
+        assert_eq!(n1, n2, "{what}");
+        assert_eq!(one.dump(), batched.dump(), "{what}");
+        let (a, b) = (one.reset_online(), batched.reset_online());
+        assert_eq!(
+            (a.predicted, a.accuracy, a.perplexity, a.depth),
+            (b.predicted, b.accuracy, b.perplexity, b.depth),
+            "{what}"
+        );
+    }
+}

@@ -30,6 +30,7 @@ pub mod compress;
 pub mod corpus;
 pub mod edge;
 pub mod experiment;
+pub mod fastmap;
 pub mod focus;
 pub mod geometry;
 pub mod guard;
