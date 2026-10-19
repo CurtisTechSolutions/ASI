@@ -22,6 +22,8 @@ pub const WIDTH_MIN: f64 = 0.05;
 pub const WIDTH_MAX: f64 = 20.0;
 /// Every coefficient of a weighting is clipped to `[-limit, limit]` after adapting, so no edge can become certain.
 pub const COEFFICIENT_LIMIT: f64 = 8.0;
+/// UCB1's constant: how much the `explore` traversal mode favours an edge for being little traversed.
+pub const EXPLORE: f64 = std::f64::consts::SQRT_2;
 
 /// The coefficients of one edge's weighting function:
 /// `log_weight = bias + seen·f_seen + recent·f_recent + net·f_net + age·f_age + width·f_width`.
@@ -190,6 +192,14 @@ impl Edge {
     /// Credit per traversal: `(rewarded − punished) / (seen + 1)`.
     pub fn net(&self) -> f64 {
         (self.rewarded - self.punished) / (self.seen as f64 + 1.0)
+    }
+
+    /// The `explore` traversal mode's log-weight: `rewarded − punished + explore · sqrt(ln(1 + N) / (1 + seen))`, `N`
+    /// the traversals of every edge in the row.  Every unit of reward it has earned beyond its punishment multiplies
+    /// its odds by e, and the less it has been traversed than its row the bigger its bonus: the most rewarded and
+    /// least traversed path is the likeliest (UCB1's bonus).
+    pub fn explore_log_weight(&self, row_seen: u64, explore: f64) -> f64 {
+        self.rewarded - self.punished + explore * ((row_seen as f64).ln_1p() / (self.seen as f64 + 1.0)).sqrt()
     }
 
     /// The five features of [`FEATURES`], as they are at `clock`.

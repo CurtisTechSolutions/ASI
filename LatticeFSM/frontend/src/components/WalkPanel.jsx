@@ -1,21 +1,26 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { focusIndex } from "../matrix.js";
+import { EXPLORE, MODES, focusIndex, modeLabel } from "../matrix.js";
 import { fmtNum, parseInteger, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 
 /**
- * Where a run starts and how it moves: the focus on the central vertical
- * vector (set, none, or learned from the input), skips past a node when a
- * two-edge path is more efficient, and the nodes rearranging themselves.
+ * Where a run starts and how it moves: how a row's edges are weighed (each by
+ * its own weighting, or least traversed and most rewarded first), the focus on
+ * the central vertical vector (set, none, or learned from the input), skips
+ * past a node when a two-edge path is more efficient, and the nodes
+ * rearranging themselves.
  */
 export default function WalkPanel({ stats, onMoved }) {
   const [focus, setFocus] = useStoredState("walk.focus", "0");
   const [noFocus, setNoFocus] = useStoredState("walk.noFocus", true);
   const [learn, setLearn] = useStoredState("walk.learn", false);
   const [probe, setProbe] = useStoredState("walk.probe", "abba");
+  const [mode, setMode] = useStoredState("walk.mode", "own");
+  const [explore, setExplore] = useStoredState("walk.explore", String(Math.round(EXPLORE * 1000) / 1000));
+  const [equalReward, setEqualReward] = useStoredState("walk.equalReward", false);
   const [skip, setSkip] = useStoredState("walk.skip", false);
   const [margin, setMargin] = useStoredState("walk.margin", "0");
   const [every, setEvery] = useStoredState("walk.rearrangeEvery", "0");
@@ -43,6 +48,58 @@ export default function WalkPanel({ stats, onMoved }) {
 
   return (
     <div className="panel">
+      <div className="card wide">
+        <h2>How it traverses</h2>
+        <p className="note">
+          Every step the machine weighs the edges of the row it is in and draws one. <b>Own weighting</b> weighs each
+          edge by its own adapted function of its features, plus the stimulation's width term. <b>Explore</b> takes the
+          least traversed and most rewarded first: an edge's log-weight is its reward beyond its punishment, plus a
+          bonus of <i>explore</i> × √(ln(1 + N) / (1 + seen)), N the traversals of its whole row. A path that keeps
+          being rewarded wins; one that has seldom been tried gets a chance; one that keeps being punished fades. The
+          edges still adapt their own weightings either way, so switching back loses nothing. Now:{" "}
+          <b>{modeLabel(stats)}</b>.
+        </p>
+        <p className="note">
+          A reward normally lands on a run's last edge in full and on each earlier one 0.8 times the next. With{" "}
+          <b>equal reward</b>, a correct output rewards every edge of the path that made it in full; punishment is
+          still discounted back from the end, where the blame most likely lies. Now:{" "}
+          <b>{stats && stats.equal_reward ? "the whole path equally" : "discounted from the end"}</b>.
+        </p>
+        <div className="row">
+          <SelectField label="Mode" value={mode} onChange={setMode} options={MODES} />
+          <NumberField
+            label="Explore"
+            value={explore}
+            onChange={setExplore}
+            min="0"
+            step="0.1"
+            disabled={mode !== "explore"}
+            hint="the bonus for a little-traversed edge; 1.41 is UCB1's, 0 the most rewarded only"
+          />
+        </div>
+        <CheckField
+          label="Reward the whole path equally"
+          checked={equalReward}
+          onChange={setEqualReward}
+          hint="a correct output credits every edge of its run in full"
+        />
+        <div className="actions">
+          <button
+            type="button"
+            onClick={() =>
+              act(
+                () => api.mode({ mode, explore: parseNumber(explore, EXPLORE), equal_reward: equalReward }),
+                (r) =>
+                  `the machine now traverses by ${modeLabel(r)}; a reward lands ${
+                    r.equal_reward ? "on the whole path equally" : "discounted from the end"
+                  }`,
+              )
+            }
+          >
+            Apply
+          </button>
+        </div>
+      </div>
       <div className="card wide">
         <h2>Focus</h2>
         <p className="note">

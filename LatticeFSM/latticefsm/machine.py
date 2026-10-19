@@ -30,6 +30,13 @@ machine's behaviour, and everything else here is what feeds back into it:
   from the code, so a lossy ``compress_precision`` is applied, not only
   recorded.
 
+``mode`` is how a row's edges are weighed: ``"own"`` (the default), each
+by its own adapted function plus the stimulation's width term; or
+``"explore"``, the least traversed and most rewarded first
+(:meth:`Edge.explore_log_weight`: its reward beyond its punishment, plus a
+bonus of ``explore`` the less it has been traversed than its row).  A run
+can take another ``mode`` for itself.
+
 ``weight_fn`` replaces the weighting altogether: a callable
 ``(edge, clock, life, stimulation) -> log-weight``, for a machine whose
 edges are weighed by something other than their own adapted function.
@@ -44,11 +51,11 @@ import random
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from .edge import Edge, Weighting
+from .edge import EXPLORE, Edge, Weighting
 from .lattice import Lattice
 
-__all__ = ["BASELINE", "DEFAULT_ALPHABET", "DEFAULT_STATES", "DISCOUNT", "LIFE", "Machine", "Run", "Transition",
-           "load_machine"]
+__all__ = ["BASELINE", "DEFAULT_ALPHABET", "DEFAULT_STATES", "DISCOUNT", "LIFE", "MODES", "Machine", "Run",
+           "Transition", "load_machine"]
 
 LIFE = 1_000
 """Ticks for a trace, an age, a width's excess or the stimulation's excess to fade by a half."""
@@ -58,6 +65,15 @@ BASELINE = 1.0
 
 DISCOUNT = 0.8
 """How much of a run's credit each step further back from its end receives."""
+
+MODES = ("own", "explore")
+"""How a machine can weigh a row's edges: each by its own weighting, or least traversed and most rewarded first."""
+
+
+def _check_mode(mode: str) -> str:
+    if mode not in MODES:
+        raise ValueError(f"mode must be own or explore, got {mode!r}")
+    return mode
 
 DEFAULT_STATES = 13
 """The states of a machine made without saying how many: with :data:`DEFAULT_ALPHABET`, a 13 x 13 x 13 matrix."""
@@ -140,6 +156,9 @@ class Machine:
         skip: bool = False,
         skip_margin: float = 0.0,
         rearrange_every: int = 0,
+        mode: str = "own",
+        explore: float = EXPLORE,
+        equal_reward: bool = False,
     ) -> None:
         if not (life > 0) or not math.isfinite(life):
             raise ValueError(f"life must be a positive number of ticks, got {life}")
@@ -181,6 +200,15 @@ class Machine:
             raise ValueError(f"skip_margin must be >= 0, got {skip_margin}")
         if rearrange_every < 0:
             raise ValueError(f"rearrange_every must be >= 0 (0 never), got {rearrange_every}")
+        if not (math.isfinite(explore) and explore >= 0):
+            raise ValueError(f"explore must be >= 0, got {explore}")
+        self.mode = _check_mode(mode)
+        """How a row's edges are weighed (``weight_fn``, when set, comes first)."""
+        self.explore = float(explore)
+        """The ``explore`` mode's bonus for a little-traversed edge (UCB1's constant, sqrt 2; 0: none)."""
+        self.equal_reward = bool(equal_reward)
+        """A reward lands on every edge of the run in full (a correct output credits the whole path that made it);
+        punishment is still discounted back from the end, where the blame most likely lies."""
         self.learn_focus = bool(learn_focus)
         """Read the focus off the input through :attr:`focus_learner` instead of taking it as a setting."""
         self.focus_learner = FocusLearner(list(self.lattice.symbols), rate=focus_rate, explore=focus_explore)
@@ -290,6 +318,9 @@ class Machine:
         row = self.lattice.row(source, symbol)
         if self.weight_fn is not None:
             return [self.weight_fn(e, self.clock, self.life, stim) for e in row]
+        if self.mode == "explore":
+            n = sum(e.seen for e in row)
+            return [e.explore_log_weight(n, self.explore) for e in row]
         return [e.log_weight(self.clock, self.life, stim) for e in row]
 
     def probabilities(self, source: int, symbol: int | str, stimulation: float | None = None,
@@ -423,12 +454,18 @@ class Machine:
 
     def run(self, symbols: Iterable[str], stimulation: float | None = None, temperature: float | None = None,
             quiet: bool = False, from_middle: bool = False, focus: float | None = None,
-            skip: bool | None = None) -> Run:
+            skip: bool | None = None, mode: str | None = None) -> Run:
         """Read a string.  It starts from the middle state (``from_middle``), else the node a ``focus`` given for this
         run picks, else - with ``learn_focus`` - the node the learned focus reads off the input, else :attr:`origin`
         (the machine's focus node, or ``start``).  With skips on (the machine's ``skip``, or ``skip`` for this run),
-        two symbols are read in one move whenever that is more efficient.  Quiet, the same choices are made and
-        nothing moves."""
+        two symbols are read in one move whenever that is more efficient.  Its edges are weighed the machine's
+        ``mode``, or ``mode`` for this run.  Quiet, the same choices are made and nothing moves."""
+        if mode is not None and _check_mode(mode) != self.mode:
+            own, self.mode = self.mode, mode
+            try:
+                return self.run(symbols, stimulation, temperature, quiet, from_middle, focus, skip)
+            finally:
+                self.mode = own
         stim = self.stimulation if stimulation is None else float(stimulation)
         syms = [s for s in symbols if not (isinstance(s, str) and s.isspace())]
         learned = None
@@ -524,7 +561,7 @@ class Machine:
 
     def credit(self, amount: float, path: Sequence[Edge] | None = None) -> int:
         """Credit the current run (or ``path``): its last edge receives ``amount``, each earlier one ``discount`` times
-        the next.  Returns how many edges were credited."""
+        the next - or, a reward with ``equal_reward``, every edge all of it.  Returns how many edges were credited."""
         edges = self.path if path is None else list(path)
         if not edges or amount == 0.0:
             return 0
@@ -532,9 +569,10 @@ class Machine:
         if path is None and self._last_focus is not None:
             self.focus_learner.learn(amount, *self._last_focus)
         share = float(amount)
+        discount = 1.0 if amount > 0 and self.equal_reward else self.discount
         for edge in reversed(edges):
             edge.credit(share, self.clock, self.life, widen=self.reward_widening, narrow=self.punish_narrowing)
-            share *= self.discount
+            share *= discount
             if abs(share) < 1e-12:
                 break
         return len(edges)
@@ -612,6 +650,9 @@ class Machine:
             "skip": self.skip,
             "skip_margin": self.skip_margin,
             "skips": self.skips,
+            "mode": self.mode,
+            "explore": self.explore,
+            "equal_reward": self.equal_reward,
             "rearrange_every": self.rearrange_every,
             "swaps": self.swaps,
             "state_order": list(self.lattice.state_ids),
@@ -637,6 +678,7 @@ class Machine:
             "compress_every": self.compress_every, "compress_precision": self.compress_precision,
             "compress_rebuild": self.compress_rebuild, "focus": self._focus, "learn_focus": self.learn_focus,
             "skip": self.skip, "skip_margin": self.skip_margin, "rearrange_every": self.rearrange_every,
+            "mode": self.mode, "explore": self.explore, "equal_reward": self.equal_reward,
         }
 
     def to_dict(self) -> dict:
@@ -700,6 +742,9 @@ class Machine:
         m.skip = bool(st.get("skip", False))
         m.skip_margin = float(st.get("skip_margin", 0.0))
         m.rearrange_every = int(st.get("rearrange_every", 0))
+        m.mode = _check_mode(st.get("mode", "own"))
+        m.explore = float(st.get("explore", EXPLORE))
+        m.equal_reward = bool(st.get("equal_reward", False))
         m.skips = int(data.get("skips", 0))
         m.swaps = int(data.get("swaps", 0))
         m.since_rearrange = int(data.get("since_rearrange", 0))

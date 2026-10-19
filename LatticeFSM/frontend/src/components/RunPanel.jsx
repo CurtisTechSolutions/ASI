@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
-import { describeRun, stimulationFrom } from "../matrix.js";
+import { MODES, describeRun, modeLabel, stimulationFrom } from "../matrix.js";
 import { fmtNum, parseNumber } from "../util.js";
 import Alert from "./Alert.jsx";
-import { CheckField, NumberField, TextField } from "./Fields.jsx";
+import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
 
 /**
  * Read a string from the start state - traversing it, or asking quietly -
@@ -16,6 +16,7 @@ export default function RunPanel({ stats, onMoved }) {
   const [temperature, setTemperature] = useStoredState("run.temperature", "1");
   const [amount, setAmount] = useStoredState("run.amount", "1");
   const [fromMiddle, setFromMiddle] = useStoredState("run.fromMiddle", false);
+  const [mode, setMode] = useStoredState("run.mode", "");
   const [result, setResult] = useState(null);
   const [credited, setCredited] = useState(null);
   const [error, setError] = useState(null);
@@ -32,6 +33,7 @@ export default function RunPanel({ stats, onMoved }) {
         temperature: parseNumber(temperature, 1),
         quiet,
         from_middle: fromMiddle,
+        ...(mode ? { mode } : {}),
       });
       setResult({ ...r, quiet });
       setError(null);
@@ -65,7 +67,8 @@ export default function RunPanel({ stats, onMoved }) {
           The machine starts in state {stats ? stats.start : 0} and reads the string one symbol at a time, drawing
           each next state from the row by the edges' weights. A run traverses what it draws; asked quietly, the same
           draws are made and nothing moves. Reward or punish the last run: the credit lands on its edges, the last in
-          full and each earlier one discounted.
+          full and each earlier one discounted
+          {stats && stats.equal_reward ? " - except a reward, which this machine gives every edge of the run in full" : ""}.
         </p>
         <div className="row">
           <TextField label="String" value={text} onChange={setText} hint={`symbols of ${stats && stats.alphabet ? stats.alphabet.join("") : "the alphabet"}`} />
@@ -80,6 +83,13 @@ export default function RunPanel({ stats, onMoved }) {
           />
           <NumberField label="Temperature" value={temperature} onChange={setTemperature} min="0" step="0.1" hint="0 is greedy" />
           <NumberField label="Credit" value={amount} onChange={setAmount} min="0" step="0.5" hint="the size of a reward or punishment" />
+          <SelectField
+            label="Mode"
+            value={mode}
+            onChange={setMode}
+            options={[["", `the machine's: ${modeLabel(stats)}`], ...MODES]}
+            hint="how this run weighs the edges"
+          />
         </div>
         <CheckField
           label={`Start from the middle state (${stats && stats.center ? stats.center[0] : "the centre"}) and walk outward`}
@@ -111,6 +121,7 @@ export default function RunPanel({ stats, onMoved }) {
             {"  "}
             <span className="muted">
               ended in {result.final} · log p {fmtNum(result.log_probability, 3)}
+              {result.mode ? ` · ${result.mode}` : ""}
             </span>
           </div>
         ) : null}

@@ -128,3 +128,18 @@ export function appendToken(text, token, unit) {
   if (unit === "word" && NO_SPACE_BEFORE.has(token)) return text.replace(/\s+$/, "") + token;
   return text === "" || /\s$/.test(text) ? text + token : `${text} ${token}`;
 }
+
+/** How a machine can weigh a row's edges (`mode`), for a select: its own weighting, or explore. */
+export const MODES = [
+  ["own", "own weighting - each edge's adapted function"],
+  ["explore", "explore - least traversed, most rewarded first"],
+];
+
+/** UCB1's constant: the explore mode's default bonus for a little-traversed edge (the server's `edge::EXPLORE`). */
+export const EXPLORE = Math.SQRT2;
+
+/** "explore (bonus 1.41)" or "own weighting": a machine's mode in a few words. */
+export function modeLabel(stats) {
+  if (!stats || !stats.mode) return "own weighting";
+  return stats.mode === "explore" ? `explore (bonus ${Number(stats.explore ?? EXPLORE).toFixed(2)})` : "own weighting";
+}

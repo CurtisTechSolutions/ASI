@@ -771,3 +771,32 @@ fn a_reply_that_is_no_answer_is_drawn_again_hotter() {
     assert!(g.get("samples").unwrap().as_array().unwrap()[0].get("guard").is_some());
     assert!(g.get("guard").unwrap().num("judged", 0.0) >= 1.0);
 }
+
+#[test]
+fn the_traversal_mode_and_equal_reward() {
+    let addr = serve(20);
+    let (status, st) = post(
+        &addr,
+        "/api/mode",
+        r#"{"mode":"explore","explore":0.5,"equal_reward":true}"#,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(st.str_or("mode", ""), "explore");
+    assert_eq!(st.num("explore", 0.0), 0.5);
+    assert_eq!(st.get("equal_reward"), Some(&Json::Bool(true)));
+    let (status, bad) = post(&addr, "/api/mode", r#"{"mode":"wander"}"#);
+    assert_eq!(status, 400);
+    assert!(bad.str_or("error", "").contains("own or explore"));
+    // a run can take a mode of its own, and says which it walked by
+    let (_, r) = post(&addr, "/api/run", r#"{"text":"ab","mode":"own","quiet":true}"#);
+    assert_eq!(r.str_or("mode", ""), "own");
+    assert_eq!(r.get("stats").unwrap().str_or("mode", ""), "explore");
+    // a fresh machine can be made in it
+    let (_, m) = post(
+        &addr,
+        "/api/new",
+        r#"{"states":4,"alphabet":"ab","mode":"explore","equal_reward":true}"#,
+    );
+    assert_eq!(m.str_or("mode", ""), "explore");
+    assert_eq!(m.get("equal_reward"), Some(&Json::Bool(true)));
+}

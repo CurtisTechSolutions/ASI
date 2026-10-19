@@ -86,7 +86,7 @@ use crate::http::{self, Handler, Request, Response};
 use crate::job::Job;
 use crate::json::Json;
 use crate::languages::{examples, language, LANGUAGES};
-use crate::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
+use crate::machine::{load_machine, Machine, Mode, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
 use crate::network::{load_network, Credit, Merge, Network, Step, Vote, LAYER_DISCOUNT};
 use crate::ngram::{load_ngram, Evaluation, NGram};
 use crate::rng::Rng;
@@ -638,6 +638,7 @@ impl Service {
             ("POST", "compression") => compression_route(&mut m, &req.body),
             ("POST", "focus") => focus_route(&mut m, &req.body),
             ("POST", "skip") => skip_route(&mut m, &req.body),
+            ("POST", "mode") => mode_route(&mut m, &req.body),
             ("POST", "rearrange") => rearrange_route(&mut m, &req.body),
             ("POST", "credit") => {
                 let amount = req.body.num("amount", 1.0);
@@ -941,6 +942,7 @@ fn run(m: &mut Machine, body: &Json) -> Result<Json, String> {
         from_middle: body.bool_or("from_middle", false),
         focus: body.get("focus").and_then(Json::as_f64),
         skip: body.get("skip").and_then(Json::as_bool),
+        mode: body.get("mode").and_then(Json::as_str).map(Mode::parse).transpose()?,
     };
     let symbols = m.tokenize(text)?;
     let run = m.walk(&symbols, walk)?;
@@ -949,7 +951,27 @@ fn run(m: &mut Machine, body: &Json) -> Result<Json, String> {
         .with("quiet", quiet.into())
         .with("from_middle", walk.from_middle.into())
         .with("focus", m.last_focus.map(Json::from).unwrap_or(Json::Null))
+        .with("mode", walk.mode.unwrap_or(m.mode).name().into())
         .with("stats", m.stats()))
+}
+
+/// `POST /api/mode {mode?, explore?, equal_reward?}`: how the machine weighs a row's edges from now on - `own`
+/// (every edge's own weighting) or `explore` (least traversed and most rewarded first, the bonus for little traversal
+/// `explore`) - and whether a reward lands on every edge of a run in full (`equal_reward`).
+fn mode_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
+    if let Some(mode) = body.get("mode").and_then(Json::as_str) {
+        m.mode = Mode::parse(mode)?;
+    }
+    if let Some(explore) = body.get("explore").and_then(Json::as_f64) {
+        if !(explore.is_finite() && explore >= 0.0) {
+            return Err("explore must be >= 0".to_string());
+        }
+        m.explore = explore;
+    }
+    if let Some(equal) = body.get("equal_reward").and_then(Json::as_bool) {
+        m.equal_reward = equal;
+    }
+    Ok(m.stats())
 }
 
 fn focus_route(m: &mut Machine, body: &Json) -> Result<Json, String> {
@@ -1187,6 +1209,9 @@ pub fn new_machine(body: &Json) -> Result<Machine, String> {
         skip: body.bool_or("skip", false),
         skip_margin: body.num("skip_margin", 0.0),
         rearrange_every: body.num("rearrange_every", 0.0).max(0.0) as u64,
+        mode: Mode::parse(body.str_or("mode", "own"))?,
+        explore: body.num("explore", d.explore),
+        equal_reward: body.bool_or("equal_reward", d.equal_reward),
     };
     Machine::new(states, &alphabet, &accepting, settings)
 }

@@ -171,6 +171,9 @@ export default function StatusBar({ onStats, onStatus, tick }) {
         {s.compress_every ? <> · every {fmtInt(s.compress_every)}</> : null}
         {s.core_bytes ? <> · code {fmtInt(s.core_bytes)} B</> : null}
       </span>
+      <span className="stat" title="How a row's edges are weighed: each by its own weighting, or least traversed and most rewarded first">
+        traverse <b>{s.mode === "explore" ? "explore" : "own"}</b>
+      </span>
       <span className="stat" title="Where runs start, how often they skipped a node, and how often nodes swapped">
         focus <b>{s.learn_focus ? "learned" : s.focus === null || s.focus === undefined ? "none" : fmtNum(s.focus, 2)}</b>
         {s.origin !== undefined && !s.learn_focus ? <> · from state {s.origin}</> : null}

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../api.js";
 import { useStoredState } from "../hooks/useStoredState.js";
+import { EXPLORE, MODES } from "../matrix.js";
 import { fmtNum, parseInteger, parseNumber, parseStateList } from "../util.js";
 import Alert from "./Alert.jsx";
 import { CheckField, NumberField, SelectField, TextField } from "./Fields.jsx";
@@ -13,6 +14,8 @@ export default function MachinePanel({ stats, onMoved }) {
   const [life, setLife] = useStoredState("machine.life", "1000");
   const [baseline, setBaseline] = useStoredState("machine.baseline", "1");
   const [seed, setSeed] = useStoredState("machine.seed", "1");
+  const [mode, setMode] = useStoredState("machine.mode", "own");
+  const [equalReward, setEqualReward] = useStoredState("machine.equalReward", false);
   const [path, setPath] = useStoredState("machine.path", "machine.json.gz");
   const [every, setEvery] = useStoredState("compression.every", "0");
   const [everyPrecision, setEveryPrecision] = useStoredState("compression.precision", "exact");
@@ -51,7 +54,14 @@ export default function MachinePanel({ stats, onMoved }) {
           <NumberField label="Life" value={life} onChange={setLife} min="1" step="100" hint="ticks to fade by a half" />
           <NumberField label="Baseline stimulation" value={baseline} onChange={setBaseline} min="0" step="0.5" />
           <NumberField label="Seed" value={seed} onChange={setSeed} step="1" />
+          <SelectField label="Traversal" value={mode} onChange={setMode} options={MODES} hint="how a row's edges are weighed" />
         </div>
+        <CheckField
+          label="Reward the whole path equally"
+          checked={equalReward}
+          onChange={setEqualReward}
+          hint="a correct output credits every edge of its run in full, not discounted from the end"
+        />
         <div className="actions">
           <button
             type="button"
@@ -65,6 +75,9 @@ export default function MachinePanel({ stats, onMoved }) {
                     life: parseNumber(life, 1000),
                     baseline: parseNumber(baseline, 1),
                     seed: parseInteger(seed, 1),
+                    mode,
+                    explore: EXPLORE,
+                    equal_reward: equalReward,
                   }),
                 (r) => `a fresh machine of ${r.shape.join(" × ")}`,
               )

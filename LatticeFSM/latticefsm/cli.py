@@ -39,7 +39,8 @@ from . import experiment
 from .autotemp import MAX_TEMPERATURE, TRIES, climb, climb_note
 from .compress import PRECISIONS, compress, fidelity, load_core
 from .languages import LANGUAGES, all_strings, examples, language
-from .machine import BASELINE, DEFAULT_ALPHABET, DEFAULT_STATES, DISCOUNT, LIFE, Machine, load_machine
+from .edge import EXPLORE
+from .machine import BASELINE, DEFAULT_ALPHABET, DEFAULT_STATES, DISCOUNT, LIFE, MODES, Machine, load_machine
 
 
 def _add_machine_options(p: argparse.ArgumentParser) -> None:
@@ -62,6 +63,13 @@ def _add_machine_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--skip-margin", type=float, default=0.0, help="how much more efficient (log-probability)")
     p.add_argument("--rearrange-every", type=int, default=0,
                    help="let the nodes rearrange themselves every N transitions (0: never)")
+    p.add_argument("--mode", choices=MODES, default=None,
+                   help="how a row's edges are weighed: own (each edge's own weighting, the default) or explore "
+                        "(least traversed and most rewarded first); with run --load, for that run")
+    p.add_argument("--equal-reward", action="store_true",
+                   help="a reward lands on every edge of the run in full (punishment is still discounted from the end)")
+    p.add_argument("--explore", type=float, default=EXPLORE,
+                   help="explore's bonus for a little-traversed edge (default sqrt 2, UCB1's; 0: the most rewarded only)")
     p.add_argument("--compress-every", type=int, default=0,
                    help="fold the matrix into its central node every N transitions (0: never)")
     p.add_argument("--compress-precision", choices=list(PRECISIONS), default="exact")
@@ -83,7 +91,8 @@ def _fresh(args) -> Machine:
                    baseline=args.baseline, calm=args.calm, temperature=args.temperature, discount=args.discount,
                    seed=args.seed, compress_every=args.compress_every, compress_precision=args.compress_precision,
                    compress_rebuild=args.compress_rebuild, focus=args.focus, learn_focus=args.learn_focus,
-                   skip=args.skip, skip_margin=args.skip_margin, rearrange_every=args.rearrange_every)
+                   skip=args.skip, skip_margin=args.skip_margin, rearrange_every=args.rearrange_every,
+                   mode=args.mode or "own", explore=args.explore, equal_reward=args.equal_reward)
 
 
 def _machine(args) -> Machine:
@@ -133,7 +142,7 @@ def cmd_run(args) -> int:
     for _ in range(max(1, args.times)):
         r = m.run(args.text, stimulation=args.stimulation, temperature=args.temperature_run, quiet=args.quiet,
                   from_middle=args.from_middle, focus=args.focus if args.load else None,
-                  skip=True if args.skip else None)
+                  skip=True if args.skip else None, mode=args.mode)
         steps = "  ".join(f"{t.source} -{t.symbol}({t.probability:.2f})-> {t.target}" if t.skipped is None else
                           f"{t.source} ={t.symbol}({t.probability:.2f})=> {t.target} [skipping {t.skipped}]"
                           for t in r.transitions)

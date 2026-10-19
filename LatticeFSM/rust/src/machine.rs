@@ -18,7 +18,7 @@ use crate::compress::{compress, Core, Precision};
 use crate::focus::{FocusDraw, FocusLearner};
 use crate::geometry::{check_focus, focus_index, focus_node};
 
-use crate::edge::{Edge, Weighting};
+use crate::edge::{Edge, Weighting, EXPLORE};
 use crate::gzip;
 use crate::json::{parse, Json};
 use crate::lattice::Lattice;
@@ -38,6 +38,36 @@ pub const DEFAULT_ALPHABET: &str = "abcdefghijklm";
 
 const FORMAT: &str = "latticefsm-machine";
 const FORMAT_VERSION: f64 = 1.0;
+
+/// How a machine weighs the edges of a row when it chooses among them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// Every edge by its own adapted weighting function, plus the stimulation's width term.
+    #[default]
+    Own,
+    /// The least traversed and most rewarded first: `Edge::explore_log_weight` - its reward beyond its punishment,
+    /// plus a bonus the less it has been traversed than its row.
+    Explore,
+}
+
+impl Mode {
+    pub const NAMES: [&'static str; 2] = ["own", "explore"];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Mode::Own => "own",
+            Mode::Explore => "explore",
+        }
+    }
+
+    pub fn parse(name: &str) -> Result<Mode, String> {
+        match name {
+            "own" => Ok(Mode::Own),
+            "explore" => Ok(Mode::Explore),
+            _ => Err(format!("mode must be own or explore, got {name:?}")),
+        }
+    }
+}
 
 /// A function that weighs an edge in place of its own weighting: `(edge, clock, life, stimulation) -> log-weight`.
 pub type WeightFn = Box<dyn Fn(&Edge, i64, f64, f64) -> f64 + Send + Sync>;
@@ -143,6 +173,12 @@ pub struct Settings {
     pub skip_margin: f64,
     /// Let the nodes rearrange themselves every this many transitions; 0 never.
     pub rearrange_every: u64,
+    /// How a row's edges are weighed: their own weighting, or least traversed and most rewarded first.
+    pub mode: Mode,
+    /// The `explore` mode's bonus for a little-traversed edge (UCB1's constant, √2, by default; 0: none).
+    pub explore: f64,
+    /// A reward lands on every edge of the run in full, not discounted back from its end (punishment still is).
+    pub equal_reward: bool,
 }
 
 impl Default for Settings {
@@ -170,6 +206,9 @@ impl Default for Settings {
             skip: false,
             skip_margin: 0.0,
             rearrange_every: 0,
+            mode: Mode::Own,
+            explore: EXPLORE,
+            equal_reward: false,
         }
     }
 }
@@ -186,6 +225,8 @@ pub struct Walk {
     pub focus: Option<f64>,
     /// Skip or not for this run, instead of the machine's `skip`.
     pub skip: Option<bool>,
+    /// Weigh the edges this way for this run, instead of the machine's `mode`.
+    pub mode: Option<Mode>,
 }
 
 enum Move {
@@ -207,6 +248,13 @@ pub struct Machine {
     pub reward_widening: f64,
     pub punish_narrowing: f64,
     pub weight_fn: Option<WeightFn>,
+    /// How a row's edges are weighed (`weight_fn`, when set, comes first).
+    pub mode: Mode,
+    /// The `explore` mode's bonus for a little-traversed edge.
+    pub explore: f64,
+    /// A reward lands on every edge of the run in full (a correct output credits the whole path that made it);
+    /// punishment is still discounted back from the end, where the blame most likely lies.
+    pub equal_reward: bool,
     /// Greedy (temperature 0) choices take the lowest of tied targets instead of drawing among them, and draw
     /// nothing: a network's quiet passes are deterministic and leave the generator alone.  Not saved.
     pub greedy_first: bool,
@@ -271,6 +319,9 @@ impl Machine {
         if settings.skip_margin < 0.0 {
             return Err(format!("skip_margin must be >= 0, got {}", settings.skip_margin));
         }
+        if !(settings.explore.is_finite() && settings.explore >= 0.0) {
+            return Err(format!("explore must be >= 0, got {}", settings.explore));
+        }
         let mut lattice = Lattice::new(states, alphabet, settings.prototype.clone())?;
         if settings.start >= states {
             return Err(format!(
@@ -300,6 +351,9 @@ impl Machine {
             reward_widening: settings.reward_widening,
             punish_narrowing: settings.punish_narrowing,
             weight_fn: None,
+            mode: settings.mode,
+            explore: settings.explore,
+            equal_reward: settings.equal_reward,
             greedy_first: false,
             seed: settings.seed,
             compress_every: settings.compress_every,
@@ -457,9 +511,13 @@ impl Machine {
     pub fn log_weights(&self, source: usize, symbol: usize, stimulation: Option<f64>) -> Vec<f64> {
         let stim = stimulation.unwrap_or_else(|| self.stimulation());
         let row = self.lattice.row(source, symbol);
-        match &self.weight_fn {
-            Some(f) => row.iter().map(|e| f(e, self.clock, self.life, stim)).collect(),
-            None => row.iter().map(|e| e.log_weight(self.clock, self.life, stim)).collect(),
+        match (&self.weight_fn, self.mode) {
+            (Some(f), _) => row.iter().map(|e| f(e, self.clock, self.life, stim)).collect(),
+            (None, Mode::Own) => row.iter().map(|e| e.log_weight(self.clock, self.life, stim)).collect(),
+            (None, Mode::Explore) => {
+                let n: u64 = row.iter().map(|e| e.seen).sum();
+                row.iter().map(|e| e.explore_log_weight(n, self.explore)).collect()
+            }
         }
     }
 
@@ -776,6 +834,19 @@ impl Machine {
     }
 
     fn walk_from(&mut self, origin: usize, learned: Option<FocusDraw>, symbols: &[usize], walk: Walk) -> Run {
+        // a mode for this run alone: the machine's own back afterwards
+        match walk.mode {
+            Some(mode) if mode != self.mode => {
+                let own = std::mem::replace(&mut self.mode, mode);
+                let run = self.walk_from(origin, learned, symbols, Walk { mode: None, ..walk });
+                self.mode = own;
+                run
+            }
+            _ => self.walk_from_here(origin, learned, symbols, walk),
+        }
+    }
+
+    fn walk_from_here(&mut self, origin: usize, learned: Option<FocusDraw>, symbols: &[usize], walk: Walk) -> Run {
         let stim = walk.stimulation.unwrap_or_else(|| self.stimulation());
         let do_skip = walk.skip.unwrap_or(self.skip);
         if !walk.quiet {
@@ -947,10 +1018,16 @@ impl Machine {
             self.focus_learner.learn(amount, &draw);
         }
         let mut share = amount;
+        // a reward, with equal_reward, is the whole path's: every edge of it gets all of it
+        let discount = if amount > 0.0 && self.equal_reward {
+            1.0
+        } else {
+            self.discount
+        };
         let (clock, life, widen, narrow) = (self.clock, self.life, self.reward_widening, self.punish_narrowing);
         for &i in self.path.iter().rev() {
             self.lattice.edges[i].credit(share, clock, life, widen, narrow);
-            share *= self.discount;
+            share *= discount;
             if share.abs() < 1e-12 {
                 break;
             }
@@ -1085,6 +1162,9 @@ impl Machine {
             .with("skip", self.skip.into())
             .with("skip_margin", self.skip_margin.into())
             .with("skips", (self.skips as f64).into())
+            .with("mode", self.mode.name().into())
+            .with("explore", self.explore.into())
+            .with("equal_reward", self.equal_reward.into())
             .with("rearrange_every", (self.rearrange_every as f64).into())
             .with("swaps", (self.swaps as f64).into())
             .with(
@@ -1118,6 +1198,9 @@ impl Machine {
             .with("skip", self.skip.into())
             .with("skip_margin", self.skip_margin.into())
             .with("rearrange_every", (self.rearrange_every as f64).into())
+            .with("mode", self.mode.name().into())
+            .with("explore", self.explore.into())
+            .with("equal_reward", self.equal_reward.into())
     }
 
     pub fn to_json(&self) -> Json {
@@ -1187,6 +1270,9 @@ impl Machine {
             reward_widening: st.num("reward_widening", 0.2),
             punish_narrowing: st.num("punish_narrowing", 0.2),
             weight_fn: None,
+            mode: Mode::parse(st.str_or("mode", "own"))?,
+            explore: st.num("explore", EXPLORE),
+            equal_reward: st.bool_or("equal_reward", false),
             greedy_first: false,
             seed,
             rng,

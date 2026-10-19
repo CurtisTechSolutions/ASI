@@ -33,7 +33,7 @@ use latticefsm::compress::{compress, expansion, fidelity, load_core, Core, Preci
 use latticefsm::experiment::{self, teach_language};
 use latticefsm::json::Json;
 use latticefsm::languages::{all_strings, examples, language, LANGUAGES};
-use latticefsm::machine::{load_machine, Machine, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
+use latticefsm::machine::{load_machine, Machine, Mode, Settings, Walk, DEFAULT_ALPHABET, DEFAULT_STATES};
 use latticefsm::media;
 use latticefsm::network::{load_network, Credit, Merge, Network, Vote, LAYER_DISCOUNT};
 use latticefsm::ngram::{corpus_sequences, detokenize, load_ngram, split_lines, NGram};
@@ -183,14 +183,18 @@ machine options (train, demo, serve without --load)
   --temperature 1  --discount 0.8  --seed 1  --use-widening 0.01  --reward-widening 0.2  --punish-narrowing 0.2
   --compress-every N (0: never)  --compress-precision exact|float32|float16  --compress-rebuild
   --focus F (0..1)  --learn-focus  --skip  --skip-margin M  --rearrange-every N (0: never)
+  --mode own|explore  how a row's edges are weighed: own (each edge's own weighting) or explore (least traversed
+                      and most rewarded first: rewarded - punished + E sqrt(ln(1+N)/(1+seen)), N the row's traversals)
+  --equal-reward      a reward lands on every edge of the run in full (punishment is still discounted from the end)
+  --explore E         explore's bonus for a little-traversed edge (1.414, UCB1's sqrt 2; 0: the most rewarded only)
 common options
   --load FILE  --save FILE (.json or .json.gz)  --stimulation X (run)  --temperature T (run, accuracy)
   --language even-b|contains-aa|ends-ab|mod3-a  --episodes N  --max-length 6  --tests 300
 ";
 
-fn settings(a: &Args) -> Settings {
+fn settings(a: &Args) -> Result<Settings, String> {
     let d = Settings::default();
-    Settings {
+    Ok(Settings {
         start: a.num("start", 0.0) as usize,
         life: a.num("life", d.life),
         baseline: a.num("baseline", d.baseline),
@@ -219,7 +223,10 @@ fn settings(a: &Args) -> Settings {
         skip: a.has("skip"),
         skip_margin: a.num("skip-margin", 0.0),
         rearrange_every: a.num("rearrange-every", 0.0).max(0.0) as u64,
-    }
+        mode: Mode::parse(&a.str("mode", "own"))?,
+        explore: a.num("explore", d.explore),
+        equal_reward: a.has("equal-reward"),
+    })
 }
 
 fn fresh(a: &Args) -> Result<Machine, String> {
@@ -240,7 +247,7 @@ fn fresh(a: &Args) -> Result<Machine, String> {
             None => vec![0],
         },
     };
-    Machine::new(states, &alphabet, &accepting, settings(a))
+    Machine::new(states, &alphabet, &accepting, settings(a)?)
 }
 
 fn machine(a: &Args) -> Result<Machine, String> {
@@ -632,6 +639,7 @@ fn run(a: &Args) -> Result<(), String> {
             from_middle: a.has("from-middle"),
             focus,
             skip: if a.has("skip") { Some(true) } else { None },
+            mode: a.get("mode").map(Mode::parse).transpose()?,
         };
         let r = m.walk(&symbols, walk)?;
         let steps: Vec<String> = r
@@ -909,7 +917,7 @@ fn network(a: &Args) -> Result<Network, String> {
         a.num("seed", 1.0) as u64,
         Merge::parse(&a.str("merge", "concat"))?,
         Vote::parse(&a.str("vote", "majority"))?,
-        &settings(a),
+        &settings(a)?,
     )?;
     let accepting: Vec<usize> = match a.get("accepting") {
         Some(list) => list

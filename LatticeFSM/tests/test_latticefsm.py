@@ -1563,6 +1563,117 @@ class TestRustParity(unittest.TestCase):
             self.assertIn(f'"clock": {m.clock}', out2)
 
 
+class TestExploreMode(unittest.TestCase):
+    """The explore traversal mode: the least traversed and most rewarded edge of a row first."""
+
+    def test_an_edges_explore_weight(self):
+        from latticefsm.edge import EXPLORE, Edge
+        e = Edge(0, 0, 1)
+        # nothing traversed in the row: no bonus, and nothing earned
+        self.assertEqual(e.explore_log_weight(0), 0.0)
+        e.seen, e.rewarded, e.punished = 4, 3.0, 1.0
+        self.assertAlmostEqual(e.explore_log_weight(10), 2.0 + EXPLORE * math.sqrt(math.log(11) / 5), places=12)
+        self.assertAlmostEqual(e.explore_log_weight(10, 0.0), 2.0, places=12)
+        # the less traversed of two equally rewarded edges weighs more
+        f = Edge(0, 0, 2)
+        f.seen, f.rewarded, f.punished = 1, 3.0, 1.0
+        self.assertGreater(f.explore_log_weight(10), e.explore_log_weight(10))
+
+    def test_the_machine_weighs_its_rows_so(self):
+        m = Machine(3, "ab", accepting=[0], mode="explore", temperature=1.0)
+        self.assertEqual(m.mode, "explore")
+        # untried: every edge alike
+        self.assertEqual(len(set(m.log_weights(0, "a"))), 1)
+        m.teach(0, "a", 1, 2.0)   # rewarded
+        m.teach(0, "a", 2, -1.0)  # punished
+        w = m.log_weights(0, "a")
+        self.assertGreater(w[1], w[0])  # rewarded beats untried...
+        self.assertGreater(w[0], w[2])  # ...and untried beats punished
+        self.assertEqual(max(range(3), key=w.__getitem__), 1)
+        # with no bonus the untried edge has only its (zero) earnings
+        m.explore = 0.0
+        self.assertEqual(m.log_weights(0, "a"), [0.0, 2.0, -1.0])
+        # the own mode weighs the same edges by their own functions
+        m.mode = "own"
+        self.assertEqual(m.log_weights(0, "a"), [e.log_weight(m.clock, m.life, m.stimulation)
+                                                 for e in m.lattice.row(0, "a")])
+        with self.assertRaises(ValueError):
+            Machine(3, "ab", mode="wander")
+        with self.assertRaises(ValueError):
+            Machine(3, "ab", explore=-1)
+
+    def test_a_run_can_take_a_mode_of_its_own(self):
+        m = Machine(3, "ab", accepting=[0])
+        m.teach(0, "a", 2, 3.0)
+        r = m.run("a", temperature=0, quiet=True, mode="explore")
+        self.assertEqual(r.final, 2)
+        self.assertEqual(m.mode, "own")  # the machine's own mode is back
+
+    def test_the_mode_is_saved(self):
+        m = Machine(3, "ab", mode="explore", explore=0.5)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.json")
+            m.save(path)
+            back = load_machine(path)
+            self.assertEqual((back.mode, back.explore), ("explore", 0.5))
+            # a file from before the mode reads as the own mode
+            with open(path) as f:
+                data = json.load(f)
+            del data["settings"]["mode"], data["settings"]["explore"]
+            old = Machine.from_dict(data)
+            self.assertEqual((old.mode, old.explore), ("own", math.sqrt(2)))
+
+    def test_a_reward_can_be_the_whole_paths(self):
+        for equal in (False, True):
+            m = Machine(3, "ab", accepting=[0], equal_reward=equal, temperature=0)
+            m.run("aba")
+            path = list(m.path)
+            m.reward(1.0)
+            got = [e.rewarded for e in path]
+            self.assertEqual(got, [1.0, 1.0, 1.0] if equal else [0.8 ** 2, 0.8, 1.0], equal)
+            # punishment is discounted back from the end either way
+            m.run("aba")
+            path = list(m.path)
+            before = [e.punished for e in path]
+            m.punish(1.0)
+            self.assertEqual([round(e.punished - b, 12) for e, b in zip(path, before)], [0.64, 0.8, 1.0])
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.json")
+            Machine(3, "ab", equal_reward=True).save(path)
+            self.assertTrue(load_machine(path).equal_reward)
+
+    def test_it_learns_a_language(self):
+        from latticefsm.experiment import teach_language
+        from latticefsm.languages import examples, language
+        lang = language("even-b")
+        test = examples(lang, 300, random.Random(7), 6)
+        m = Machine(6, "ab", accepting=lang.accepting, mode="explore", seed=1)
+        teach_language(m, "even-b", 4000, random.Random(1))
+        self.assertGreaterEqual(m.accuracy(test), 0.95)
+
+
+@unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
+class TestRustExploreParity(unittest.TestCase):
+    """A machine trained in the explore mode by one port reads in the other with its mode, and walks the same greedy
+    table (greedy walks draw nothing, so the two generators do not matter)."""
+
+    def test_an_explore_machine_crosses(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.json.gz")
+            subprocess.run([RUST, "train", "--language", "ends-ab", "--states", "4", "--alphabet", "ab", "--episodes",
+                            "600", "--mode", "explore", "--explore", "0.7", "--equal-reward", "--save", path], check=True,
+                           capture_output=True)
+            m = load_machine(path)
+            self.assertEqual((m.mode, m.explore, m.equal_reward), ("explore", 0.7, True))
+            out = subprocess.run([RUST, "table", "--load", path], check=True, capture_output=True, text=True).stdout
+            for (s, sym), t in m.transition_table().items():
+                self.assertIn(f"{sym} -> {t}", out.splitlines()[1 + s])
+            back = os.path.join(d, "back.json")
+            m.save(back)
+            stats = subprocess.run([RUST, "stats", "--load", back], check=True, capture_output=True, text=True).stdout
+            self.assertIn('"mode": "explore"', stats)
+
+
 @unittest.skipUnless(os.path.exists(RUST), "the Rust crate is not built (make rust-build)")
 class TestRustNetworkParity(unittest.TestCase):
     """A network file written by either port reads in the other, which then classifies, traces and translates every

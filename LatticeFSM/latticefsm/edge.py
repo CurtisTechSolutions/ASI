@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field, fields
 
-__all__ = ["COEFFICIENT_LIMIT", "FEATURES", "Edge", "Weighting", "WIDTH_MAX", "WIDTH_MIN", "WIDTH_REST"]
+__all__ = ["COEFFICIENT_LIMIT", "EXPLORE", "FEATURES", "Edge", "Weighting", "WIDTH_MAX", "WIDTH_MIN", "WIDTH_REST"]
 
 FEATURES = ("seen", "recent", "net", "age", "width")
 """The features an edge's weighting function reads, in the order :meth:`Edge.features_at` returns them.
@@ -46,6 +46,9 @@ WIDTH_REST, WIDTH_MIN, WIDTH_MAX = 1.0, 0.05, 20.0
 
 COEFFICIENT_LIMIT = 8.0
 """Every coefficient of a weighting is clipped to ``[-limit, limit]`` after adapting, so no edge can become certain."""
+
+EXPLORE = math.sqrt(2.0)
+"""UCB1's constant: how much the ``explore`` traversal mode favours an edge for being little traversed."""
 
 
 @dataclass(slots=True)
@@ -163,6 +166,14 @@ class Edge:
     def net(self) -> float:
         """Credit per traversal: ``(rewarded - punished) / (seen + 1)``."""
         return (self.rewarded - self.punished) / (self.seen + 1)
+
+    def explore_log_weight(self, row_seen: int, explore: float | None = None) -> float:
+        """The ``explore`` traversal mode's log-weight: ``rewarded - punished + explore * sqrt(log(1 + N) / (1 +
+        seen))``, ``N`` the traversals of every edge in the row.  Every unit of reward it has earned beyond its
+        punishment multiplies its odds by e, and the less it has been traversed than its row the bigger its bonus:
+        the most rewarded and least traversed path is the likeliest (UCB1's bonus)."""
+        c = EXPLORE if explore is None else explore
+        return self.rewarded - self.punished + c * math.sqrt(math.log1p(row_seen) / (self.seen + 1.0))
 
     def features_at(self, clock: int, life: float) -> tuple[float, float, float, float, float]:
         """The five features of :data:`FEATURES`, as they are at ``clock``."""

@@ -1175,3 +1175,46 @@ as in §9.
   rarely helps when the model's likeliest token is the end of the reply:
   "why" needed five draws and 0.4. Forbidding `</s>` before a minimum
   length would fix that deterministically, and is left as the next step.
+
+## 23. Traversal modes and rewarding the whole path
+
+`Machine::log_weights` weighs a row in one of two ways:
+* **`own`** (the default) uses each edge's adapted weighting plus
+  `stimulation · ln(width)`, as in §3.
+* **`explore`** uses `Edge::explore_log_weight`:
+  `rewarded − punished + explore · sqrt(ln(1 + N) / (1 + seen))`, where `N`
+  is the sum of `seen` over the row.
+
+A `weight_fn`, when set, still comes first. The mode only changes how edges
+are chosen. Credit, traversal, width and every edge's own adaptation are
+the same in both modes, so a machine can be trained in one and run in the
+other. `mode`, `explore` and `equal_reward` are settings: both ports save
+them, and a file without them reads as `own`, √2 and off. A run can take a
+mode for itself (`Walk::mode`, `run(mode=...)`); the machine's own mode is
+restored afterwards.
+
+`equal_reward` changes `credit`. A positive amount, which is a reward, is
+not discounted: every edge of the path receives all of it. A negative
+amount is discounted as before.
+
+### 23.1 Decisions
+
+* **Net reward, not a share.** The first version weighed an edge by
+  `ln((rewarded + 1) / (rewarded + punished + 2))`, the posterior chance that
+  it is right. At temperature 1 that leaves the choice nearly proportional
+  to those chances, so an edge right 90% of the time, beside five untried
+  ones, is drawn about a quarter of the time. The machine never settled
+  (0.70–0.88 on 6 states where `own` reaches 1.0). Net reward keeps growing
+  on an edge that keeps being right, and the policy sharpens on its own.
+* **UCB1's bonus, per row.** `sqrt(ln(1 + N) / (1 + seen))` is large for an
+  edge seldom tried compared with its row, shrinks as the edge is used,
+  and is zero before the row has been traversed at all. So a fresh row is
+  uniform.
+* **Lock-in is the price.** Net reward has no ceiling, so on small machines
+  an early winner can hold a row against a bonus that never exceeds a few
+  units. Capping or decaying the reward would loosen this, at the cost of
+  settling more slowly.
+* **Equal reward is a setting, off by default.** It measured worse in both
+  modes (own 0.894 → 0.860, explore 0.944 → 0.858 over 36 runs). The edges
+  near a run's start are shared by most strings, and with a full reward they
+  gain as much as the edge that decided the answer.

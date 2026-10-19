@@ -123,6 +123,8 @@ export const api = {
   compression: (body) => post("/api/compression", body),
   focus: (body) => post("/api/focus", body),
   skip: (body) => post("/api/skip", body),
+  /** How the machine weighs a row's edges from now on: `{mode: "own" | "explore", explore?}`; answers its stats. */
+  mode: (body) => post("/api/mode", body),
   rearrange: (body) => post("/api/rearrange", body),
   ngram: () => get("/api/ngram"),
   ngramNew: (body) => post("/api/ngram/new", body),

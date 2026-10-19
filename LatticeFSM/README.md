@@ -236,7 +236,7 @@ busy.
 | **Matrix** | the matrix one symbol-slice at a time: each row a state, each cell the probability of moving to that column's state, shaded by it, with the channel's width and `seen` beneath; click a cell for every field of the edge and its weighting function |
 | **3D** | the whole matrix as a cube of cells - source top to bottom, symbol into the page, target across - drawn on a canvas by hand: drag to turn, scroll to zoom, hover to read, click for the edge's record; colour by probability, seen, width or net; only the inner shells, the touched edges or one symbol; the central node, the central vertical vector and the focus node outlined |
 | **Run** | read a string at a stimulation of your choosing, traversing it or asking quietly; reward or punish the last run |
-| **Walk** | the focus: a slider over the central vertical vector, none, or learned from the input (and what the learner reads off a string); skips and their margin; the nodes rearranging themselves (one pass, until settled, every N transitions) or two of them swapped |
+| **Walk** | **how it traverses**: each edge by its own weighting, or **explore** (least traversed and most rewarded first) and its bonus; **reward the whole path equally**; the focus: a slider over the central vertical vector, none, or learned from the input (and what the learner reads off a string); skips and their margin; the nodes rearranging themselves (one pass, until settled, every N transitions) or two of them swapped |
 | **Teach** | teach the machine a language for some episodes, with the accuracy curve and the greedy table it ends in |
 | **Time** | let ticks pass; raise or set the stimulation |
 | **Compress** | fold the matrix into its central node at a precision or a budget; the code's size, its loss in state and behaviour, and its rebuild shell by shell from the centre outward; rebuild the machine to any shell; walk straight from the code, from the start or the middle; save and load codes |
@@ -823,6 +823,57 @@ bounded by memory: a 135 MB text inside a 51 MB zip trains in 25 s in 47 MB
 of memory (Rust). For `base64` every file is its bytes, archives giving their
 members' bytes. `latticefsm corpus PATH` (`make corpus`) shows what a path
 is read as; both ports print the same.
+
+## Traversal modes: explore, and rewarding the whole path
+
+At every step the machine weighs the edges of the row it is in and draws
+one. By default (`own`), each edge is weighed by its own adapted function
+plus the stimulation's width term. The **explore** mode (`--mode explore`,
+`POST /api/mode`, Walk tab) takes the **least traversed and most rewarded**
+edge first:
+
+```
+log-weight = rewarded − punished + explore · sqrt(ln(1 + N) / (1 + seen))
+```
+
+Here `N` is the number of traversals of the edge's whole row, and `explore`
+defaults to √2, UCB1's constant. Every unit of reward an edge has earned
+beyond its punishment multiplies its odds by e. An edge that has seldom been
+tried, compared with its row, gets a bonus that shrinks as it is used. With
+`explore` 0 the machine just follows what was most rewarded. The edges still
+adapt their own weightings either way, so switching back loses nothing. A
+single run can take either mode for itself (`mode` on `/api/run`, or
+`run --mode`).
+
+Measured by teaching each language for 4000 episodes, on machines of 4, 6
+and 13 states over `ab`, seeds 1–3 (the mean accuracy after training):
+
+| | all 36 | 4 states | 13 states | worst |
+|---|---|---|---|---|
+| own | 0.894 | 0.978 | 0.832 | 0.623 |
+| explore | **0.944** | 0.920 | **0.947** | 0.787 |
+
+Explore is better on the default-sized machine, and usually learns sooner.
+On the smallest machines it can **lock in**: once an edge has earned enough
+net reward, the bonus cannot pull the machine away from it, and accuracy
+plateaus (contains-aa on 4 states stopped at 0.79 to 0.93). Scoring by the
+*share* of credit that was reward, instead of the net amount, was tried
+first. It stayed too flat to settle on anything (0.70 to 0.88).
+
+**Rewarding the whole path** (`--equal-reward`, `equal_reward`, the Walk tab)
+changes how a correct output is credited. By default a run's last edge gets
+the reward in full and each earlier edge gets 0.8 times the next. With equal
+reward, every edge of the path that made the correct output gets the whole
+reward. Punishment is still discounted back from the end, where the blame
+most likely lies. It is **off by default** because it measured worse on the
+same grid: own 0.894 → 0.860, explore 0.944 → 0.858. The early edges,
+which nearly every string shares, are rewarded as much as the step that
+decided the answer, and in explore mode they lock in sooner.
+
+```bash
+latticefsm train --language even-b --states 13 --alphabet ab --mode explore
+latticefsm train --language even-b --states 13 --alphabet ab --mode explore --equal-reward
+```
 
 ## Networks of machines
 
