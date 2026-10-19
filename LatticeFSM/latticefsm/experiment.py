@@ -1,0 +1,679 @@
+"""The three experiments: a language is learned by credit, stimulation prefers the wide channel, an edge adapts.
+
+Each is a function of the machine's settings that returns a JSON-serialisable
+record; :func:`run` runs the ones asked for and writes them, and
+:func:`tables` renders them as the markdown ``README.md`` quotes.  Everything
+is deterministic given the seed.
+
+* :func:`learning` - for each language and each machine size, the machine
+  runs random strings, is rewarded when it ends in the right kind of state
+  and punished when it does not, and its accuracy on held-out strings is
+  measured as it goes.  The control runs the same strings quietly and
+  credits them the same way: credit without a traversal lands on nothing,
+  so nothing is learned.
+* :func:`stimulation` - a fork of three channels of different widths, and
+  the probability of each against the stimulation level; then a machine
+  stimulated once, and the preference relaxing on the clock as the
+  stimulation does.
+* :func:`adaptation` - two edges that start from the same prototype and live
+  different lives: one is used and rewarded, one is used and punished.  Use
+  widens, punishment narrows, the verdict never fades, the width and the
+  trace do; and the two weighting functions end up different.
+* :func:`compression` - default machines, fresh and taught each language, folded
+  into their central node at each precision: the bytes, and what the rebuilt
+  machine lost; one of them rebuilt from the central node outward, a shell at a
+  time; and every language taught again with the matrix folded into its central
+  node every ``every`` transitions, rebuilt from the code each time, at each
+  precision - what a compression on a clock costs the learning.
+* :func:`walk` - where a run starts and how it moves: the node each focus picks
+  on the central vertical vector; every language taught plain, with skips,
+  with a learned focus, with the nodes rearranging themselves, and from a
+  fixed focus of 0.5 and of 1; and what letting the nodes rearrange
+  themselves does to the shells the compressed code is laid out in.
+* :func:`network` - machines connected into networks (``network.py``): every
+  language taught to one machine, to two in a row, to three side by side
+  voting (credited by the network's verdict, or each by its own), and so on -
+  the same strings in the same order as the learning experiment's.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import sys
+from collections.abc import Sequence
+
+from .compress import PRECISIONS, compress, fidelity
+from .edge import Weighting
+from .languages import ALPHABET, LANGUAGES, examples, language
+from .machine import BASELINE, DISCOUNT, LIFE, Machine
+
+__all__ = ["EXPERIMENTS", "MEDIA", "NETWORKS", "NGRAMS", "ngram", "adaptation", "learning", "main", "media", "network", "run", "stimulation", "tables", "teach_language"]
+
+EXPERIMENTS = ("learning", "stimulation", "adaptation", "compression", "walk", "network", "media", "ngram")
+
+NGRAMS = (("word", 1), ("word", 2), ("word", 3), ("word", 4), ("char", 3), ("char", 5), ("char", 7), ("sound", 3),
+          ("sound", 5), ("base64", 4), ("base64", 8), ("base64", 12))
+"""The N-gram models the ngram experiment measures: a unit and an order."""
+
+MEDIA = (("text", "text>13"), ("image", "image>3"), ("audio", "audio>3"), ("video", "diff>3"), ("video", "video>13"))
+"""The media experiment's networks: the kind of data set (``media.make_dataset``) and the architecture taught it."""
+
+NETWORKS = (("3", "shared"), ("3>3", "shared"), ("3f>3", "shared"), ("(3|3)>3", "shared"), ("(3|3|3)", "shared"),
+            ("(3|3|3)", "own"), ("13", "shared"), ("(13|13|13)", "own"))
+"""The networks the network experiment compares: an architecture string and whose verdict its output layers are
+credited by."""
+
+TRANSLATORS = ("enc>dec", "enc>13>dec")
+"""The English-to-English networks the network experiment teaches each phonetic task to."""
+
+
+def _settings(**kw) -> dict:
+    return {k: v for k, v in kw.items()}
+
+
+def oracle_amounts(machine: Machine, lang, s: str, run, reward: float = 1.0, punish: bool = True) -> list[float]:
+    """What the oracle says of every step of ``run`` over ``s``: ``+reward`` where the state it landed in is
+    accepting exactly when the prefix read so far is in the language, else ``-reward`` (or nothing, without
+    ``punish``)."""
+    states: list[int] = []
+    for t in run.transitions:
+        if t.skipped is not None:
+            states.append(t.skipped)
+        states.append(t.target)
+    out = []
+    for i, st in enumerate(states):
+        if machine.lattice.states[st].accepting == lang.member(s[:i + 1]):
+            out.append(reward)
+        else:
+            out.append(-reward if punish else 0.0)
+    return out
+
+
+def teach_language(machine: Machine, name: str, episodes: int, rng: random.Random, max_length: int = 6,
+                   quiet: bool = False, reward: float = 1.0, test: Sequence[tuple[str, bool]] | None = None,
+                   every: int = 0, oracle: bool = False, punish: bool = True) -> list[tuple[int, float]]:
+    """Run ``episodes`` random strings through ``machine`` and credit each by whether it was classified right - or,
+    ``oracle``, every step by its own: whether the state it lands in classifies the prefix read so far rightly.
+    Without ``punish`` only what is right is rewarded, and what is wrong gets nothing.
+
+    Returns ``(episode, accuracy on test)`` every ``every`` episodes, when
+    ``test`` and ``every`` are given.  Quiet, the runs traverse nothing and
+    the credit has nothing to land on.
+    """
+    lang = language(name)
+    curve = []
+    for ep in range(1, episodes + 1):
+        s = "".join(rng.choice(ALPHABET) for _ in range(rng.randint(0, max_length)))
+        result = machine.run(s, quiet=quiet)
+        if oracle:
+            if not quiet and s:
+                machine.credit_steps(oracle_amounts(machine, lang, s, result, reward, punish))
+        elif result.accepted == lang.member(s):
+            machine.reward(reward)
+        elif punish:
+            machine.punish(reward)
+        if test is not None and every and ep % every == 0:
+            curve.append((ep, machine.accuracy(test)))
+    return curve
+
+
+def learning(episodes: int = 4000, sizes: Sequence[int] = (3, 4, 6, 13), seeds: Sequence[int] = (1, 2, 3, 4, 5),
+             life: float = LIFE, discount: float = DISCOUNT, max_length: int = 6, tests: int = 300) -> dict:
+    rows = []
+    for name, lang in LANGUAGES.items():
+        for states in sizes:
+            arms = {"credited": [], "quiet": []}
+            curves = []
+            for seed in seeds:
+                for arm in arms:
+                    rng = random.Random(seed)
+                    test = examples(lang, tests, rng, max_length)
+                    m = Machine(states, ALPHABET, accepting=lang.accepting, life=life, discount=discount, seed=seed)
+                    before = m.accuracy(test)
+                    curve = teach_language(m, name, episodes, rng, max_length, quiet=(arm == "quiet"), test=test,
+                                           every=max(1, episodes // 8))
+                    after = m.accuracy(test)
+                    arms[arm].append({"seed": seed, "before": before, "after": after, "curve": curve,
+                                      "touched": m.stats()["touched"], "clock": m.clock})
+                    if arm == "credited":
+                        curves.append(curve)
+            credited = [a["after"] for a in arms["credited"]]
+            rows.append({
+                "language": name, "description": lang.description, "min_states": lang.min_states, "states": states,
+                "before": sum(a["before"] for a in arms["credited"]) / len(seeds),
+                "after_mean": sum(credited) / len(seeds),
+                "after_min": min(credited), "after_max": max(credited),
+                "solved": sum(a >= 0.999 for a in credited),
+                "quiet_after": sum(a["after"] for a in arms["quiet"]) / len(seeds),
+                "quiet_touched": max(a["touched"] for a in arms["quiet"]),
+                "arms": arms,
+            })
+    return {
+        "experiment": "learning",
+        "settings": _settings(episodes=episodes, sizes=list(sizes), seeds=list(seeds), life=life, discount=discount,
+                              max_length=max_length, tests=tests),
+        "rows": rows,
+    }
+
+
+def stimulation(widths: Sequence[float] = (4.0, 1.0, 0.25), levels: Sequence[float] = (0.0, 0.5, 1.0, 2.0, 4.0),
+                life: float = LIFE, baseline: float = BASELINE, surge: float = 3.0,
+                waits: Sequence[float] = (0.0, 0.5, 1.0, 2.0, 4.0)) -> dict:
+    n = len(widths)
+    m = Machine(n, "a", life=life, baseline=baseline, seed=1)
+    for t, w in enumerate(widths):
+        m.edge(0, "a", t).set_width(w, 0)
+    curve = [{"stimulation": level, "probabilities": m.probabilities(0, "a", stimulation=level)} for level in levels]
+    # a surge, and its relaxation on the clock
+    m.stimulate(surge)
+    relax = []
+    for lives in waits:
+        m2 = Machine(n, "a", life=life, baseline=baseline, seed=1)
+        for t, w in enumerate(widths):
+            m2.edge(0, "a", t).set_width(w, 0)
+        m2.stimulate(surge)
+        m2.tick(int(lives * life))
+        relax.append({"lives": lives, "stimulation": m2.stimulation,
+                      "probabilities": m2.probabilities(0, "a"), "widths": [e.width_at(m2.clock, m2.life)
+                                                                             for e in m2.lattice.row(0, "a")]})
+    return {
+        "experiment": "stimulation",
+        "settings": _settings(widths=list(widths), levels=list(levels), life=life, baseline=baseline, surge=surge,
+                              waits=list(waits)),
+        "curve": curve,
+        "relaxation": relax,
+    }
+
+
+def adaptation(uses: int = 20, life: float = LIFE, waits: Sequence[float] = (0.0, 1.0, 4.0)) -> dict:
+    """Two edges, one life each: rewarded on every use, and punished on every use."""
+    m = Machine(3, "a", life=life, seed=1)
+    good, bad = m.edge(0, "a", 1), m.edge(0, "a", 2)
+    stages = []
+
+    def snapshot(label: str) -> None:
+        stages.append({
+            "stage": label, "clock": m.clock,
+            "probabilities": m.probabilities(0, "a"),
+            "edges": {
+                "rewarded": _edge_view(good, m), "punished": _edge_view(bad, m),
+                "untouched": _edge_view(m.edge(0, "a", 0), m),
+            },
+        })
+
+    snapshot("fresh")
+    for i in range(uses):
+        m.teach(0, "a", 1, +1.0)
+        m.teach(0, "a", 2, -1.0)
+        if i + 1 in (1, 5, uses):
+            snapshot(f"after {i + 1} uses each")
+    end = m.clock
+    for lives in waits[1:]:
+        m.tick(end + int(lives * life) - m.clock)
+        snapshot(f"{lives:g} {'life' if lives == 1 else 'lives'} later")
+    return {
+        "experiment": "adaptation",
+        "settings": _settings(uses=uses, life=life, waits=list(waits), prototype=Weighting().to_list()),
+        "stages": stages,
+    }
+
+
+def compression(episodes: int = 4000, seed: int = 1, life: float = LIFE, tests: int = 300, every: int = 500) -> dict:
+    """Default 13 x 13 x 13 machines folded into their central node: fresh, and taught each language."""
+    rows, expansion, periodic = [], [], []
+    machines = [("fresh", None)] + [(name, name) for name in LANGUAGES]
+    for label, name in machines:
+        lang = language(name) if name else None
+        m = Machine(accepting=lang.accepting if lang else (0,), life=life, seed=seed)
+        rng = random.Random(seed)
+        test = examples(lang, tests, random.Random(seed + 1000)) if lang else []
+        if lang:
+            teach_language(m, name, episodes, rng)
+        for precision in PRECISIONS:
+            core = compress(m, precision)
+            r = core.decompress()
+            f = fidelity(m, r)
+            s = core.summary()
+            rows.append({
+                "machine": label, "precision": precision, "touched": s["touched"], "bytes": s["bytes"],
+                "dense_bytes": s["dense_bytes"], "ratio": s["ratio"], "record_bytes": s["record_bytes"],
+                "lossless": f["lossless"], "max_relative_error": f["max_relative_error"], "mean_kl": f["mean_kl"],
+                "max_kl": f["max_kl"], "greedy_changed": f["greedy_changed"],
+                "accuracy": m.accuracy(test) if test else None, "accuracy_rebuilt": r.accuracy(test) if test else None,
+            })
+            if label == "even-b" and precision == "exact":
+                for row in s["shell_table"]:
+                    k = row["shell"] + 1
+                    part = core.decompress(shells=k)
+                    pf = fidelity(m, part)
+                    expansion.append({
+                        "shells": k, "cells": sum(x["cells"] for x in s["shell_table"][:k]),
+                        "touched": sum(x["touched"] for x in s["shell_table"][:k]),
+                        "greedy_changed": pf["greedy_changed"], "max_kl": pf["max_kl"],
+                        "accuracy": part.accuracy(test),
+                    })
+    for name in LANGUAGES:
+        lang = language(name)
+        test = examples(lang, tests, random.Random(seed + 1000))
+        arms = [("never", None, False)] + [(f"every {every}", p, True) for p in PRECISIONS]
+        for label, precision, rebuild in arms:
+            m = Machine(accepting=lang.accepting, life=life, seed=seed, compress_every=every if precision else 0,
+                        compress_precision=precision or "exact", compress_rebuild=rebuild)
+            teach_language(m, name, episodes, random.Random(seed))
+            periodic.append({
+                "language": name, "compression": label, "precision": precision, "compressions": m.compressions,
+                "bytes": m.core.bytes if m.core is not None else None, "accuracy": m.accuracy(test),
+            })
+    return {
+        "experiment": "compression",
+        "settings": _settings(episodes=episodes, seed=seed, life=life, tests=tests, every=every, shape=[13, 13, 13]),
+        "rows": rows,
+        "expansion": expansion,
+        "periodic": periodic,
+    }
+
+
+WALK_ARMS = (
+    ("plain", {}),
+    ("skip", {"skip": True}),
+    ("learned focus", {"learn_focus": True}),
+    ("rearrange every 500", {"rearrange_every": 500}),
+    ("focus 0.5", {"focus": 0.5}),
+    ("focus 1", {"focus": 1.0}),
+)
+
+
+def walk(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3), life: float = LIFE, tests: int = 300) -> dict:
+    """Focus, skips, the learned focus and rearrangement, measured on default 13 x 13 x 13 machines."""
+    from .geometry import focus_node
+    shape = (13, 13, 13)
+    focus = [{"focus": f, "node": list(focus_node(shape, f))} for f in (None, 0.0, 0.07, 0.08, 0.25, 0.5, 0.75, 0.92, 0.93, 1.0)]
+    arms = []
+    for name in LANGUAGES:
+        lang = language(name)
+        test = examples(lang, tests, random.Random(1000))
+        for label, kw in WALK_ARMS:
+            accs, skips, swaps, moves = [], 0, 0, 0
+            for seed in seeds:
+                m = Machine(accepting=lang.accepting, life=life, seed=seed, **kw)
+                teach_language(m, name, episodes, random.Random(seed))
+                accs.append(m.accuracy(test))
+                skips += m.skips
+                swaps += m.swaps
+                moves += m.clock
+            arms.append({"language": name, "arm": label, "accuracy_mean": sum(accs) / len(accs), "accuracies": accs,
+                         "solved": sum(a >= 0.999 for a in accs), "skips": skips, "swaps": swaps, "transitions": moves})
+    lang = language("even-b")
+    m = Machine(accepting=lang.accepting, life=life, seed=seeds[0])
+    teach_language(m, "even-b", episodes, random.Random(seeds[0]))
+    before = compress(m).shell_table()
+    test = examples(lang, tests, random.Random(1000))
+    acc_before = m.accuracy(test, temperature=0.0)
+    made = m.rearrange(full=True)
+    after = compress(m).shell_table()
+    rearranged = {
+        "swaps": len(made), "state_order": list(m.lattice.state_ids), "symbol_order": list(m.alphabet),
+        "start": m.start,
+        "shells": [{"shell": b["shell"], "cells": b["cells"], "touched_before": b["touched"],
+                    "touched_after": a["touched"]} for b, a in zip(before, after)],
+    }
+    return {
+        "experiment": "walk",
+        "settings": _settings(episodes=episodes, seeds=list(seeds), life=life, tests=tests, shape=list(shape)),
+        "focus": focus,
+        "arms": arms,
+        "rearranged": rearranged,
+    }
+
+
+def _edge_view(e, m: Machine) -> dict:
+    """Every field of an edge by name, the fading ones read at the clock - the Rust crate's ``Edge::describe``."""
+    return {
+        "source": e.source, "symbol": e.symbol, "target": e.target,
+        "seen": e.seen, "first_seen": e.first_seen, "last_seen": e.last_seen,
+        "recent": e.recent_at(m.clock, m.life), "age": e.age_at(m.clock, m.life),
+        "rewarded": e.rewarded, "punished": e.punished, "net": e.net,
+        "last_rewarded": e.last_rewarded, "last_punished": e.last_punished,
+        "width": e.width_at(m.clock, m.life),
+        "weighting": e.weighting.to_list(), "features": list(e.features),
+        "log_weight": e.log_weight(m.clock, m.life, m.stimulation),
+    }
+
+
+# ---- rendering ---------------------------------------------------------------------------------------------------
+
+def network(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3, 4, 5), life: float = LIFE, tests: int = 300,
+            networks: Sequence[tuple[str, str]] = NETWORKS, translators: Sequence[str] = TRANSLATORS,
+            epochs: int = 20) -> dict:
+    """Every language taught to each network of ``networks`` from the learning experiment's strings, per seed; then
+    each English-to-English task (``phonetic.TASKS``) to each of ``translators`` for ``epochs`` epochs, every fourth
+    pair held out."""
+    from .network import Network, teach_network
+    from .phonetic import TASKS, split
+    rows = []
+    for name, lang in LANGUAGES.items():
+        for arch, credit in networks:
+            accs, touched, layers = [], 0, 0
+            for seed in seeds:
+                rng = random.Random(seed)
+                test = examples(lang, tests, rng)
+                net = Network(arch, alphabet=ALPHABET, seed=seed, layer_options={"life": life})
+                net.compile(accepting=lang.accepting, credit=credit)
+                teach_network(net, name, episodes, rng)
+                accs.append(net.evaluate([s for s, _ in test], [m for _, m in test]))
+                layers = len(net.layers())
+                touched = max(touched, sum(len(list(l.machine.lattice.touched())) for l in net.layers()))
+            rows.append({"language": name, "architecture": arch, "credit": credit, "layers": layers,
+                         "accuracy": accs, "accuracy_mean": sum(accs) / len(accs), "accuracy_min": min(accs),
+                         "accuracy_max": max(accs), "solved": sum(a >= 0.999 for a in accs), "touched": touched})
+    translation = []
+    for task, pairs in TASKS.items():
+        train, test = split(pairs)
+        for arch in translators:
+            net = Network(arch, seed=seeds[0], layer_options={"life": life})
+            h = net.fit_pairs(train, epochs=epochs, validation_data=test)
+            translation.append({"task": task, "architecture": arch, "taught": len(train), "held_out": len(test),
+                                "sounds": h["sounds"][-1], "exact": h["exact"][-1], "held_out_exact": h["val_exact"][-1],
+                                "examples": [[x, net.translate(x), y] for x, y in (train[:2] + test[:2])]})
+    return {
+        "experiment": "network",
+        "settings": _settings(episodes=episodes, seeds=list(seeds), life=life, tests=tests,
+                              networks=[list(n) for n in networks], layer_discount=0.8,
+                              translators=list(translators), epochs=epochs),
+        "rows": rows,
+        "translation": translation,
+    }
+
+
+def media(count: int = 60, epochs: int = 30, seed: int = 1, discount: float = 0.95, life: float = LIFE,
+          networks: Sequence[tuple[str, str]] = MEDIA) -> dict:
+    """Each synthetic data set (text, images, spoken words, video clips; ``media.make_dataset``) written to a temporary
+    directory and taught to a network that reads it, every fifth example held out: the accuracy on both after
+    ``epochs`` epochs, and how many symbols an example is."""
+    import shutil
+    import tempfile
+    from .media import make_dataset, read_labels, verdict
+    from .network import Network
+    rows, tmp = [], tempfile.mkdtemp(prefix="latticefsm-media-")
+    try:
+        paths = {}
+        for kind, arch in networks:
+            if kind not in paths:
+                paths[kind] = make_dataset(kind, os.path.join(tmp, kind), count=count, seed=seed)
+            data = read_labels(paths[kind], resolve=kind != "text")
+            x, y = [a for a, _ in data], [verdict(b) for _, b in data]
+            tr = [i for i in range(len(x)) if i % 5 != 4]
+            te = [i for i in range(len(x)) if i % 5 == 4]
+            net = Network(arch, seed=seed, layer_options={"life": life, "discount": discount}).compile(accepting=[0])
+            lengths = [len(net._symbols(x[i])) for i in range(len(x))]
+            before = net.evaluate([x[i] for i in te], [y[i] for i in te])
+            net.fit([x[i] for i in tr], [y[i] for i in tr], epochs=epochs)
+            rows.append({"data": kind, "architecture": arch, "examples": len(x), "held_out": len(te),
+                         "symbols_mean": sum(lengths) / len(lengths), "alphabet": len(net.alphabet),
+                         "held_out_before": before,
+                         "taught": net.evaluate([x[i] for i in tr], [y[i] for i in tr]),
+                         "held_out_after": net.evaluate([x[i] for i in te], [y[i] for i in te])})
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return {"experiment": "media",
+            "settings": _settings(count=count, epochs=epochs, seed=seed, discount=discount, life=life,
+                                  networks=[list(n) for n in networks]),
+            "rows": rows}
+
+
+def _media_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"media: each synthetic data set taught to a network that reads it for {s['epochs']} epochs (discount "
+             f"{s['discount']:g}), every fifth example held out; text: is there a negation, image: are the stripes "
+             "vertical, audio: is the spoken noun plural, video: does the square move right", "",
+             "| data | network | examples (held out) | symbols per example | alphabet | held out before | taught after | "
+             "held out after |", "|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['data']} | `{row['architecture']}` | {row['examples']} ({row['held_out']}) | "
+                     f"{row['symbols_mean']:.0f} | {row['alphabet']} | {row['held_out_before']:.2f} | "
+                     f"{row['taught']:.2f} | **{row['held_out_after']:.2f}** |")
+    return "\n".join(lines)
+
+
+def ngram(data: Sequence[str] = ("data/corpus",), held_out: int = 10, models: Sequence[tuple[str, int]] = NGRAMS,
+          max_ranked: int = 2000) -> dict:
+    """Every model of ``models`` trained on the corpus under ``data``, every ``held_out``-th line (or base64 sequence)
+    held out, measured on it: perplexity, bits a token, next-token accuracy (first guess, first five) and - to compare
+    units - bits a byte of the held-out text.  Draws nothing: both ports give the same numbers."""
+    from .b64 import decode, file_sequences
+    from .ngram import NGram, corpus_lines, split_lines, tokenize
+    rows = []
+    for unit, order in models:
+        m = NGram(order, unit)
+        test: list[list[str]] = []
+        nbytes = 0
+        if unit == "base64":
+            for path, seqs in file_sequences(data):
+                tr, te = split_lines(seqs, held_out)
+                m.train_lines([list(q) for q in tr], source=path)
+                test += [list(q) for q in te]
+                nbytes += sum(len(decode(q)) for q in te)
+        else:
+            for path, lines in corpus_lines(data):
+                tr, te = split_lines(lines, held_out)
+                m.train_lines(tr, source=path)
+                for line in te:
+                    toks = tokenize(line, unit, True)
+                    if toks:
+                        test.append(toks)
+                        nbytes += len(line.encode("utf-8")) + 1
+        ev = m.evaluate(test, max_ranked)
+        st = m.stats()
+        rows.append({"unit": unit, "order": order, "vocab": st["vocab"], "ngrams": st["ngrams"], "tokens": st["tokens"],
+                     "held_out_tokens": ev["tokens"], "held_out_bytes": nbytes, "perplexity": ev["perplexity"],
+                     "bits": ev["bits"], "bits_per_byte": ev["bits"] * ev["tokens"] / nbytes if nbytes else None,
+                     "accuracy": ev["accuracy"], "top5": ev["top5"]})
+    return {"experiment": "ngram",
+            "settings": _settings(data=list(data), held_out=held_out, models=[list(x) for x in models],
+                                  max_ranked=max_ranked),
+            "rows": rows}
+
+
+def _ngram_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"ngram: interpolated Kneser-Ney on {', '.join(s['data'])}, every {s['held_out']}th line (base64: every "
+             f"{s['held_out']}th 76-letter sequence of the files) held out; accuracy over the first {s['max_ranked']} "
+             "held-out positions; bits a byte to compare the units", "",
+             "| unit | N | vocabulary | n-grams | held-out perplexity | bits a token | **bits a byte** | next-token accuracy "
+             "| top 5 |", "|---|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['unit']} | {row['order']} | {row['vocab']} | {row['ngrams']} | {row['perplexity']:.2f} | "
+                     f"{row['bits']:.3f} | **{row['bits_per_byte']:.3f}** | {row['accuracy']:.3f} | {row['top5']:.3f} |")
+    return "\n".join(lines)
+
+
+def _network_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"network: every language taught to each network for {s['episodes']} episodes (the learning experiment's "
+             f"strings), {len(s['seeds'])} seeds, {s['tests']} held-out strings; `>` one after another, `(a|b)` side by "
+             "side (majority vote at the end), `f` writes only the final state", "",
+             "| language | network | credit | layers | accuracy: mean | min | max | solved | touched edges |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['language']} | `{row['architecture']}` | {row['credit']} | {row['layers']} | "
+                     f"**{row['accuracy_mean']:.2f}** | {row['accuracy_min']:.2f} | {row['accuracy_max']:.2f} | "
+                     f"{row['solved']}/{len(s['seeds'])} | {row['touched']} |")
+    lines += ["", f"English to English: each task taught to each network for {s['epochs']} epochs, every fourth pair "
+              "held out; exact means every sound right", "",
+              "| task | network | pairs taught / held out | sounds right while taught | exact: taught | held out | "
+              "translations (taught, taught, held out, held out) |", "|---|---|---|---|---|---|---|"]
+    for row in r["translation"]:
+        ex = ", ".join(f"{x} → {got}" + ("" if got == want else f" ({want})") for x, got, want in row["examples"])
+        lines.append(f"| {row['task']} | `{row['architecture']}` | {row['taught']} / {row['held_out']} | "
+                     f"{row['sounds']:.2f} | **{row['exact']:.2f}** | {row['held_out_exact']:.2f} | {ex} |")
+    return "\n".join(lines)
+
+
+def tables(record: dict) -> str:
+    kind = record["experiment"]
+    if kind == "network":
+        return _network_table(record)
+    if kind == "media":
+        return _media_table(record)
+    if kind == "ngram":
+        return _ngram_table(record)
+    if kind == "learning":
+        return _learning_table(record)
+    if kind == "stimulation":
+        return _stimulation_table(record)
+    if kind == "compression":
+        return _compression_table(record)
+    if kind == "walk":
+        return _walk_table(record)
+    return _adaptation_table(record)
+
+
+def _walk_table(r: dict) -> str:
+    s = r["settings"]
+    lines = ["walk: the node each focus picks on the central vertical vector (s, g, 6) of the 13 x 13 x 13 matrix", "",
+             "| focus | node | runs start from |", "|---|---|---|"]
+    for row in r["focus"]:
+        f = "none" if row["focus"] is None else f"{row['focus']:g}"
+        node = row["node"]
+        lines.append(f"| {f} | ({node[0]}, g, {node[2]}) | state {node[0]} |")
+    lines += ["", f"every language taught for {s['episodes']} episodes on {len(s['seeds'])} seeds, each way", "",
+              "| language | way | accuracy, mean | solved | skips per transition | swaps |", "|---|---|---|---|---|---|"]
+    for row in r["arms"]:
+        per = row["skips"] / row["transitions"] if row["transitions"] else 0.0
+        lines.append(f"| {row['language']} | {row['arm']} | {row['accuracy_mean']:.3f} | {row['solved']}/{len(s['seeds'])} | "
+                     f"{per:.3f} | {row['swaps']} |")
+    rr = r["rearranged"]
+    lines += ["", f"even-b, taught plain, then left to rearrange itself until settled: {rr['swaps']} swaps; states top to "
+              f"bottom {rr['state_order']}, symbols {''.join(rr['symbol_order'])}, start state {rr['start']}", "",
+              "| shell | cells | touched edges before | after |", "|---|---|---|---|"]
+    for row in rr["shells"]:
+        lines.append(f"| {row['shell']} | {row['cells']} | {row['touched_before']} | {row['touched_after']} |")
+    return "\n".join(lines)
+
+
+def _compression_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"compression: default 13 x 13 x 13 machines, fresh and taught each language for {s['episodes']} episodes, "
+             "folded into the central node (6, g, 6) at each precision", "",
+             "| machine | precision | touched | bytes | smaller than dense | lossless | max relative error | max KL | "
+             "greedy changed | accuracy: original → rebuilt |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        acc = "–" if row["accuracy"] is None else f"{row['accuracy']:.3f} → {row['accuracy_rebuilt']:.3f}"
+        lines.append(f"| {row['machine']} | {row['precision']} | {row['touched']} | {row['bytes']} | {row['ratio']:.1f}× | "
+                     f"{'yes' if row['lossless'] else 'no'} | {row['max_relative_error']:.1e} | {row['max_kl']:.1e} | "
+                     f"{row['greedy_changed']} | {acc} |")
+    lines += ["", "even-b, exact, rebuilt from the central node outward", "",
+              "| shells rebuilt | cells | touched edges restored | greedy changed | accuracy |", "|---|---|---|---|---|"]
+    for row in r["expansion"]:
+        lines.append(f"| {row['shells']} | {row['cells']} | {row['touched']} | {row['greedy_changed']} | "
+                     f"{row['accuracy']:.3f} |")
+    lines += ["", f"every language taught again, the matrix folded into its central node every {s['every']} transitions "
+              "and rebuilt from the code each time", "",
+              "| language | compression | precision | compressions | last code, bytes | accuracy |", "|---|---|---|---|---|---|"]
+    for row in r["periodic"]:
+        lines.append(f"| {row['language']} | {row['compression']} | {row['precision'] or '–'} | {row['compressions']} | "
+                     f"{row['bytes'] if row['bytes'] is not None else '–'} | {row['accuracy']:.3f} |")
+    return "\n".join(lines)
+
+
+def _learning_table(r: dict) -> str:
+    s = r["settings"]
+    lines = [f"learning: {s['episodes']} episodes, strings up to {s['max_length']} symbols, {len(s['seeds'])} seeds, "
+             f"{s['tests']} held-out strings; the quiet arm runs the same strings without traversing", "",
+             "| language | states (min) | before | after: mean | min | max | solved | quiet after |",
+             "|---|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['language']} ({row['description']}) | {row['states']} ({row['min_states']}) | "
+                     f"{row['before']:.2f} | **{row['after_mean']:.2f}** | {row['after_min']:.2f} | "
+                     f"{row['after_max']:.2f} | {row['solved']}/{len(s['seeds'])} | {row['quiet_after']:.2f} |")
+    return "\n".join(lines)
+
+
+def _stimulation_table(r: dict) -> str:
+    s = r["settings"]
+    widths = s["widths"]
+    head = " | ".join(f"width {w:g}" for w in widths)
+    lines = [f"stimulation: a fork of {len(widths)} channels; probability of each by stimulation level", "",
+             f"| stimulation | {head} |", "|---|" + "---|" * len(widths)]
+    for c in r["curve"]:
+        lines.append(f"| {c['stimulation']:g} | " + " | ".join(f"{p:.3f}" for p in c["probabilities"]) + " |")
+    lines += ["", f"a surge of +{s['surge']:g} over the baseline {s['baseline']:g}, relaxing on the clock", "",
+              f"| lives since | stimulation | {head} |", "|---|---|" + "---|" * len(widths)]
+    for c in r["relaxation"]:
+        lines.append(f"| {c['lives']:g} | {c['stimulation']:.2f} | "
+                     + " | ".join(f"{p:.3f}" for p in c["probabilities"]) + " |")
+    return "\n".join(lines)
+
+
+def _adaptation_table(r: dict) -> str:
+    lines = ["adaptation: two edges from one prototype, one rewarded on every use and one punished", "",
+             "| stage | clock | P(rewarded) | P(punished) | P(untouched) | width + | width − | net + | net − | "
+             "recent + | bias + | bias − |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for st in r["stages"]:
+        g, b = st["edges"]["rewarded"], st["edges"]["punished"]
+        p = st["probabilities"]
+        lines.append(f"| {st['stage']} | {st['clock']} | {p[1]:.3f} | {p[2]:.3f} | {p[0]:.3f} | {g['width']:.2f} | "
+                     f"{b['width']:.2f} | {g['net']:+.2f} | {b['net']:+.2f} | {g['recent']:.2f} | "
+                     f"{g['weighting'][0]:+.2f} | {b['weighting'][0]:+.2f} |")
+    last = r["stages"][-1]["edges"]
+    lines += ["", "the two weighting functions at the end (bias, seen, recent, net, age, width, rate):",
+              f"  rewarded: {[round(v, 3) for v in last['rewarded']['weighting']]}",
+              f"  punished: {[round(v, 3) for v in last['punished']['weighting']]}"]
+    return "\n".join(lines)
+
+
+# ---- running -----------------------------------------------------------------------------------------------------
+
+def run(which: Sequence[str], out: str | None = None, **kw) -> list[dict]:
+    """Run the experiments named (or ``all``) and write each as ``<out>/<name>_results.json``."""
+    names = EXPERIMENTS if "all" in which else tuple(which)
+    records = []
+    for name in names:
+        if name == "learning":
+            rec = learning(episodes=kw.get("episodes", 4000), sizes=kw.get("sizes", (3, 4, 6, 13)),
+                           seeds=kw.get("seeds", (1, 2, 3, 4, 5)), life=kw.get("life", LIFE),
+                           discount=kw.get("discount", DISCOUNT))
+        elif name == "stimulation":
+            rec = stimulation(life=kw.get("life", LIFE), baseline=kw.get("baseline", BASELINE))
+        elif name == "adaptation":
+            rec = adaptation(life=kw.get("life", LIFE))
+        elif name == "compression":
+            rec = compression(life=kw.get("life", LIFE))
+        elif name == "walk":
+            rec = walk(life=kw.get("life", LIFE))
+        elif name == "network":
+            rec = network(episodes=kw.get("episodes", 4000), life=kw.get("life", LIFE))
+        elif name == "media":
+            rec = media(life=kw.get("life", LIFE))
+        elif name == "ngram":
+            rec = ngram()
+        else:
+            raise ValueError(f"no experiment named {name!r}; choose from {EXPERIMENTS} or all")
+        records.append(rec)
+        if out:
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, f"{name}_results.json"), "w", encoding="utf-8") as f:
+                json.dump(rec, f, indent=1)
+    return records
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description="the LatticeFSM experiments")
+    p.add_argument("--which", nargs="+", default=["all"], choices=list(EXPERIMENTS) + ["all"])
+    p.add_argument("--out", default=None)
+    p.add_argument("--episodes", type=int, default=4000)
+    p.add_argument("--life", type=float, default=LIFE)
+    args = p.parse_args(argv)
+    for rec in run(args.which, args.out, episodes=args.episodes, life=args.life):
+        print(tables(rec))
+        print()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,516 @@
+{
+ "experiment": "walk",
+ "settings": {
+  "episodes": 4000,
+  "seeds": [
+   1,
+   2,
+   3
+  ],
+  "life": 1000.0,
+  "tests": 300,
+  "shape": [
+   13,
+   13,
+   13
+  ]
+ },
+ "focus": [
+  {
+   "focus": null,
+   "node": [
+    0,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.0,
+   "node": [
+    0,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.07,
+   "node": [
+    0,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.08,
+   "node": [
+    1,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.25,
+   "node": [
+    3,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.5,
+   "node": [
+    6,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.75,
+   "node": [
+    9,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.92,
+   "node": [
+    11,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 0.93,
+   "node": [
+    12,
+    6,
+    6
+   ]
+  },
+  {
+   "focus": 1.0,
+   "node": [
+    12,
+    6,
+    6
+   ]
+  }
+ ],
+ "arms": [
+  {
+   "language": "even-b",
+   "arm": "plain",
+   "accuracy_mean": 0.5555555555555556,
+   "accuracies": [
+    0.5333333333333333,
+    0.54,
+    0.5933333333333334
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "even-b",
+   "arm": "skip",
+   "accuracy_mean": 1.0,
+   "accuracies": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "solved": 3,
+   "skips": 3246,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "even-b",
+   "arm": "learned focus",
+   "accuracy_mean": 0.5455555555555556,
+   "accuracies": [
+    0.58,
+    0.5133333333333333,
+    0.5433333333333333
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "even-b",
+   "arm": "rearrange every 500",
+   "accuracy_mean": 1.0,
+   "accuracies": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "solved": 3,
+   "skips": 0,
+   "swaps": 185,
+   "transitions": 35786
+  },
+  {
+   "language": "even-b",
+   "arm": "focus 0.5",
+   "accuracy_mean": 0.73,
+   "accuracies": [
+    0.88,
+    0.4266666666666667,
+    0.8833333333333333
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "even-b",
+   "arm": "focus 1",
+   "accuracy_mean": 0.4611111111111111,
+   "accuracies": [
+    0.4266666666666667,
+    0.48,
+    0.4766666666666667
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "contains-aa",
+   "arm": "plain",
+   "accuracy_mean": 0.8877777777777777,
+   "accuracies": [
+    0.9533333333333334,
+    1.0,
+    0.71
+   ],
+   "solved": 1,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "contains-aa",
+   "arm": "skip",
+   "accuracy_mean": 0.9477777777777777,
+   "accuracies": [
+    1.0,
+    0.8566666666666667,
+    0.9866666666666667
+   ],
+   "solved": 1,
+   "skips": 4953,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "contains-aa",
+   "arm": "learned focus",
+   "accuracy_mean": 0.6333333333333334,
+   "accuracies": [
+    0.6266666666666667,
+    0.5933333333333334,
+    0.68
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "contains-aa",
+   "arm": "rearrange every 500",
+   "accuracy_mean": 0.8377777777777777,
+   "accuracies": [
+    1.0,
+    0.64,
+    0.8733333333333333
+   ],
+   "solved": 1,
+   "skips": 0,
+   "swaps": 199,
+   "transitions": 35786
+  },
+  {
+   "language": "contains-aa",
+   "arm": "focus 0.5",
+   "accuracy_mean": 0.7133333333333333,
+   "accuracies": [
+    0.6533333333333333,
+    0.6566666666666666,
+    0.83
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "contains-aa",
+   "arm": "focus 1",
+   "accuracy_mean": 0.7322222222222222,
+   "accuracies": [
+    0.77,
+    0.6666666666666666,
+    0.76
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "ends-ab",
+   "arm": "plain",
+   "accuracy_mean": 0.958888888888889,
+   "accuracies": [
+    1.0,
+    0.9966666666666667,
+    0.88
+   ],
+   "solved": 1,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "ends-ab",
+   "arm": "skip",
+   "accuracy_mean": 0.9677777777777777,
+   "accuracies": [
+    0.9033333333333333,
+    1.0,
+    1.0
+   ],
+   "solved": 2,
+   "skips": 811,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "ends-ab",
+   "arm": "learned focus",
+   "accuracy_mean": 0.9199999999999999,
+   "accuracies": [
+    0.9133333333333333,
+    0.94,
+    0.9066666666666666
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "ends-ab",
+   "arm": "rearrange every 500",
+   "accuracy_mean": 0.9288888888888889,
+   "accuracies": [
+    1.0,
+    0.9166666666666666,
+    0.87
+   ],
+   "solved": 1,
+   "skips": 0,
+   "swaps": 194,
+   "transitions": 35786
+  },
+  {
+   "language": "ends-ab",
+   "arm": "focus 0.5",
+   "accuracy_mean": 0.9122222222222222,
+   "accuracies": [
+    0.9033333333333333,
+    0.8633333333333333,
+    0.97
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "ends-ab",
+   "arm": "focus 1",
+   "accuracy_mean": 0.9544444444444444,
+   "accuracies": [
+    0.8633333333333333,
+    1.0,
+    1.0
+   ],
+   "solved": 2,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "mod3-a",
+   "arm": "plain",
+   "accuracy_mean": 0.7244444444444444,
+   "accuracies": [
+    0.71,
+    0.71,
+    0.7533333333333333
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "mod3-a",
+   "arm": "skip",
+   "accuracy_mean": 0.8677777777777779,
+   "accuracies": [
+    1.0,
+    0.85,
+    0.7533333333333333
+   ],
+   "solved": 1,
+   "skips": 2007,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "mod3-a",
+   "arm": "learned focus",
+   "accuracy_mean": 0.8133333333333334,
+   "accuracies": [
+    0.7233333333333334,
+    0.85,
+    0.8666666666666667
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "mod3-a",
+   "arm": "rearrange every 500",
+   "accuracy_mean": 0.7077777777777777,
+   "accuracies": [
+    0.7033333333333334,
+    0.71,
+    0.71
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 183,
+   "transitions": 35786
+  },
+  {
+   "language": "mod3-a",
+   "arm": "focus 0.5",
+   "accuracy_mean": 0.64,
+   "accuracies": [
+    0.5933333333333334,
+    0.5933333333333334,
+    0.7333333333333333
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  },
+  {
+   "language": "mod3-a",
+   "arm": "focus 1",
+   "accuracy_mean": 0.6744444444444445,
+   "accuracies": [
+    0.7166666666666667,
+    0.7133333333333334,
+    0.5933333333333334
+   ],
+   "solved": 0,
+   "skips": 0,
+   "swaps": 0,
+   "transitions": 35786
+  }
+ ],
+ "rearranged": {
+  "swaps": 27,
+  "state_order": [
+   4,
+   5,
+   1,
+   6,
+   2,
+   3,
+   0,
+   9,
+   7,
+   8,
+   10,
+   11,
+   12
+  ],
+  "symbol_order": [
+   "c",
+   "d",
+   "e",
+   "f",
+   "g",
+   "b",
+   "a",
+   "h",
+   "i",
+   "j",
+   "k",
+   "l",
+   "m"
+  ],
+  "start": 6,
+  "shells": [
+   {
+    "shell": 0,
+    "cells": 1,
+    "touched_before": 0,
+    "touched_after": 1
+   },
+   {
+    "shell": 1,
+    "cells": 26,
+    "touched_before": 0,
+    "touched_after": 17
+   },
+   {
+    "shell": 2,
+    "cells": 98,
+    "touched_before": 0,
+    "touched_after": 32
+   },
+   {
+    "shell": 3,
+    "cells": 218,
+    "touched_before": 0,
+    "touched_after": 48
+   },
+   {
+    "shell": 4,
+    "cells": 386,
+    "touched_before": 0,
+    "touched_after": 64
+   },
+   {
+    "shell": 5,
+    "cells": 602,
+    "touched_before": 121,
+    "touched_after": 80
+   },
+   {
+    "shell": 6,
+    "cells": 866,
+    "touched_before": 217,
+    "touched_after": 96
+   }
+  ]
+ }
+}

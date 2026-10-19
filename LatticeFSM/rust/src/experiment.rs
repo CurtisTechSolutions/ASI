@@ -1,0 +1,1496 @@
+//! The three experiments: a language is learned by credit, stimulation prefers the wide channel, an edge adapts.
+//!
+//! Each returns a JSON record; [`run`] runs the ones asked for and writes them, and [`tables`] renders a
+//! record as the markdown `README.md` quotes.  Everything is deterministic given the seed.
+//!
+//! * [`learning`] - for each language and machine size, the machine runs random strings, is rewarded when it
+//!   ends in the right kind of state and punished when it does not, and its accuracy on held-out strings is
+//!   measured as it goes.  The control runs the same strings quietly and credits them the same way: credit
+//!   without a traversal lands on nothing.
+//! * [`stimulation`] - a fork of three channels of different widths, the probability of each against the
+//!   stimulation level; then a surge of stimulation relaxing on the clock.
+//! * [`adaptation`] - two edges from one prototype living different lives: one used and rewarded, one used and
+//!   punished.  Use widens, punishment narrows, the verdict never fades, the width and the trace do, and the
+//!   two weighting functions end up different.
+
+use std::fs;
+
+use crate::compress::{compress, fidelity, Precision};
+use crate::edge::Weighting;
+use crate::json::Json;
+use crate::languages::{examples, language, random_string, Language, ALPHABET, LANGUAGES};
+use crate::machine::{Machine, Settings, BASELINE, DISCOUNT, LIFE};
+use crate::rng::Rng;
+
+pub const EXPERIMENTS: [&str; 8] = [
+    "learning",
+    "stimulation",
+    "adaptation",
+    "compression",
+    "walk",
+    "network",
+    "media",
+    "ngram",
+];
+
+/// The media experiment's networks: the kind of data set (`media::make_dataset`) and the architecture taught it.
+pub const MEDIA: [(&str, &str); 5] = [
+    ("text", "text>13"),
+    ("image", "image>3"),
+    ("audio", "audio>3"),
+    ("video", "diff>3"),
+    ("video", "video>13"),
+];
+
+/// The networks the network experiment compares: an architecture string and whose verdict its output layers are
+/// credited by.
+pub const NETWORKS: [(&str, &str); 8] = [
+    ("3", "shared"),
+    ("3>3", "shared"),
+    ("3f>3", "shared"),
+    ("(3|3)>3", "shared"),
+    ("(3|3|3)", "shared"),
+    ("(3|3|3)", "own"),
+    ("13", "shared"),
+    ("(13|13|13)", "own"),
+];
+
+/// The English-to-English networks the network experiment teaches each phonetic task to.
+pub const TRANSLATORS: [&str; 2] = ["enc>dec", "enc>13>dec"];
+
+fn alphabet() -> Vec<String> {
+    ALPHABET.iter().map(|s| s.to_string()).collect()
+}
+
+/// Run `episodes` random strings through `machine` and credit each by whether it was classified right.
+/// Returns `(episode, accuracy on test)` every `every` episodes when a test set is given.  Quiet, the runs
+/// traverse nothing and the credit has nothing to land on.
+#[allow(clippy::too_many_arguments)]
+pub fn teach_language(
+    machine: &mut Machine,
+    lang: &Language,
+    episodes: usize,
+    rng: &mut Rng,
+    max_length: usize,
+    quiet: bool,
+    reward: f64,
+    test: Option<&[(String, bool)]>,
+    every: usize,
+) -> Vec<(usize, f64)> {
+    let lesson = Lesson {
+        quiet,
+        reward,
+        ..Lesson::default()
+    };
+    teach_language_by(machine, lang, episodes, rng, max_length, lesson, test, every)
+}
+
+/// How a lesson is credited.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lesson {
+    /// Run the strings without traversing: the control.
+    pub quiet: bool,
+    pub reward: f64,
+    /// Credit every step by the oracle - whether the state it lands in classifies the prefix read so far
+    /// rightly - instead of the whole run by its final answer.
+    pub oracle: bool,
+    /// Punish what is wrong; without it a wrong step (or run) gets nothing, and only what is right is rewarded.
+    pub punish: bool,
+}
+
+impl Default for Lesson {
+    fn default() -> Lesson {
+        Lesson {
+            quiet: false,
+            reward: 1.0,
+            oracle: false,
+            punish: true,
+        }
+    }
+}
+
+/// What the oracle says of every step of `run` over `s`: `+reward` where the state it landed in is accepting exactly
+/// when the prefix read so far is in the language, else `-reward` (or nothing, without `punish`).
+pub fn oracle_amounts(
+    machine: &Machine,
+    lang: &Language,
+    s: &str,
+    run: &crate::machine::Run,
+    lesson: &Lesson,
+) -> Vec<f64> {
+    let mut states = Vec::with_capacity(s.len());
+    for t in &run.transitions {
+        if let Some(mid) = t.skipped {
+            states.push(mid);
+        }
+        states.push(t.target);
+    }
+    let chars: Vec<char> = s.chars().collect();
+    states
+        .iter()
+        .enumerate()
+        .map(|(i, st)| {
+            let prefix: String = chars[..=i.min(chars.len() - 1)].iter().collect();
+            if machine.lattice.states[*st].accepting == (lang.member)(&prefix) {
+                lesson.reward
+            } else if lesson.punish {
+                -lesson.reward
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+/// `episodes` random strings run through `machine` and credited as `lesson` says: the whole run by its final answer
+/// (rewarded when right, punished when wrong), or - `oracle` - every step by its own.  Returns `(episode, accuracy
+/// on test)` every `every` episodes, when `test` and `every` are given.
+#[allow(clippy::too_many_arguments)]
+pub fn teach_language_by(
+    machine: &mut Machine,
+    lang: &Language,
+    episodes: usize,
+    rng: &mut Rng,
+    max_length: usize,
+    lesson: Lesson,
+    test: Option<&[(String, bool)]>,
+    every: usize,
+) -> Vec<(usize, f64)> {
+    let mut curve = Vec::new();
+    for ep in 1..=episodes {
+        let s = random_string(rng, max_length);
+        let symbols = machine.tokenize(&s).expect("over the alphabet");
+        let result = machine.run(&symbols, None, None, lesson.quiet);
+        if lesson.oracle {
+            if !lesson.quiet && !s.is_empty() {
+                let amounts = oracle_amounts(machine, lang, &s, &result, &lesson);
+                machine.credit_steps(&amounts);
+            }
+        } else if result.accepted == (lang.member)(&s) {
+            machine.reward(lesson.reward);
+        } else if lesson.punish {
+            machine.punish(lesson.reward);
+        }
+        if let Some(test) = test {
+            if every > 0 && ep % every == 0 {
+                curve.push((ep, machine.accuracy(test, 0.0)));
+            }
+        }
+    }
+    curve
+}
+
+pub struct LearningOptions {
+    pub episodes: usize,
+    pub sizes: Vec<usize>,
+    pub seeds: Vec<u64>,
+    pub life: f64,
+    pub discount: f64,
+    pub max_length: usize,
+    pub tests: usize,
+}
+
+impl Default for LearningOptions {
+    fn default() -> LearningOptions {
+        LearningOptions {
+            episodes: 4000,
+            sizes: vec![3, 4, 6, 13],
+            seeds: vec![1, 2, 3, 4, 5],
+            life: LIFE,
+            discount: DISCOUNT,
+            max_length: 6,
+            tests: 300,
+        }
+    }
+}
+
+/// One arm of the learning experiment across the seeds: credited, or the quiet control.
+struct Arm {
+    name: &'static str,
+    records: Vec<Json>,
+    before: Vec<f64>,
+    after: Vec<f64>,
+    touched: Vec<usize>,
+}
+
+impl Arm {
+    fn new(name: &'static str) -> Arm {
+        Arm {
+            name,
+            records: Vec::new(),
+            before: Vec::new(),
+            after: Vec::new(),
+            touched: Vec::new(),
+        }
+    }
+}
+
+fn curve_json(curve: &[(usize, f64)]) -> Json {
+    Json::Array(
+        curve
+            .iter()
+            .map(|(ep, acc)| Json::numbers(&[*ep as f64, *acc]))
+            .collect(),
+    )
+}
+
+pub fn learning(o: &LearningOptions) -> Json {
+    let mut rows = Vec::new();
+    let n = o.seeds.len() as f64;
+    for lang in LANGUAGES.iter() {
+        for &states in &o.sizes {
+            let mut arms = [Arm::new("credited"), Arm::new("quiet")];
+            for &seed in &o.seeds {
+                for arm in arms.iter_mut() {
+                    let quiet = arm.name == "quiet";
+                    let mut rng = Rng::new(seed);
+                    let test = examples(lang, o.tests, &mut rng, o.max_length);
+                    let settings = Settings {
+                        life: o.life,
+                        discount: o.discount,
+                        seed,
+                        ..Settings::default()
+                    };
+                    let mut m = Machine::new(states, &alphabet(), lang.accepting, settings).expect("a machine");
+                    let before = m.accuracy(&test, 0.0);
+                    let every = (o.episodes / 8).max(1);
+                    let curve = teach_language(
+                        &mut m,
+                        lang,
+                        o.episodes,
+                        &mut rng,
+                        o.max_length,
+                        quiet,
+                        1.0,
+                        Some(&test),
+                        every,
+                    );
+                    let after = m.accuracy(&test, 0.0);
+                    let touched = m.stats().num("touched", 0.0) as usize;
+                    arm.records.push(
+                        Json::object()
+                            .with("seed", (seed as f64).into())
+                            .with("before", before.into())
+                            .with("after", after.into())
+                            .with("curve", curve_json(&curve))
+                            .with("touched", touched.into())
+                            .with("clock", m.clock.into()),
+                    );
+                    arm.before.push(before);
+                    arm.after.push(after);
+                    arm.touched.push(touched);
+                }
+            }
+            let credited = &arms[0].after;
+            let quiet = &arms[1].after;
+            rows.push(
+                Json::object()
+                    .with("language", lang.name.into())
+                    .with("description", lang.description.into())
+                    .with("min_states", lang.min_states.into())
+                    .with("states", states.into())
+                    .with("before", (arms[0].before.iter().sum::<f64>() / n).into())
+                    .with("after_mean", (credited.iter().sum::<f64>() / n).into())
+                    .with("after_min", credited.iter().cloned().fold(1.0, f64::min).into())
+                    .with("after_max", credited.iter().cloned().fold(0.0, f64::max).into())
+                    .with("solved", credited.iter().filter(|&&a| a >= 0.999).count().into())
+                    .with("quiet_after", (quiet.iter().sum::<f64>() / n).into())
+                    .with(
+                        "quiet_touched",
+                        arms[1].touched.iter().cloned().max().unwrap_or(0).into(),
+                    )
+                    .with(
+                        "arms",
+                        Json::object()
+                            .with("credited", Json::Array(arms[0].records.clone()))
+                            .with("quiet", Json::Array(arms[1].records.clone())),
+                    ),
+            );
+        }
+    }
+    Json::object()
+        .with("experiment", "learning".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("episodes", o.episodes.into())
+                .with("sizes", Json::Array(o.sizes.iter().map(|&s| s.into()).collect()))
+                .with(
+                    "seeds",
+                    Json::Array(o.seeds.iter().map(|&s| (s as f64).into()).collect()),
+                )
+                .with("life", o.life.into())
+                .with("discount", o.discount.into())
+                .with("max_length", o.max_length.into())
+                .with("tests", o.tests.into()),
+        )
+        .with("rows", Json::Array(rows))
+}
+
+pub struct StimulationOptions {
+    pub widths: Vec<f64>,
+    pub levels: Vec<f64>,
+    pub life: f64,
+    pub baseline: f64,
+    pub surge: f64,
+    pub waits: Vec<f64>,
+}
+
+impl Default for StimulationOptions {
+    fn default() -> StimulationOptions {
+        StimulationOptions {
+            widths: vec![4.0, 1.0, 0.25],
+            levels: vec![0.0, 0.5, 1.0, 2.0, 4.0],
+            life: LIFE,
+            baseline: BASELINE,
+            surge: 3.0,
+            waits: vec![0.0, 0.5, 1.0, 2.0, 4.0],
+        }
+    }
+}
+
+fn fork(o: &StimulationOptions) -> Machine {
+    let settings = Settings {
+        life: o.life,
+        baseline: o.baseline,
+        ..Settings::default()
+    };
+    let mut m = Machine::over(o.widths.len(), "a", &[], settings).expect("a machine");
+    for (t, &w) in o.widths.iter().enumerate() {
+        m.edge_mut(0, 0, t).set_width(w, 0);
+    }
+    m
+}
+
+pub fn stimulation(o: &StimulationOptions) -> Json {
+    let m = fork(o);
+    let curve: Vec<Json> = o
+        .levels
+        .iter()
+        .map(|&level| {
+            Json::object().with("stimulation", level.into()).with(
+                "probabilities",
+                Json::numbers(&m.probabilities(0, 0, Some(level), None)),
+            )
+        })
+        .collect();
+    let relax: Vec<Json> = o
+        .waits
+        .iter()
+        .map(|&lives| {
+            let mut m2 = fork(o);
+            m2.stimulate(o.surge);
+            m2.tick((lives * o.life) as i64);
+            let widths: Vec<f64> = m2
+                .lattice
+                .row(0, 0)
+                .iter()
+                .map(|e| e.width_at(m2.clock, m2.life))
+                .collect();
+            Json::object()
+                .with("lives", lives.into())
+                .with("stimulation", m2.stimulation().into())
+                .with("probabilities", Json::numbers(&m2.probabilities(0, 0, None, None)))
+                .with("widths", Json::numbers(&widths))
+        })
+        .collect();
+    Json::object()
+        .with("experiment", "stimulation".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("widths", Json::numbers(&o.widths))
+                .with("levels", Json::numbers(&o.levels))
+                .with("life", o.life.into())
+                .with("baseline", o.baseline.into())
+                .with("surge", o.surge.into())
+                .with("waits", Json::numbers(&o.waits)),
+        )
+        .with("curve", Json::Array(curve))
+        .with("relaxation", Json::Array(relax))
+}
+
+/// Two edges, one life each: rewarded on every use, and punished on every use.
+pub fn adaptation(uses: usize, life: f64, waits: &[f64]) -> Json {
+    let settings = Settings {
+        life,
+        ..Settings::default()
+    };
+    let mut m = Machine::over(3, "a", &[], settings).expect("a machine");
+    let mut stages = Vec::new();
+    let snapshot = |m: &Machine, label: &str| -> Json {
+        let (clock, life, stim) = (m.clock, m.life, m.stimulation());
+        Json::object()
+            .with("stage", label.into())
+            .with("clock", clock.into())
+            .with("probabilities", Json::numbers(&m.probabilities(0, 0, None, None)))
+            .with(
+                "edges",
+                Json::object()
+                    .with("rewarded", m.edge(0, 0, 1).describe(clock, life, stim))
+                    .with("punished", m.edge(0, 0, 2).describe(clock, life, stim))
+                    .with("untouched", m.edge(0, 0, 0).describe(clock, life, stim)),
+            )
+    };
+    stages.push(snapshot(&m, "fresh"));
+    for i in 1..=uses {
+        m.teach(0, 0, 1, 1.0).expect("edge");
+        m.teach(0, 0, 2, -1.0).expect("edge");
+        if i == 1 || i == 5 || i == uses {
+            stages.push(snapshot(&m, &format!("after {i} uses each")));
+        }
+    }
+    let end = m.clock;
+    for &lives in waits.iter().skip(1) {
+        m.tick(end + (lives * life) as i64 - m.clock);
+        let label = format!("{} {} later", lives, if lives == 1.0 { "life" } else { "lives" });
+        stages.push(snapshot(&m, &label));
+    }
+    Json::object()
+        .with("experiment", "adaptation".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("uses", uses.into())
+                .with("life", life.into())
+                .with("waits", Json::numbers(waits))
+                .with("prototype", Weighting::default().to_json()),
+        )
+        .with("stages", Json::Array(stages))
+}
+
+// ---- rendering ----------------------------------------------------------------------------------------------------
+
+/// Default 13 × 13 × 13 machines folded into their central node: fresh, and taught each language, at each
+/// precision; one rebuilt from the central node outward, a shell at a time; and every language taught again with
+/// the matrix folded into its central node every `every` transitions, rebuilt from the code each time.
+pub fn compression(episodes: usize, seed: u64, life: f64, tests: usize, every: u64) -> Result<Json, String> {
+    let (mut rows, mut expansion, mut periodic) = (Vec::new(), Vec::new(), Vec::new());
+    let mut labels: Vec<(&str, Option<Language>)> = vec![("fresh", None)];
+    labels.extend(LANGUAGES.iter().map(|l| (l.name, Some(*l))));
+    for (label, lang) in labels {
+        let accepting: &[usize] = lang.as_ref().map(|l| l.accepting).unwrap_or(&[0]);
+        let mut m = Machine::default_shape(
+            accepting,
+            Settings {
+                life,
+                seed,
+                ..Settings::default()
+            },
+        )?;
+        let test = match &lang {
+            Some(l) => examples(l, tests, &mut Rng::new(seed + 1000), 6),
+            None => Vec::new(),
+        };
+        if let Some(l) = &lang {
+            teach_language(&mut m, l, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
+        }
+        for p in Precision::ALL {
+            let core = compress(&m, Some(p), None);
+            let mut r = core.decompress(None)?;
+            let f = fidelity(&m, &r);
+            let s = core.summary();
+            let (acc, acc_r) = if test.is_empty() {
+                (Json::Null, Json::Null)
+            } else {
+                (m.accuracy(&test, 0.0).into(), r.accuracy(&test, 0.0).into())
+            };
+            rows.push(
+                Json::object()
+                    .with("machine", label.into())
+                    .with("precision", p.name().into())
+                    .with("touched", s.get("touched").cloned().unwrap_or(Json::Null))
+                    .with("bytes", s.get("bytes").cloned().unwrap_or(Json::Null))
+                    .with("dense_bytes", s.get("dense_bytes").cloned().unwrap_or(Json::Null))
+                    .with("ratio", s.get("ratio").cloned().unwrap_or(Json::Null))
+                    .with("record_bytes", s.get("record_bytes").cloned().unwrap_or(Json::Null))
+                    .with("lossless", f.get("lossless").cloned().unwrap_or(Json::Null))
+                    .with(
+                        "max_relative_error",
+                        f.get("max_relative_error").cloned().unwrap_or(Json::Null),
+                    )
+                    .with("mean_kl", f.get("mean_kl").cloned().unwrap_or(Json::Null))
+                    .with("max_kl", f.get("max_kl").cloned().unwrap_or(Json::Null))
+                    .with("greedy_changed", f.get("greedy_changed").cloned().unwrap_or(Json::Null))
+                    .with("accuracy", acc)
+                    .with("accuracy_rebuilt", acc_r),
+            );
+            if label == "even-b" && p == Precision::Exact {
+                let table = core.shell_table();
+                let shells = table.as_array().cloned().unwrap_or_default();
+                for k in 1..=shells.len() {
+                    let mut part = core.decompress(Some(k))?;
+                    let pf = fidelity(&m, &part);
+                    expansion.push(
+                        Json::object()
+                            .with("shells", k.into())
+                            .with(
+                                "cells",
+                                shells[..k].iter().map(|x| x.num("cells", 0.0)).sum::<f64>().into(),
+                            )
+                            .with(
+                                "touched",
+                                shells[..k].iter().map(|x| x.num("touched", 0.0)).sum::<f64>().into(),
+                            )
+                            .with(
+                                "greedy_changed",
+                                pf.get("greedy_changed").cloned().unwrap_or(Json::Null),
+                            )
+                            .with("max_kl", pf.get("max_kl").cloned().unwrap_or(Json::Null))
+                            .with("accuracy", part.accuracy(&test, 0.0).into()),
+                    );
+                }
+            }
+        }
+    }
+    for lang in LANGUAGES.iter() {
+        let test = examples(lang, tests, &mut Rng::new(seed + 1000), 6);
+        let mut arms: Vec<(String, Option<Precision>)> = vec![("never".to_string(), None)];
+        arms.extend(Precision::ALL.iter().map(|&p| (format!("every {every}"), Some(p))));
+        for (label, precision) in arms {
+            let settings = Settings {
+                life,
+                seed,
+                compress_every: if precision.is_some() { every } else { 0 },
+                compress_precision: precision.unwrap_or(Precision::Exact),
+                compress_rebuild: precision.is_some(),
+                ..Settings::default()
+            };
+            let mut m = Machine::default_shape(lang.accepting, settings)?;
+            teach_language(&mut m, lang, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
+            periodic.push(
+                Json::object()
+                    .with("language", lang.name.into())
+                    .with("compression", label.into())
+                    .with(
+                        "precision",
+                        precision.map(|p| Json::from(p.name())).unwrap_or(Json::Null),
+                    )
+                    .with("compressions", (m.compressions as f64).into())
+                    .with(
+                        "bytes",
+                        m.core.as_ref().map(|c| Json::from(c.bytes())).unwrap_or(Json::Null),
+                    )
+                    .with("accuracy", m.accuracy(&test, 0.0).into()),
+            );
+        }
+    }
+    Ok(Json::object()
+        .with("experiment", "compression".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("episodes", episodes.into())
+                .with("seed", (seed as f64).into())
+                .with("life", life.into())
+                .with("tests", tests.into())
+                .with("every", (every as f64).into())
+                .with("shape", Json::numbers(&[13.0, 13.0, 13.0])),
+        )
+        .with("rows", Json::Array(rows))
+        .with("expansion", Json::Array(expansion))
+        .with("periodic", Json::Array(periodic)))
+}
+
+/// Focus, skips, the learned focus and rearrangement, measured on default 13 × 13 × 13 machines: the node each
+/// focus picks; every language taught each way on `seeds`; and a taught machine left to rearrange itself, shell by
+/// shell before and after.
+pub fn walk(episodes: usize, seeds: &[u64], life: f64, tests: usize) -> Result<Json, String> {
+    use crate::geometry::focus_node;
+    let shape = (13, 13, 13);
+    let focus: Vec<Json> = [
+        None,
+        Some(0.0),
+        Some(0.07),
+        Some(0.08),
+        Some(0.25),
+        Some(0.5),
+        Some(0.75),
+        Some(0.92),
+        Some(0.93),
+        Some(1.0),
+    ]
+    .iter()
+    .map(|&f| {
+        let (s, a, t) = focus_node(shape, f);
+        Json::object()
+            .with("focus", f.map(Json::from).unwrap_or(Json::Null))
+            .with("node", Json::numbers(&[s as f64, a as f64, t as f64]))
+    })
+    .collect();
+    let arms: [(&str, Settings); 6] = [
+        ("plain", Settings::default()),
+        (
+            "skip",
+            Settings {
+                skip: true,
+                ..Settings::default()
+            },
+        ),
+        (
+            "learned focus",
+            Settings {
+                learn_focus: true,
+                ..Settings::default()
+            },
+        ),
+        (
+            "rearrange every 500",
+            Settings {
+                rearrange_every: 500,
+                ..Settings::default()
+            },
+        ),
+        (
+            "focus 0.5",
+            Settings {
+                focus: Some(0.5),
+                ..Settings::default()
+            },
+        ),
+        (
+            "focus 1",
+            Settings {
+                focus: Some(1.0),
+                ..Settings::default()
+            },
+        ),
+    ];
+    let mut rows = Vec::new();
+    for lang in LANGUAGES.iter() {
+        let test = examples(lang, tests, &mut Rng::new(1000), 6);
+        for (label, base) in arms.iter() {
+            let (mut accs, mut skips, mut swaps, mut moves) = (Vec::new(), 0u64, 0u64, 0i64);
+            for &seed in seeds {
+                let settings = Settings {
+                    life,
+                    seed,
+                    ..base.clone()
+                };
+                let mut m = Machine::default_shape(lang.accepting, settings)?;
+                teach_language(&mut m, lang, episodes, &mut Rng::new(seed), 6, false, 1.0, None, 0);
+                accs.push(m.accuracy(&test, 0.0));
+                skips += m.skips;
+                swaps += m.swaps;
+                moves += m.clock;
+            }
+            rows.push(
+                Json::object()
+                    .with("language", lang.name.into())
+                    .with("arm", (*label).into())
+                    .with("accuracy_mean", (accs.iter().sum::<f64>() / accs.len() as f64).into())
+                    .with("accuracies", Json::numbers(&accs))
+                    .with("solved", accs.iter().filter(|&&a| a >= 0.999).count().into())
+                    .with("skips", (skips as f64).into())
+                    .with("swaps", (swaps as f64).into())
+                    .with("transitions", moves.into()),
+            );
+        }
+    }
+    let lang = language("even-b")?;
+    let mut m = Machine::default_shape(
+        lang.accepting,
+        Settings {
+            life,
+            seed: seeds[0],
+            ..Settings::default()
+        },
+    )?;
+    teach_language(&mut m, &lang, episodes, &mut Rng::new(seeds[0]), 6, false, 1.0, None, 0);
+    let before = compress(&m, None, None).shell_table();
+    let made = m.rearrange(true);
+    let after = compress(&m, None, None).shell_table();
+    let shells: Vec<Json> = before
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .zip(after.as_array().cloned().unwrap_or_default().iter())
+        .map(|(b, a)| {
+            Json::object()
+                .with("shell", b.num("shell", 0.0).into())
+                .with("cells", b.num("cells", 0.0).into())
+                .with("touched_before", b.num("touched", 0.0).into())
+                .with("touched_after", a.num("touched", 0.0).into())
+        })
+        .collect();
+    let rearranged = Json::object()
+        .with("swaps", made.len().into())
+        .with(
+            "state_order",
+            Json::Array(m.lattice.state_ids.iter().map(|&i| i.into()).collect()),
+        )
+        .with("symbol_order", Json::strings(&m.lattice.symbols))
+        .with("start", m.start.into())
+        .with("shells", Json::Array(shells));
+    Ok(Json::object()
+        .with("experiment", "walk".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("episodes", episodes.into())
+                .with(
+                    "seeds",
+                    Json::numbers(&seeds.iter().map(|&s| s as f64).collect::<Vec<_>>()),
+                )
+                .with("life", life.into())
+                .with("tests", tests.into())
+                .with("shape", Json::numbers(&[13.0, 13.0, 13.0])),
+        )
+        .with("focus", Json::Array(focus))
+        .with("arms", Json::Array(rows))
+        .with("rearranged", rearranged))
+}
+
+fn walk_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let seeds = arr(&s, "seeds").len();
+    let mut lines = vec![
+        "walk: the node each focus picks on the central vertical vector (s, g, 6) of the 13 x 13 x 13 matrix"
+            .to_string(),
+        String::new(),
+        "| focus | node | runs start from |".to_string(),
+        "|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "focus") {
+        let f = row
+            .get("focus")
+            .and_then(Json::as_f64)
+            .map(|f| f.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let node = arr(row, "node");
+        let n0 = node.first().and_then(Json::as_f64).unwrap_or(0.0);
+        let n2 = node.get(2).and_then(Json::as_f64).unwrap_or(0.0);
+        lines.push(format!("| {f} | ({n0}, g, {n2}) | state {n0} |"));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "every language taught for {} episodes on {seeds} seeds, each way",
+        s.num("episodes", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push("| language | way | accuracy, mean | solved | skips per transition | swaps |".to_string());
+    lines.push("|---|---|---|---|---|---|".to_string());
+    for row in arr(r, "arms") {
+        let moves = row.num("transitions", 0.0);
+        let per = if moves > 0.0 {
+            row.num("skips", 0.0) / moves
+        } else {
+            0.0
+        };
+        lines.push(format!(
+            "| {} | {} | {:.3} | {}/{seeds} | {per:.3} | {} |",
+            row.str_or("language", ""),
+            row.str_or("arm", ""),
+            row.num("accuracy_mean", 0.0),
+            row.num("solved", 0.0),
+            row.num("swaps", 0.0)
+        ));
+    }
+    let rr = r.get("rearranged").cloned().unwrap_or(Json::object());
+    let order: Vec<String> = arr(&rr, "state_order").iter().map(Json::dump).collect();
+    let symbols: String = arr(&rr, "symbol_order").iter().filter_map(Json::as_str).collect();
+    lines.push(String::new());
+    lines.push(format!(
+        "even-b, taught plain, then left to rearrange itself until settled: {} swaps; states top to bottom [{}], symbols {symbols}, start state {}",
+        rr.num("swaps", 0.0),
+        order.join(", "),
+        rr.num("start", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push("| shell | cells | touched edges before | after |".to_string());
+    lines.push("|---|---|---|---|".to_string());
+    for row in arr(&rr, "shells") {
+        lines.push(format!(
+            "| {} | {} | {} | {} |",
+            row.num("shell", 0.0),
+            row.num("cells", 0.0),
+            row.num("touched_before", 0.0),
+            row.num("touched_after", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn compression_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let mut lines = vec![
+        format!(
+            "compression: default 13 x 13 x 13 machines, fresh and taught each language for {} episodes, folded into \
+             the central node (6, g, 6) at each precision",
+            s.num("episodes", 0.0)
+        ),
+        String::new(),
+        "| machine | precision | touched | bytes | smaller than dense | lossless | max relative error | max KL | \
+         greedy changed | accuracy: original → rebuilt |"
+            .to_string(),
+        "|---|---|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        let acc = match (
+            row.get("accuracy").and_then(Json::as_f64),
+            row.get("accuracy_rebuilt").and_then(Json::as_f64),
+        ) {
+            (Some(a), Some(b)) => format!("{a:.3} → {b:.3}"),
+            _ => "–".to_string(),
+        };
+        lines.push(format!(
+            "| {} | {} | {} | {} | {:.1}× | {} | {:.1e} | {:.1e} | {} | {} |",
+            row.str_or("machine", ""),
+            row.str_or("precision", ""),
+            row.num("touched", 0.0),
+            row.num("bytes", 0.0),
+            row.num("ratio", 0.0),
+            if row.bool_or("lossless", false) { "yes" } else { "no" },
+            row.num("max_relative_error", 0.0),
+            row.num("max_kl", 0.0),
+            row.num("greedy_changed", 0.0),
+            acc
+        ));
+    }
+    lines.push(String::new());
+    lines.push("even-b, exact, rebuilt from the central node outward".to_string());
+    lines.push(String::new());
+    lines.push("| shells rebuilt | cells | touched edges restored | greedy changed | accuracy |".to_string());
+    lines.push("|---|---|---|---|---|".to_string());
+    for row in arr(r, "expansion") {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {:.3} |",
+            row.num("shells", 0.0),
+            row.num("cells", 0.0),
+            row.num("touched", 0.0),
+            row.num("greedy_changed", 0.0),
+            row.num("accuracy", 0.0)
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "every language taught again, the matrix folded into its central node every {} transitions and rebuilt \
+         from the code each time",
+        s.num("every", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push("| language | compression | precision | compressions | last code, bytes | accuracy |".to_string());
+    lines.push("|---|---|---|---|---|---|".to_string());
+    for row in arr(r, "periodic") {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {:.3} |",
+            row.str_or("language", ""),
+            row.str_or("compression", ""),
+            row.str_or("precision", "–"),
+            row.num("compressions", 0.0),
+            row.get("bytes")
+                .and_then(Json::as_f64)
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "–".to_string()),
+            row.num("accuracy", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Machines connected into networks: every language taught to each of [`NETWORKS`] from the learning experiment's
+/// strings, per seed; then each English-to-English task to each of [`TRANSLATORS`] for `epochs` epochs, every fourth
+/// pair held out.
+pub fn network(episodes: usize, seeds: &[u64], life: f64, tests: usize, epochs: usize) -> Result<Json, String> {
+    use crate::network::{teach_network, Credit, Merge, Network, Vote, LAYER_DISCOUNT};
+    use crate::phonetic::{past, plurals, split};
+    let settings = Settings {
+        life,
+        ..Settings::default()
+    };
+    let mut rows = Vec::new();
+    for lang in LANGUAGES.iter() {
+        for (arch, credit) in NETWORKS {
+            let (mut accs, mut touched, mut layers) = (Vec::new(), 0usize, 0usize);
+            for &seed in seeds {
+                let mut rng = Rng::new(seed);
+                let test = examples(lang, tests, &mut rng, 6);
+                let mut net =
+                    Network::from_architecture(arch, &alphabet(), seed, Merge::Concat, Vote::Majority, &settings)?;
+                net.compile(Some(lang.accepting), LAYER_DISCOUNT, 1.0, 1.0, Credit::parse(credit)?)?;
+                teach_network(&mut net, lang, episodes, &mut rng, 6);
+                accs.push(net.evaluate(&test)?);
+                layers = net.layers().len();
+                touched = touched.max(net.layers().iter().map(|l| l.machine.lattice.touched().count()).sum());
+            }
+            let mean = accs.iter().sum::<f64>() / accs.len() as f64;
+            rows.push(
+                Json::object()
+                    .with("language", lang.name.into())
+                    .with("architecture", arch.into())
+                    .with("credit", credit.into())
+                    .with("layers", layers.into())
+                    .with("accuracy", Json::numbers(&accs))
+                    .with("accuracy_mean", mean.into())
+                    .with(
+                        "accuracy_min",
+                        accs.iter().cloned().fold(f64::INFINITY, f64::min).into(),
+                    )
+                    .with(
+                        "accuracy_max",
+                        accs.iter().cloned().fold(f64::NEG_INFINITY, f64::max).into(),
+                    )
+                    .with("solved", accs.iter().filter(|&&a| a >= 0.999).count().into())
+                    .with("touched", touched.into()),
+            );
+        }
+    }
+    let mut translation = Vec::new();
+    for (task, pairs) in [("plural", plurals()), ("past", past())] {
+        let (train, test) = split(&pairs, 4);
+        for arch in TRANSLATORS {
+            let mut net =
+                Network::from_architecture(arch, &alphabet(), seeds[0], Merge::Concat, Vote::Majority, &settings)?;
+            let h = net.fit_pairs(&train, epochs, Some(&test))?;
+            let mut shown = Vec::new();
+            for (x, y) in train.iter().take(2).chain(test.iter().take(2)) {
+                shown.push(Json::strings(&[x.clone(), net.translate(x)?, y.clone()]));
+            }
+            translation.push(
+                Json::object()
+                    .with("task", task.into())
+                    .with("architecture", arch.into())
+                    .with("taught", train.len().into())
+                    .with("held_out", test.len().into())
+                    .with("sounds", h.sounds.last().copied().unwrap_or(0.0).into())
+                    .with("exact", h.exact.last().copied().unwrap_or(0.0).into())
+                    .with("held_out_exact", h.val_exact.last().copied().unwrap_or(0.0).into())
+                    .with("examples", Json::Array(shown)),
+            );
+        }
+    }
+    let nets: Vec<Json> = NETWORKS
+        .iter()
+        .map(|(a, c)| Json::strings(&[a.to_string(), c.to_string()]))
+        .collect();
+    Ok(Json::object()
+        .with("experiment", "network".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("episodes", episodes.into())
+                .with(
+                    "seeds",
+                    Json::numbers(&seeds.iter().map(|&s| s as f64).collect::<Vec<_>>()),
+                )
+                .with("life", life.into())
+                .with("tests", tests.into())
+                .with("networks", Json::Array(nets))
+                .with("layer_discount", LAYER_DISCOUNT.into())
+                .with("translators", Json::strings(&TRANSLATORS.map(String::from)))
+                .with("epochs", epochs.into()),
+        )
+        .with("rows", Json::Array(rows))
+        .with("translation", Json::Array(translation)))
+}
+
+/// Each synthetic data set written to a temporary directory and taught to a network that reads it, every fifth
+/// example held out: the accuracy on both after `epochs` epochs, and how many symbols an example is.
+pub fn media(count: usize, epochs: usize, seed: u64, discount: f64, life: f64) -> Result<Json, String> {
+    use crate::media::{make_dataset, read_labels, verdict};
+    use crate::network::{Credit, Merge, Network, Vote, LAYER_DISCOUNT};
+    let tmp = std::env::temp_dir().join(format!("latticefsm-media-{}", std::process::id()));
+    let settings = Settings {
+        life,
+        discount,
+        ..Settings::default()
+    };
+    let run = || -> Result<Vec<Json>, String> {
+        let mut rows = Vec::new();
+        let mut made: Vec<(&str, String)> = Vec::new();
+        for (kind, arch) in MEDIA {
+            let path = match made.iter().find(|(k, _)| *k == kind) {
+                Some((_, p)) => p.clone(),
+                None => {
+                    let p = make_dataset(kind, &tmp.join(kind).to_string_lossy(), count, seed)?;
+                    made.push((kind, p.clone()));
+                    p
+                }
+            };
+            let data = read_labels(&path, kind != "text")?;
+            let mut train = Vec::new();
+            let mut test = Vec::new();
+            for (i, (x, y)) in data.iter().enumerate() {
+                let e = (x.clone(), verdict(y)?);
+                if i % 5 == 4 {
+                    test.push(e)
+                } else {
+                    train.push(e)
+                }
+            }
+            let mut net =
+                Network::from_architecture(arch, &alphabet(), seed, Merge::Concat, Vote::Majority, &settings)?;
+            net.compile(Some(&[0]), LAYER_DISCOUNT, 1.0, 1.0, Credit::Shared)?;
+            let mut total = 0usize;
+            for (x, _) in &data {
+                total += net.tokenize(x)?.len();
+            }
+            let before = net.evaluate(&test)?;
+            net.fit(&train, epochs)?;
+            rows.push(
+                Json::object()
+                    .with("data", kind.into())
+                    .with("architecture", arch.into())
+                    .with("examples", data.len().into())
+                    .with("held_out", test.len().into())
+                    .with("symbols_mean", (total as f64 / data.len() as f64).into())
+                    .with("alphabet", net.alphabet.len().into())
+                    .with("held_out_before", before.into())
+                    .with("taught", net.evaluate(&train)?.into())
+                    .with("held_out_after", net.evaluate(&test)?.into()),
+            );
+        }
+        Ok(rows)
+    };
+    let rows = run();
+    let _ = fs::remove_dir_all(&tmp);
+    let nets: Vec<Json> = MEDIA
+        .iter()
+        .map(|(k, a)| Json::strings(&[k.to_string(), a.to_string()]))
+        .collect();
+    Ok(Json::object()
+        .with("experiment", "media".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("count", count.into())
+                .with("epochs", epochs.into())
+                .with("seed", (seed as f64).into())
+                .with("discount", discount.into())
+                .with("life", life.into())
+                .with("networks", Json::Array(nets)),
+        )
+        .with("rows", Json::Array(rows?)))
+}
+
+fn media_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let mut lines = vec![
+        format!(
+            "media: each synthetic data set taught to a network that reads it for {} epochs (discount {}), every \
+             fifth example held out; text: is there a negation, image: are the stripes vertical, audio: is the \
+             spoken noun plural, video: does the square move right",
+            s.num("epochs", 0.0),
+            s.num("discount", 0.0)
+        ),
+        String::new(),
+        "| data | network | examples (held out) | symbols per example | alphabet | held out before | taught after | \
+         held out after |"
+            .to_string(),
+        "|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        lines.push(format!(
+            "| {} | `{}` | {} ({}) | {:.0} | {} | {:.2} | {:.2} | **{:.2}** |",
+            row.str_or("data", ""),
+            row.str_or("architecture", ""),
+            row.num("examples", 0.0),
+            row.num("held_out", 0.0),
+            row.num("symbols_mean", 0.0),
+            row.num("alphabet", 0.0),
+            row.num("held_out_before", 0.0),
+            row.num("taught", 0.0),
+            row.num("held_out_after", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// The N-gram models the ngram experiment measures: a unit and an order.
+pub const NGRAMS: [(&str, usize); 12] = [
+    ("word", 1),
+    ("word", 2),
+    ("word", 3),
+    ("word", 4),
+    ("char", 3),
+    ("char", 5),
+    ("char", 7),
+    ("sound", 3),
+    ("sound", 5),
+    ("base64", 4),
+    ("base64", 8),
+    ("base64", 12),
+];
+
+/// Every model of [`NGRAMS`] trained on the corpus under `data`, every `held_out`-th line (or base64 sequence) held
+/// out and measured: perplexity, bits a token, next-token accuracy, and bits a byte of the held-out text.  Draws
+/// nothing: the Python port gives the same numbers.
+pub fn ngram(data: &[String], held_out: usize, max_ranked: usize) -> Result<Json, String> {
+    use crate::b64::{decode, file_sequences};
+    use crate::ngram::{corpus_lines, split_lines, tokenize, NGram};
+    let mut rows = Vec::new();
+    for (unit, order) in NGRAMS {
+        let mut m = NGram::new(order, unit, true, 1.0)?;
+        let mut test: Vec<Vec<String>> = Vec::new();
+        let mut nbytes = 0usize;
+        if unit == "base64" {
+            for (path, seqs) in file_sequences(data, 76)? {
+                let (tr, te) = split_lines(&seqs, held_out);
+                let tr: Vec<Vec<String>> = tr.iter().map(|q| q.chars().map(String::from).collect()).collect();
+                m.train_sequences(&tr, Some(&path));
+                for q in te {
+                    nbytes += decode(&q).len();
+                    test.push(q.chars().map(String::from).collect());
+                }
+            }
+        } else {
+            for (path, lines) in corpus_lines(data)? {
+                let (tr, te) = split_lines(&lines, held_out);
+                m.train_lines(&tr, Some(&path));
+                for line in te {
+                    let toks = tokenize(&line, unit, true);
+                    if !toks.is_empty() {
+                        test.push(toks);
+                        nbytes += line.len() + 1;
+                    }
+                }
+            }
+        }
+        let ev = m.evaluate(&test, max_ranked);
+        let bits = ev.bits.unwrap_or(0.0);
+        rows.push(
+            Json::object()
+                .with("unit", unit.into())
+                .with("order", order.into())
+                .with("vocab", (m.vocab.len() - 3).into())
+                .with("ngrams", m.n_grams().into())
+                .with("tokens", (m.clock as f64).into())
+                .with("held_out_tokens", ev.tokens.into())
+                .with("held_out_bytes", nbytes.into())
+                .with("perplexity", ev.perplexity.map(Json::from).unwrap_or(Json::Null))
+                .with("bits", ev.bits.map(Json::from).unwrap_or(Json::Null))
+                .with(
+                    "bits_per_byte",
+                    if nbytes > 0 {
+                        Json::from(bits * ev.tokens as f64 / nbytes as f64)
+                    } else {
+                        Json::Null
+                    },
+                )
+                .with("accuracy", ev.accuracy.map(Json::from).unwrap_or(Json::Null))
+                .with("top5", ev.top5.map(Json::from).unwrap_or(Json::Null)),
+        );
+    }
+    let models: Vec<Json> = NGRAMS
+        .iter()
+        .map(|(u, o)| Json::Array(vec![(*u).into(), (*o).into()]))
+        .collect();
+    Ok(Json::object()
+        .with("experiment", "ngram".into())
+        .with(
+            "settings",
+            Json::object()
+                .with("data", Json::strings(data))
+                .with("held_out", held_out.into())
+                .with("models", Json::Array(models))
+                .with("max_ranked", max_ranked.into()),
+        )
+        .with("rows", Json::Array(rows)))
+}
+
+fn ngram_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let data: Vec<&str> = arr(&s, "data").iter().filter_map(Json::as_str).collect();
+    let k = s.num("held_out", 0.0);
+    let mut lines = vec![
+        format!(
+            "ngram: interpolated Kneser-Ney on {}, every {k}th line (base64: every {k}th 76-letter sequence of the \
+             files) held out; accuracy over the first {} held-out positions; bits a byte to compare the units",
+            data.join(", "),
+            s.num("max_ranked", 0.0)
+        ),
+        String::new(),
+        "| unit | N | vocabulary | n-grams | held-out perplexity | bits a token | **bits a byte** | next-token accuracy \
+         | top 5 |"
+            .to_string(),
+        "|---|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {:.2} | {:.3} | **{:.3}** | {:.3} | {:.3} |",
+            row.str_or("unit", ""),
+            row.num("order", 0.0),
+            row.num("vocab", 0.0),
+            row.num("ngrams", 0.0),
+            row.num("perplexity", 0.0),
+            row.num("bits", 0.0),
+            row.num("bits_per_byte", 0.0),
+            row.num("accuracy", 0.0),
+            row.num("top5", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn network_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let seeds = arr(&s, "seeds").len();
+    let mut lines = vec![
+        format!(
+            "network: every language taught to each network for {} episodes (the learning experiment's strings), \
+             {seeds} seeds, {} held-out strings; `>` one after another, `(a|b)` side by side (majority vote at the \
+             end), `f` writes only the final state",
+            s.num("episodes", 0.0),
+            s.num("tests", 0.0)
+        ),
+        String::new(),
+        "| language | network | credit | layers | accuracy: mean | min | max | solved | touched edges |".to_string(),
+        "|---|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        lines.push(format!(
+            "| {} | `{}` | {} | {} | **{:.2}** | {:.2} | {:.2} | {}/{seeds} | {} |",
+            row.str_or("language", ""),
+            row.str_or("architecture", ""),
+            row.str_or("credit", ""),
+            row.num("layers", 0.0),
+            row.num("accuracy_mean", 0.0),
+            row.num("accuracy_min", 0.0),
+            row.num("accuracy_max", 0.0),
+            row.num("solved", 0.0),
+            row.num("touched", 0.0)
+        ));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "English to English: each task taught to each network for {} epochs, every fourth pair held out; exact means \
+         every sound right",
+        s.num("epochs", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push(
+        "| task | network | pairs taught / held out | sounds right while taught | exact: taught | held out | \
+         translations (taught, taught, held out, held out) |"
+            .to_string(),
+    );
+    lines.push("|---|---|---|---|---|---|---|".to_string());
+    for row in arr(r, "translation") {
+        let ex: Vec<String> = arr(row, "examples")
+            .iter()
+            .map(|e| {
+                let t: Vec<&str> = e
+                    .as_array()
+                    .map(|v| v.iter().filter_map(Json::as_str).collect())
+                    .unwrap_or_default();
+                let (x, got, want) = (t[0], t[1], t[2]);
+                if got == want {
+                    format!("{x} → {got}")
+                } else {
+                    format!("{x} → {got} ({want})")
+                }
+            })
+            .collect();
+        lines.push(format!(
+            "| {} | `{}` | {} / {} | {:.2} | **{:.2}** | {:.2} | {} |",
+            row.str_or("task", ""),
+            row.str_or("architecture", ""),
+            row.num("taught", 0.0),
+            row.num("held_out", 0.0),
+            row.num("sounds", 0.0),
+            row.num("exact", 0.0),
+            row.num("held_out_exact", 0.0),
+            ex.join(", ")
+        ));
+    }
+    lines.join("\n")
+}
+
+pub fn tables(record: &Json) -> String {
+    match record.str_or("experiment", "") {
+        "network" => network_table(record),
+        "media" => media_table(record),
+        "ngram" => ngram_table(record),
+        "learning" => learning_table(record),
+        "stimulation" => stimulation_table(record),
+        "compression" => compression_table(record),
+        "walk" => walk_table(record),
+        _ => adaptation_table(record),
+    }
+}
+
+fn arr<'a>(v: &'a Json, key: &str) -> &'a [Json] {
+    v.get(key).and_then(Json::as_array).map(Vec::as_slice).unwrap_or(&[])
+}
+
+fn learning_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let seeds = arr(&s, "seeds").len();
+    let mut lines = vec![
+        format!(
+            "learning: {} episodes, strings up to {} symbols, {} seeds, {} held-out strings; the quiet arm runs the \
+             same strings without traversing",
+            s.num("episodes", 0.0),
+            s.num("max_length", 0.0),
+            seeds,
+            s.num("tests", 0.0)
+        ),
+        String::new(),
+        "| language | states (min) | before | after: mean | min | max | solved | quiet after |".to_string(),
+        "|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    for row in arr(r, "rows") {
+        lines.push(format!(
+            "| {} ({}) | {} ({}) | {:.2} | **{:.2}** | {:.2} | {:.2} | {}/{} | {:.2} |",
+            row.str_or("language", ""),
+            row.str_or("description", ""),
+            row.num("states", 0.0),
+            row.num("min_states", 0.0),
+            row.num("before", 0.0),
+            row.num("after_mean", 0.0),
+            row.num("after_min", 0.0),
+            row.num("after_max", 0.0),
+            row.num("solved", 0.0),
+            seeds,
+            row.num("quiet_after", 0.0)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn probs_cells(c: &Json) -> String {
+    arr(c, "probabilities")
+        .iter()
+        .map(|p| format!("{:.3}", p.as_f64().unwrap_or(0.0)))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn stimulation_table(r: &Json) -> String {
+    let s = r.get("settings").cloned().unwrap_or(Json::object());
+    let widths = arr(&s, "widths");
+    let head = widths
+        .iter()
+        .map(|w| format!("width {}", w.as_f64().unwrap_or(0.0)))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let rule = "---|".repeat(widths.len());
+    let mut lines = vec![
+        format!(
+            "stimulation: a fork of {} channels; probability of each by stimulation level",
+            widths.len()
+        ),
+        String::new(),
+        format!("| stimulation | {head} |"),
+        format!("|---|{rule}"),
+    ];
+    for c in arr(r, "curve") {
+        lines.push(format!("| {} | {} |", c.num("stimulation", 0.0), probs_cells(c)));
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "a surge of +{} over the baseline {}, relaxing on the clock",
+        s.num("surge", 0.0),
+        s.num("baseline", 0.0)
+    ));
+    lines.push(String::new());
+    lines.push(format!("| lives since | stimulation | {head} |"));
+    lines.push(format!("|---|---|{rule}"));
+    for c in arr(r, "relaxation") {
+        lines.push(format!(
+            "| {} | {:.2} | {} |",
+            c.num("lives", 0.0),
+            c.num("stimulation", 0.0),
+            probs_cells(c)
+        ));
+    }
+    lines.join("\n")
+}
+
+fn adaptation_table(r: &Json) -> String {
+    let mut lines = vec![
+        "adaptation: two edges from one prototype, one rewarded on every use and one punished".to_string(),
+        String::new(),
+        "| stage | clock | P(rewarded) | P(punished) | P(untouched) | width + | width − | net + | net − | recent + | \
+         bias + | bias − |"
+            .to_string(),
+        "|---|---|---|---|---|---|---|---|---|---|---|---|".to_string(),
+    ];
+    let stages = arr(r, "stages");
+    for st in stages {
+        let p = arr(st, "probabilities");
+        let pn = |i: usize| p.get(i).and_then(Json::as_f64).unwrap_or(0.0);
+        let edges = st.get("edges").cloned().unwrap_or(Json::object());
+        let g = edges.get("rewarded").cloned().unwrap_or(Json::object());
+        let b = edges.get("punished").cloned().unwrap_or(Json::object());
+        let bias = |e: &Json| arr(e, "weighting").first().and_then(Json::as_f64).unwrap_or(0.0);
+        lines.push(format!(
+            "| {} | {} | {:.3} | {:.3} | {:.3} | {:.2} | {:.2} | {:+.2} | {:+.2} | {:.2} | {:+.2} | {:+.2} |",
+            st.str_or("stage", ""),
+            st.num("clock", 0.0),
+            pn(1),
+            pn(2),
+            pn(0),
+            g.num("width", 0.0),
+            b.num("width", 0.0),
+            g.num("net", 0.0),
+            b.num("net", 0.0),
+            g.num("recent", 0.0),
+            bias(&g),
+            bias(&b)
+        ));
+    }
+    if let Some(last) = stages.last() {
+        let edges = last.get("edges").cloned().unwrap_or(Json::object());
+        let w = |k: &str| {
+            arr(&edges.get(k).cloned().unwrap_or(Json::object()), "weighting")
+                .iter()
+                .map(|v| format!("{:.3}", v.as_f64().unwrap_or(0.0)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        lines.push(String::new());
+        lines.push("the two weighting functions at the end (bias, seen, recent, net, age, width, rate):".to_string());
+        lines.push(format!("  rewarded: [{}]", w("rewarded")));
+        lines.push(format!("  punished: [{}]", w("punished")));
+    }
+    lines.join("\n")
+}
+
+// ---- running -------------------------------------------------------------------------------------------------------
+
+/// Run the experiments named (or `all`) and write each as `<out>/<name>_results.json` when `out` is given.
+pub fn run(which: &[String], out: Option<&str>, episodes: usize, life: f64) -> Result<Vec<Json>, String> {
+    let names: Vec<String> = if which.iter().any(|w| w == "all") {
+        EXPERIMENTS.iter().map(|s| s.to_string()).collect()
+    } else {
+        which.to_vec()
+    };
+    let mut records = Vec::new();
+    for name in &names {
+        let rec = match name.as_str() {
+            "learning" => learning(&LearningOptions {
+                episodes,
+                life,
+                ..LearningOptions::default()
+            }),
+            "stimulation" => stimulation(&StimulationOptions {
+                life,
+                ..StimulationOptions::default()
+            }),
+            "adaptation" => adaptation(20, life, &[0.0, 1.0, 4.0]),
+            "compression" => compression(episodes, 1, life, 300, 500)?,
+            "walk" => walk(episodes, &[1, 2, 3], life, 300)?,
+            "network" => network(episodes, &[1, 2, 3, 4, 5], life, 300, 20)?,
+            "media" => media(60, 30, 1, 0.95, life)?,
+            "ngram" => ngram(&["data/corpus".to_string()], 10, 2000)?,
+            other => {
+                return Err(format!(
+                    "no experiment named {other:?}; choose from {EXPERIMENTS:?} or all"
+                ))
+            }
+        };
+        if let Some(dir) = out {
+            fs::create_dir_all(dir).map_err(|e| format!("{dir}: {e}"))?;
+            let path = format!("{dir}/{name}_results.json");
+            fs::write(&path, rec.pretty(1)).map_err(|e| format!("{path}: {e}"))?;
+        }
+        records.push(rec);
+    }
+    Ok(records)
+}
+
+/// A language by name, for the CLI.
+pub fn language_by_name(name: &str) -> Result<Language, String> {
+    language(name)
+}

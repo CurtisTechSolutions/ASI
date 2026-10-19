@@ -1,0 +1,218 @@
+//! The chain: one input to a node, the output node predicts the next, and the walk back through the input nodes
+//! stops as soon as it has gathered enough confidence.
+
+use latticefsm::chain::{load_chain, Chain};
+use latticefsm::json::Json;
+use latticefsm::ngram::{corpus_sequences, predict_now, split_lines, Sequence, PREDICT_ALL};
+use latticefsm::rng::Rng;
+
+fn corpus(unit: &str) -> (Vec<Sequence>, Vec<Sequence>) {
+    let seqs: Vec<Sequence> = corpus_sequences(&["../data/corpus/prose.txt".to_string()], unit, true)
+        .unwrap()
+        .into_iter()
+        .flat_map(|(_, s)| s)
+        .collect();
+    split_lines(&seqs, 10)
+}
+
+fn lines(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn abc_fills_nodes_one_to_three_and_node_four_predicts() {
+    let mut m = Chain::new(4, "char", true, 1.0).unwrap();
+    m.train_lines(&lines(&["abcd", "abcd", "abce", "abcd"]), None);
+    let e = m.explain(&m.tokens("abc"), 3, None);
+    let inputs: Vec<&str> = e
+        .get("inputs")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    assert_eq!(inputs, ["a", "b", "c"]);
+    let walk = e.get("walk").unwrap().as_array().unwrap();
+    let nodes: Vec<f64> = walk.iter().map(|s| s.num("node", 0.0)).collect();
+    assert_eq!(nodes, [4.0, 3.0, 2.0, 1.0]);
+    assert_eq!(walk[0].get("input"), Some(&Json::Null));
+    assert_eq!(walk[1].str_or("input", ""), "c");
+    assert_eq!(e.get("next").unwrap().as_array().unwrap()[0].str_or("token", ""), "d");
+}
+
+#[test]
+fn the_more_confident_the_shorter_the_walk() {
+    let (train, test) = corpus("char");
+    let mut m = Chain::new(8, "char", true, 0.9).unwrap();
+    m.predict = false;
+    m.train_sequences(&train, None);
+    let sweep = m.sweep(&test, &[0.0, 0.3, 0.5, 0.7, 0.9, 1.0]);
+    let depths: Vec<f64> = sweep.iter().map(|(_, e)| e.depth.unwrap()).collect();
+    assert_eq!(depths[0], 0.0);
+    assert!(depths.windows(2).all(|w| w[0] <= w[1]), "{depths:?}");
+    assert!(sweep[5].1.accuracy > sweep[0].1.accuracy);
+    let before = m.evaluate(&test, None).depth.unwrap();
+    m.train_sequences(&train, None);
+    assert!(m.evaluate(&test, None).depth.unwrap() < before);
+    // reward shortens the walks of what it rewards; punishment lengthens them
+    let text = "the brain is a directed cyclic graph";
+    let mut ids = m.history_ids(&m.tokens(text));
+    ids.push(1);
+    let walked = |m: &Chain| (1..ids.len()).map(|i| m.walk(&ids[..i], None).unwrap()).sum::<usize>();
+    let start = walked(&m);
+    assert!(m.credit_text(text, 2.0) > 0);
+    let rewarded = walked(&m);
+    assert!(rewarded < start);
+    m.credit_text(text, -6.0);
+    assert!(walked(&m) > rewarded);
+}
+
+#[test]
+fn predicting_while_learning_changes_nothing_learned() {
+    let (train, _) = corpus("word");
+    let mut plain = Chain::new(4, "word", true, 0.9).unwrap();
+    plain.predict = false;
+    plain.train_sequences(&train, None);
+    let mut learner = Chain::new(4, "word", true, 0.9).unwrap();
+    let n = learner.train_sequences(&train, None);
+    assert_eq!(plain.to_json().dump(), learner.to_json().dump());
+    let online = learner.reset_online();
+    assert_eq!(online.predicted as usize, n);
+    assert!(online.accuracy.unwrap() > 0.0 && online.depth.unwrap() > 0.0);
+    assert_eq!(plain.reset_online().predicted, 0);
+}
+
+#[test]
+fn a_long_run_predicts_a_thinning_sample() {
+    // every position of the first PREDICT_ALL, then every 2nd of the next as many, every 3rd, ...
+    assert!((0..PREDICT_ALL).all(predict_now));
+    assert!(predict_now(PREDICT_ALL) && !predict_now(PREDICT_ALL + 1) && predict_now(PREDICT_ALL + 2));
+    assert!(predict_now(3 * PREDICT_ALL) && !predict_now(2 * PREDICT_ALL + 1) && predict_now(2 * PREDICT_ALL + 2));
+    let line = "the quick brown fox jumps over the lazy dog";
+    let text: Vec<String> = (0..3000).map(|i| format!("{line} {i}")).collect();
+    let mut plain = Chain::new(6, "char", true, 0.9).unwrap();
+    plain.predict = false;
+    plain.train_lines(&text, None);
+    let mut learner = Chain::new(6, "char", true, 0.9).unwrap();
+    let n = learner.train_lines(&text, None) as u64;
+    assert!(n > 2 * PREDICT_ALL);
+    // what is learned is the same, and the sample is exactly the positions predict_now picks
+    assert_eq!(plain.to_json().dump(), learner.to_json().dump());
+    let online = learner.reset_online();
+    assert_eq!(online.predicted, (0..n).filter(|&i| predict_now(i)).count() as u64);
+    assert!(online.predicted < n);
+    // a reset starts the count again: every position of a short run is predicted
+    let short = learner.train_lines(&lines(&["the cat sat"]), None) as u64;
+    assert_eq!(learner.reset_online().predicted, short);
+}
+
+#[test]
+fn the_file_and_generation() {
+    let (train, _) = corpus("char");
+    let mut m = Chain::new(5, "char", true, 0.8).unwrap();
+    m.train_sequences(&train[..40], None);
+    m.credit_text("the brain", 1.5);
+    let path = std::env::temp_dir().join(format!("latticefsm-chain-{}.json.gz", std::process::id()));
+    m.save(path.to_str().unwrap()).unwrap();
+    let back = load_chain(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(&path).ok();
+    assert_eq!(back.to_json().dump(), m.to_json().dump());
+    let t = m.tokens("the bra");
+    assert_eq!(back.predict_tokens(&t, 5), m.predict_tokens(&t, 5));
+    let (toks, depths) = m.continue_tokens(&t, 20, 0.0, &mut Rng::new(1));
+    assert!(!toks.is_empty() && depths.len() >= toks.len());
+    assert!(Chain::new(1, "char", true, 0.5).is_err());
+    assert!(Chain::new(4, "char", true, 1.5).is_err());
+}
+
+#[test]
+fn parallel_batches_preserve_chain_learning_and_measurements() {
+    let lines: Vec<String> = (0..280)
+        .map(|i| {
+            if i % 29 == 0 {
+                String::new()
+            } else {
+                format!("the cat {} sat on the mat ", i % 11).repeat(3)
+            }
+        })
+        .collect();
+    let mut batched = Chain::new(4, "word", true, 0.9).unwrap();
+    batched.predict = true;
+    batched.self_credit = 0.25;
+    let mut serial = Chain::from_json(&batched.to_json()).unwrap();
+    serial.predict = true;
+    serial.self_credit = 0.25;
+    batched.train_lines(&lines, None);
+    let seqs: Vec<_> = lines.iter().map(|line| serial.tokens(line)).collect();
+    for tokens in seqs.iter().filter(|s| !s.is_empty()) {
+        serial.train_tokens(tokens);
+    }
+    assert_eq!(batched.to_json().dump(), serial.to_json().dump());
+    let before = batched.to_json().dump();
+    let mut logp = 0.0;
+    let (mut count, mut right, mut depth) = (0, 0, 0);
+    let mut depths = vec![0; batched.nodes];
+    for tokens in seqs.iter().filter(|s| !s.is_empty()) {
+        for (j, (token, prob, d)) in serial.score_tokens(tokens).into_iter().enumerate() {
+            logp += prob.max(1e-300).ln();
+            right += usize::from(serial.predict_tokens(&tokens[..j], 1)[0].0 == token);
+            count += 1;
+            depth += d;
+            depths[d] += 1;
+        }
+    }
+    let got = batched.evaluate(&seqs, None);
+    assert_eq!(got.tokens, count);
+    assert_eq!(got.perplexity, Some((-logp / count as f64).exp()));
+    assert_eq!(got.accuracy, Some(right as f64 / count as f64));
+    assert_eq!(got.depth, Some(depth as f64 / count as f64));
+    assert_eq!(got.depths, depths);
+    assert_eq!(batched.to_json().dump(), before);
+}
+
+#[test]
+fn saving_writes_the_tree_without_building_it() {
+    // nodes with a few counts (a sorted list) and with many (a map), credited ones, and a source and history
+    let (train, test) = corpus("char");
+    let mut m = Chain::new(6, "char", true, 0.9).unwrap();
+    m.self_credit = 0.25;
+    m.train_sequences(&train, Some("prose"));
+    m.evaluate(&test, None);
+    m.credit_text("the brain", 0.5);
+    assert!(m.tables[0].values().any(|nd| nd.counts.len() > 32));
+    assert!(m.tables[5].values().any(|nd| nd.counts.len() == 1));
+    let text = m.dump();
+    assert_eq!(text, m.to_json().dump());
+    let back = Chain::from_json(&latticefsm::json::parse(&text).unwrap()).unwrap();
+    assert_eq!(back.dump(), text);
+}
+
+#[test]
+fn an_oracle_answer_credits_every_guess_alone() {
+    let mut m = Chain::new(4, "word", true, 0.9).unwrap();
+    m.train_lines(&lines(&["a b c", "a b d", "a b d"]), None);
+    let toks = |s: &str| -> Vec<String> { s.split_whitespace().map(String::from).collect() };
+    // b right, d guessed where c is the answer, </s> right
+    assert_eq!(m.credit_answer(&toks("a"), &toks("b c"), 0.0, 0.0), (2, 3));
+    let credited = |m: &Chain| -> (f64, f64) {
+        m.tables
+            .iter()
+            .flat_map(|t| t.values())
+            .fold((0.0, 0.0), |(r, p), n| (r + n.rewarded, p + n.punished))
+    };
+    let before = m.to_json().dump();
+    m.credit_answer(&toks("a"), &toks("b c"), 1.0, 0.0);
+    let (r, p) = credited(&m);
+    assert!(r > 0.0 && p == 0.0, "rewards only: {r} {p}");
+    m.credit_answer(&toks("a"), &toks("b c"), 0.0, 1.0);
+    assert!(credited(&m).1 > 0.0);
+    // credit moves the nodes' records, never their counts
+    let after = Chain::from_json(&m.to_json()).unwrap();
+    assert_eq!(
+        after.clock,
+        Chain::from_json(&latticefsm::json::parse(&before).unwrap())
+            .unwrap()
+            .clock
+    );
+}

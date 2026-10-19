@@ -1,0 +1,238 @@
+learning: 4000 episodes, strings up to 6 symbols, 5 seeds, 300 held-out strings; the quiet arm runs the same strings without traversing
+
+| language | states (min) | before | after: mean | min | max | solved | quiet after |
+|---|---|---|---|---|---|---|---|
+| even-b (an even number of b's) | 3 (2) | 0.59 | **1.00** | 1.00 | 1.00 | 5/5 | 0.59 |
+| even-b (an even number of b's) | 4 (2) | 0.59 | **1.00** | 1.00 | 1.00 | 5/5 | 0.59 |
+| even-b (an even number of b's) | 6 (2) | 0.60 | **1.00** | 1.00 | 1.00 | 5/5 | 0.59 |
+| even-b (an even number of b's) | 13 (2) | 0.59 | **0.92** | 0.61 | 1.00 | 4/5 | 0.59 |
+| contains-aa (two a's in a row somewhere) | 3 (3) | 0.62 | **1.00** | 1.00 | 1.00 | 5/5 | 0.60 |
+| contains-aa (two a's in a row somewhere) | 4 (3) | 0.62 | **0.89** | 0.68 | 1.00 | 3/5 | 0.61 |
+| contains-aa (two a's in a row somewhere) | 6 (3) | 0.62 | **0.93** | 0.79 | 1.00 | 3/5 | 0.63 |
+| contains-aa (two a's in a row somewhere) | 13 (3) | 0.66 | **0.80** | 0.65 | 1.00 | 1/5 | 0.66 |
+| ends-ab (ends with ab) | 3 (3) | 0.67 | **1.00** | 1.00 | 1.00 | 5/5 | 0.65 |
+| ends-ab (ends with ab) | 4 (3) | 0.69 | **0.82** | 0.65 | 1.00 | 2/5 | 0.71 |
+| ends-ab (ends with ab) | 6 (3) | 0.74 | **0.93** | 0.85 | 1.00 | 2/5 | 0.74 |
+| ends-ab (ends with ab) | 13 (3) | 0.78 | **0.95** | 0.92 | 0.99 | 0/5 | 0.78 |
+| mod3-a (a multiple of three a's) | 3 (3) | 0.62 | **1.00** | 1.00 | 1.00 | 5/5 | 0.62 |
+| mod3-a (a multiple of three a's) | 4 (3) | 0.65 | **0.94** | 0.69 | 1.00 | 4/5 | 0.64 |
+| mod3-a (a multiple of three a's) | 6 (3) | 0.67 | **0.82** | 0.67 | 1.00 | 2/5 | 0.66 |
+| mod3-a (a multiple of three a's) | 13 (3) | 0.69 | **0.80** | 0.69 | 0.86 | 0/5 | 0.69 |
+
+stimulation: a fork of 3 channels; probability of each by stimulation level
+
+| stimulation | width 4 | width 1 | width 0.25 |
+|---|---|---|---|
+| 0 | 0.333 | 0.333 | 0.333 |
+| 0.5 | 0.571 | 0.286 | 0.143 |
+| 1 | 0.762 | 0.190 | 0.048 |
+| 2 | 0.938 | 0.059 | 0.004 |
+| 4 | 0.996 | 0.004 | 0.000 |
+
+a surge of +3 over the baseline 1, relaxing on the clock
+
+| lives since | stimulation | width 4 | width 1 | width 0.25 |
+|---|---|---|---|---|
+| 0 | 4.00 | 0.996 | 0.004 | 0.000 |
+| 0.5 | 3.12 | 0.970 | 0.028 | 0.003 |
+| 1 | 2.50 | 0.883 | 0.089 | 0.028 |
+| 2 | 1.75 | 0.611 | 0.229 | 0.160 |
+| 4 | 1.19 | 0.387 | 0.315 | 0.298 |
+
+adaptation: two edges from one prototype, one rewarded on every use and one punished
+
+| stage | clock | P(rewarded) | P(punished) | P(untouched) | width + | width − | net + | net − | recent + | bias + | bias − |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| fresh | 0 | 0.333 | 0.333 | 0.333 | 1.00 | 1.00 | +0.00 | +0.00 | 0.00 | +0.00 | +0.00 |
+| after 1 uses each | 2 | 0.602 | 0.126 | 0.272 | 1.21 | 0.84 | +0.50 | -0.50 | 1.00 | +0.10 | -0.10 |
+| after 5 uses each | 10 | 1.000 | 0.000 | 0.000 | 2.61 | 0.42 | +0.83 | -0.83 | 4.98 | +0.50 | -0.50 |
+| after 20 uses each | 40 | 1.000 | 0.000 | 0.000 | 19.99 | 0.05 | +0.95 | -0.95 | 19.71 | +2.00 | -2.00 |
+| 1 life later | 1040 | 1.000 | 0.000 | 0.000 | 10.49 | 0.53 | +0.95 | -0.95 | 9.86 | +2.00 | -2.00 |
+| 4 lives later | 4040 | 1.000 | 0.000 | 0.000 | 2.19 | 0.94 | +0.95 | -0.95 | 1.23 | +2.00 | -2.00 |
+
+the two weighting functions at the end (bias, seen, recent, net, age, width, rate):
+  rewarded: [2.0, 4.234, 8.0, 2.64, 1.897, 3.496, 0.1]
+  punished: [-2.0, -4.234, -8.0, 2.64, -1.897, 3.179, 0.1]
+
+compression: default 13 x 13 x 13 machines, fresh and taught each language for 4000 episodes, folded into the central node (6, g, 6) at each precision
+
+| machine | precision | touched | bytes | smaller than dense | lossless | max relative error | max KL | greedy changed | accuracy: original → rebuilt |
+|---|---|---|---|---|---|---|---|---|---|
+| fresh | exact | 0 | 275 | 1342.2× | yes | 0.0e+00 | 0.0e+00 | 0 | – |
+| fresh | float32 | 0 | 275 | 1342.2× | yes | 0.0e+00 | 0.0e+00 | 0 | – |
+| fresh | float16 | 0 | 275 | 1342.2× | yes | 0.0e+00 | 0.0e+00 | 0 | – |
+| even-b | exact | 338 | 48947 | 7.5× | yes | 0.0e+00 | 0.0e+00 | 0 | 0.600 → 0.600 |
+| even-b | float32 | 338 | 28667 | 12.9× | no | 5.9e-08 | 4.0e-13 | 0 | 0.600 → 0.600 |
+| even-b | float16 | 338 | 18527 | 19.9× | no | 4.8e-04 | 8.2e-05 | 0 | 0.600 → 0.600 |
+| contains-aa | exact | 335 | 48515 | 7.6× | yes | 0.0e+00 | 0.0e+00 | 0 | 0.957 → 0.957 |
+| contains-aa | float32 | 335 | 28415 | 13.0× | no | 5.9e-08 | 6.8e-14 | 0 | 0.957 → 0.957 |
+| contains-aa | float16 | 335 | 18365 | 20.1× | no | 2.1e-03 | 3.5e-05 | 0 | 0.957 → 0.957 |
+| ends-ab | exact | 209 | 30371 | 12.2× | yes | 0.0e+00 | 0.0e+00 | 0 | 1.000 → 1.000 |
+| ends-ab | float32 | 209 | 17831 | 20.7× | no | 5.9e-08 | 3.6e-16 | 0 | 1.000 → 1.000 |
+| ends-ab | float16 | 209 | 11561 | 31.9× | no | 4.7e-04 | 8.8e-08 | 0 | 1.000 → 1.000 |
+| mod3-a | exact | 328 | 47507 | 7.8× | yes | 0.0e+00 | 0.0e+00 | 0 | 0.743 → 0.743 |
+| mod3-a | float32 | 328 | 27827 | 13.3× | no | 5.9e-08 | 2.1e-14 | 0 | 0.743 → 0.743 |
+| mod3-a | float16 | 328 | 17987 | 20.5× | no | 2.4e-03 | 4.8e-08 | 0 | 0.743 → 0.743 |
+
+even-b, exact, rebuilt from the central node outward
+
+| shells rebuilt | cells | touched edges restored | greedy changed | accuracy |
+|---|---|---|---|---|
+| 1 | 1 | 0 | 23 | 0.583 |
+| 2 | 27 | 0 | 23 | 0.583 |
+| 3 | 125 | 0 | 23 | 0.583 |
+| 4 | 343 | 0 | 23 | 0.583 |
+| 5 | 729 | 0 | 23 | 0.583 |
+| 6 | 1331 | 121 | 18 | 0.577 |
+| 7 | 2197 | 338 | 0 | 0.600 |
+
+every language taught again, the matrix folded into its central node every 500 transitions and rebuilt from the code each time
+
+| language | compression | precision | compressions | last code, bytes | accuracy |
+|---|---|---|---|---|---|
+| even-b | never | – | 0 | – | 0.600 |
+| even-b | every 500 | exact | 23 | 48947 | 0.600 |
+| even-b | every 500 | float32 | 23 | 28667 | 0.600 |
+| even-b | every 500 | float16 | 23 | 18473 | 1.000 |
+| contains-aa | never | – | 0 | – | 0.957 |
+| contains-aa | every 500 | exact | 23 | 48515 | 0.957 |
+| contains-aa | every 500 | float32 | 23 | 28415 | 0.957 |
+| contains-aa | every 500 | float16 | 23 | 18365 | 1.000 |
+| ends-ab | never | – | 0 | – | 1.000 |
+| ends-ab | every 500 | exact | 23 | 30371 | 1.000 |
+| ends-ab | every 500 | float32 | 23 | 17831 | 1.000 |
+| ends-ab | every 500 | float16 | 23 | 11453 | 1.000 |
+| mod3-a | never | – | 0 | – | 0.743 |
+| mod3-a | every 500 | exact | 23 | 47363 | 0.743 |
+| mod3-a | every 500 | float32 | 23 | 27743 | 0.743 |
+| mod3-a | every 500 | float16 | 23 | 17231 | 0.703 |
+
+walk: the node each focus picks on the central vertical vector (s, g, 6) of the 13 x 13 x 13 matrix
+
+| focus | node | runs start from |
+|---|---|---|
+| none | (0, g, 6) | state 0 |
+| 0 | (0, g, 6) | state 0 |
+| 0.07 | (0, g, 6) | state 0 |
+| 0.08 | (1, g, 6) | state 1 |
+| 0.25 | (3, g, 6) | state 3 |
+| 0.5 | (6, g, 6) | state 6 |
+| 0.75 | (9, g, 6) | state 9 |
+| 0.92 | (11, g, 6) | state 11 |
+| 0.93 | (12, g, 6) | state 12 |
+| 1 | (12, g, 6) | state 12 |
+
+every language taught for 4000 episodes on 3 seeds, each way
+
+| language | way | accuracy, mean | solved | skips per transition | swaps |
+|---|---|---|---|---|---|
+| even-b | plain | 0.556 | 0/3 | 0.000 | 0 |
+| even-b | skip | 1.000 | 3/3 | 0.091 | 0 |
+| even-b | learned focus | 0.546 | 0/3 | 0.000 | 0 |
+| even-b | rearrange every 500 | 1.000 | 3/3 | 0.000 | 185 |
+| even-b | focus 0.5 | 0.730 | 0/3 | 0.000 | 0 |
+| even-b | focus 1 | 0.461 | 0/3 | 0.000 | 0 |
+| contains-aa | plain | 0.888 | 1/3 | 0.000 | 0 |
+| contains-aa | skip | 0.948 | 1/3 | 0.138 | 0 |
+| contains-aa | learned focus | 0.633 | 0/3 | 0.000 | 0 |
+| contains-aa | rearrange every 500 | 0.838 | 1/3 | 0.000 | 199 |
+| contains-aa | focus 0.5 | 0.713 | 0/3 | 0.000 | 0 |
+| contains-aa | focus 1 | 0.732 | 0/3 | 0.000 | 0 |
+| ends-ab | plain | 0.959 | 1/3 | 0.000 | 0 |
+| ends-ab | skip | 0.968 | 2/3 | 0.023 | 0 |
+| ends-ab | learned focus | 0.920 | 0/3 | 0.000 | 0 |
+| ends-ab | rearrange every 500 | 0.929 | 1/3 | 0.000 | 194 |
+| ends-ab | focus 0.5 | 0.912 | 0/3 | 0.000 | 0 |
+| ends-ab | focus 1 | 0.954 | 2/3 | 0.000 | 0 |
+| mod3-a | plain | 0.724 | 0/3 | 0.000 | 0 |
+| mod3-a | skip | 0.868 | 1/3 | 0.056 | 0 |
+| mod3-a | learned focus | 0.813 | 0/3 | 0.000 | 0 |
+| mod3-a | rearrange every 500 | 0.708 | 0/3 | 0.000 | 183 |
+| mod3-a | focus 0.5 | 0.640 | 0/3 | 0.000 | 0 |
+| mod3-a | focus 1 | 0.674 | 0/3 | 0.000 | 0 |
+
+even-b, taught plain, then left to rearrange itself until settled: 27 swaps; states top to bottom [4, 5, 1, 6, 2, 3, 0, 9, 7, 8, 10, 11, 12], symbols cdefgbahijklm, start state 6
+
+| shell | cells | touched edges before | after |
+|---|---|---|---|
+| 0 | 1 | 0 | 1 |
+| 1 | 26 | 0 | 17 |
+| 2 | 98 | 0 | 32 |
+| 3 | 218 | 0 | 48 |
+| 4 | 386 | 0 | 64 |
+| 5 | 602 | 121 | 80 |
+| 6 | 866 | 217 | 96 |
+
+network: every language taught to each network for 4000 episodes (the learning experiment's strings), 5 seeds, 300 held-out strings; `>` one after another, `(a|b)` side by side (majority vote at the end), `f` writes only the final state
+
+| language | network | credit | layers | accuracy: mean | min | max | solved | touched edges |
+|---|---|---|---|---|---|---|---|---|
+| even-b | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| even-b | `3>3` | shared | 2 | **1.00** | 1.00 | 1.00 | 5/5 | 45 |
+| even-b | `3f>3` | shared | 2 | **1.00** | 1.00 | 1.00 | 5/5 | 27 |
+| even-b | `(3|3)>3` | shared | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 90 |
+| even-b | `(3|3|3)` | shared | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| even-b | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| even-b | `13` | shared | 1 | **0.82** | 0.53 | 1.00 | 2/5 | 338 |
+| even-b | `(13|13|13)` | own | 3 | **0.71** | 0.57 | 1.00 | 1/5 | 1014 |
+| contains-aa | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| contains-aa | `3>3` | shared | 2 | **0.89** | 0.71 | 1.00 | 3/5 | 45 |
+| contains-aa | `3f>3` | shared | 2 | **0.89** | 0.43 | 1.00 | 4/5 | 27 |
+| contains-aa | `(3|3)>3` | shared | 3 | **0.66** | 0.51 | 0.75 | 0/5 | 90 |
+| contains-aa | `(3|3|3)` | shared | 3 | **0.79** | 0.56 | 1.00 | 2/5 | 54 |
+| contains-aa | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| contains-aa | `13` | shared | 1 | **0.79** | 0.65 | 0.98 | 0/5 | 336 |
+| contains-aa | `(13|13|13)` | own | 3 | **0.73** | 0.66 | 0.78 | 0/5 | 1002 |
+| ends-ab | `3` | shared | 1 | **0.98** | 0.88 | 1.00 | 4/5 | 18 |
+| ends-ab | `3>3` | shared | 2 | **0.85** | 0.72 | 1.00 | 1/5 | 45 |
+| ends-ab | `3f>3` | shared | 2 | **0.97** | 0.86 | 1.00 | 4/5 | 27 |
+| ends-ab | `(3|3)>3` | shared | 3 | **0.91** | 0.82 | 1.00 | 2/5 | 90 |
+| ends-ab | `(3|3|3)` | shared | 3 | **0.96** | 0.79 | 1.00 | 4/5 | 54 |
+| ends-ab | `(3|3|3)` | own | 3 | **0.99** | 0.94 | 1.00 | 4/5 | 54 |
+| ends-ab | `13` | shared | 1 | **0.90** | 0.83 | 0.99 | 0/5 | 296 |
+| ends-ab | `(13|13|13)` | own | 3 | **0.95** | 0.85 | 1.00 | 1/5 | 827 |
+| mod3-a | `3` | shared | 1 | **1.00** | 1.00 | 1.00 | 5/5 | 18 |
+| mod3-a | `3>3` | shared | 2 | **0.76** | 0.53 | 1.00 | 2/5 | 45 |
+| mod3-a | `3f>3` | shared | 2 | **0.73** | 0.51 | 1.00 | 2/5 | 27 |
+| mod3-a | `(3|3)>3` | shared | 3 | **0.73** | 0.51 | 1.00 | 1/5 | 90 |
+| mod3-a | `(3|3|3)` | shared | 3 | **0.77** | 0.65 | 0.86 | 0/5 | 54 |
+| mod3-a | `(3|3|3)` | own | 3 | **1.00** | 1.00 | 1.00 | 5/5 | 54 |
+| mod3-a | `13` | shared | 1 | **0.79** | 0.69 | 0.92 | 0/5 | 329 |
+| mod3-a | `(13|13|13)` | own | 3 | **0.71** | 0.69 | 0.77 | 0/5 | 979 |
+
+English to English: each task taught to each network for 20 epochs, every fourth pair held out; exact means every sound right
+
+| task | network | pairs taught / held out | sounds right while taught | exact: taught | held out | translations (taught, taught, held out, held out) |
+|---|---|---|---|---|---|---|
+| plural | `enc>dec` | 35 / 11 | 0.90 | **0.80** | 0.09 | cat → cats, dog → dogs, hat → hats, box → b ks z (boxes) |
+| plural | `enc>13>dec` | 35 / 11 | 0.16 | **0.11** | 0.00 | cat → ksiz (cats), dog → doors (dogs), hat → rus k (hats), box → benz s (boxes) |
+| past | `enc>dec` | 21 / 7 | 0.89 | **0.76** | 0.00 | walk → walked, play → played, jump → pt (jumped), look → l kt (looked) |
+| past | `enc>13>dec` | 21 / 7 | 0.12 | **0.05** | 0.00 | walk → want (walked), play → pt he (played), jump → wawnd w (jumped), look → wawld (looked) |
+
+media: each synthetic data set taught to a network that reads it for 30 epochs (discount 0.95), every fifth example held out; text: is there a negation, image: are the stripes vertical, audio: is the spoken noun plural, video: does the square move right
+
+| data | network | examples (held out) | symbols per example | alphabet | held out before | taught after | held out after |
+|---|---|---|---|---|---|---|---|
+| text | `text>13` | 60 (12) | 18 | 43 | 0.50 | 0.58 | **0.58** |
+| image | `image>3` | 60 (12) | 64 | 4 | 0.50 | 0.35 | **0.50** |
+| audio | `audio>3` | 60 (12) | 18 | 64 | 0.50 | 0.94 | **0.67** |
+| video | `diff>3` | 60 (12) | 455 | 6 | 0.50 | 0.50 | **0.50** |
+| video | `video>13` | 60 (12) | 533 | 74 | 0.50 | 0.54 | **0.50** |
+
+ngram: interpolated Kneser-Ney on data/corpus, every 10th line (base64: every 10th 76-letter sequence of the files) held out; accuracy over the first 2000 held-out positions; bits a byte to compare the units
+
+| unit | N | vocabulary | n-grams | held-out perplexity | bits a token | **bits a byte** | next-token accuracy | top 5 |
+|---|---|---|---|---|---|---|---|---|
+| word | 1 | 1811 | 1812 | 360.80 | 8.495 | **1.882** | 0.069 | 0.261 |
+| word | 2 | 1811 | 7210 | 195.87 | 7.614 | **1.687** | 0.170 | 0.371 |
+| word | 3 | 1811 | 10269 | 180.07 | 7.492 | **1.660** | 0.181 | 0.382 |
+| word | 4 | 1811 | 11051 | 178.39 | 7.479 | **1.657** | 0.185 | 0.387 |
+| char | 3 | 79 | 4449 | 7.23 | 2.855 | **2.838** | 0.418 | 0.800 |
+| char | 5 | 79 | 18577 | 4.48 | 2.165 | **2.152** | 0.588 | 0.860 |
+| char | 7 | 79 | 31171 | 4.32 | 2.112 | **2.100** | 0.602 | 0.863 |
+| sound | 3 | 43 | 5179 | 7.60 | 2.926 | **2.511** | 0.413 | 0.766 |
+| sound | 5 | 43 | 19784 | 5.28 | 2.400 | **2.059** | 0.536 | 0.812 |
+| base64 | 4 | 63 | 15989 | 4.91 | 2.295 | **3.101** | 0.520 | 0.887 |
+| base64 | 8 | 63 | 50119 | 4.28 | 2.099 | **2.835** | 0.614 | 0.897 |
+| base64 | 12 | 63 | 62754 | 4.29 | 2.103 | **2.840** | 0.610 | 0.897 |
+

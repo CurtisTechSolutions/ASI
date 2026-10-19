@@ -1,0 +1,5 @@
+# The Python package beside this crate documents itself in lines of about 120
+# columns, and the Rust port is formatted to the same width rather than to
+# rustfmt's 100.
+max_width = 120
+use_field_init_shorthand = true

@@ -1034,7 +1034,7 @@ impl Model {
     }
 
     /// Encodes a chunk of texts on the worker threads.
-    fn encode_all(&self, texts: &[&String]) -> Vec<Vec<String>> {
+    pub(crate) fn encode_all(&self, texts: &[&String]) -> Vec<Vec<String>> {
         let enc = self.g.enc;
         let mut grams = vec![Vec::new(); texts.len()];
         parallel_fill(&mut grams, self.workers(), |i, slot| *slot = enc.encode(texts[i]));

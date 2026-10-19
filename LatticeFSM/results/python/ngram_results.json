@@ -1,0 +1,230 @@
+{
+ "experiment": "ngram",
+ "settings": {
+  "data": [
+   "data/corpus"
+  ],
+  "held_out": 10,
+  "models": [
+   [
+    "word",
+    1
+   ],
+   [
+    "word",
+    2
+   ],
+   [
+    "word",
+    3
+   ],
+   [
+    "word",
+    4
+   ],
+   [
+    "char",
+    3
+   ],
+   [
+    "char",
+    5
+   ],
+   [
+    "char",
+    7
+   ],
+   [
+    "sound",
+    3
+   ],
+   [
+    "sound",
+    5
+   ],
+   [
+    "base64",
+    4
+   ],
+   [
+    "base64",
+    8
+   ],
+   [
+    "base64",
+    12
+   ]
+  ],
+  "max_ranked": 2000
+ },
+ "rows": [
+  {
+   "unit": "word",
+   "order": 1,
+   "vocab": 1811,
+   "ngrams": 1812,
+   "tokens": 12030,
+   "held_out_tokens": 1262,
+   "held_out_bytes": 5697,
+   "perplexity": 360.80082374117364,
+   "bits": 8.495058822176084,
+   "bits_per_byte": 1.881826265330212,
+   "accuracy": 0.06893819334389857,
+   "top5": 0.26148969889064977
+  },
+  {
+   "unit": "word",
+   "order": 2,
+   "vocab": 1811,
+   "ngrams": 7210,
+   "tokens": 12030,
+   "held_out_tokens": 1262,
+   "held_out_bytes": 5697,
+   "perplexity": 195.8684121977631,
+   "bits": 7.613740941948283,
+   "bits_per_byte": 1.686596641870938,
+   "accuracy": 0.17036450079239301,
+   "top5": 0.37083993660855785
+  },
+  {
+   "unit": "word",
+   "order": 3,
+   "vocab": 1811,
+   "ngrams": 10269,
+   "tokens": 12030,
+   "held_out_tokens": 1262,
+   "held_out_bytes": 5697,
+   "perplexity": 180.0712453204105,
+   "bits": 7.492424012630934,
+   "bits_per_byte": 1.6597225037634264,
+   "accuracy": 0.1814580031695721,
+   "top5": 0.38193343898573695
+  },
+  {
+   "unit": "word",
+   "order": 4,
+   "vocab": 1811,
+   "ngrams": 11051,
+   "tokens": 12030,
+   "held_out_tokens": 1262,
+   "held_out_bytes": 5697,
+   "perplexity": 178.38635644907248,
+   "bits": 7.478861467387363,
+   "bits_per_byte": 1.6567181274079081,
+   "accuracy": 0.18462757527733756,
+   "top5": 0.38748019017432644
+  },
+  {
+   "unit": "char",
+   "order": 3,
+   "vocab": 79,
+   "ngrams": 4449,
+   "tokens": 52229,
+   "held_out_tokens": 5663,
+   "held_out_bytes": 5697,
+   "perplexity": 7.233142026982489,
+   "bits": 2.8546224801022997,
+   "bits_per_byte": 2.837585940814345,
+   "accuracy": 0.4185,
+   "top5": 0.8
+  },
+  {
+   "unit": "char",
+   "order": 5,
+   "vocab": 79,
+   "ngrams": 18577,
+   "tokens": 52229,
+   "held_out_tokens": 5663,
+   "held_out_bytes": 5697,
+   "perplexity": 4.484697674267978,
+   "bits": 2.165010732405297,
+   "bits_per_byte": 2.1520898328262588,
+   "accuracy": 0.588,
+   "top5": 0.86
+  },
+  {
+   "unit": "char",
+   "order": 7,
+   "vocab": 79,
+   "ngrams": 31171,
+   "tokens": 52229,
+   "held_out_tokens": 5663,
+   "held_out_bytes": 5697,
+   "perplexity": 4.323970730533309,
+   "bits": 2.1123567573331172,
+   "bits_per_byte": 2.0997500994870006,
+   "accuracy": 0.6015,
+   "top5": 0.863
+  },
+  {
+   "unit": "sound",
+   "order": 3,
+   "vocab": 43,
+   "ngrams": 5179,
+   "tokens": 45363,
+   "held_out_tokens": 4889,
+   "held_out_bytes": 5697,
+   "perplexity": 7.601880206665487,
+   "bits": 2.9263562908390064,
+   "bits_per_byte": 2.511314008410023,
+   "accuracy": 0.413,
+   "top5": 0.7665
+  },
+  {
+   "unit": "sound",
+   "order": 5,
+   "vocab": 43,
+   "ngrams": 19784,
+   "tokens": 45363,
+   "held_out_tokens": 4889,
+   "held_out_bytes": 5697,
+   "perplexity": 5.27700023529587,
+   "bits": 2.3997180478592806,
+   "bits_per_byte": 2.0593683580803974,
+   "accuracy": 0.536,
+   "top5": 0.8125
+  },
+  {
+   "unit": "base64",
+   "order": 4,
+   "vocab": 63,
+   "ngrams": 15989,
+   "tokens": 70902,
+   "held_out_tokens": 7854,
+   "held_out_bytes": 5814,
+   "perplexity": 4.908402844341814,
+   "bits": 2.295253659286893,
+   "bits_per_byte": 3.100605820440189,
+   "accuracy": 0.52,
+   "top5": 0.8875
+  },
+  {
+   "unit": "base64",
+   "order": 8,
+   "vocab": 63,
+   "ngrams": 50119,
+   "tokens": 70902,
+   "held_out_tokens": 7854,
+   "held_out_bytes": 5814,
+   "perplexity": 4.283075519211216,
+   "bits": 2.0986471150601473,
+   "bits_per_byte": 2.835014523853182,
+   "accuracy": 0.614,
+   "top5": 0.8975
+  },
+  {
+   "unit": "base64",
+   "order": 12,
+   "vocab": 63,
+   "ngrams": 62754,
+   "tokens": 70902,
+   "held_out_tokens": 7854,
+   "held_out_bytes": 5814,
+   "perplexity": 4.294987378605034,
+   "bits": 2.1026538918175968,
+   "bits_per_byte": 2.840427187192192,
+   "accuracy": 0.6095,
+   "top5": 0.897
+  }
+ ]
+}

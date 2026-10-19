@@ -2,8 +2,8 @@
 //!
 //! The Go port spawns one goroutine per text, because a goroutine costs a few
 //! kilobytes of stack and a scheduler entry.  An OS thread does not, so this
-//! port fans out over a pool the size of the machine instead and hands each
-//! thread a contiguous block of the work.  `workers = 1` runs everything on the
+//! port uses up to the available CPU count, including the calling thread,
+//! and distributes work dynamically.  `workers = 1` runs everything on the
 //! calling thread, which is what the single-threaded half of the benchmark
 //! compares against Go's `--workers 1`.
 
@@ -28,7 +28,7 @@ where
         return;
     }
     let pool = effective_workers(workers).min(n);
-    if pool <= 1 {
+    if pool <= 1 || ACTIVE.with(|active| active.get()) {
         for i in 0..n {
             f(i);
         }
@@ -37,53 +37,86 @@ where
     let next = AtomicUsize::new(0);
     let f = &f;
     let next = &next;
-    thread::scope(|scope| {
-        for _ in 0..pool {
-            scope.spawn(move || loop {
-                let i = next.fetch_add(1, Ordering::Relaxed);
-                if i >= n {
-                    break;
-                }
-                f(i);
-            });
+    let work = || {
+        let _active = Active::enter();
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= n {
+                break;
+            }
+            f(i);
         }
+    };
+    thread::scope(|scope| {
+        for _ in 1..pool {
+            scope.spawn(work);
+        }
+        work();
     });
 }
 
-/// Fills `out` in parallel: `f(i, &mut out[i])` for every entry, each thread
-/// owning a contiguous block of the slice (so nothing is shared mutably).
+/// Fills `out` in order, with disjoint chunks claimed dynamically. Workers
+/// finish a chunk before taking another, so long texts do not strand a core.
+/// The caller participates and nested passes stay on their current worker.
 pub fn parallel_fill<T, F>(out: &mut [T], workers: usize, f: F)
 where
     T: Send,
     F: Fn(usize, &mut T) + Sync,
 {
-    let n = out.len();
-    if n == 0 {
-        return;
-    }
-    let pool = effective_workers(workers).min(n);
-    if pool <= 1 {
+    let pool = effective_workers(workers).min(out.len());
+    if pool <= 1 || ACTIVE.with(|active| active.get()) {
         for (i, slot) in out.iter_mut().enumerate() {
             f(i, slot);
         }
         return;
     }
-    let block = n.div_ceil(pool);
-    let f = &f;
-    thread::scope(|scope| {
-        for (b, chunk) in out.chunks_mut(block).enumerate() {
-            let base = b * block;
-            scope.spawn(move || {
-                for (i, slot) in chunk.iter_mut().enumerate() {
-                    f(base + i, slot);
-                }
-            });
+    let block = out.len().div_ceil(pool.saturating_mul(8));
+    let queue = std::sync::Mutex::new(out.chunks_mut(block).enumerate());
+    let work = || {
+        let _active = Active::enter();
+        loop {
+            // Move a disjoint mutable slice out of the queue, releasing the
+            // lock before the expensive work. No unsafe sharing is needed.
+            let next = queue.lock().unwrap_or_else(|e| e.into_inner()).next();
+            let Some((b, chunk)) = next else { break };
+            for (i, slot) in chunk.iter_mut().enumerate() {
+                f(b * block + i, slot);
+            }
         }
+    };
+    thread::scope(|scope| {
+        for _ in 1..pool {
+            scope.spawn(work);
+        }
+        work();
     });
 }
 
-/// Splits `0..n` into contiguous ranges, one per worker, and calls
-/// `f(lo, hi)` for each - the shape the weight and cost recomputes want.
+/// Ordered map: completion order never changes the order of returned values.
+pub fn parallel_map<T: Sync, R: Send, F: Fn(&T) -> R + Sync>(input: &[T], workers: usize, f: F) -> Vec<R> {
+    let mut out: Vec<Option<R>> = (0..input.len()).map(|_| None).collect();
+    parallel_fill(&mut out, workers, |i, slot| *slot = Some(f(&input[i])));
+    out.into_iter().map(Option::unwrap).collect()
+}
+
+thread_local! {
+    static ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct Active(bool);
+impl Active {
+    fn enter() -> Self {
+        Self(ACTIVE.with(|active| active.replace(true)))
+    }
+}
+impl Drop for Active {
+    fn drop(&mut self) {
+        ACTIVE.with(|active| active.set(self.0));
+    }
+}
+
+/// Disjoint ranges claimed dynamically; all workers may participate even
+/// when the graph has fewer than 256 nodes per available core.
 pub fn parallel_ranges<F>(n: usize, workers: usize, f: F)
 where
     F: Fn(usize, usize) + Sync,
@@ -91,20 +124,15 @@ where
     if n == 0 {
         return;
     }
-    let pool = effective_workers(workers);
-    if pool <= 1 {
+    let pool = effective_workers(workers).min(n);
+    if pool <= 1 || ACTIVE.with(|active| active.get()) {
         f(0, n);
         return;
     }
-    let block = n.div_ceil(pool).max(256);
-    let f = &f;
-    thread::scope(|scope| {
-        let mut lo = 0;
-        while lo < n {
-            let hi = (lo + block).min(n);
-            scope.spawn(move || f(lo, hi));
-            lo = hi;
-        }
+    let block = n.div_ceil(pool.saturating_mul(8));
+    parallel_for(n.div_ceil(block), pool, |i| {
+        let lo = i * block;
+        f(lo, (lo + block).min(n));
     });
 }
 
@@ -180,5 +208,61 @@ mod tests {
             });
             assert!(covered.iter().all(|c| c.load(Ordering::Relaxed) == 1));
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+    use std::sync::{Barrier, Mutex};
+
+    #[test]
+    fn empty_and_uneven_work_keeps_input_order() {
+        for workers in [1, 2, 7, 32] {
+            for n in [0, 1, 3, 259] {
+                let input: Vec<usize> = (0..n).collect();
+                let got = parallel_map(&input, workers, |&i| {
+                    for _ in 0..i % 11 {
+                        std::thread::yield_now();
+                    }
+                    i * i
+                });
+                assert_eq!(got, input.iter().map(|i| i * i).collect::<Vec<_>>());
+            }
+        }
+    }
+
+    #[test]
+    fn all_requested_workers_can_run_and_nested_work_stays_with_them() {
+        let gate = Barrier::new(4);
+        let threads = Mutex::new(std::collections::HashSet::new());
+        let mut out = [0; 4];
+        parallel_fill(&mut out, 4, |i, value| {
+            let id = thread::current().id();
+            threads.lock().unwrap().insert(id);
+            gate.wait(); // proves four workers can be active simultaneously
+            let mut nested = [0; 19];
+            parallel_fill(&mut nested, 8, |j, slot| {
+                assert_eq!(thread::current().id(), id);
+                *slot = j;
+            });
+            *value = i + nested.iter().sum::<usize>();
+        });
+        assert_eq!(threads.into_inner().unwrap().len(), 4);
+        assert_eq!(out, [171, 172, 173, 174]);
+    }
+
+    #[test]
+    fn a_panicking_worker_propagates_and_restores_the_caller() {
+        assert!(std::panic::catch_unwind(|| {
+            parallel_fill(&mut [0; 8], 4, |i, _| {
+                if i == 3 {
+                    panic!("worker failed");
+                }
+            });
+        })
+        .is_err());
+        assert!(!ACTIVE.with(|active| active.get()));
+        assert_eq!(parallel_map(&[1, 2, 3], 4, |n| n * 2), [2, 4, 6]);
     }
 }
