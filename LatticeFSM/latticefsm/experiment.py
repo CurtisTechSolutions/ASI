@@ -120,26 +120,58 @@ def teach_language(machine: Machine, name: str, episodes: int, rng: random.Rando
     return curve
 
 
+def workers() -> int:
+    """Processes the experiments run on: ``LATTICEFSM_WORKERS`` (1: all in this one), else every core."""
+    try:
+        n = int(os.environ.get("LATTICEFSM_WORKERS", "0"))
+    except ValueError:
+        n = 0
+    return n if n > 0 else (os.cpu_count() or 1)
+
+
+def parallel_map(fn, jobs: Sequence[tuple]) -> list:
+    """``[fn(*job) for job in jobs]``, in that order, the jobs spread over :func:`workers` processes.  Every run of an
+    experiment is independent - its own machine, its own generator seeded from its own seed - so the results are
+    the same in any number of processes."""
+    jobs = list(jobs)
+    n = min(workers(), len(jobs))
+    if n <= 1:
+        return [fn(*job) for job in jobs]
+    from concurrent.futures import ProcessPoolExecutor
+    with ProcessPoolExecutor(max_workers=n) as pool:
+        return list(pool.map(fn, *zip(*jobs)))
+
+
+def _learning_run(name: str, states: int, seed: int, quiet: bool, episodes: int, life: float, discount: float,
+                  max_length: int, tests: int) -> dict:
+    """One run of the learning experiment: a fresh machine taught ``name`` from ``seed``."""
+    lang = LANGUAGES[name]
+    rng = random.Random(seed)
+    test = examples(lang, tests, rng, max_length)
+    m = Machine(states, ALPHABET, accepting=lang.accepting, life=life, discount=discount, seed=seed)
+    before = m.accuracy(test)
+    curve = teach_language(m, name, episodes, rng, max_length, quiet=quiet, test=test, every=max(1, episodes // 8))
+    after = m.accuracy(test)
+    return {"seed": seed, "before": before, "after": after, "curve": curve, "touched": m.stats()["touched"],
+            "clock": m.clock}
+
+
 def learning(episodes: int = 4000, sizes: Sequence[int] = (3, 4, 6, 13), seeds: Sequence[int] = (1, 2, 3, 4, 5),
              life: float = LIFE, discount: float = DISCOUNT, max_length: int = 6, tests: int = 300) -> dict:
     rows = []
+    jobs = [(name, states, seed, arm == "quiet", episodes, life, discount, max_length, tests)
+            for name in LANGUAGES for states in sizes for seed in seeds for arm in ("credited", "quiet")]
+    done = iter(parallel_map(_learning_run, jobs))
     for name, lang in LANGUAGES.items():
         for states in sizes:
             arms = {"credited": [], "quiet": []}
             curves = []
             for seed in seeds:
                 for arm in arms:
-                    rng = random.Random(seed)
-                    test = examples(lang, tests, rng, max_length)
-                    m = Machine(states, ALPHABET, accepting=lang.accepting, life=life, discount=discount, seed=seed)
-                    before = m.accuracy(test)
-                    curve = teach_language(m, name, episodes, rng, max_length, quiet=(arm == "quiet"), test=test,
-                                           every=max(1, episodes // 8))
-                    after = m.accuracy(test)
-                    arms[arm].append({"seed": seed, "before": before, "after": after, "curve": curve,
-                                      "touched": m.stats()["touched"], "clock": m.clock})
+                    record = next(done)
+                    arms[arm].append(record)
                     if arm == "credited":
-                        curves.append(curve)
+                        curves.append(record["curve"])
             credited = [a["after"] for a in arms["credited"]]
             rows.append({
                 "language": name, "description": lang.description, "min_states": lang.min_states, "states": states,
@@ -286,24 +318,32 @@ WALK_ARMS = (
 )
 
 
+def _walk_run(name: str, arm: int, seed: int, episodes: int, life: float, tests: int) -> tuple:
+    """One run of the walk experiment: a default machine taught ``name`` the ``arm``-th way, from ``seed``."""
+    lang = language(name)
+    test = examples(lang, tests, random.Random(1000))
+    m = Machine(accepting=lang.accepting, life=life, seed=seed, **WALK_ARMS[arm][1])
+    teach_language(m, name, episodes, random.Random(seed))
+    return m.accuracy(test), m.skips, m.swaps, m.clock
+
+
 def walk(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3), life: float = LIFE, tests: int = 300) -> dict:
     """Focus, skips, the learned focus and rearrangement, measured on default 13 x 13 x 13 machines."""
     from .geometry import focus_node
     shape = (13, 13, 13)
     focus = [{"focus": f, "node": list(focus_node(shape, f))} for f in (None, 0.0, 0.07, 0.08, 0.25, 0.5, 0.75, 0.92, 0.93, 1.0)]
     arms = []
+    jobs = [(name, a, seed, episodes, life, tests) for name in LANGUAGES for a in range(len(WALK_ARMS)) for seed in seeds]
+    done = iter(parallel_map(_walk_run, jobs))
     for name in LANGUAGES:
-        lang = language(name)
-        test = examples(lang, tests, random.Random(1000))
         for label, kw in WALK_ARMS:
             accs, skips, swaps, moves = [], 0, 0, 0
             for seed in seeds:
-                m = Machine(accepting=lang.accepting, life=life, seed=seed, **kw)
-                teach_language(m, name, episodes, random.Random(seed))
-                accs.append(m.accuracy(test))
-                skips += m.skips
-                swaps += m.swaps
-                moves += m.clock
+                acc, sk, sw, clock = next(done)
+                accs.append(acc)
+                skips += sk
+                swaps += sw
+                moves += clock
             arms.append({"language": name, "arm": label, "accuracy_mean": sum(accs) / len(accs), "accuracies": accs,
                          "solved": sum(a >= 0.999 for a in accs), "skips": skips, "swaps": swaps, "transitions": moves})
     lang = language("even-b")
@@ -345,6 +385,19 @@ def _edge_view(e, m: Machine) -> dict:
 
 # ---- rendering ---------------------------------------------------------------------------------------------------
 
+def _network_run(name: str, arch: str, credit: str, seed: int, episodes: int, life: float, tests: int) -> tuple:
+    """One run of the network experiment: network ``arch`` taught ``name`` from ``seed``."""
+    from .network import Network, teach_network
+    lang = LANGUAGES[name]
+    rng = random.Random(seed)
+    test = examples(lang, tests, rng)
+    net = Network(arch, alphabet=ALPHABET, seed=seed, layer_options={"life": life})
+    net.compile(accepting=lang.accepting, credit=credit)
+    teach_network(net, name, episodes, rng)
+    acc = net.evaluate([s for s, _ in test], [m for _, m in test])
+    return acc, len(net.layers()), sum(len(list(l.machine.lattice.touched())) for l in net.layers())
+
+
 def network(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3, 4, 5), life: float = LIFE, tests: int = 300,
             networks: Sequence[tuple[str, str]] = NETWORKS, translators: Sequence[str] = TRANSLATORS,
             epochs: int = 20) -> dict:
@@ -354,18 +407,16 @@ def network(episodes: int = 4000, seeds: Sequence[int] = (1, 2, 3, 4, 5), life: 
     from .network import Network, teach_network
     from .phonetic import TASKS, split
     rows = []
+    jobs = [(name, arch, credit, seed, episodes, life, tests) for name in LANGUAGES for arch, credit in networks
+            for seed in seeds]
+    done = iter(parallel_map(_network_run, jobs))
     for name, lang in LANGUAGES.items():
         for arch, credit in networks:
             accs, touched, layers = [], 0, 0
             for seed in seeds:
-                rng = random.Random(seed)
-                test = examples(lang, tests, rng)
-                net = Network(arch, alphabet=ALPHABET, seed=seed, layer_options={"life": life})
-                net.compile(accepting=lang.accepting, credit=credit)
-                teach_network(net, name, episodes, rng)
-                accs.append(net.evaluate([s for s, _ in test], [m for _, m in test]))
-                layers = len(net.layers())
-                touched = max(touched, sum(len(list(l.machine.lattice.touched())) for l in net.layers()))
+                acc, layers, t = next(done)
+                accs.append(acc)
+                touched = max(touched, t)
             rows.append({"language": name, "architecture": arch, "credit": credit, "layers": layers,
                          "accuracy": accs, "accuracy_mean": sum(accs) / len(accs), "accuracy_min": min(accs),
                          "accuracy_max": max(accs), "solved": sum(a >= 0.999 for a in accs), "touched": touched})

@@ -9,10 +9,12 @@
 //! chain's `confidence` threshold: the more confident the near nodes, the shorter the walk.  It predicts the
 //! Witten-Bell distribution of the node it stopped at, smoothed through every node nearer the output.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 
+use crate::fastmap::{Ctx, FastMap};
 use crate::gzip;
 use crate::json::{parse, write_number, Json};
 use crate::ngram::{
@@ -21,6 +23,104 @@ use crate::ngram::{
 use crate::rng::Rng;
 
 const FORMAT: &str = "latticefsm-chain";
+/// A vocabulary up to this size is guessed from the whole distribution (letters); a bigger one from the candidates.
+const DENSE: usize = 4096;
+/// Inputs learned together in a batch (`Chain::train_batch`).
+const BATCH: usize = 1 << 15;
+/// A batch smaller than this is learned one sequence at a time: threads would cost more than they save.
+const BATCH_MIN: usize = 4096;
+/// Predictions in one part of a batch: each keeps a copy of a node of every depth until it is made.
+const PREDICTED: usize = 4096;
+
+/// The walk's depth (`Chain::walk`) over any source of nodes: `node(k)` the node at depth `k` along the context,
+/// `reach` the deepest the inputs allow, `tau` the confidence to gather.
+fn walk_over<'a>(node: impl Fn(usize) -> Option<&'a Node>, reach: usize, tau: f64) -> Option<usize> {
+    let first = node(0)?;
+    let mut doubt = 1.0 - first.confidence();
+    let mut k = 0;
+    while 1.0 - doubt < tau && k < reach {
+        match node(k + 1) {
+            None => break,
+            Some(n) => {
+                k += 1;
+                doubt *= 1.0 - n.confidence();
+            }
+        }
+    }
+    Some(k)
+}
+
+/// The floor of a vocabulary of `n` (with `<s>`, which is never predicted).
+fn uniform_of(n: usize) -> f64 {
+    1.0 / (n - 1) as f64
+}
+
+/// The Witten-Bell distribution after `path` over a vocabulary of `n`.
+fn dist_of(path: &[&Node], n: usize) -> Vec<f64> {
+    let u = uniform_of(n);
+    let mut dist = vec![u; n];
+    dist[0] = 0.0;
+    let mut counted: Vec<(usize, f64)> = Vec::new();
+    for node in path {
+        let t = node.counts.len() as u64;
+        let (tf, nn) = (t as f64, (node.total + t) as f64);
+        // `(c + t p) / n` for every input: the counted ones from their counts, the rest (`c = 0`, so `t p` exactly)
+        // in one pass - the same arithmetic as `p`, without a lookup per input
+        counted.clear();
+        counted.extend(
+            node.counts
+                .iter()
+                .map(|(&w, &c)| (w as usize, (c as f64 + tf * dist[w as usize]) / nn)),
+        );
+        for p in dist.iter_mut() {
+            *p = (tf * *p) / nn;
+        }
+        for &(w, v) in &counted {
+            dist[w] = v;
+        }
+    }
+    dist[0] = 0.0;
+    dist
+}
+
+/// The first guess after a non-empty `path` and the probability of `w`, from the whole distribution over `n`.
+fn dense_guess_and_p(path: &[&Node], w: u32, n: usize) -> (u32, f64) {
+    let dist = dist_of(path, n);
+    let mut best = 1;
+    for (i, &p) in dist.iter().enumerate().skip(1) {
+        if p > dist[best] {
+            best = i;
+        }
+    }
+    (best as u32, dist[w as usize])
+}
+
+/// Input `w` learned by one depth's table in context `ctx`: the node there tested (when it was there before - its
+/// guess right or not) or made, then counting `w`; the output node's (`ranks`) count buckets follow its counts.
+fn learn_at(table: &mut FastMap<Ctx, Node>, ranks: Option<&mut BTreeMap<u64, BTreeSet<u32>>>, ctx: &[u32], w: u32) {
+    // one lookup: the node in its context tested or made
+    let node = match table.entry(Ctx::new(ctx)) {
+        Entry::Occupied(o) => {
+            let node = o.into_mut();
+            node.tested += 1;
+            node.right += (node.best == Some(w)) as u64;
+            node
+        }
+        Entry::Vacant(v) => v.insert(Node::default()),
+    };
+    if let Some(ranks) = ranks {
+        let old = node.counts.get(&w).copied().unwrap_or(0);
+        if old > 0 {
+            let bucket = ranks.get_mut(&old).expect("ranked");
+            bucket.remove(&w);
+            if bucket.is_empty() {
+                ranks.remove(&old);
+            }
+        }
+        ranks.entry(old + 1).or_default().insert(w);
+    }
+    node.add(w, 1);
+}
 /// Imagined misses every node starts with: its confidence is 0 until it is right.
 pub const PRIOR: f64 = 2.0;
 pub const MAX_NODES: usize = 16;
@@ -34,7 +134,7 @@ const FEW: usize = 32;
 #[derive(Clone, Debug)]
 pub enum Counts {
     Few(Vec<(u32, u64)>),
-    Many(Box<HashMap<u32, u64>>),
+    Many(Box<FastMap<u32, u64>>),
 }
 
 impl Default for Counts {
@@ -185,9 +285,10 @@ pub struct Chain {
     pub lower: bool,
     pub confidence: f64,
     pub vocab: Vec<String>,
-    index: HashMap<String, u32>,
+    index: FastMap<String, u32>,
     /// `tables[k]`: the input nodes at depth `k` by context (the last `k` inputs); `tables[0]` the output node alone.
-    pub tables: Vec<HashMap<Vec<u32>, Node>>,
+    /// Keyed by `Ctx` - looked up by the slice of ids itself (`fastmap`).
+    pub tables: Vec<FastMap<Ctx, Node>>,
     /// The output node's counts as buckets (count -> ids), for the guess among inputs no deeper node has seen.
     ranks: BTreeMap<u64, BTreeSet<u32>>,
     pub clock: u64,
@@ -226,7 +327,7 @@ impl Chain {
             confidence,
             vocab,
             index,
-            tables: vec![HashMap::new(); nodes],
+            tables: vec![FastMap::default(); nodes],
             ranks: BTreeMap::new(),
             clock: 0,
             sentences: 0,
@@ -292,24 +393,11 @@ impl Chain {
     /// the input nodes run out.  The walk is the nodes at depths `0..=d` along `ids`.
     pub fn walk(&self, ids: &[u32], confidence: Option<f64>) -> Option<usize> {
         let tau = confidence.unwrap_or(self.confidence);
-        let first = self.node(ids, 0)?;
-        let mut doubt = 1.0 - first.confidence();
-        let reach = self.depth().min(ids.len());
-        let mut k = 0;
-        while 1.0 - doubt < tau && k < reach {
-            match self.node(ids, k + 1) {
-                None => break,
-                Some(node) => {
-                    k += 1;
-                    doubt *= 1.0 - node.confidence();
-                }
-            }
-        }
-        Some(k)
+        walk_over(|k| self.node(ids, k), self.depth().min(ids.len()), tau)
     }
 
     fn uniform(&self) -> f64 {
-        1.0 / (self.vocab.len() - 1) as f64
+        uniform_of(self.vocab.len())
     }
 
     fn path<'a>(&'a self, ids: &[u32], d: Option<usize>) -> Vec<&'a Node> {
@@ -330,46 +418,16 @@ impl Chain {
     }
 
     fn dist(&self, path: &[&Node]) -> Vec<f64> {
-        let u = self.uniform();
-        let mut dist = vec![u; self.vocab.len()];
-        dist[0] = 0.0;
-        let mut counted: Vec<(usize, f64)> = Vec::new();
-        for node in path {
-            let t = node.counts.len() as u64;
-            let (tf, n) = (t as f64, (node.total + t) as f64);
-            // `(c + t p) / n` for every input: the counted ones from their counts, the rest (`c = 0`, so `t p`
-            // exactly) in one pass - the same arithmetic as `p`, without a lookup per input
-            counted.clear();
-            counted.extend(
-                node.counts
-                    .iter()
-                    .map(|(&w, &c)| (w as usize, (c as f64 + tf * dist[w as usize]) / n)),
-            );
-            for p in dist.iter_mut() {
-                *p = (tf * *p) / n;
-            }
-            for &(w, v) in &counted {
-                dist[w] = v;
-            }
-        }
-        dist[0] = 0.0;
-        dist
+        dist_of(path, self.vocab.len())
     }
 
     /// The first guess after `path` and the probability of `w`: from the whole distribution when the vocabulary is
     /// small (letters), from the candidates when it is not.
     fn guess_and_p(&self, path: &[&Node], w: u32) -> (u32, f64) {
-        if path.is_empty() || self.vocab.len() > 4096 {
+        if path.is_empty() || self.vocab.len() > DENSE {
             return (self.guess(path), self.p(path, w));
         }
-        let dist = self.dist(path);
-        let mut best = 1;
-        for (i, &p) in dist.iter().enumerate().skip(1) {
-            if p > dist[best] {
-                best = i;
-            }
-        }
-        (best as u32, dist[w as usize])
+        dense_guess_and_p(path, w, self.vocab.len())
     }
 
     /// The likeliest input after `path` (ties: the lower id; never `<s>`): an input no node past the output node has
@@ -428,12 +486,24 @@ impl Chain {
     /// not) and then learns the input that came; with `predict` the whole chain first predicts it.  Returns how many
     /// inputs were learned.
     pub fn train_tokens(&mut self, tokens: &[String]) -> usize {
-        let mut ids = vec![0u32];
+        let ids = self.learn_ids(tokens);
+        self.train_ids(&ids)
+    }
+
+    /// `<s>`, the tokens' ids (new ones added to the vocabulary) and `</s>`.
+    fn learn_ids(&mut self, tokens: &[String]) -> Vec<u32> {
+        let mut ids = Vec::with_capacity(tokens.len() + 2);
+        ids.push(0u32);
         for t in tokens {
             let i = self.id(t, true);
             ids.push(i);
         }
         ids.push(1);
+        ids
+    }
+
+    /// One sequence of ids (`learn_ids`) learned, every input predicted first when asked: what `train_tokens` does.
+    fn train_ids(&mut self, ids: &[u32]) -> usize {
         for i in 1..ids.len() {
             let w = ids[i];
             let hist = &ids[..i];
@@ -457,31 +527,180 @@ impl Chain {
                 }
             }
             for k in 0..=self.depth().min(i) {
-                let ctx = &ids[i - k..i];
-                if let Some(node) = self.tables[k].get_mut(ctx) {
-                    node.tested += 1;
-                    node.right += (node.best == Some(w)) as u64;
-                } else {
-                    self.tables[k].insert(ctx.to_vec(), Node::default());
-                }
-                let node = self.tables[k].get_mut(ctx).expect("there");
-                if k == 0 {
-                    let old = node.counts.get(&w).copied().unwrap_or(0);
-                    if old > 0 {
-                        let bucket = self.ranks.get_mut(&old).expect("ranked");
-                        bucket.remove(&w);
-                        if bucket.is_empty() {
-                            self.ranks.remove(&old);
-                        }
-                    }
-                    self.ranks.entry(old + 1).or_default().insert(w);
-                }
-                node.add(w, 1);
+                let ranks = if k == 0 { Some(&mut self.ranks) } else { None };
+                learn_at(&mut self.tables[k], ranks, &ids[i - k..i], w);
             }
             self.clock += 1;
         }
         self.sentences += 1;
         ids.len() - 1
+    }
+
+    /// Sequences learned together, exactly as `train_tokens` would learn them one after another, but with every
+    /// depth's table past the output node on a thread of its own: an input changes only the table of each depth it is
+    /// learned at, so the tables can learn the whole batch side by side, each in order (`learn_part`).  Where an
+    /// input is predicted first, each deeper table keeps a copy of its node there before learning it; the
+    /// predictions are then made in order - the output node as it stands, learning as it goes, the deeper nodes from
+    /// their copies - the same walks, guesses and probabilities as one by one.  The output node's ranks are made
+    /// again from its counts after each part.  Self-credit changes nodes as it predicts, and a vocabulary of more
+    /// than `DENSE` inputs guesses from the ranks as they were: those batches, and small ones, are learned one
+    /// sequence at a time.
+    pub fn train_batch(&mut self, seqs: &[Sequence]) -> usize {
+        // one by one: decided before any id is handed out, so each sequence's predictions see the vocabulary as it
+        // was then
+        let inputs: usize = seqs.iter().filter(|t| !t.is_empty()).map(|t| t.len() + 1).sum();
+        let threads = crate::parallel::effective_workers(0);
+        let one_by_one = threads < 2 || inputs < BATCH_MIN || self.self_credit != 0.0 || {
+            // a guess from the ranks (a vocabulary past DENSE) anywhere in the batch
+            let mut fresh = crate::fastmap::FastSet::<&str>::default();
+            for t in seqs.iter().flatten() {
+                if !self.index.contains_key(t.as_str()) {
+                    fresh.insert(t.as_str());
+                }
+            }
+            self.predict && self.vocab.len() + fresh.len() > DENSE
+        };
+        if one_by_one {
+            return seqs
+                .iter()
+                .filter(|t| !t.is_empty())
+                .map(|t| self.train_tokens(t))
+                .sum();
+        }
+        let before = self.vocab.len();
+        let all: Vec<Vec<u32>> = seqs
+            .iter()
+            .filter(|t| !t.is_empty())
+            .map(|t| self.learn_ids(t))
+            .collect();
+        // the vocabulary as each sequence was learned (new ids are handed out in order): a prediction's floor is
+        // 1 / (inputs then - 1)
+        let mut known = before;
+        let vocab_at: Vec<usize> = all
+            .iter()
+            .map(|ids| {
+                known = known.max(ids.iter().map(|&w| w as usize + 1).max().unwrap_or(0));
+                known
+            })
+            .collect();
+        // in parts of at most PREDICTED predictions, so the copies kept for them stay few
+        let mut start = 0;
+        while start < all.len() {
+            let mut preds: Vec<(usize, usize)> = Vec::new();
+            let mut end = start;
+            while end < all.len() && preds.len() < PREDICTED {
+                for i in 1..all[end].len() {
+                    if self.predict {
+                        if predict_now(self.seen) {
+                            preds.push((end, i));
+                        }
+                        self.seen += 1;
+                    }
+                }
+                end += 1;
+            }
+            self.learn_part(&all[start..end], start, &preds, &vocab_at);
+            start = end;
+        }
+        let inputs: usize = all.iter().map(|ids| ids.len() - 1).sum();
+        self.clock += inputs as u64;
+        self.sentences += all.len() as u64;
+        inputs
+    }
+
+    /// `part` (sequences `offset..` of a batch) learned: the tables past the output node each on a thread of its own,
+    /// keeping a copy of the node at every position in `preds` before learning there; then, in order, every
+    /// prediction - the output node as it stands, the deeper ones from their copies - and the output node learning.
+    fn learn_part(&mut self, part: &[Vec<u32>], offset: usize, preds: &[(usize, usize)], vocab_at: &[usize]) {
+        let depth = self.depth();
+        let (first, deeper) = self.tables.split_at_mut(1);
+        let output = &mut first[0];
+        let snaps: Vec<Vec<Option<Node>>> = std::thread::scope(|sc| {
+            // with nothing to predict the output node learns beside the others
+            if preds.is_empty() {
+                let output = &mut *output;
+                sc.spawn(move || {
+                    for ids in part {
+                        for i in 1..ids.len() {
+                            learn_at(output, None, &ids[i..i], ids[i]);
+                        }
+                    }
+                });
+            }
+            let handles: Vec<_> = deeper
+                .iter_mut()
+                .enumerate()
+                .map(|(j, table)| {
+                    let k = j + 1;
+                    sc.spawn(move || {
+                        let mut kept = Vec::with_capacity(preds.len());
+                        let mut next = 0;
+                        for (s, ids) in part.iter().enumerate() {
+                            for i in 1..ids.len() {
+                                let predicted = next < preds.len() && preds[next] == (offset + s, i);
+                                if k <= depth.min(i) {
+                                    let ctx = &ids[i - k..i];
+                                    if predicted {
+                                        kept.push(table.get(ctx).cloned());
+                                    }
+                                    learn_at(table, None, ctx, ids[i]);
+                                } else if predicted {
+                                    kept.push(None);
+                                }
+                                next += predicted as usize;
+                            }
+                        }
+                        kept
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a table's thread"))
+                .collect()
+        });
+        let mut next = 0;
+        for (s, ids) in part.iter().enumerate() {
+            if preds.is_empty() {
+                break;
+            }
+            for i in 1..ids.len() {
+                let w = ids[i];
+                if next < preds.len() && preds[next] == (offset + s, i) {
+                    let j = next;
+                    let node = |k: usize| {
+                        if k == 0 {
+                            output.get(&ids[i..i])
+                        } else {
+                            snaps[k - 1][j].as_ref()
+                        }
+                    };
+                    let d = walk_over(node, depth.min(i), self.confidence);
+                    let path: Vec<&Node> = match d {
+                        None => Vec::new(),
+                        Some(d) => (0..=d).map(|k| node(k).expect("walked")).collect(),
+                    };
+                    let (guess, p) = if path.is_empty() {
+                        (1, if w != 0 { uniform_of(vocab_at[offset + s]) } else { 0.0 })
+                    } else {
+                        dense_guess_and_p(&path, w, vocab_at[offset + s])
+                    };
+                    self.online.0 += (guess == w) as u64;
+                    self.online.1 += 1;
+                    self.online.2 += p.max(1e-300).ln();
+                    self.online.3 += d.unwrap_or(0) as u64;
+                    next += 1;
+                }
+                learn_at(output, None, &ids[i..i], w);
+            }
+        }
+        // the ranks are the output node's counts by count: made again once, not followed input by input
+        self.ranks.clear();
+        if let Some(node) = output.get(&[][..]) {
+            for (&w, &c) in node.counts.iter() {
+                self.ranks.entry(c).or_default().insert(w);
+            }
+        }
     }
 
     /// What predicting while training measured since the last reset, and a fresh start.
@@ -525,15 +744,23 @@ impl Chain {
 
     pub fn train_sequences(&mut self, seqs: &[Sequence], source: Option<&str>) -> usize {
         let (mut n, mut count) = (0, 0);
-        for toks in seqs {
-            if !toks.is_empty() {
-                if crate::job::stopped() {
-                    break;
-                }
-                n += self.train_tokens(toks);
+        let mut start = 0;
+        while start < seqs.len() {
+            if crate::job::stopped() {
+                break;
+            }
+            // a batch of about BATCH inputs
+            let (mut end, mut size) = (start, 0);
+            while end < seqs.len() && size < BATCH {
+                size += seqs[end].len() + 1;
+                end += 1;
+            }
+            n += self.train_batch(&seqs[start..end]);
+            for toks in seqs[start..end].iter().filter(|t| !t.is_empty()) {
                 crate::job::tick("", toks.len());
                 count += 1;
             }
+            start = end;
         }
         if let Some(s) = source {
             self.sources.push((s.to_string(), count, n));
@@ -659,14 +886,26 @@ impl Chain {
     pub fn train_paths(&mut self, paths: &[String], held_out: usize) -> Result<(usize, Vec<Sequence>), String> {
         let (unit, lower) = (self.unit.clone(), self.lower);
         let mut sources = std::mem::take(&mut self.sources);
+        // sequences gathered into batches of about BATCH inputs (`train_batch`); each counts as learned when read
+        let mut batch: Vec<Sequence> = Vec::new();
+        let mut size = 0;
         let r = train_corpus(
             paths,
             &unit,
             lower,
             held_out,
-            &mut |t| self.train_tokens(t),
+            &mut |t| {
+                size += t.len() + 1;
+                batch.push(t.to_vec());
+                if size >= BATCH {
+                    self.train_batch(&std::mem::take(&mut batch));
+                    size = 0;
+                }
+                t.len() + 1
+            },
             &mut sources,
         );
+        self.train_batch(&batch);
         self.sources = sources;
         r
     }
@@ -1051,7 +1290,7 @@ impl Chain {
             .with("lower", self.lower.into())
             .with("confidence", self.confidence.into())
             .with("vocab", (self.vocab.len() - 3).into())
-            .with("contexts", self.tables.iter().map(HashMap::len).sum::<usize>().into())
+            .with("contexts", self.tables.iter().map(|t| t.len()).sum::<usize>().into())
             .with("tokens", (self.clock as f64).into())
             .with("sentences", (self.sentences as f64).into())
             .with("sources", self.sources.len().into())
@@ -1074,7 +1313,7 @@ impl Chain {
         for (k, table) in self.tables.iter().enumerate() {
             for (ctx, nd) in table {
                 let mut key = vec![k as u32];
-                key.extend(ctx);
+                key.extend(ctx.iter());
                 let mut row: Vec<Json> = key.iter().map(|&x| Json::from(x as f64)).collect();
                 row.push((nd.tested as f64).into());
                 row.push((nd.right as f64).into());
@@ -1176,7 +1415,7 @@ impl Chain {
                     m.ranks.entry(c).or_default().insert(w);
                 }
             }
-            m.tables[k].insert(ctx, nd);
+            m.tables[k].insert(Ctx::from(ctx), nd);
         }
         m.clock = v.num("clock", 0.0) as u64;
         m.sentences = v.num("sentences", 0.0) as u64;
@@ -1203,7 +1442,7 @@ impl Chain {
     /// `to_json().dump()`, the same text, without the tree: the table - nearly all of it - is written straight out
     /// (a tree of numbers took several times the memory of the chain itself).
     pub fn dump(&self) -> String {
-        let mut rows: Vec<(u32, &Vec<u32>, &Node)> = Vec::new();
+        let mut rows: Vec<(u32, &Ctx, &Node)> = Vec::new();
         for (k, table) in self.tables.iter().enumerate() {
             rows.extend(table.iter().map(|(ctx, nd)| (k as u32, ctx, nd)));
         }
@@ -1216,7 +1455,7 @@ impl Chain {
             }
             table.push('[');
             write_number(&mut table, k as f64);
-            for &x in ctx {
+            for &x in ctx.iter() {
                 table.push(',');
                 write_number(&mut table, x as f64);
             }

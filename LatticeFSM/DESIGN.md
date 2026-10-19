@@ -1077,6 +1077,56 @@ building a tree of JSON numbers. Measured on a 10 MB text file, training
 peaked at 641 MB instead of 769 MB, and saving a 2 MB one's chain at 293 MB
 instead of 838 MB. The rest is the tables of contexts themselves.
 
+**Speed.** Training a chain is looking contexts up and adding to them,
+eight times a character for 8 nodes. The cost was the tables, not the
+arithmetic, and a GPU can't help with that: the work is irregular hash
+lookups, and predicting while training needs the model as it was a token
+ago. Three changes make it faster, and leave every result byte for byte as
+it was:
+
+* **Faster tables.** `fastmap::FastMap` hashes with the Fx function
+  (rotate, xor, multiply) instead of SipHash. A context is a `fastmap::Ctx`:
+  up to 15 ids held inline, so making one allocates nothing, and comparing
+  two follows no pointer. A `Ctx` hashes, compares and orders exactly as the
+  slice it holds, so tables are still looked up by `&ids[a..b]`, and sorted
+  output is unchanged. Updating a node takes one lookup (`entry`), not
+  three.
+* **The chain's tables learn side by side** (`Chain::train_batch`). An
+  input changes only the table of each depth it is learned at, so each
+  table past the output node learns a whole batch (about 32 000 inputs) on
+  its own thread, in order. Where an input is predicted first, each deeper
+  table keeps a copy of its node there. The predictions are then made in
+  order, from the output node as it stands and the copies, so the walks,
+  guesses and probabilities match one-by-one training exactly. A part of a
+  batch holds at most 4096 predictions, so the copies stay few.
+  - The output node's count buckets (`ranks`) are a function of its counts,
+    so they are rebuilt once per part instead of after every input.
+  - Self-credit changes nodes as it predicts. A vocabulary past 4096 guesses
+    from the buckets as they were at that moment. So those batches, small
+    ones, and `LATTICEFSM_WORKERS=1` learn one sequence at a time.
+  - `tests/chain.rs` checks that batched training gives the same model and
+    measures as one-by-one training, for every case.
+* **Experiments run side by side.** Every run of the learning, walk and
+  network grids is independent, with its own machine and its own seeded
+  generator. Rust spreads them over threads (`parallel::parallel_map`), and
+  Python over processes (`experiment.parallel_map`). Both keep the results
+  in order, so the results files are unchanged.
+
+Measured on 4 cores:
+
+| | before | after |
+|---|---|---|
+| chain, 2 MB of text, predicting while training | 5.26 s | 2.10 s |
+| chain, 2 MB, no prediction | 4.85 s | 1.53 s |
+| N-gram, word trigrams, 2 MB, predicting | 4.43 s | 2.30 s |
+| a 10 MB training job through the server | 24.0 s, 416 000 tokens/s | 9.2 s, 1 090 000 tokens/s |
+| every Rust experiment | 7.1 s | 3.8 s |
+| the Python learning, walk and network grids (small settings) | 10.5 s | 3.2 s |
+
+A `Ctx` takes 64 bytes whatever its length, so the 10 MB job peaks at
+711 MB instead of 626 MB. The N-gram model's remaining cost is its exact
+first guess at every predicted position, which has to stay sequential.
+
 
 ## 21. The guard
 

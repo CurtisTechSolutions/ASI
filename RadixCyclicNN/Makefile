@@ -103,7 +103,7 @@ GLOBAL      := --model $(MODEL) --backend $(BACKEND) $(DEVICE_FLAG) --seed $(SEE
         phone-train phone-predict phone-generate phone-words phone-test phone-demo speak speak-play say acoustic-train acoustic-speak phone-go phone-rust phone-parity \
         rust-build rust-test rust-parity rust-talk go-talk bench-compare train resume predict generate score talk talk-repl 2nrl invert compress \
         negative-blame negative-clear negative-why negative-filter negative-auto negative-reasons negative-forget tutor-blame \
-        evolve evolve-forever evolve-blame info checkpoints restore bench demo serve test-core frontend-install frontend-build \
+        evolve evolve-forever evolve-blame info checkpoints restore bench demo serve py-serve test-core frontend-install frontend-build \
         frontend-dev frontend-test ollama-models ollama-corpus ollama-garbage ollama-review ollama-blame ollama-correct ollama-2nrl \
         chatgpt-models chatgpt-ask codegen codegen-teacher codegen-model \
         speech-info speech-teach speech-listen speech-tutor speech-decode \
@@ -564,13 +564,20 @@ mcp: ## Serve the tools and the network over the Model Context Protocol (stdio)
 	$(RADIXNET) $(GLOBAL) mcp
 
 ##@ Serve (local)
-serve: ## Start the HTTP API + prebuilt frontend on http://HOST:PORT (uploads go to UPLOAD_DIR)
+# `serve` runs the Rust server (../ModelKit/rust): the same API, the same model file - MODEL, the sine-activation radix
+# model for a new one, as the Python server makes - built first.  `py-serve` is the Python server, the one to use for
+# the torch backend (BACKEND=torch / a GPU), Stable Diffusion or local Whisper, which the Rust port does not have.
+serve: rust-build ## Start the HTTP API + prebuilt frontend on http://HOST:PORT from the Rust server (uploads go to UPLOAD_DIR)
+	$(RUST) --model $(MODEL) --kind radix --seed $(SEED) serve --host $(HOST) --port $(PORT) \
+	    --frontend-dir $(KIT)/frontend/dist --upload-dir $(UPLOAD_DIR) --checkpoint-dir $(CKPT_DIR)
+
+py-serve: ## The same from the Python server (torch backend, Stable Diffusion, local Whisper; BACKEND / DEVICE apply)
 	$(RADIXNET) $(GLOBAL) serve --host $(HOST) --port $(PORT) --checkpoint-dir $(CKPT_DIR) --upload-dir $(UPLOAD_DIR)
 
 frontend-install: ## Install the frontend dependencies (npm) in ../ModelKit/frontend
 	cd $(KIT)/frontend && npm install --no-audit --no-fund
 
-frontend-build: ## Rebuild ../ModelKit/frontend/dist (what `make serve` serves)
+frontend-build: ## Rebuild ../ModelKit/frontend/dist (what `make serve` and `make py-serve` serve)
 	cd $(KIT)/frontend && npm run build
 
 frontend-dev: ## Vite dev server with hot reload on http://localhost:5173 (expects `make serve` running)
