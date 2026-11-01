@@ -114,10 +114,14 @@ earlier draft of this design credited it; the body reading retired that
 
 ## 3. Status, and the numbers that constrain it
 
-Nothing in this directory is measured yet. Every claim below is **held**
-(`Research/Insights.md`'s word) until §17's experiment for it has run. The
-repository's existing numbers are the floor and the ceiling of what may be
-claimed:
+The first build is the Rust crate in `rust/` (§13), with E1 and E2 run
+(`results/README.md`): E1 **matches** the plain oracle lattice (0.961
+against 0.961, both above every LatticeFSM mark) and does not beat it, which
+is §21.2; E2 is **contradicted as built** (Nim at chance, under 0.04 bits of
+position in the named state), with its diagnosis recorded. Every other claim
+below is **held** (`Research/Insights.md`'s word) until §17's experiment for
+it has run. The repository's existing numbers are the floor and the ceiling
+of what may be claimed:
 
 | measured | number | where | what it binds here |
 |---|---|---|---|
@@ -863,66 +867,77 @@ clock the server applies is a two-port build.
 
 ## 13. Package layout
 
+The build is the Rust crate `rust/` (`gamelattice`), standard library only,
+depending on the sibling crates `../LatticeFSM/rust` (`latticefsm`) and
+`../RadixCyclicNN/rust` (`radixnet`) by path. The Python reference package
+the first draft of this section planned (`gamelattice/`) follows the first
+numbers rather than preceding them (§21.8, decided).
+
 ```
 GameLattice/
   DESIGN.md                 this file
-  README.md                 what is measured and what is not (E1–E13), the quick start
-  Makefile                  test / demo / experiments / the babbling and layout runs
-  gamelattice/
-    __init__.py             exports GameGraph, GameLattice, Decoder, Verdict, Referee, Efference, Body, __version__
-    verdict.py              Verdict, the reason taxonomy re-exported from blame.py, the innate-sign table
-    referee.py              Referee protocol; GameReferee (uge), ToolBoxReferee, SandboxReferee, EyeReferee, PhonotacticReferee
-    credit.py               credit_steps per Layer, mask_reafferent, direct() for a refusal with a reason, the baseline option,
-                            the identity-addressed path (blame by origin)
-    efference.py            Efference.copy / match, the per-modality translator (decoder alphabet -> reading alphabet),
-                            the self tag on Transition
-    forward.py              predict(lattice, s, a) quietly; learn(s, a, s_actual): the lesson; the collapse guard (agreement rate)
-    game.py                 the stage game: seats, bids, the congestion payoff, regret matching plus, sampled Shapley,
-                            CycleDetector (from GTMNN/DESIGN.md §8-12, with cortex/routing.py as precedent)
-    encoder.py              GameGraph(RadixCyclicGraph): strategy / regret / wealth / reputation per node; the window per modality;
-                            name(s) -> s_t; observe_think / observe_back on a cycle
-    lattice.py              GameLattice: the three kinds over Machine / Layer; the topographic flag; the abstain floor; the reasons table
-    select.py               ActionSelector: the release rule; coalition.py: within and across senses; meta.py: the meta-player
-    gate.py                 reserves per modality, surges on onsets, SUPPRESS / ATTEND with a cap
-    clock.py                SharedClock over Machine.tick; the idle clock
-    decoders/
-      base.py               the Decoder protocol; readouts (verdict, label, state stream, value, trace); ExpressionDecoder
-      repertoire.py         repertoires on edges: SymbolDecoder (text), SoundDecoder (+ ProsodyDials), structured output
-      action.py             ActionDecoder: propose-and-replay; GazeDecoder; the factored tape for moves
-      taste.py              Taste, Mouth.ingest: the gate on the way in
-    senses/
-      text.py               the text sense over radixnet.encoding (tier 1)
-      eye.py                fixate, surround_symbols, motion_symbols, FixationEncoder (tier 1)
-      ear.py                the frame gate, the running mean, the aligner (tier 1)
-      readback.py           a (call, result) pair -> haptic frame + verdict symbol + gauge step (tier 1: the hand's feedback)
-      touch.py, smell.py, intero.py, proprio.py, vestibular.py, temperature.py, pain.py, chrono.py   (tier 2)
-    babble.py               babble(effector, sense, lattice, steps, rng)
-    curriculum.py           Stage, ORDER, the plateau gate, the schedules
-    body.py                 Body: the organism wired - encoders, lattices, decoders, the loop, the clock
-    experiment.py           E1-E13 (§17), each writing results/<name>.json
-    cli.py                  argparse: demo, babble, train, play, experiment
-  tests/                    unittest (run: `python -m unittest discover -s tests -v` from GameLattice/)
-  data/                     the four languages' examples come from latticefsm.languages; games from uge; media from media.make_dataset
-  results/                  what E1-E13 wrote, and results/README.md reading them
+  README.md                 status, the quick start, the numbers
+  Makefile                  build / test / demo / train / plain / nim / e1 / e2
+  results/                  what E1 and E2 wrote, and results/README.md reading them
+  rust/
+    Cargo.toml              gamelattice; the two sibling crates are the whole dependency list
+    src/
+      lib.rs                the crate root and the doc example
+      verdict.rs            Verdict, Source: the one record for every source of credit (§6.1)
+      game.rs               the stage game: Seat, allocate (the auction), Payoff (correctness, an oracle's set
+                            of right states, belief, a refusal), solve (regret matching plus), the best-response
+                            cycle check, shapley (sampled, antithetic), aggregate, margin, entropy (§4.3, §10)
+      encoder.rs            GameGraph: radixnet::Graph plus per-node beliefs keyed by window bucket and the
+                            lattice's previous state; walk, window, name / name_quietly, settle, think_at,
+                            diversity, wealth_stats (§4)
+      lattice.rs            GameLattice: a latticefsm::Machine with Kind, the topographic flag, the abstain
+                            floor, the Reasons side table (§5)
+      forward.rs            predict (quiet), learn (the lesson), Agreement (§5.1, §8.2)
+      efference.rs          Efference: copy / observe / expire; Return (reafferent, error, exafferent) (§8)
+      credit.rs             land: sharp on one edge, dull within the run, reafference masked, the baseline (§7)
+      select.rs             Release: the release rule (§6.3, §10.4)
+      gate.rs               Gate: reserves and capped holds; Surge: the reflex table (§10.1, E10)
+      clock.rs              SharedClock (§5.3, §12.3)
+      referee.rs            LanguageOracle; Nim (legal, apply, winner, optimal, state_code, refuse) (§6.4)
+      decoders/mod.rs       Output, the Decoder protocol, check (a decoder must name its sense)
+      decoders/readout.rs   verdict, label, state stream, value, trace, expression
+      decoders/repertoire.rs  SymbolDecoder: repertoires on edges playing the congestion game over the alphabet
+      decoders/action.rs    ActionDecoder: propose-and-replay through a referee; the validity head
+      decoders/taste.rs     Taste: the gate on the way in
+      body.rs               Body (a language: text sense -> encoder -> sense lattice -> the oracle per step);
+                            NimBody (the tape -> encoder -> act lattice -> the action decoder -> the referee)
+      babble.rs             babble_nim
+      experiment.rs         E1, E2, write
+      bin/gamelattice.rs    demo, train, nim, experiment
+    tests/                  test_game, test_body, test_nim: the design choices as tests (§15)
 ```
 
-**Module dependency order** (no cycles): `verdict` → `referee` → `credit`
-→ `efference` → `forward` → `game` → `encoder` → `lattice` → `select`,
-`coalition`, `meta` → `gate` → `clock` → `decoders/*` → `senses/*` →
-`babble` → `curriculum` → `body` → `experiment` → `cli`.
+**Module dependency order** (no cycles): `verdict` → `game` → `encoder`,
+`lattice` → `forward`, `efference`, `credit`, `select`, `gate`, `clock` →
+`referee` → `decoders` → `body` → `babble` → `experiment` → `bin`.
 
-**The one patch outside this directory:** `LatticeFSM/latticefsm/network.py`
-gains a leading `Parallel` whose branches each start with their own
-`Encoder` (today an encoder can only be the network's first block and
-every branch reads the same input), per-branch layer options in the
-architecture string (`3[life=10]`), a per-branch pause symbol for a
-missing modality, and `credit_steps` through `Layer`. Its Rust twin lands
-when §21.8 says so.
+**What the first build settled that the draft left open.** A seat's belief is
+keyed by its *bucket* in the window (the current gram's node, the one
+before, older, a child of the current node) as well as by the lattice's
+previous state: without the bucket the current symbol is invisible to a set
+of nodes, and without the previous state the window carries no memory. A
+newborn node or edge leans somewhere at random and disfavours abstain
+(`noise`, `abstain_prior`): a flat belief bids exactly zero and nobody is
+ever seated. When every seat abstains, the naming falls back to the
+highest-reputation candidate's own belief (`Fallback::Reputation`, GTMNN's
+`TRUST_REPUTATION` at the cap), not to the previous state. Learning, the
+game is solved with the label known (§4.4): `Payoff::Correctness` with the
+lattice's prediction when right, else the right state the lattice's row
+ranks highest; the set-valued `Payoff::Oracle` (right and rare among every
+right state) is kept as a setting and measured worse - it keeps the seats
+shifting among the right states and the lattice's rows on a moving target.
+An accepted act is the validity head's positive label, credited per step
+(§7.4). The one patch to `latticefsm/network.py` the draft listed is not
+needed by this build, which drives the machine directly.
 
-**Dependencies.** Required: `radixnet`, `latticefsm`, `uge`. Extras:
-`phonetok` (the ear, the mouth, the phonotactic referee), `modelkit`
-(the hands, the monitors, the narrator, the VAE eye). A `Body` built with
-an extra missing says which organ it lacks and runs without it.
+**Dependencies.** Required: `latticefsm`, `radixnet`. Not yet used:
+`phonetok` and `modelkit` (the ear, the mouth, the hands) and `uge`
+(Python; Nim is ported in `referee.rs`).
 
 ---
 
@@ -1074,8 +1089,9 @@ game its coverage. A result below the number to beat is recorded as
   experiment or is marked as needing one.
 * **Dependencies:** three siblings required, two as extras; the GTMNN
   pieces are built here against GTMNN's DESIGN.md (§21.6 may move them).
-* **Python reference first.** Rust parity follows the first numbers
-  (§21.8), as every sibling did.
+* **Rust first.** The author chose the build over the reference (§21.8);
+  the Python reference follows the first numbers, the reverse of every
+  sibling's order, so the parity test will hold Python to Rust.
 
 ---
 
@@ -1114,6 +1130,9 @@ The design agreed in the first discussion is corrected here, not silently:
 11. Stimulation had no afferent; it now has **a reflex table** (E10) and a
     soft ceiling, per lattice.
 12. The guard moves **onto the way in** (taste).
+13. "Python reference first" becomes **Rust first** (§13, §21.8), and the
+    first build settles the window buckets, the newborn lean, the reputation
+    fallback and the unique training label (§13).
 
 ---
 
@@ -1141,9 +1160,8 @@ The design agreed in the first discussion is corrected here, not silently:
    voice act lattice shares it, which decides whether the forward-model
    lesson `teach(s, a, s_actual)` is well typed across the ear and the
    mouth.
-8. **Port parity timing:** every new symbol, option and tick in both
-   ports with a parity test from the start, or Python first and Rust after
-   E1–E9. The LatticeFSM server is Rust-only.
+8. **Port parity timing** — *decided: Rust first.* The Python reference
+   follows E1–E9's numbers; its parity test will hold it to the crate.
 9. **The association lattice:** from the start, or only if E9 says voting
    is not enough; and two-character labels in the file format to lift the
    62-letter cap.

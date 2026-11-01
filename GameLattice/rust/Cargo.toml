@@ -1,0 +1,33 @@
+# gamelattice (Rust) - a RadixCyclicNN whose step is a game, a LatticeFSM lattice whose states are the
+# encoder's outputs, decoders separate from the lattice, and the loop that feeds every output back in.
+#
+# No dependencies from outside this repository, like every other crate in it: the two models it combines are
+# the sibling crates ../../LatticeFSM/rust (latticefsm) and ../../RadixCyclicNN/rust (radixnet), both standard
+# library only.  The game-theory machinery (the auction, the congestion game, regret matching, sampled Shapley)
+# is written out in src/game.rs from GTMNN/DESIGN.md, which has no code of its own.
+[package]
+name = "gamelattice"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A game-playing radix encoder naming the states of a lattice of adaptive edges, with separate decoders and a sensorimotor loop"
+license = "LicenseRef-ASI"
+publish = false
+
+[lib]
+name = "gamelattice"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gamelattice"
+path = "src/bin/gamelattice.rs"
+
+[dependencies]
+latticefsm = { path = "../../LatticeFSM/rust" }
+radixnet = { path = "../../RadixCyclicNN/rust" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
