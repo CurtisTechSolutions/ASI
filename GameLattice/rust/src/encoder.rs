@@ -102,6 +102,16 @@ pub const PREVIOUS: usize = 1;
 pub const OLDER: usize = 2;
 pub const CHILD: usize = 3;
 
+/// A bucket's name, as the trace and the server write it.
+pub fn bucket_name(bucket: usize) -> &'static str {
+    match bucket {
+        CURRENT => "current",
+        PREVIOUS => "previous",
+        OLDER => "older",
+        _ => "child",
+    }
+}
+
 /// The nodes a position's walk window seats, each with its bucket.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Window {
@@ -216,6 +226,11 @@ impl GameGraph {
 
     pub fn wealth(&self, node: usize) -> f64 {
         self.wealth[node]
+    }
+
+    /// A node's discounted count of non-abstaining plays (0 for a node that never played).
+    pub fn plays(&self, node: usize) -> f64 {
+        self.plays.get(node).copied().unwrap_or(0.0)
     }
 
     /// A node's belief over the slots, seated in `bucket`, given the lattice was in `prev`.

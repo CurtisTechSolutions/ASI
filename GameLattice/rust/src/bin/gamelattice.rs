@@ -4,6 +4,8 @@
 //!     train       the same over --episodes random strings, printing held-out accuracy
 //!     nim         babble, then play Nim against a random opponent, printing legality and optimal moves
 //!     experiment  E1 (the four languages against the plain oracle lattice) and E2 (Nim by window), to --out
+//!     serve       the HTTP API and the built frontend (`DESIGN.md` §16): a body for --language and a Nim body,
+//!                 on --host:--port, the frontend from --frontend-dir, the results from --results-dir
 //!
 //! Everything is deterministic given --seed.
 
@@ -15,6 +17,7 @@ use std::process;
 use gamelattice::babble::babble_nim;
 use gamelattice::body::{Body, BodySettings, NimBody, NimSettings};
 use gamelattice::experiment::{self, E1Settings, E2Settings};
+use gamelattice::server::{self, ServeSettings};
 use latticefsm::languages::{examples, language};
 use latticefsm::rng::Rng;
 
@@ -34,9 +37,9 @@ fn flag(args: &[String], name: &str) -> bool {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: gamelattice <demo|train|nim|experiment> [--language L] [--episodes N] [--states S] [--window W] \
+        "usage: gamelattice <demo|train|nim|experiment|serve> [--language L] [--episodes N] [--states S] [--window W] \
          [--n N] [--seed K] [--plain] [--games N] [--babble N] [--which e1|e2|all] [--seeds a,b,c] [--out DIR] \
-         [--arms a,b]"
+         [--arms a,b] [--host H] [--port P] [--frontend-dir DIR] [--results-dir DIR]"
     );
     process::exit(2)
 }
@@ -169,6 +172,44 @@ fn main() {
                     Ok(p) => println!("wrote {p}"),
                     Err(e) => eprintln!("{e}"),
                 }
+            }
+        }
+        "serve" => {
+            let mut s = ServeSettings::default();
+            s.language = arg(&args, "--language").unwrap_or_else(|| "even-b".to_string());
+            s.body.encoder.states = num(&args, "--states", 13);
+            s.body.encoder.window = num(&args, "--window", 8);
+            s.body.encoder.n = num(&args, "--n", 1);
+            s.body.seed = seed;
+            s.nim.encoder.states = s.body.encoder.states;
+            s.nim.encoder.window = s.body.encoder.window;
+            s.nim.repertoire.window = s.nim.encoder.window.max(1);
+            s.nim.seed = seed;
+            s.frontend = arg(&args, "--frontend-dir")
+                .map(std::path::PathBuf::from)
+                .or_else(server::default_frontend_dir);
+            s.results = arg(&args, "--results-dir")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(server::default_results_dir);
+            let addr = format!(
+                "{}:{}",
+                arg(&args, "--host").unwrap_or_else(|| "127.0.0.1".to_string()),
+                num::<u16>(&args, "--port", 8000)
+            );
+            eprintln!(
+                "gamelattice serving http://{addr}/  ({} on {} states, window {}, seed {seed}; frontend {}; results {})",
+                s.language,
+                s.body.encoder.states,
+                s.body.encoder.window,
+                s.frontend
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "none: /api/ only".to_string()),
+                s.results.display()
+            );
+            if let Err(e) = server::serve(s, &addr, None) {
+                eprintln!("error: {e}");
+                process::exit(1);
             }
         }
         _ => usage(),

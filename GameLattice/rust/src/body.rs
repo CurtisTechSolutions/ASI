@@ -2,6 +2,11 @@
 //! sense lattice credited by the oracle per step; and, for a game, the same encoder over the move tape naming
 //! the states of an act lattice whose row is the forward model, with an action decoder proposing moves the
 //! referee replays.
+//!
+//! A string can also be read with its trace (`Body::trace`, quiet; `Body::run_traced`, learning): per character, the
+//! window's candidates with their bids and the slots they played, the auction, the equilibrium, the aggregate,
+//! the named state beside the lattice's prediction, and what would have asked the meta-player (`DESIGN.md` §4.3,
+//! §6.2's *trace* output, §16).
 
 use latticefsm::languages::{random_string, Language};
 use latticefsm::machine::Settings;
@@ -12,9 +17,9 @@ use crate::credit::{self, CreditSettings};
 use crate::decoders::action::ActionDecoder;
 use crate::decoders::repertoire::{RepertoireSettings, SymbolDecoder};
 use crate::efference::{Efference, Return};
-use crate::encoder::{EncoderSettings, GameGraph, Named};
+use crate::encoder::{bucket_name, EncoderSettings, GameGraph, Named, Window, BUCKETS};
 use crate::forward::{self, Agreement};
-use crate::game::Payoff;
+use crate::game::{Payoff, Seat};
 use crate::lattice::{GameLattice, Kind};
 use crate::referee::{LanguageOracle, Nim, NimMove, NimState};
 use crate::verdict::Verdict;
@@ -71,6 +76,55 @@ pub struct Classification {
     pub triggers: usize,
 }
 
+/// One candidate of a position's window as the trace shows it: seated or not, its bid, its belief over the `S`
+/// states plus abstain (keyed by its bucket and the lattice's previous state), and - seated - the slot it played
+/// and, once a learning step settled it, its Shapley value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceSeat {
+    pub node: usize,
+    /// Where it sits in the window: `current`, `previous`, `older` or `child`.
+    pub bucket: &'static str,
+    /// The node's gram (`graph.label`).
+    pub label: String,
+    pub seated: bool,
+    pub bid: f64,
+    pub reputation: f64,
+    pub wealth: f64,
+    /// `S + 1` slots; the last is abstain.
+    pub belief: Vec<f64>,
+    /// The slot it played (`S` is abstain); `None` when it was not seated.
+    pub action: Option<usize>,
+    /// Its Shapley value; `None` on a quiet step or an unseated candidate.
+    pub phi: Option<f64>,
+}
+
+/// One character of a read: the stage game that named a state, and the lattice's prediction beside it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TraceStep {
+    pub symbol: String,
+    /// The state the lattice was in: the row's source, and the key of every belief.
+    pub prev: usize,
+    /// The seated seats in bid order, then the candidates that were not seated.
+    pub seats: Vec<TraceSeat>,
+    pub aggregate: Vec<f64>,
+    pub named: usize,
+    pub margin: f64,
+    pub price: f64,
+    pub bidders: usize,
+    pub no_bidders: bool,
+    pub exploitability: f64,
+    pub cycle: usize,
+    pub converged: bool,
+    /// The lattice's own target from `prev` on this symbol, and the probability it had.
+    pub predicted: usize,
+    pub probability: f64,
+    /// Why the meta-player would be asked (`Named::triggered`): `cycle`, `photo finish`, `no bidders`,
+    /// `unconverged`; empty when nothing would.
+    pub triggers: Vec<&'static str>,
+    /// Whether the step was credited (a learning read).
+    pub learned: bool,
+}
+
 pub struct Body {
     pub encoder: GameGraph,
     pub lattice: GameLattice,
@@ -120,6 +174,78 @@ impl Body {
     /// Read a string: the lattice steps from the state the encoder named, the encoder names the next state
     /// from the walk window, and - learning - every step is credited by the oracle.  Quiet, nothing moves.
     pub fn run(&mut self, text: &str, learn: bool) -> Classification {
+        self.read(text, learn, false).0
+    }
+
+    /// Quiet, with the trace: what `classify` answers and, per character, the game that named the state.  Nothing
+    /// moves - not an edge, not a belief, not the machine's state or path, not the agreement count.
+    pub fn trace(&mut self, text: &str) -> (Classification, Vec<TraceStep>) {
+        let state = self.lattice.machine.state;
+        let path = self.lattice.machine.path.clone();
+        let agreement = self.agreement.clone();
+        let out = self.read(text, false, true);
+        self.lattice.machine.state = state;
+        self.lattice.machine.path = path;
+        self.agreement = agreement;
+        out
+    }
+
+    /// One learning episode on `text`, with the trace (each seat's Shapley value included).
+    pub fn run_traced(&mut self, text: &str) -> (Classification, Vec<TraceStep>) {
+        self.read(text, true, true)
+    }
+
+    /// The window's candidates at one naming, seated first (as `named.seats` holds them), then the rest.
+    fn trace_seats(&self, window: &Window, named: &Named) -> Vec<TraceSeat> {
+        let mut out: Vec<TraceSeat> = Vec::with_capacity(window.nodes.len());
+        for (k, seat) in named.seats.iter().enumerate() {
+            let (node, bucket) = (seat.id / BUCKETS, seat.id % BUCKETS);
+            out.push(TraceSeat {
+                node,
+                bucket: bucket_name(bucket),
+                label: self.encoder.graph.label(node).to_string(),
+                seated: true,
+                bid: seat.bid(),
+                reputation: seat.reputation,
+                wealth: self.encoder.wealth(node),
+                belief: seat.belief.clone(),
+                action: named.actions.get(k).copied(),
+                phi: None,
+            });
+        }
+        for &(node, bucket) in &window.nodes {
+            if named.seated.contains(&(node * BUCKETS + bucket)) {
+                continue;
+            }
+            let belief = self.encoder.belief(node, bucket, named.prev);
+            let reputation = self.encoder.reputation(node);
+            let bid = Seat {
+                id: node * BUCKETS + bucket,
+                belief: belief.clone(),
+                reputation,
+                voice: 1.0,
+                regret: Vec::new(),
+            }
+            .bid();
+            out.push(TraceSeat {
+                node,
+                bucket: bucket_name(bucket),
+                label: self.encoder.graph.label(node).to_string(),
+                seated: false,
+                bid,
+                reputation,
+                wealth: self.encoder.wealth(node),
+                belief,
+                action: None,
+                phi: None,
+            });
+        }
+        out
+    }
+
+    /// `run`, recording the trace when `record`.
+    fn read(&mut self, text: &str, learn: bool, record: bool) -> (Classification, Vec<TraceStep>) {
+        let mut steps: Vec<TraceStep> = Vec::new();
         let chars: Vec<char> = text.chars().collect();
         let nodes = self.encoder.walk(text, learn);
         let m = &mut self.lattice.machine;
@@ -180,6 +306,40 @@ impl Body {
             if named.triggered(&self.settings.encoder.game) {
                 triggers += 1;
             }
+            let mut step = record.then(|| {
+                let g = &self.settings.encoder.game;
+                let mut why = Vec::new();
+                if named.cycle > 0 {
+                    why.push("cycle");
+                }
+                if named.margin < g.margin_tau {
+                    why.push("photo finish");
+                }
+                if named.no_bidders {
+                    why.push("no bidders");
+                }
+                if !named.converged && named.exploitability > g.expl_tau {
+                    why.push("unconverged");
+                }
+                TraceStep {
+                    symbol: ch.to_string(),
+                    prev: s,
+                    seats: self.trace_seats(&window, &named),
+                    aggregate: named.aggregate.clone(),
+                    named: named.state,
+                    margin: named.margin,
+                    price: named.price,
+                    bidders: named.bidders,
+                    no_bidders: named.no_bidders,
+                    exploitability: named.exploitability,
+                    cycle: named.cycle,
+                    converged: named.converged,
+                    predicted: t.target,
+                    probability: t.probability,
+                    triggers: why,
+                    learned: learn,
+                }
+            });
             let next = if self.settings.encoder_sets_state {
                 named.state
             } else {
@@ -188,6 +348,11 @@ impl Body {
             if learn {
                 lattice_verdicts.push(self.oracle.judge(&prefix, self.accepts(t.target), i));
                 self.encoder.settle(&mut named, payoff);
+                if let Some(step) = step.as_mut() {
+                    for (k, seat) in step.seats.iter_mut().filter(|x| x.seated).enumerate() {
+                        seat.phi = named.phi.get(k).copied();
+                    }
+                }
                 if named.cycle > 0 {
                     self.encoder.think_at(nodes[i]);
                 }
@@ -202,6 +367,7 @@ impl Body {
             predicted.push(t.target);
             last_t = t.target;
             s = next;
+            steps.extend(step);
         }
         if learn {
             self.episodes += 1;
@@ -227,7 +393,7 @@ impl Body {
             self.clock.stepped(chars.len() as i64);
         }
         let n = chars.len().max(1) as f64;
-        Classification {
+        let classification = Classification {
             encoder: self.accepts(s),
             lattice: self.accepts(last_t),
             named: named_states,
@@ -235,7 +401,8 @@ impl Body {
             lattice_bits: lattice_bits / n,
             encoder_bits: encoder_bits / n,
             triggers,
-        }
+        };
+        (classification, steps)
     }
 
     /// Quiet: the verdict on a string, nothing moved.

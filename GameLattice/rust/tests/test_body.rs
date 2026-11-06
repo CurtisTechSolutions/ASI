@@ -172,3 +172,53 @@ fn a_topographic_layer_keeps_its_symbol_axis() {
     l.topographic = false;
     assert!(l.swap_symbols(0, 1).is_ok());
 }
+
+#[test]
+fn a_trace_changes_nothing_and_matches_classify() {
+    let lang = language("mod3-a").unwrap();
+    let mut body = Body::for_language(&lang, BodySettings::default()).unwrap();
+    let mut rng = Rng::new(3);
+    body.teach(300, &mut rng, 6);
+    let before = body.lattice.machine.to_json().dump();
+    let (namings, agreement, episodes) = (body.encoder.namings, body.agreement.clone(), body.episodes);
+    let (c, steps) = body.trace("abaab");
+    let (c2, steps2) = body.trace("abaab");
+    assert_eq!((c.clone(), steps.clone()), (c2, steps2), "a trace is deterministic");
+    assert_eq!(body.lattice.machine.to_json().dump(), before, "nothing moved");
+    assert_eq!(body.encoder.namings, namings);
+    assert_eq!(body.agreement, agreement, "a trace does not count agreement");
+    assert_eq!(body.episodes, episodes);
+    assert_eq!(c, body.classify("abaab"), "the trace's verdict is classify's");
+    assert_eq!(steps.len(), 5);
+    for (i, step) in steps.iter().enumerate() {
+        assert_eq!(step.named, c.named[i]);
+        assert_eq!(step.predicted, c.predicted[i]);
+        assert_eq!(step.aggregate.len(), 13);
+        assert!(!step.learned);
+        assert!(
+            step.seats.iter().all(|s| s.phi.is_none()),
+            "phi is only known after learning"
+        );
+        assert!(step.seats.iter().all(|s| s.belief.len() == 14));
+        assert!(step.seats.iter().filter(|s| !s.seated).all(|s| s.action.is_none()));
+    }
+}
+
+#[test]
+fn a_traced_run_learns_and_carries_shapley_values() {
+    let lang = language("even-b").unwrap();
+    let mut body = Body::for_language(&lang, BodySettings::default()).unwrap();
+    let before = body.lattice.machine.to_json().dump();
+    let (c, steps) = body.run_traced("abba");
+    assert_eq!(body.episodes, 1);
+    assert_ne!(
+        body.lattice.machine.to_json().dump(),
+        before,
+        "a learning run credits the lattice"
+    );
+    assert_eq!(c.named.len(), 4);
+    assert!(steps.iter().all(|s| s.learned));
+    let seated: Vec<_> = steps.iter().flat_map(|s| s.seats.iter().filter(|x| x.seated)).collect();
+    assert!(!seated.is_empty());
+    assert!(seated.iter().all(|s| s.phi.is_some()), "every seated seat was settled");
+}

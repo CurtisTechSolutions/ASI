@@ -877,7 +877,7 @@ numbers rather than preceding them (§21.8, decided).
 GameLattice/
   DESIGN.md                 this file
   README.md                 status, the quick start, the numbers
-  Makefile                  build / test / demo / train / plain / nim / e1 / e2
+  Makefile                  build / test / demo / train / plain / nim / e1 / e2 / serve / frontend-*
   results/                  what E1 and E2 wrote, and results/README.md reading them
   rust/
     Cargo.toml              gamelattice; the two sibling crates are the whole dependency list
@@ -908,13 +908,16 @@ GameLattice/
                             NimBody (the tape -> encoder -> act lattice -> the action decoder -> the referee)
       babble.rs             babble_nim
       experiment.rs         E1, E2, write
-      bin/gamelattice.rs    demo, train, nim, experiment
-    tests/                  test_game, test_body, test_nim: the design choices as tests (§15)
+      server.rs             the HTTP API over latticefsm::http: the body and the Nim body behind locks, jobs,
+                            the frontend's files (§16)
+      bin/gamelattice.rs    demo, train, nim, experiment, serve
+    tests/                  test_game, test_body, test_nim: the design choices as tests (§15); test_server: the API
+  frontend/                 the React frontend (§16): Vite, plain JSX, one stylesheet; dist/ committed
 ```
 
 **Module dependency order** (no cycles): `verdict` → `game` → `encoder`,
 `lattice` → `forward`, `efference`, `credit`, `select`, `gate`, `clock` →
-`referee` → `decoders` → `body` → `babble` → `experiment` → `bin`.
+`referee` → `decoders` → `body` → `babble` → `experiment` → `server` → `bin`.
 
 **What the first build settled that the draft left open.** A seat's belief is
 keyed by its *bucket* in the window (the current gram's node, the one
@@ -986,10 +989,78 @@ The tests encode the design choices, not the code:
 
 ## 16. The frontend and the server
 
-Deferred until E1–E9 have numbers. When they do, the LatticeFSM frontend
-gains a Body tab (the senses live, the gate's reserves, the clearing price
-as the pupil, the affect frame) over the LatticeFSM Rust server's routes,
-and nothing in this directory serves HTTP itself.
+Built after E1 and E2 had numbers, and built here: the server is a module of
+this crate, the frontend a directory beside it, both in the shape of
+LatticeFSM's. The earlier plan - a Body tab in the LatticeFSM frontend over the
+LatticeFSM server's routes - is retired; a body is not a machine, and its
+centrepiece, the stage game naming a state, has no place in that server.
+
+**The server.** `rust/src/server.rs`, started by `gamelattice serve --host
+--port --frontend-dir --results-dir --language --states --window --n --seed`.
+The HTTP is `latticefsm::http` as it is, the sibling's dependency-free
+HTTP/1.1; nothing here writes another. It holds one `Body` for a language
+(with the fixed held-out set of 300 and the training generator, both drawn
+from the seed as `gamelattice train` draws them) and one `NimBody`, each behind
+its own lock, and a job slot.
+
+| route | does |
+|---|---|
+| `GET /api/health` | the version, the language, the lattice's shape, the encoder's settings |
+| `GET /api/status` | everything in brief: the settings, episodes, diversity, wealth (mean, Gini), thinks, namings, the lattice's stats, agreement, the last held-out accuracy, the Nim body, the job |
+| `GET /api/languages` | the four languages |
+| `POST /api/new` | `{language?, states?, window?, n?, seed?, encoder_sets_state?, forward_lessons?, punish?, whole_run?, label_set?, nim?}`: a fresh body; what is not given is the body's now |
+| `POST /api/train` | `{episodes?, max_length?, job?}`: random strings, every step credited by the oracle; held-out accuracy of the encoder and of the lattice every tenth |
+| `POST /api/classify` | `{text}`: quiet; the `Classification` and the naming trace |
+| `POST /api/run` | `{text}`: one learning episode on `text`; the same, every seat's Shapley value included |
+| `GET /api/matrix?symbol=`, `/api/edge`, `/api/table` | the lattice as `latticefsm serve` shows it: the `S × S` slice, one edge, the greedy table and the accepting states |
+| `GET /api/encoder` | the graph's nodes, edges and compression, the named-state histogram, diversity, wealth, thinks, the richest nodes |
+| `GET /api/nim`, `POST /api/nim/new`, `/api/nim/babble`, `/api/nim/play` | the Nim body; babbling; play against a random opponent, per game and in total (wins, legal first try, refusals a move, optimal, `I(state; nim-sum)`, states used, agreement) |
+| `GET /api/results` | `results/e1.json` and `e2.json` as they were written, `null` where missing |
+| `GET /api/job`, `POST /api/job/stop` | the running or last job, with a training job's curve so far; ask it to stop |
+
+**The trace.** `Body::trace(text)` reads a string quietly - `name_quietly`,
+`step(..., quiet)` - and returns per character what the stage game did: every
+candidate of the window (seated or not, its gram, its bucket, its bid, its
+reputation, its wealth, its belief keyed by the lattice's previous state, the
+slot it played), the clearing price, the bidders, the exploitability, the
+cycle, the aggregate, the named state, the lattice's prediction with its
+probability, and the triggers that would ask the meta-player. A trace moves
+nothing - not an edge, not a belief, not the machine's state or path, not the
+agreement count - and a test holds it to that. `Body::run_traced(text)` is one
+learning episode with the same record, each seated seat's `φ` filled once it
+was settled. `Body::run` is unchanged; both are the one reading loop.
+
+**Locks and jobs.** The sibling's rules. Outside a job a request takes the lock
+it needs only when it is free, and answers 409 `{busy: true, error, job}`
+when it is not, so nothing waits behind a training run. A `POST` with
+`"job": true` runs on its own thread and answers `{job}` at once; one job at a
+time, a second refused with 409. A job reports through `latticefsm::job`:
+episodes (or games) and symbols (or plies) done, the tenth reached; a stopped
+job keeps what it learned and ends `stopped`. Everything is deterministic
+given the seed. Outside `/api/` the server serves the built frontend, a path
+that would climb out of its directory refused and an unknown path answered
+with `index.html`; with no frontend directory, a JSON 404 that says so.
+
+**The frontend.** `frontend/`: Vite, React, plain JSX, LatticeFSM's one
+stylesheet with a block for the trace added, no UI or chart library, panel
+settings in `localStorage` under `gamelattice.v1.`, `frontend/dist` committed
+so a checkout serves it with no npm. The tabs: **Body** (a body for a language
+with E1's arms as toggles; training as a job with the held-out curve; Classify
+and Run with the *naming trace*, one row a character: the seats with their
+grams, buckets, bids and the slots they played, abstain shown as such; the
+aggregate as a bar strip over the `S` states with the named state filled and
+the lattice's prediction marked; margin, price, bidders, triggers), **Game**
+(one step in detail: the seats as cards with their beliefs and, after a
+learning run, their Shapley values; the auction; the equilibrium; the named
+state against the lattice's prediction), **Lattice** (the matrix slice by
+symbol and the greedy table: the encoder names, the lattice predicts),
+**Encoder**, **Nim**, **Results** (E1 against 0.894 / 0.924 / 0.944, E2 by
+window), **Settings**. `make serve` runs the two processes together, `make
+serve-prod` the one.
+
+What the frontend does not show yet, because the body does not have it yet:
+the senses of §9 beyond text and the tape, the gate's reserves, the clearing
+price as the pupil, the affect frame.
 
 ---
 

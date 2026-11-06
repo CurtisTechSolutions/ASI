@@ -34,6 +34,7 @@ pub mod gate;
 pub mod lattice;
 pub mod referee;
 pub mod select;
+pub mod server;
 pub mod verdict;
 
 pub use body::{Body, BodySettings, Classification};

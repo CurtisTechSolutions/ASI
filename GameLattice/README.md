@@ -15,8 +15,10 @@ the decoder protocol with its four mechanisms (§6), the credit landings
 and a move tape over Nim, the gate, the clock, the selector, babbling, and
 experiments E1 and E2 of §17. The Python reference the design planned comes
 after the numbers, not before (§21.8, decided by the author: Rust first).
-Not built yet: the senses of §9 beyond text and the tape, the association
-lattice, the curriculum, persistence of a whole body, the server.
+An HTTP server in the crate and a React frontend in `frontend/` show the
+stage game naming a state step by step (§16). Not built yet: the senses of §9
+beyond text and the tape, the association lattice, the curriculum,
+persistence of a whole body.
 
 ## Quick start
 
@@ -27,7 +29,8 @@ make train LANGUAGE=mod3-a EPISODES=4000    # held-out accuracy every tenth of t
 make plain LANGUAGE=mod3-a                  # the control: the lattice alone, per-step oracle
 make nim                                    # babble 200 games, then 400 against a random opponent
 make e1 && make e2                          # the measurements, to results/
-make test                                   # cargo test, clippy with warnings denied, the formatter check
+make test                                   # cargo test, clippy, the formatter check, the frontend's tests
+make serve-prod                             # the API and the built frontend on http://127.0.0.1:8000/
 ```
 
 Needs Cargo. Everything is deterministic given `SEED`.
@@ -51,6 +54,38 @@ on one edge in full, a dull one discounted within the run, and a reafferent
 step at exactly zero. The decoders (`rust/src/decoders/`) are readouts,
 repertoires on edges, propose-and-replay through a referee, and the taste
 gate; the Nim referee (`rust/src/referee.rs`) refuses, replays and grades.
+
+## The web server and the frontend
+
+```bash
+make serve-prod        # one process, no npm: `gamelattice serve` with the committed frontend/dist on :8000
+make serve             # the backend on :8000 and Vite with hot reload on :5173 (/api proxied); Ctrl-C stops both
+make frontend-test     # the frontend's unit tests (node --test)
+```
+
+`gamelattice serve [--host 127.0.0.1] [--port 8000] [--frontend-dir ../frontend/dist] [--results-dir ../results]
+[--language even-b] [--states 13] [--window 8] [--n 1] [--seed 1]` holds one body for a language and one Nim
+body behind locks, on `latticefsm::http` (the sibling's dependency-free server, reused). Outside a job a busy
+body answers 409 at once; a `POST` with `"job": true` runs in the background (`GET /api/job`, `POST
+/api/job/stop`), one at a time. Everything outside `/api/` is the frontend, `index.html` for any route of it.
+
+| route | does |
+|---|---|
+| `GET /api/health`, `/api/status`, `/api/languages` | the shape and settings; everything in brief; the four languages |
+| `POST /api/new` | a fresh body: language, states, window, n, seed, the E1 arms (and `nim` settings) |
+| `POST /api/train` | `{episodes, max_length, job}`: random strings, held-out accuracy on a fixed 300 every tenth |
+| `POST /api/classify`, `/api/run` | `{text}`: the verdicts and the naming trace, quiet or as one learning episode |
+| `GET /api/matrix?symbol=`, `/api/edge`, `/api/table` | the lattice as `latticefsm serve` shows it |
+| `GET /api/encoder` | the graph, the named-state histogram, diversity, wealth, thinks, the richest nodes |
+| `GET /api/nim`, `POST /api/nim/new`, `/api/nim/babble`, `/api/nim/play` | the Nim body: babble, play, the totals |
+| `GET /api/results` | `results/e1.json` and `e2.json` as they are |
+| `GET /api/job`, `POST /api/job/stop` | the background job |
+
+The tabs ([`frontend/README.md`](frontend/README.md)): **Body** (make, train with the held-out curve, classify
+or run a string with its naming trace - per character the seats, their bids and the slots they played, the
+aggregate over the states with the named state and the lattice's prediction), **Game** (one step in detail: the
+seats as cards with their beliefs and Shapley values, the auction, the equilibrium), **Lattice** (the matrix
+slice by symbol, the greedy table), **Encoder**, **Nim**, **Results** (E1 and E2 from `results/`), **Settings**.
 
 ## The numbers
 
@@ -76,4 +111,6 @@ with the diagnosis in `results/README.md`.
 | `rust/src/select.rs`, `gate.rs`, `clock.rs` | the release rule; the reserves and surges; the shared clock |
 | `rust/src/body.rs`, `babble.rs` | the organism wired for a language and for Nim; babbling |
 | `rust/src/experiment.rs` | E1 and E2 |
-| `rust/tests/` | the design choices as tests: the game's invariants, quiet classification, no collapse, lessons move the row and agreement does not, reafference at zero, sharp on one edge, a decoder must name its sense, the release rule, the topographic axis, Nim, taste |
+| `rust/src/server.rs` | the HTTP API (§16) over `latticefsm::http`: the body and the Nim body behind locks, the jobs, the frontend |
+| `frontend/` | the React frontend: Body, Game, Lattice, Encoder, Nim, Results, Settings; `dist/` committed |
+| `rust/tests/` | the design choices as tests: the game's invariants, quiet classification, a trace that moves nothing, no collapse, lessons move the row and agreement does not, reafference at zero, sharp on one edge, a decoder must name its sense, the release rule, the topographic axis, Nim, taste; the HTTP API |
