@@ -83,6 +83,7 @@ current behavior, results, and limitations.
 | [FilterBankRadix](#filterbankradix) | Route text through an activation filter into radix-tree experts | Python implementation, comparison runs, tests |
 | [GREN](#gren) | Discover a game's rules from refused actions | Python implementation, CLI, tests |
 | [GTMNN](#gtmnn) | Combine populations of micro-networks through game theory | Design specification; no implementation yet |
+| [GameLattice](#gamelattice) | A game-playing radix encoder, a lattice of adaptive edges, separate decoders, and a body of senses and effectors | Design specification, a first Rust build, two measured experiments |
 | [ModelKit](#modelkit) | Reusable teaching, agent, serving, and interface layer | Python, Go, Rust, and React components |
 | [PhoneticTokenizer](#phonetictokenizer) | Turn words and recordings into sound-based tokens | Python, Go, and Rust implementations |
 | [RadixAcyclicNN](#radixacyclicnn) | Compare the cyclic model with a context tree without cycles | Python model, CLI, comparisons, tests |
@@ -219,6 +220,29 @@ is for GREN to describe a game and GTMNN to play it.
 `DESIGN.md`, with no runnable package, CLI, or tests. The Python package,
 optional acceleration, API, and frontend described there are planned components.
 See the [overview](GTMNN/README.md) and [full specification](GTMNN/DESIGN.md).
+
+### GameLattice
+
+The combination of **RadixCyclicNN** and **LatticeFSM**: a radix encoder
+whose step is a stage game among the nodes of its walk window, naming a
+state of a dense lattice of adaptive edges; decoders separate from the
+lattice, one per output type; and a body around them, where the senses are
+the encoders, the effectors the decoders, and every output is copied back in
+through the sense that reads it. The design treats every organ as a code
+with a rate and every lattice as a channel with a state capacity, and admits
+nothing without a measured number in the repository to beat.
+
+**Status:** a first build in Rust (`rust/`, depending on the sibling
+`latticefsm` and `radixnet` crates), with the encoder, the lattice kinds,
+the decoders, the credit landings, the efference copy, a text sense over the
+four regular languages, a Nim referee, and experiments E1 and E2 measured:
+the stage game matches the plain oracle lattice on the languages and does
+not beat it; the Nim body is at chance as built.
+
+**Start:** `(cd GameLattice && make demo)`; `make test` runs the suite.
+**Needs:** Cargo; the sibling LatticeFSM and RadixCyclicNN checkouts.
+See the [overview](GameLattice/README.md), [full specification](GameLattice/DESIGN.md)
+and [results](GameLattice/results/README.md).
 
 ### DISTIL
 
